@@ -563,6 +563,67 @@ async fn happy_path_login_is_never_throttled() {
     assert_eq!(resp.status(), 200);
 }
 
+#[tokio::test]
+async fn successful_login_refunds_the_rate_limit_budget() {
+    // Guards the success-path refund of the charge-before-verify model: the login
+    // handler charges the attempt BEFORE the bcrypt verify and clears it on a
+    // correct password, so a successful login resets the IP's accumulated failures
+    // rather than leaving them one step closer to a lockout. (This specifically
+    // catches "clear() on success removed" — without it the correct login charges
+    // to 5/5 and the next attempt 429s. The narrower ordering fix — clear() placed
+    // BEFORE the session commit so a session error on a correct password also
+    // refunds — is not black-box testable here: the in-memory session store does
+    // not fail, so that path is covered by inspection/review, not this test.)
+    let (addr, _tmp) = boot_with_users(vec![user_entry("alice", "secret-pw")]).await;
+    let c = client();
+
+    // Four wrong attempts: budget at 4 of 5, still under the limit.
+    for _ in 0..4 {
+        let resp = c
+            .post(format!("http://{addr}/api/login"))
+            .json(&serde_json::json!({"username":"alice","password":"WRONG"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    // A correct login must succeed despite the 4 prior failures AND clear the
+    // bucket. (If the success path failed to refund, the budget would sit at 5/5.)
+    let ok = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.status(),
+        200,
+        "correct login must succeed after prior failures"
+    );
+    // The success must also actually establish a session (not a hollow 200).
+    assert!(
+        session_cookie(&ok).is_some(),
+        "a successful login must set the dux_session cookie"
+    );
+
+    // The very next wrong attempt must be a normal 401, NOT an immediate 429:
+    // proof the success reset the budget. Before the refund fix it would be 5/5
+    // and this first post-success failure would trip the throttle.
+    let after = c
+        .post(format!("http://{addr}/api/login"))
+        .json(&serde_json::json!({"username":"alice","password":"WRONG"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        401,
+        "a successful login must reset the rate-limit budget (got {} — budget was not refunded)",
+        after.status()
+    );
+}
+
 // --- Live config-reload refresh -------------------------------------------
 
 /// Adding a user to config + `reload_config` makes that user able to log in

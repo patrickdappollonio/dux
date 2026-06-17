@@ -230,6 +230,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "insecure_allow_remote",
         config.server.insecure_allow_remote,
     );
+    patch_table_bool(
+        doc,
+        "server",
+        "dangerously_listen_http",
+        config.server.dangerously_listen_http,
+    );
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
     patch_table_usize(
@@ -663,6 +669,7 @@ unknown_key = \"untouched\"
         config.server.tailscale_enabled = false;
         config.server.listen_addrs = vec!["0.0.0.0:9000".to_string()];
         config.server.insecure_allow_remote = true;
+        config.server.dangerously_listen_http = true;
         config.server.color = "never".to_string();
         config.server.access_log = false;
         config.server.max_websocket_connections = 42;
@@ -675,6 +682,10 @@ unknown_key = \"untouched\"
         assert!(!parsed.server.tailscale_enabled);
         assert_eq!(parsed.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
         assert!(parsed.server.insecure_allow_remote);
+        assert!(
+            parsed.server.dangerously_listen_http,
+            "dangerously_listen_http must round-trip through a plain write"
+        );
         assert_eq!(parsed.server.color, "never");
         assert!(!parsed.server.access_log);
         assert_eq!(parsed.server.max_websocket_connections, 42);

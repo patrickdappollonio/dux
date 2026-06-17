@@ -515,6 +515,23 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.server.insecure_allow_remote),
         },
         ConfigEntry::Field {
+            key: "dangerously_listen_http",
+            comment: Some(CommentSource::Static(
+                "# Acknowledge serving UNENCRYPTED plain HTTP on a non-loopback (public)\n\
+                 # listen_addrs entry. This is the config-file equivalent of the\n\
+                 # `dux server --dangerously-listen-http` flag: either one satisfies the\n\
+                 # gate, so a config-only rollback off [server.acme] can re-open a public\n\
+                 # plain-HTTP bind without editing the service's command line. It only\n\
+                 # covers the ENCRYPTION requirement, though: a public bind still needs\n\
+                 # auth ([auth] users or insecure_allow_remote), so this alone will not\n\
+                 # unblock startup. Traffic (including the login password) is sent in the\n\
+                 # clear, so prefer built-in TLS via [server.acme]; set this true only\n\
+                 # when an upstream proxy terminates TLS or you accept the risk on a\n\
+                 # trusted network.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.server.dangerously_listen_http),
+        },
+        ConfigEntry::Field {
             key: "color",
             comment: Some(CommentSource::Static(
                 "# Colored, vite-style console output for `dux server`. One of:\n\
@@ -1175,6 +1192,7 @@ mod tests {
             "renderer must not emit the deprecated bind key"
         );
         assert!(rendered.contains("insecure_allow_remote = false"));
+        assert!(rendered.contains("dangerously_listen_http = false"));
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("max_websocket_connections = 128"));

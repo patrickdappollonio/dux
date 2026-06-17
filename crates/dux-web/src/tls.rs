@@ -558,6 +558,11 @@ async fn host_allowlist_middleware(
         .and_then(|h| h.to_str().ok());
     match host {
         Some(h) if allowlist.allows(h) => next.run(request).await,
+        // A Host that normalizes to nothing (empty or whitespace-only) carries no
+        // hostname — malformed like an absent header, so 400 rather than 421.
+        Some(h) if normalize_host_for_match(h).is_none() => {
+            (StatusCode::BAD_REQUEST, "missing or invalid Host header").into_response()
+        }
         Some(_) => (
             StatusCode::MISDIRECTED_REQUEST,
             "this dux server does not serve the requested host",
@@ -582,9 +587,9 @@ pub fn host_allowlist_layer(router: Router, domains: Vec<String>) -> Router {
 /// The `Strict-Transport-Security` value dux sends on the TLS path: a two-year
 /// `max-age` with `includeSubDomains`, but NO `preload`.
 ///
-/// - `max-age=63072000` — 2 years, the OWASP/Lighthouse-recommended value (HSTS
-///   preload lists require only a 1-year minimum), long enough that a returning
-///   browser keeps upgrading to HTTPS on its own.
+/// - `max-age=63072000` — 2 years, comfortably above the 1-year minimum that the
+///   HSTS preload list and Lighthouse's HSTS audit require, long enough that a
+///   returning browser keeps upgrading to HTTPS on its own.
 /// - `includeSubDomains` — every name under the served domain is HTTPS-only too.
 /// - NO `preload` — preload is an irreversible, browser-vendor-list commitment
 ///   that an operator must opt into deliberately, never something dux asserts on
@@ -1333,6 +1338,32 @@ mod tests {
         assert!(
             out.contains("/some/path") && out.contains("421"),
             "a foreign-Host 421 on :80 must be access-logged: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn access_log_strips_the_query_string() {
+        use tower::ServiceExt; // for `oneshot`
+        let (console, sink) = crate::console::Console::test_capture(false);
+        let (router, _tmp) = challenge_router_with_console(console, true);
+        // A request whose query carries a (would-be) session id and file path must
+        // be logged by PATH ONLY — the query string must never reach the access log.
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/some/path?session_id=topsecret&path=/etc/shadow")
+                    .header(axum::http::header::HOST, "dux.example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        let out = sink.contents();
+        assert!(out.contains("/some/path"), "the path must be logged: {out}");
+        assert!(
+            !out.contains("session_id") && !out.contains("topsecret") && !out.contains("shadow"),
+            "the query string (session id, file path) must NOT be logged: {out}"
         );
     }
 

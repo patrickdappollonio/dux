@@ -187,6 +187,17 @@ pub struct ServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<String>,
     pub insecure_allow_remote: bool,
+    /// Acknowledge serving UNENCRYPTED plain HTTP on a non-loopback (public)
+    /// listen address. Mirrors the `--dangerously-listen-http` CLI flag so the
+    /// choice is reviewable in config — and so a config-only rollback off
+    /// `[server.acme]` does not brick a public server (the CLI flag alone would
+    /// otherwise be the only escape). This only satisfies the ENCRYPTION half of
+    /// the public-bind gate: a public bind ALSO requires auth ([auth] users or
+    /// `insecure_allow_remote`), so setting this alone does not unblock startup.
+    /// Prefer built-in TLS via `[server.acme]`; only set this when an upstream
+    /// proxy terminates TLS or you accept the risk on a trusted network. Default
+    /// false.
+    pub dangerously_listen_http: bool,
     /// Colored, vite-style console output for `dux server`. One of `"auto"`
     /// (default — color only when stdout is a terminal, `NO_COLOR` is unset, and
     /// `TERM` is not `dumb`), `"always"` (force color), or `"never"` (plain text).
@@ -423,6 +434,7 @@ impl Default for ServerConfig {
             listen_addrs: Vec::new(),
             bind: None,
             insecure_allow_remote: false,
+            dangerously_listen_http: false,
             color: "auto".to_string(),
             access_log: true,
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
@@ -1407,25 +1419,37 @@ pub fn resolve_server_plan(
     if let Some(offender) = public.first() {
         let allow_remote = cli.insecure_allow_remote || server.insecure_allow_remote;
         let auth_ok = auth_enabled || allow_remote;
-        // If the offender is a Tailscale CGNAT address (100.64.0.0/10) but Tailscale
-        // was NOT detected at startup, the operator most likely meant a tailnet-only
-        // bind and the daemon is simply down — without detection dux can't recognize
-        // it as local and treats it as public, so name that so the refusal is not
-        // mystifying.
-        let offender_is_tailscale_cgnat = matches!(
-            offender.ip(),
-            std::net::IpAddr::V4(v4)
-                if v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])
-        );
-        let tailscale_note = if tailscale_ip.is_none() && offender_is_tailscale_cgnat {
-            " Note: this is a Tailscale CGNAT address (100.64.0.0/10), but the Tailscale \
-             daemon was not detected at startup, so dux is treating it as a public bind; \
-             if you meant a tailnet-only bind, make sure the Tailscale daemon is running so \
-             dux can classify it as local."
+        // If the offender is in the RFC 6598 shared CGNAT range (100.64.0.0/10) —
+        // which Tailscale reuses for its IPv4 tailnet addresses — or Tailscale's
+        // IPv6 range (fd7a:115c:a1e0::/48), and Tailscale was NOT detected at
+        // startup, the operator most likely meant a tailnet-only bind and the
+        // daemon is simply down. Without detection dux can't recognize it as local
+        // and treats it as public, so name that so the refusal is not mystifying.
+        let offender_in_cgnat_range = match offender.ip() {
+            std::net::IpAddr::V4(v4) => {
+                v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])
+            }
+            std::net::IpAddr::V6(v6) => {
+                let s = v6.segments();
+                s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+            }
+        };
+        let tailscale_note = if tailscale_ip.is_none() && offender_in_cgnat_range {
+            " Note: this address is in the RFC 6598 shared CGNAT range (100.64.0.0/10), or \
+             Tailscale's IPv6 range — Tailscale reuses these for tailnet addresses. The \
+             Tailscale daemon was not detected at startup, so dux is treating it as a public \
+             bind. If you meant a tailnet-only bind, ensure the Tailscale daemon is running \
+             so dux can classify it as local; if this is a carrier-grade-NAT address from \
+             your ISP, it is genuinely reachable beyond this host."
         } else {
             ""
         };
-        match (auth_ok, cli.dangerously_listen_http) {
+        // The "acknowledge unencrypted plain HTTP" escape exists as BOTH a CLI flag
+        // and a config field, mirroring `insecure_allow_remote`, so a config-only
+        // rollback off [server.acme] can re-open a public plain-HTTP bind without
+        // editing the service unit's CLI args.
+        let listen_http = cli.dangerously_listen_http || server.dangerously_listen_http;
+        match (auth_ok, listen_http) {
             (false, false) => bail!(
                 "refusing to serve plain HTTP on the non-loopback listen address {offender}: \
                  it has NO login configured (anyone who can reach it could control your agents \
@@ -1433,9 +1457,9 @@ pub fn resolve_server_plan(
                  unencrypted. Add at least one user to [auth] in config.toml \
                  (or use the server-add-user palette command) so the login gate protects it, \
                  OR pass --insecure-allow-remote if an upstream auth proxy handles login; \
-                 then ALSO enable built-in TLS via [server.acme], or pass \
-                 --dangerously-listen-http to acknowledge the unencrypted public bind \
-                 explicitly.{tailscale_note}"
+                 then ALSO enable built-in TLS via [server.acme], or acknowledge the \
+                 unencrypted public bind with --dangerously-listen-http (or set \
+                 dangerously_listen_http = true under [server] in config.toml).{tailscale_note}"
             ),
             (false, true) => bail!(
                 "refusing to bind the non-loopback listen address {offender}: the dux web UI \
@@ -1452,7 +1476,8 @@ pub fn resolve_server_plan(
                  To serve encrypted, enable built-in TLS via [server.acme] (set enabled = true \
                  and configure domains). If TLS is terminated by an upstream proxy, or you \
                  accept the risk on a trusted network, re-run with --dangerously-listen-http \
-                 to acknowledge the unencrypted public bind explicitly.{tailscale_note}"
+                 or set dangerously_listen_http = true under [server] in config.toml to \
+                 acknowledge the unencrypted public bind explicitly.{tailscale_note}"
             ),
             (true, true) => {}
         }
@@ -1798,6 +1823,39 @@ mod resolve_server_plan_tests {
         };
         let plan = resolve(&cfg, true, false, cli).expect("auth + dangerously ok");
         assert_eq!(plan, plain(&["0.0.0.0:8080"]));
+    }
+
+    #[test]
+    fn listen_public_auth_on_with_config_dangerously_passes() {
+        // The config-file equivalent of --dangerously-listen-http must ALSO satisfy
+        // the gate (mirroring insecure_allow_remote), so a config-only rollback off
+        // [server.acme] can re-open a public plain-HTTP bind without editing the
+        // service's CLI args.
+        let cfg = ServerConfig {
+            dangerously_listen_http: true,
+            ..server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default())
+        };
+        let plan = resolve(&cfg, true, false, ServerCliOverrides::default())
+            .expect("auth + config dangerously_listen_http ok");
+        assert_eq!(plan, plain(&["0.0.0.0:8080"]));
+    }
+
+    #[test]
+    fn listen_public_no_auth_with_config_dangerously_still_refuses() {
+        // The config field only satisfies the ENCRYPTION half of the gate. With no
+        // auth (no users, no insecure_allow_remote), a public bind must STILL be
+        // refused even when dangerously_listen_http=true is set in config — the
+        // field must not become an auth bypass.
+        let cfg = ServerConfig {
+            dangerously_listen_http: true,
+            ..server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default())
+        };
+        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
+            .expect_err("config dangerously_listen_http without auth must still refuse");
+        assert!(
+            err.to_string().contains("[auth]"),
+            "the refusal must still name auth as the fix: {err}"
+        );
     }
 
     #[test]
