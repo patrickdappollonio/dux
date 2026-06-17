@@ -676,7 +676,10 @@ fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String
                 if let Err(e) = &r {
                     dux_core::logger::error(&format!(
                         "[server] the ACME challenge/redirect listener on {http_addr} failed: {e} \
-                         — is something already listening there?"
+                         — is something already listening on that port? While it is down, \
+                         Let's Encrypt cannot reach the HTTP-01 challenge, so TLS certificates \
+                         will not issue or renew. Free the port (or stop the other listener) and \
+                         restart dux."
                     ));
                     shutdown.record_failure(anyhow::anyhow!(
                         "the ACME challenge/redirect listener on {http_addr} failed: {e}"

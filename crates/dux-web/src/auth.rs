@@ -144,6 +144,13 @@ impl AuthState {
     /// malformed case too: `parse_users` returns empty there, so `build` reports
     /// `enabled = false` and this transition fires.
     ///
+    /// NOTE: the guard keys on `next.users.is_empty()`, so it only catches an
+    /// enabled→disabled transition caused by the users going away. A reload that
+    /// turned the gate off while users *remain* (i.e. `disable_auth` flipping
+    /// true) would NOT be refused. That is safe only because `disable_auth` is a
+    /// process-lifetime CLI flag that cannot change at reload time; if it ever
+    /// becomes reloadable, this guard must be revisited.
+    ///
     /// Any other transition (enabling from disabled, swapping which users exist
     /// while at least one remains, a no-op reload) simply takes the rebuilt
     /// snapshot.
@@ -246,7 +253,13 @@ pub(crate) async fn session_user_if_valid(auth: &SharedAuth, session: &Session) 
             let _ = session.flush().await;
             None
         }
-        _ => None,
+        Ok(None) => None,
+        Err(_) => {
+            // A corrupted or unreadable session record: flush it too, so its
+            // cookie can't keep presenting the same bad state on every request.
+            let _ = session.flush().await;
+            None
+        }
     }
 }
 

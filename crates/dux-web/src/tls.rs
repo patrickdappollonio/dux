@@ -538,11 +538,15 @@ fn normalize_host_for_match(host_header: &str) -> Option<String> {
     }
 }
 
-/// Middleware: reject any request whose `Host` is not in the allowlist with
-/// `421 Misdirected Request` (the semantically correct code for "this server is
-/// not authoritative for the requested host"). DNS-rebinding defense: an attacker
-/// who points a controlled hostname at this IP gets a 421 instead of a response
-/// that would let their page talk to dux.
+/// Middleware: pin requests to the configured domains. A request whose `Host` is
+/// present but not in the allowlist gets `421 Misdirected Request` (the
+/// semantically correct code for "this server is not authoritative for the
+/// requested host") — the DNS-rebinding defense: an attacker who points a
+/// controlled hostname at this IP gets a 421 instead of a response that would let
+/// their page talk to dux. A request with NO usable `Host` header (absent, or not
+/// valid UTF-8) is malformed per HTTP/1.1 rather than misrouted, so it gets
+/// `400 Bad Request` instead of a 421 (which a client may read as "retry on a new
+/// connection").
 async fn host_allowlist_middleware(
     State(allowlist): State<Arc<DomainAllowlist>>,
     request: Request,
@@ -554,11 +558,12 @@ async fn host_allowlist_middleware(
         .and_then(|h| h.to_str().ok());
     match host {
         Some(h) if allowlist.allows(h) => next.run(request).await,
-        _ => (
+        Some(_) => (
             StatusCode::MISDIRECTED_REQUEST,
             "this dux server does not serve the requested host",
         )
             .into_response(),
+        None => (StatusCode::BAD_REQUEST, "missing or invalid Host header").into_response(),
     }
 }
 
@@ -577,8 +582,9 @@ pub fn host_allowlist_layer(router: Router, domains: Vec<String>) -> Router {
 /// The `Strict-Transport-Security` value dux sends on the TLS path: a two-year
 /// `max-age` with `includeSubDomains`, but NO `preload`.
 ///
-/// - `max-age=63072000` — 2 years, the de-facto value preload lists require, long
-///   enough that a returning browser keeps upgrading to HTTPS on its own.
+/// - `max-age=63072000` — 2 years, the OWASP/Lighthouse-recommended value (HSTS
+///   preload lists require only a 1-year minimum), long enough that a returning
+///   browser keeps upgrading to HTTPS on its own.
 /// - `includeSubDomains` — every name under the served domain is HTTPS-only too.
 /// - NO `preload` — preload is an irreversible, browser-vendor-list commitment
 ///   that an operator must opt into deliberately, never something dux asserts on
@@ -834,6 +840,11 @@ pub async fn serve_http_challenge(
 /// graceful-shutdown handle. Production reaches it via [`serve_http_challenge`]
 /// (bind-by-addr → here); the e2e reaches it directly with a `127.0.0.1:0`
 /// listener. Sets the listener non-blocking so callers need not.
+///
+/// Unlike [`serve_https_with_acceptor`], this path does NOT wrap the acceptor in
+/// `NoDelayAcceptor`: `:80` only carries ACME challenge probes and one-shot 308
+/// redirects, never the interactive terminal stream that TCP_NODELAY exists to
+/// de-jitter, so Nagle batching is harmless here.
 pub async fn serve_http_challenge_from_tcp(
     listener: std::net::TcpListener,
     app: Router,
@@ -1323,6 +1334,25 @@ mod tests {
             out.contains("/some/path") && out.contains("421"),
             "a foreign-Host 421 on :80 must be access-logged: {out}"
         );
+    }
+
+    #[tokio::test]
+    async fn host_allowlist_missing_host_is_400_not_421() {
+        use tower::ServiceExt; // for `oneshot`
+        let (console, _sink) = crate::console::Console::test_capture(false);
+        let (router, _tmp) = challenge_router_with_console(console, false);
+        // A request with NO Host header is malformed (not misrouted): the
+        // allowlist must answer 400 Bad Request, not 421 Misdirected Request.
+        let resp = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/some/path")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     // ── build_acme_state cache-dir hardening ──────────────────────────────

@@ -441,6 +441,12 @@ fn same_origin_allowed(headers: &HeaderMap) -> bool {
 
 /// Extract the `host[:port]` authority from an `Origin` header value
 /// (`scheme://host[:port]`), so it can be compared against the `Host` header.
+///
+/// NOTE: the scheme is intentionally dropped, so the comparison in
+/// [`same_origin_allowed`] is authority-only — it does NOT distinguish an
+/// `http://` Origin from an `https://` one for the same host. A cross-protocol
+/// upgrade is not blocked here; browsers reject it via mixed-content policy, and
+/// on the TLS path the host allowlist is the complementary layer.
 fn origin_host(origin: &str) -> Option<String> {
     let after_scheme = origin.split_once("://").map(|(_, rest)| rest)?;
     // Strip any path/query that shouldn't appear in an Origin but be defensive.
