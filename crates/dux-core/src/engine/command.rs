@@ -675,35 +675,49 @@ impl Engine {
                     )));
                 };
                 let worktree = PathBuf::from(&session.worktree_path);
-                let diff_text = match crate::git::staged_diff_text(&worktree) {
-                    Ok(d) if d.trim().is_empty() => {
-                        return Ok(EventReaction::Status(StatusUpdate::error(
-                            "No staged changes to summarize. Stage files first.",
-                        )));
-                    }
-                    Ok(d) => d,
-                    Err(e) => {
-                        return Ok(EventReaction::Status(StatusUpdate::error(format!(
-                            "Failed to read the staged diff: {e}"
-                        ))));
-                    }
-                };
-                let prompt = format!("{}\n\n{}", self.config.default_commit_prompt(), diff_text);
+                let prompt_prefix = self.config.default_commit_prompt();
                 let cfg = crate::config::provider_config(&self.config, &session.provider);
                 let prov = crate::provider::create_provider(session.provider.as_str(), cfg);
                 let tx = self.worker_tx.clone();
-                std::thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
-                    Ok(message) => {
-                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
-                            session_id,
-                            message,
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
-                            session_id,
-                            error: e.to_string(),
-                        });
+                // Read the staged diff AND run the provider off the engine thread.
+                // `git diff --staged` can be slow on a large staged set, and on the
+                // web server every request runs on the single engine thread —
+                // reading it inline would stall every other session. The empty-diff
+                // and read-error cases are reported through the same failure event
+                // the provider path uses, so the UI surfaces them the same way.
+                std::thread::spawn(move || {
+                    let diff_text = match crate::git::staged_diff_text(&worktree) {
+                        Ok(d) if d.trim().is_empty() => {
+                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                                session_id,
+                                error: "No staged changes to summarize. Stage files first."
+                                    .to_string(),
+                            });
+                            return;
+                        }
+                        Ok(d) => d,
+                        Err(e) => {
+                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                                session_id,
+                                error: format!("Failed to read the staged diff: {e}"),
+                            });
+                            return;
+                        }
+                    };
+                    let prompt = format!("{prompt_prefix}\n\n{diff_text}");
+                    match prov.run_oneshot(&prompt, &worktree) {
+                        Ok(message) => {
+                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
+                                session_id,
+                                message,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                                session_id,
+                                error: e.to_string(),
+                            });
+                        }
                     }
                 });
                 Ok(EventReaction::Status(StatusUpdate::busy(

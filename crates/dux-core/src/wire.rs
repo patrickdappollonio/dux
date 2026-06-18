@@ -3048,6 +3048,9 @@ mod tests {
     #[test]
     fn apply_generate_commit_message_errors_with_nothing_staged() {
         // init_repo writes a.txt but does NOT stage it, so the cached diff is empty.
+        // The staged-diff read now runs on the worker thread (off the engine
+        // thread), so the synchronous reaction is Busy and the "nothing staged"
+        // error arrives as a CommitMessageFailed worker event.
         let repo = init_repo();
         let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
@@ -3061,14 +3064,30 @@ mod tests {
             .expect("apply");
         match reaction {
             EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Error);
+                assert_eq!(update.tone, StatusTone::Busy);
                 assert!(
-                    update.message.contains("No staged changes"),
-                    "unexpected message: {}",
+                    update.message.contains("Generating an AI commit message"),
+                    "unexpected busy message: {}",
                     update.message
                 );
             }
-            _ => panic!("expected Error Status reaction"),
+            _ => panic!("expected Busy Status reaction"),
+        }
+
+        // The empty-diff check now happens on the spawned worker; wait for it.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("worker event");
+        match event {
+            WorkerEvent::CommitMessageFailed { session_id, error } => {
+                assert_eq!(session_id, "s1");
+                assert!(
+                    error.contains("No staged changes"),
+                    "unexpected error: {error}"
+                );
+            }
+            _ => panic!("expected WorkerEvent::CommitMessageFailed"),
         }
     }
 
