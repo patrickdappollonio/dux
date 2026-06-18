@@ -1335,6 +1335,9 @@ impl App {
     ) -> Result<Self> {
         let pr_banner_at_bottom = engine.config.ui.pr_banner_position == "bottom";
         let show_diff_line_numbers = engine.config.ui.show_diff_line_numbers;
+        // Seed the changes (right) pane's hidden state from config; the runtime
+        // RemoveGitPane toggle (Ctrl-]) overrides it for the rest of the session.
+        let right_hidden = !engine.config.ui.show_changes_pane;
         let left_width_pct = engine.config.ui.left_width_pct;
         let right_width_pct = engine.config.ui.right_width_pct;
         let terminal_pane_height_pct = engine.config.ui.terminal_pane_height_pct;
@@ -1361,7 +1364,7 @@ impl App {
                 .with_placeholder("Type your commit message\u{2026}"),
             left_collapsed: false,
             right_collapsed: false,
-            right_hidden: false,
+            right_hidden,
             focus: FocusPane::Left,
             center_mode: CenterMode::Agent,
             resize_mode: false,

@@ -428,6 +428,13 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.auto_reopen_agents),
         },
         ConfigEntry::Field {
+            key: "show_changes_pane",
+            comment: Some(CommentSource::Static(
+                "# Show the Changes pane (the right-hand list of changed files).\n# Set to false to hide it by default; toggle it at runtime from the command palette.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.show_changes_pane),
+        },
+        ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
                 "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",

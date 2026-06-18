@@ -51,6 +51,11 @@ pub struct ViewModel {
     /// reconnect repaint replays — without it, xterm.js silently caps at its
     /// 1000-line default and trims the replayed history.
     pub agent_scrollback_lines: usize,
+    /// Mirrors `config.ui.show_changes_pane`. The desktop web hides the
+    /// right-hand Changes pane when false; a runtime palette/menu toggle
+    /// overrides it per session. Older servers omit it, so the web treats a
+    /// missing value as `true`.
+    pub show_changes_pane: bool,
     /// Surface-aware command-palette commands that the web should render as a
     /// global "Commands" group, in canonical registry order. Derived from
     /// `dux_core::palette` (the `Web`/`Both` subset). Each entry's `id` is the
@@ -363,6 +368,7 @@ impl Engine {
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
+            show_changes_pane: self.config.ui.show_changes_pane,
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             palette_commands: crate::palette::web_palette_commands()
                 .map(|c| PaletteCommandView {

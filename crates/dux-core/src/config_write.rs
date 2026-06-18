@@ -201,6 +201,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "auto_reopen_agents",
         config.ui.auto_reopen_agents,
     );
+    patch_table_bool(doc, "ui", "show_changes_pane", config.ui.show_changes_pane);
     patch_table_str(
         doc,
         "ui",

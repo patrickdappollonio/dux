@@ -210,6 +210,11 @@ export interface DuxState {
   // See `armCreateFocus` and `focusNewlyCreatedSession`.
   pendingCreateFocus: { knownIds: string[]; projectId: string } | null
   sidebarWidth: string
+  // Per-session override for the Changes pane's visibility (desktop). `null`
+  // follows the config default (`viewModel.show_changes_pane`); the palette and
+  // the Changes actions menu set an explicit bool. Not persisted — re-seeds from
+  // config on reload, mirroring the TUI's runtime remove-git-pane toggle.
+  changesPaneOverride: boolean | null
   // The session whose code-editor overlay is open, the file to auto-open on
   // launch (null = none preselected), and the view it opens in: "file" (editable
   // Monaco buffer) or "diff" (read-only Monaco DiffEditor, HEAD vs working copy).
@@ -286,6 +291,7 @@ let state: DuxState = {
   pendingProjectOrder: null,
   pendingCreateFocus: null,
   sidebarWidth: loadSidebarWidth(),
+  changesPaneOverride: null,
   editorTarget: null,
 }
 
@@ -1485,4 +1491,18 @@ export function setSidebarWidth(width: string, persist = false): void {
   if (persist) {
     localStorage.setItem(SIDEBAR_WIDTH_KEY, width)
   }
+}
+
+// The Changes pane's effective visibility (desktop): the per-session override if
+// set, else the config default the ViewModel carries, else visible. Older
+// servers omit `show_changes_pane`, so a missing value reads as visible.
+export function changesPaneVisible(s: DuxState): boolean {
+  return s.changesPaneOverride ?? s.viewModel?.show_changes_pane ?? true
+}
+
+// Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
+// Changes actions menu). Sets an explicit per-session override; the config
+// default seeds the first value via `changesPaneVisible`.
+export function toggleChangesPane(): void {
+  setState({ changesPaneOverride: !changesPaneVisible(state) })
 }

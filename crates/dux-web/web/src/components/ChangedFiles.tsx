@@ -50,7 +50,14 @@ import {
   filterChangedFiles,
   shouldShowChangedFiles,
 } from "@/lib/changedFiles"
-import { openCommit, openDiscard, openEditor, useDux } from "@/lib/store"
+import {
+  openCommit,
+  openDiscard,
+  openEditor,
+  toggleChangesPane,
+  useDux,
+} from "@/lib/store"
+import { useIsMobile } from "@/hooks/use-mobile"
 import type { ChangedFileView } from "@/lib/types"
 
 interface FileRowProps {
@@ -230,6 +237,9 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
 
 export function ChangedFiles() {
   const { viewModel, selectedSessionId } = useDux()
+  // The hide-pane action is desktop-only: the mobile hub reaches Changes through
+  // its own nav, so there's no panel to hide there.
+  const isMobile = useIsMobile()
 
   // Changed-files search filter (frontend-only). The query is stored alongside
   // the session id it belongs to, so switching sessions yields an empty filter
@@ -343,6 +353,18 @@ export function ChangedFiles() {
                 >
                   Pull
                 </DropdownMenuItem>
+                {/* Hide the Changes pane entirely (desktop only) — mirrors the
+                    TUI's remove-git-pane and the Ctrl+K "toggle-remove-git-pane"
+                    command; the default comes from config.ui.show_changes_pane.
+                    No icon, matching the iconless actions above. */}
+                {!isMobile ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => toggleChangesPane()}>
+                      Hide Changes pane
+                    </DropdownMenuItem>
+                  </>
+                ) : null}
               </DropdownMenuContent>
             </DropdownMenu>
           </CardAction>
