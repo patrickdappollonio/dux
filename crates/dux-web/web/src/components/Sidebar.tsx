@@ -135,14 +135,24 @@ function TerminalSubItem({
   // tooltip so "Terminal 1" stays discoverable when a command is shown.
   const title = terminalTitle(terminal)
   return (
-    <SidebarMenuSubItem className="flex items-center">
-      {/* In-flow ⋯ (mirrors the changes pane): the button is the flex-1 label and
-          the ⋯ is a sibling whose max-width expands on reveal, so the label
-          re-ellipsizes and slides to make room rather than the ⋯ popping in over
-          it. Reveal is scoped to this row's own group/menu-sub-item. */}
+    <SidebarMenuSubItem
+      className={cn(
+        // The row owns the hover/selected highlight (rounded, full-width) so it
+        // spans the trailing ⋯ too — mirroring the agent rows, project header,
+        // and changes pane. The button stays transparent (below) so this is the
+        // single highlight surface; pr-1 keeps the ⋯ off the rounded right edge.
+        "flex items-center rounded-md pr-1 transition-colors group/terminal-row",
+        "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        active && "bg-sidebar-accent text-sidebar-accent-foreground"
+      )}
+    >
+      {/* In-flow ⋯: the button is the flex-1 label and the ⋯ is a sibling whose
+          max-width expands on reveal, so the label re-ellipsizes and slides to
+          make room. Reveal is scoped to this terminal row (group/terminal-row)
+          so hovering the parent agent doesn't reveal it. */}
       <SidebarMenuSubButton
         isActive={active}
-        className="flex-1"
+        className="flex-1 hover:bg-transparent active:bg-transparent data-active:bg-transparent"
         onClick={() => selectTerminal(terminal.id, sessionId)}
       >
         <SquareTerminal />
@@ -155,7 +165,7 @@ function TerminalSubItem({
           because Close… alone would not warrant a dropdown — and Close… routes
           through the same confirm dialog the old ✕ opened. */}
       <DropdownMenu>
-        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/menu-sub-item:max-w-6 md:group-hover/menu-sub-item:opacity-100 md:group-focus-within/menu-sub-item:max-w-6 md:group-focus-within/menu-sub-item:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
+        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/terminal-row:max-w-6 md:group-hover/terminal-row:opacity-100 md:group-focus-within/terminal-row:max-w-6 md:group-focus-within/terminal-row:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
           <SidebarMenuAction
             render={<DropdownMenuTrigger />}
             aria-label="Terminal actions"
@@ -212,159 +222,178 @@ function SessionSubItem({
   }
 
   return (
-    <SidebarMenuSubItem ref={setNodeRef} style={style} className="flex items-center">
-      {/* In-flow ⋯ (mirrors the changes pane): the button is the flex-1 row and
-          the ⋯ is a sibling whose max-width expands on reveal, so the agent's
-          right-aligned badges slide left to make room rather than the ⋯ popping
-          in over them. Reveal is scoped to this row's own group/menu-sub-item. */}
-      <SidebarMenuSubButton
-        {...attributes}
-        {...listeners}
-        isActive={agentSelected}
+    <SidebarMenuSubItem ref={setNodeRef} style={style}>
+      {/* The agent button + its ⋯ share ONE flex line inside a scoped group, so
+          the ⋯ reveals only when this agent's own header row is hovered — not
+          when a nested terminal row below is hovered (mirrors the project
+          header's group/project-header). The terminal sub-list is a block
+          sibling BELOW this row, so terminals nest UNDER the agent like a tree
+          instead of riding alongside it. */}
+      <div
         className={cn(
-          "flex-1 touch-manipulation",
-          // Positioning context for the beam overlay. Always relative: the beam
-          // self-manages its lifetime (it lingers a moment past `working` to
-          // finish its sweep), so the row can't gate the positioning context on
-          // `working` without clipping that final pass.
-          "relative"
+          // The row wrapper owns the hover/selected highlight (rounded,
+          // full-width) so it spans the trailing ⋯ too — mirroring the changes
+          // pane, where the row (not the inner label button) carries the
+          // background. The button below keeps its own background transparent,
+          // so this wrapper is the single highlight surface for the whole row.
+          "flex items-center rounded-md pr-1 transition-colors group/agent-row",
+          "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground"
         )}
-        onClick={() => selectSession(session.id)}
       >
-        {/* A light sweeps left→right across the row while the agent works (and
-            finishes its current pass when work stops). Self-manages mount. */}
-        <AgentBeam working={session.working} />
-        {/* All agents use the same Bot icon — provider is shown as text. While
-            the agent is streaming output it gently bounces (motion-safe) so the
-            "working" state is unmistakable at a glance. The transition lets the
-            icon settle back to rest when streaming stops mid-bounce instead of
-            snapping from wherever the keyframe left it. */}
-        <Bot
+        <SidebarMenuSubButton
+          {...attributes}
+          {...listeners}
+          isActive={agentSelected}
           className={cn(
-            "motion-safe:transition-transform motion-safe:duration-300",
-            session.working && "motion-safe:animate-agent-working"
+            "flex-1 touch-manipulation",
+            // Positioning context for the beam overlay. Always relative: the beam
+            // self-manages its lifetime (it lingers a moment past `working` to
+            // finish its sweep), so the row can't gate the positioning context on
+            // `working` without clipping that final pass.
+            "relative",
+            // The wrapper (group/agent-row) owns the highlight now, so keep this
+            // button transparent — otherwise it paints a second box that stops
+            // short of the trailing ⋯.
+            "hover:bg-transparent active:bg-transparent data-active:bg-transparent"
           )}
-        />
-        <span className="truncate">{label}</span>
-        <span className="ml-auto flex shrink-0 items-center gap-1">
-          {session.pr ? (
-            // Icon-only PR link: just the state-tinted glyph, with the full
-            // "#N · title" revealed on hover so long PR numbers no longer eat
-            // the row. The explicit hover classes fix the washed-out
-            // (near-white-on-light-green) hover the old badge had.
-            <TooltipProvider delay={300}>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <a
-                      href={session.pr.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
-                      className={cn(
-                        "inline-flex items-center rounded p-0.5 transition-colors",
-                        prIconClass(session.pr.state),
-                        prIconHoverClass(session.pr.state)
-                      )}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        window.open(
-                          session.pr!.url,
-                          "_blank",
-                          "noopener",
-                        )
-                      }}
-                    />
-                  }
-                >
-                  <GitPullRequest className="size-3.5" />
-                </TooltipTrigger>
-                <TooltipContent side="right">
-                  #{session.pr.number} · {session.pr.title} (
-                  {prStateLabel(session.pr.state)})
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          ) : null}
-          <StatusBadge
-            status={session.status}
-            working={session.working}
-            iconOnly
+          onClick={() => selectSession(session.id)}
+        >
+          {/* A light sweeps left→right across the row while the agent works (and
+              finishes its current pass when work stops). Self-manages mount. */}
+          <AgentBeam working={session.working} />
+          {/* All agents use the same Bot icon — provider is shown as text. While
+              the agent is streaming output it gently bounces (motion-safe) so the
+              "working" state is unmistakable at a glance. The transition lets the
+              icon settle back to rest when streaming stops mid-bounce instead of
+              snapping from wherever the keyframe left it. */}
+          <Bot
+            className={cn(
+              "motion-safe:transition-transform motion-safe:duration-300",
+              session.working && "motion-safe:animate-agent-working"
+            )}
           />
-        </span>
-      </SidebarMenuSubButton>
+          <span className="truncate">{label}</span>
+          <span className="ml-auto flex shrink-0 items-center gap-1">
+            {session.pr ? (
+              // Icon-only PR link: just the state-tinted glyph, with the full
+              // "#N · title" revealed on hover so long PR numbers no longer eat
+              // the row. The explicit hover classes fix the washed-out
+              // (near-white-on-light-green) hover the old badge had.
+              <TooltipProvider delay={300}>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <a
+                        href={session.pr.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+                        className={cn(
+                          "inline-flex items-center rounded p-0.5 transition-colors",
+                          prIconClass(session.pr.state),
+                          prIconHoverClass(session.pr.state)
+                        )}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          window.open(
+                            session.pr!.url,
+                            "_blank",
+                            "noopener",
+                          )
+                        }}
+                      />
+                    }
+                  >
+                    <GitPullRequest className="size-3.5" />
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    #{session.pr.number} · {session.pr.title} (
+                    {prStateLabel(session.pr.state)})
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            ) : null}
+            <StatusBadge
+              status={session.status}
+              working={session.working}
+              iconOnly
+            />
+          </span>
+        </SidebarMenuSubButton>
 
-      <DropdownMenu>
-        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/menu-sub-item:max-w-6 md:group-hover/menu-sub-item:opacity-100 md:group-focus-within/menu-sub-item:max-w-6 md:group-focus-within/menu-sub-item:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
-          <SidebarMenuAction
-            render={<DropdownMenuTrigger />}
-            aria-label="Session actions"
-            className="static shrink-0"
-          >
-            <Ellipsis />
-          </SidebarMenuAction>
-        </div>
-        <DropdownMenuContent side="right" align="start">
-          <DropdownMenuGroup>
-            <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
-              <Plug />
-              Reconnect
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => reconnectSession(session.id, true)}>
-              <RotateCcw />
-              Force reconnect (fresh)
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => openRename(session.id)}>
-              <Pencil />
-              Rename agent…
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
-              <GitFork />
-              Fork agent…
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
-              <Cpu />
-              Change agent provider…
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={handleToggleAutoReopen}>
-              <RefreshCw />
-              {session.auto_reopen_enabled
-                ? "Disable agent auto-reopen"
-                : "Enable agent auto-reopen"}
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openEditor(session.id)}>
-              <FileCode2 />
-              Open editor
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => {
-                void copyToClipboard(session.worktree_path).then((ok) =>
-                  ok
-                    ? toast.success("Copied local path to clipboard")
-                    : toast.error("Couldn't copy the path"),
-                )
-              }}
+        <DropdownMenu>
+          <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/agent-row:max-w-6 md:group-hover/agent-row:opacity-100 md:group-focus-within/agent-row:max-w-6 md:group-focus-within/agent-row:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
+            <SidebarMenuAction
+              render={<DropdownMenuTrigger />}
+              aria-label="Session actions"
+              className="static shrink-0"
             >
-              <ClipboardCopy />
-              Copy local path
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => createTerminal(session.id)}>
-              <SquareTerminal />
-              New terminal
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onClick={() => openDelete(session.id)}
-            >
-              <Trash2 />
-              Delete agent…
-            </DropdownMenuItem>
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
+              <Ellipsis />
+            </SidebarMenuAction>
+          </div>
+          <DropdownMenuContent side="right" align="start">
+            <DropdownMenuGroup>
+              <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
+                <Plug />
+                Reconnect
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => reconnectSession(session.id, true)}>
+                <RotateCcw />
+                Force reconnect (fresh)
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => openRename(session.id)}>
+                <Pencil />
+                Rename agent…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
+                <GitFork />
+                Fork agent…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
+                <Cpu />
+                Change agent provider…
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={handleToggleAutoReopen}>
+                <RefreshCw />
+                {session.auto_reopen_enabled
+                  ? "Disable agent auto-reopen"
+                  : "Enable agent auto-reopen"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openEditor(session.id)}>
+                <FileCode2 />
+                Open editor
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  void copyToClipboard(session.worktree_path).then((ok) =>
+                    ok
+                      ? toast.success("Copied local path to clipboard")
+                      : toast.error("Couldn't copy the path"),
+                  )
+                }}
+              >
+                <ClipboardCopy />
+                Copy local path
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => createTerminal(session.id)}>
+                <SquareTerminal />
+                New terminal
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => openDelete(session.id)}
+              >
+                <Trash2 />
+                Delete agent…
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
 
       {session.terminals.length > 0 ? (
         // mr-0/pr-0 drop the nested list's right inset (the left side is the
@@ -476,18 +505,46 @@ function ProjectItem({
             changes pane). Hover/reveal is scoped to this header group, NOT the
             whole menu-item — whose collapsible agent list would otherwise reveal
             the project ⋯ when an agent row is hovered. */}
-        <div className="flex items-center group/project-header">
+        <div
+          className={cn(
+            // The header row owns the hover highlight (rounded, full-width) so it
+            // spans the trailing ⋯ too, mirroring the agent rows and the changes
+            // pane. The button below stays transparent so this is the single
+            // highlight surface; pr-1 keeps the ⋯ off the rounded right edge.
+            "flex items-center rounded-md pr-1 transition-colors group/project-header",
+            "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+          )}
+        >
           <CollapsibleTrigger
             {...attributes}
             {...listeners}
             render={
-              <SidebarMenuButton className="min-w-0 flex-1 touch-manipulation group-has-data-[sidebar=menu-action]/menu-item:pr-2" />
+              <SidebarMenuButton className="min-w-0 flex-1 touch-manipulation hover:bg-transparent active:bg-transparent data-active:bg-transparent data-open:hover:bg-transparent group-has-data-[sidebar=menu-action]/menu-item:pr-2" />
             }
           >
-            {/* The folder itself signals the expand state — open when the project
-                is expanded, closed when collapsed — instead of a chevron. */}
-            <Folder className="group-data-[state=open]/collapsible:hidden" />
-            <FolderOpen className="hidden group-data-[state=open]/collapsible:block" />
+            {/* The folder doubles as two signals: it is FILLED when the project
+                has agents and a shallow outline when it has none, and (for
+                projects that do have agents) open vs closed tracks the expand
+                state instead of a chevron. Agent-less projects have nothing to
+                expand, so they simply stay a closed shallow folder. */}
+            {sessions.length > 0 ? (
+              // Crossfade the closed↔open folder on expand instead of an instant
+              // swap: both icons are stacked in a fixed-size box and their
+              // opacity + a subtle scale transition when the collapsible's
+              // data-state flips. Respects reduced motion.
+              <span className="relative inline-flex size-4 shrink-0">
+                <Folder
+                  fill="currentColor"
+                  className="absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out group-data-[state=open]/collapsible:scale-90 group-data-[state=open]/collapsible:opacity-0 motion-reduce:transition-none"
+                />
+                <FolderOpen
+                  fill="currentColor"
+                  className="absolute inset-0 size-4 scale-90 opacity-0 transition-[opacity,transform] duration-200 ease-out group-data-[state=open]/collapsible:scale-100 group-data-[state=open]/collapsible:opacity-100 motion-reduce:transition-none"
+                />
+              </span>
+            ) : (
+              <Folder />
+            )}
             {/* Name + branch share a baseline-aligned inner flex so the smaller
                 text-xs branch sits on the name's baseline instead of floating
                 high like a superscript (the outer button is items-center, which
@@ -748,27 +805,25 @@ export function AppSidebar() {
           </SidebarGroup>
         ) : null}
 
-        {/* A real button, not a fake list row. Hidden in icon-collapse mode
-            (a full-width labeled button can't shrink to the icon rail). */}
-        <SidebarGroup className="group-data-[collapsible=icon]:hidden">
-          <SidebarGroupContent className="px-1">
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full"
-              onClick={openAddProject}
-            >
-              <Plus />
-              Add project
-            </Button>
-          </SidebarGroupContent>
-        </SidebarGroup>
       </SidebarContent>
 
       <SidebarFooter>
-        {/* Right-aligned when expanded; centered on the icon rail so it lines up
-            with the collapsed nav icons above it. */}
-        <div className="flex justify-end group-data-[collapsible=icon]:justify-center">
+        {/* Add-project lives next to the collapse toggle (not in the scrolling
+            project list, where it slid off-screen once there were enough
+            projects). Both are icon buttons: a right-aligned row when expanded,
+            stacked and centered on the icon rail when collapsed. On mobile the
+            hub keeps its own "Add project" entry — this footer is desktop-only. */}
+        <div className="flex items-center justify-end gap-2 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center">
+          <SimpleTooltip content="Add project" side="right">
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Add project"
+              onClick={openAddProject}
+            >
+              <Plus />
+            </Button>
+          </SimpleTooltip>
           <SidebarTrigger />
         </div>
       </SidebarFooter>
