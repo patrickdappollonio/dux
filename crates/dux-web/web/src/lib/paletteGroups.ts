@@ -33,6 +33,7 @@ const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "sort-agents-by-created": "View",
   "sort-agents-by-name": "View",
   "sort-agents-by-updated": "View",
+  "toggle-remove-git-pane": "View",
 }
 
 // The ids that carry a group mapping — exported for the coverage test's REVERSE

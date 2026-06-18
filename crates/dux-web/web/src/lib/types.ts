@@ -174,6 +174,10 @@ export interface ViewModel {
    * sized to this so the reconnect repaint's replayed history isn't trimmed by
    * xterm's 1000-line default. */
   agent_scrollback_lines: number
+  /** Mirrors `config.ui.show_changes_pane`. Desktop hides the right-hand
+   * Changes pane when false; a runtime palette/menu toggle overrides it per
+   * session. Optional: older servers omit it, so the web treats it as true. */
+  show_changes_pane?: boolean
   /** Surface-aware command-palette commands the web renders as a global
    * "Commands" group, in canonical registry order. Derived from the Rust
    * `dux_core::palette` (the Web/Both subset). Each `id` is the dashed command

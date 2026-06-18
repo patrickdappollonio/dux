@@ -45,7 +45,13 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { paletteShortcutKeys } from "@/lib/platform"
 import { UNREACHABLE_MESSAGE } from "@/lib/auth"
-import { logout, retryBoot, setPaletteOpen, useDux } from "@/lib/store"
+import {
+  changesPaneVisible,
+  logout,
+  retryBoot,
+  setPaletteOpen,
+  useDux,
+} from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
@@ -238,7 +244,12 @@ function GlobalOverlays() {
 }
 
 function DesktopShell() {
-  const { sidebarWidth } = useDux()
+  const dux = useDux()
+  const { sidebarWidth } = dux
+  // The Changes pane honours config.ui.show_changes_pane (via the ViewModel) and
+  // the per-session palette/menu toggle. When hidden, the terminal panel takes
+  // the full width and the handle + panel are unmounted (no leftover sliver).
+  const showChanges = changesPaneVisible(dux)
 
   return (
     <SidebarProvider
@@ -249,13 +260,29 @@ function DesktopShell() {
         <InsetHeader />
         <div className="min-h-0 flex-1">
           <ResizablePanelGroup orientation="horizontal" className="size-full">
-            <ResizablePanel defaultSize={74} minSize={30}>
+            {/* Stable ids so react-resizable-panels reconciles correctly when
+                the Changes panel is conditionally added/removed; a single
+                remaining panel fills the width (no leftover sliver). */}
+            <ResizablePanel
+              id="terminal-pane"
+              defaultSize={showChanges ? 74 : 100}
+              minSize={30}
+            >
               <TerminalArea />
             </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel defaultSize={26} minSize={14} collapsible>
-              <ChangedFiles />
-            </ResizablePanel>
+            {showChanges ? (
+              <>
+                <ResizableHandle />
+                <ResizablePanel
+                  id="changes-pane"
+                  defaultSize={26}
+                  minSize={14}
+                  collapsible
+                >
+                  <ChangedFiles />
+                </ResizablePanel>
+              </>
+            ) : null}
           </ResizablePanelGroup>
         </div>
         <StatusBar />

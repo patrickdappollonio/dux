@@ -330,6 +330,10 @@ pub struct UiConfig {
     pub diff_tab_width: u16,
     pub github_integration: bool,
     pub auto_reopen_agents: bool,
+    /// Show the right-hand Changes pane (the changed-files list) by default.
+    /// A runtime toggle (command palette, or the web's Changes actions menu)
+    /// overrides this per session.
+    pub show_changes_pane: bool,
     pub pr_banner_position: String,
     pub theme: String,
 }
@@ -459,6 +463,7 @@ impl Default for UiConfig {
             diff_tab_width: 4,
             github_integration: true,
             auto_reopen_agents: false,
+            show_changes_pane: true,
             pr_banner_position: "bottom".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
@@ -963,6 +968,7 @@ impl Default for Config {
                 diff_tab_width: 4,
                 github_integration: true,
                 auto_reopen_agents: false,
+                show_changes_pane: true,
                 pr_banner_position: "bottom".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },

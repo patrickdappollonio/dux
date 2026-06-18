@@ -250,6 +250,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.ui.auto_reopen_agents,
         current.ui.auto_reopen_agents,
     );
+    diff_bool(
+        &mut changes,
+        "ui.show_changes_pane",
+        defaults.ui.show_changes_pane,
+        current.ui.show_changes_pane,
+    );
     diff_str(
         &mut changes,
         "ui.pr_banner_position",

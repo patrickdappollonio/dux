@@ -387,8 +387,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::RemoveGitPane,
         name: "toggle-remove-git-pane",
         description: "Remove or restore the git pane entirely",
-        // TUI-only: TUI-specific pane layout.
-        surface: PaletteSurface::Tui,
+        // Both: the web mirrors this as hide/show of its Changes pane. The
+        // paletteRegistry handler toggles the client-side visibility, seeded
+        // from config.ui.show_changes_pane.
+        surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::EditMacros,
@@ -525,6 +527,7 @@ mod tests {
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",
+            "toggle-remove-git-pane",
         ];
         let mut actual: Vec<&str> = web_palette_commands().map(|c| c.name).collect();
         actual.sort_unstable();

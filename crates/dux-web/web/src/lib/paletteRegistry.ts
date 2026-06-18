@@ -18,6 +18,7 @@ import {
   openMacrosDialog,
   socket,
   sortAgents,
+  toggleChangesPane,
 } from "@/lib/store"
 
 // id (dashed core command name) -> action to run. Handlers perform the action
@@ -30,4 +31,5 @@ export const PALETTE_HANDLERS: Record<string, () => void> = {
   "sort-agents-by-created": () => sortAgents("created"),
   "sort-agents-by-name": () => sortAgents("name"),
   "sort-agents-by-updated": () => sortAgents("updated"),
+  "toggle-remove-git-pane": () => toggleChangesPane(),
 }
