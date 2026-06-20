@@ -442,10 +442,23 @@ impl App {
                 inspection,
             } => {
                 let project_name = project.name.clone();
-                if let Err(err) = self.persist_projects_to_config_and_store() {
-                    self.set_error(format!(
-                        "Project branch was detected, but config.toml could not be updated: {err:#}"
-                    ));
+                match self.sync_projects_to_store_and_update_config() {
+                    Ok(()) => {
+                        if let Err(err) = self
+                            .engine
+                            .config_writer
+                            .save_eager(self.engine.config.clone())
+                        {
+                            self.set_error(format!(
+                                "Project branch was detected, but config.toml could not be updated: {err}"
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        self.set_error(format!(
+                            "Project branch was detected, but config.toml could not be updated: {err:#}"
+                        ));
+                    }
                 }
                 if let Err(err) =
                     self.continue_create_agent_after_branch_inspection(project, inspection)
@@ -663,9 +676,9 @@ impl App {
                 self.reload_changed_files();
                 // Add is INLINE: the engine handler already wrote config.toml
                 // through the eager queue (with SQLite rollback on failure). Do
-                // NOT write it a second time off-queue here — that would be a
-                // double write. (The other arms below still persist from runtime;
-                // routing those through the queue is Task 7.)
+                // NOT write it a second time here — that would be a double write.
+                // The other arms route their config write through save_eager via
+                // update_config_projects_from_runtime (Task 7).
                 self.set_info(status_message);
             }
 
@@ -676,9 +689,14 @@ impl App {
                 // file lists so they match the new selection instead of the
                 // removed project's stale changes.
                 self.reload_changed_files();
-                if let Err(err) = self.persist_config_projects_from_runtime() {
+                self.update_config_projects_from_runtime();
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "Project was removed from the database, but config.toml could not be updated: {err:#}"
+                        "Project was removed from the database, but config.toml could not be updated: {err}"
                     ));
                     return;
                 }
@@ -689,9 +707,14 @@ impl App {
                 self.rebuild_left_items();
                 self.selected_left = self.selected_left.saturating_sub(1);
                 self.reload_changed_files();
-                if let Err(err) = self.persist_config_projects_from_runtime() {
+                self.update_config_projects_from_runtime();
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "Project was deleted from the database, but config.toml could not be updated: {err:#}"
+                        "Project was deleted from the database, but config.toml could not be updated: {err}"
                     ));
                     return;
                 }
@@ -706,9 +729,14 @@ impl App {
                 global_default,
             } => {
                 self.rebuild_left_items();
-                if let Err(err) = self.persist_config_projects_from_runtime() {
+                self.update_config_projects_from_runtime();
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "Provider preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                        "Provider preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
                     return;
                 }
@@ -731,9 +759,14 @@ impl App {
                 project_name,
                 auto_reopen_agents,
             } => {
-                if let Err(err) = self.persist_config_projects_from_runtime() {
+                self.update_config_projects_from_runtime();
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                        "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
                     return;
                 }
@@ -749,9 +782,14 @@ impl App {
                 project_name,
                 startup_command,
             } => {
-                if let Err(err) = self.persist_config_projects_from_runtime() {
+                self.update_config_projects_from_runtime();
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                        "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
                     return;
                 }
@@ -769,9 +807,14 @@ impl App {
                 project_name,
                 env_count,
             } => {
-                if let Err(err) = self.persist_config_projects_from_runtime() {
+                self.update_config_projects_from_runtime();
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err:#}"
+                        "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
                     return;
                 }

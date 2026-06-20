@@ -3465,13 +3465,13 @@ impl App {
                         entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                         // Persist
-                        if let Err(err) = crate::config::save_config(
-                            &self.engine.paths.config_path,
-                            &self.engine.config,
-                            &self.bindings,
-                        ) {
+                        if let Err(err) = self
+                            .engine
+                            .config_writer
+                            .save_eager(self.engine.config.clone())
+                        {
                             self.set_error(format!(
-                                "Couldn't save macro \"{name}\" to config: {err:#}"
+                                "Macro \"{name}\" is active this session, but saving to config failed: {err}"
                             ));
                         } else {
                             self.set_info(format!("Macro \"{name}\" saved."));
@@ -3598,13 +3598,13 @@ impl App {
             *selected = entries.len().saturating_sub(1);
         }
 
-        if let Err(err) = crate::config::save_config(
-            &self.engine.paths.config_path,
-            &self.engine.config,
-            &self.bindings,
-        ) {
+        if let Err(err) = self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
             self.set_error(format!(
-                "Couldn't persist deletion of macro \"{name}\" to config: {err:#}"
+                "Macro \"{name}\" is active this session, but saving to config failed: {err}"
             ));
         } else {
             self.set_info(format!("Macro \"{name}\" deleted."));
@@ -5835,13 +5835,9 @@ impl App {
             self.engine.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
             self.engine.config.ui.staged_pane_height_pct = self.staged_pane_height_pct;
             self.engine.config.ui.commit_pane_height_pct = self.commit_pane_height_pct;
-            if let Err(err) = save_config(
-                &self.engine.paths.config_path,
-                &self.engine.config,
-                &self.bindings,
-            ) {
-                self.set_error(format!("Couldn't persist pane sizes to config: {err:#}"));
-            }
+            self.engine
+                .config_writer
+                .save_lazy(self.engine.config.clone());
         }
     }
 
@@ -5849,22 +5845,16 @@ impl App {
     /// new visibility to `config.toml` (`ui.show_changes_pane` seeds startup) so
     /// the choice sticks across restarts. Shared by the keybinding and the
     /// palette command so both stay in sync; mirrors `persist_pane_widths`'
-    /// synchronous canonical-config save.
+    /// lazy config write.
     pub(crate) fn toggle_git_pane_removed(&mut self) {
         self.right_hidden = !self.right_hidden;
         if self.right_hidden && self.focus == FocusPane::Files {
             self.focus = FocusPane::Center;
         }
         self.engine.config.ui.show_changes_pane = !self.right_hidden;
-        if let Err(err) = save_config(
-            &self.engine.paths.config_path,
-            &self.engine.config,
-            &self.bindings,
-        ) {
-            self.set_error(format!(
-                "Couldn't persist Changes pane visibility to config: {err:#}"
-            ));
-        }
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -13891,14 +13881,12 @@ cyan = "#00ffff"
     #[test]
     fn macro_delete_surfaces_save_failure_on_status_line() {
         let mut app = app_with_two_macros();
-        // Point config_path at a directory that doesn't exist so save_config fails.
-        app.engine.paths.config_path = app
-            .engine
-            .paths
-            .root
-            .join("nope")
-            .join("missing")
-            .join("config.toml");
+        // Point the config writer at a nonexistent path so save_eager fails.
+        // (Changing paths.config_path alone does not affect save_eager because
+        // the queue was already initialised with the original path; we must
+        // replace the writer itself.)
+        app.engine.config_writer =
+            dux_core::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
             .expect("handle d");
@@ -13945,6 +13933,65 @@ cyan = "#00ffff"
 
         assert!(pending_delete_state(&app).is_none());
         assert!(!app.engine.config.macros.entries.contains_key("greet"));
+    }
+
+    /// Helper: type printable characters one by one into the active prompt.
+    fn type_chars(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .expect("type char");
+        }
+    }
+
+    #[test]
+    fn macro_add_two_both_survive_flush_to_disk() {
+        // Regression: when the config snapshot passed to save_eager is built from
+        // the CURRENT in-memory macros (not a pre-edit clone), adding A then B
+        // must result in BOTH A and B on disk after a flush.
+        let mut app = test_app(default_bindings());
+        let config_path = app.engine.paths.config_path.clone();
+        app.open_edit_macros();
+
+        // Add macro A --------------------------------------------------
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .expect("open new macro editor");
+        type_chars(&mut app, "alpha");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("move to EditText");
+        type_chars(&mut app, "Hello A");
+        // Esc saves from EditText
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("save macro A");
+        assert!(
+            app.engine.config.macros.entries.contains_key("alpha"),
+            "macro A must be in config after save"
+        );
+
+        // Add macro B --------------------------------------------------
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .expect("open new macro editor");
+        type_chars(&mut app, "bravo");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("move to EditText");
+        type_chars(&mut app, "Hello B");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("save macro B");
+        assert!(
+            app.engine.config.macros.entries.contains_key("bravo"),
+            "macro B must be in config after save"
+        );
+
+        // Flush and check both macros are on disk ----------------------
+        app.engine.config_writer.flush();
+        let disk = std::fs::read_to_string(&config_path).expect("read config after flush");
+        assert!(
+            disk.contains("alpha"),
+            "macro A (alpha) must appear on disk after flush, got:\n{disk}"
+        );
+        assert!(
+            disk.contains("bravo"),
+            "macro B (bravo) must appear on disk after flush, got:\n{disk}"
+        );
     }
 
     #[test]
