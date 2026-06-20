@@ -661,12 +661,11 @@ impl App {
                 // previously selected project's changed files linger and look
                 // like they belong to the brand-new project.
                 self.reload_changed_files();
-                if let Err(err) = self.persist_config_projects_from_runtime() {
-                    self.set_error(format!(
-                        "Project was saved to the database, but config.toml could not be updated: {err:#}"
-                    ));
-                    return;
-                }
+                // Add is INLINE: the engine handler already wrote config.toml
+                // through the eager queue (with SQLite rollback on failure). Do
+                // NOT write it a second time off-queue here — that would be a
+                // double write. (The other arms below still persist from runtime;
+                // routing those through the queue is Task 7.)
                 self.set_info(status_message);
             }
 

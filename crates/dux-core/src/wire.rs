@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyView, BeginDeleteSessionOutcome, Command, Engine,
-    EventReaction, FinishDeleteSessionOutcome, StatusUpdate, WorktreeRemoval,
+    EventReaction, FinishDeleteSessionOutcome, ProjectPersistenceView, StatusUpdate,
+    WorktreeRemoval,
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{
@@ -548,6 +549,29 @@ impl Engine {
                 return Ok(WireCommandOutcome {
                     status: Some(status),
                 });
+            }
+            WireCommand::AddProject { .. } => {
+                // The direct add (no branch-checkout step) is the primary web add
+                // path. Like the inline checkout-add in `drive_add_project_followup`,
+                // the Add is now synchronous: success returns
+                // `ProjectPersistenceOutcome(Added)` (whose status_message is NOT a
+                // `Status` reaction, so the generic `wire_status_from_reaction` tail
+                // would drop it and leave the user with no confirmation), and a
+                // config-write/DB failure returns an error-toned `Status` (the add
+                // was rolled back). Surface the Added success message explicitly and
+                // relay any other reaction (including the rollback error) verbatim.
+                let core = self.wire_to_command(command)?;
+                let reaction = self.apply(core)?;
+                let status = match &reaction {
+                    EventReaction::ProjectPersistenceOutcome(outcome) => match &outcome.view {
+                        ProjectPersistenceView::Added { status_message, .. } => {
+                            Some(WireStatus::new("info", status_message.clone()))
+                        }
+                        _ => wire_status_from_reaction(&reaction),
+                    },
+                    _ => wire_status_from_reaction(&reaction),
+                };
+                return Ok(WireCommandOutcome { status });
             }
             _ => {}
         }
@@ -1119,12 +1143,16 @@ impl Engine {
     /// `drive_checkout_followup`: when worker 2's `git switch` for an
     /// `AddProjectCheckoutDefault` completes successfully,
     /// `process_worker_event` produces `AddProjectAfterBranchCheckout` (the TUI
-    /// drives the same reaction from `workers.rs`). This spawns the project-add
-    /// persistence (so the new project shows up in the next ViewModel push) and
-    /// returns the combined "Checked out X and added project Y" status, mirroring
-    /// the TUI's `finish_add_project_with_status` message. A switch FAILURE
-    /// instead produces an error `Status` reaction, surfaced by the actor's
-    /// `wire_statuses_from_reaction` drain. Other reactions return `[]`.
+    /// drives the same reaction from `workers.rs`). This applies the project-add
+    /// INLINE (synchronous engine call: SQLite + config.toml write through the
+    /// eager queue, with SQLite rollback on failure), so the new project is in the
+    /// engine's in-memory list by the time this returns and appears in the same
+    /// ViewModel push. On success it returns the combined "Checked out X and added
+    /// project Y" status, mirroring the TUI's `finish_add_project_with_status`
+    /// message; on a rolled-back add it relays the engine's error `Status`. A
+    /// switch FAILURE (before this runs) instead produces an error `Status`
+    /// reaction, surfaced by the actor's `wire_statuses_from_reaction` drain.
+    /// Other reactions return `[]`.
     pub fn drive_add_project_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
         match reaction {
             EventReaction::AddProjectAfterBranchCheckout {
@@ -1160,16 +1188,27 @@ impl Engine {
                     path_missing: false,
                     created_at: Some(chrono::Utc::now()),
                 };
+                // The add is INLINE: the handler writes config.toml (with SQLite
+                // rollback on failure) and returns the real outcome NOW. On
+                // success it returns `ProjectPersistenceOutcome(Added)`; on a
+                // config-write/DB failure it returns an error-toned `Status`
+                // (still a Rust `Ok`, but the add was rolled back). Inspect the
+                // reaction so a rolled-back add is reported as the failure it was,
+                // not the optimistic "added project" success.
                 match self.apply(Command::PersistProject(Box::new(
                     ProjectPersistenceAction::Add {
                         project,
                         status_message: status_message.clone(),
                     },
                 ))) {
-                    // The persistence worker confirms the add asynchronously;
-                    // surface the busy/info status now so the user isn't left
-                    // staring at the stale checkout busy message.
-                    Ok(_) => vec![WireStatus::new("info", status_message)],
+                    Ok(EventReaction::ProjectPersistenceOutcome(outcome))
+                        if matches!(outcome.view, ProjectPersistenceView::Added { .. }) =>
+                    {
+                        vec![WireStatus::new("info", status_message)]
+                    }
+                    // A rolled-back add surfaces as an error-toned Status; relay it
+                    // verbatim so the user learns the add failed and was undone.
+                    Ok(reaction) => wire_statuses_from_reaction(&reaction),
                     Err(e) => vec![WireStatus::new(
                         "error",
                         format!(
@@ -2686,6 +2725,60 @@ mod tests {
     }
 
     #[test]
+    fn drive_add_project_followup_reports_rolled_back_add_as_error() {
+        // Regression: the add is INLINE, so a config-write failure returns
+        // `Ok(EventReaction::Status(error))` (still a Rust `Ok`) after rolling
+        // the project back. The follow-up must surface THAT error, not the
+        // optimistic "added project" success. A dead writer fails every save.
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        let (mut engine, _tmp) = test_engine();
+        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
+            engine.paths.config_path.clone(),
+        );
+
+        // The switch worker still runs (it does not touch config), so the
+        // checkout busy status is produced as usual.
+        engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: work.to_string_lossy().into_owned(),
+                name: "Demo".to_string(),
+            })
+            .expect("add-checkout");
+
+        let statuses = drive_add_project_chain(&mut engine);
+        let status = statuses.last().expect("final status");
+        assert_eq!(
+            status.tone, "error",
+            "a rolled-back add must report failure, not success: {status:?}"
+        );
+        assert!(
+            !status
+                .message
+                .contains("added project \"Demo\" to the workspace"),
+            "the optimistic success message leaked on a failed add: {}",
+            status.message
+        );
+        // Pin the specific rollback path: the message must be the config-write
+        // rollback text, so a future break that produced an error via a *different*
+        // arm (e.g. the apply-level `Err`) can't pass this test by accident.
+        assert!(
+            status.message.contains("was rolled back"),
+            "expected the config-write rollback message, got: {}",
+            status.message
+        );
+        // The inline rollback undid both the in-memory list and the SQLite row,
+        // so nothing persisted.
+        assert!(engine.projects.is_empty());
+        assert!(
+            engine
+                .session_store
+                .load_projects()
+                .expect("load projects")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn apply_wire_add_project_checkout_default_rejects_heuristic() {
         // `git init` repo (no origin/HEAD) on a non-main branch yields the
         // Heuristic warning, which never offers "Check Out & Add". The wire
@@ -3312,6 +3405,59 @@ mod tests {
             err.to_string().contains("not a git repository"),
             "err: {err}"
         );
+    }
+
+    #[test]
+    fn apply_wire_add_project_surfaces_success_status() {
+        // The direct web add path (no branch checkout). The inline Add returns
+        // ProjectPersistenceOutcome(Added), which the generic apply_wire tail would
+        // drop (no Status reaction) — apply_wire must explicitly surface the
+        // "Added project …" info so the web client gets a confirmation toast.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        let outcome = engine
+            .apply_wire(WireCommand::AddProject {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: "Demo".to_string(),
+            })
+            .expect("add");
+        let status = outcome
+            .status
+            .expect("a successful add must surface a status");
+        assert_eq!(status.tone, "info", "unexpected status: {status:?}");
+        assert!(
+            status.message.contains("Added project \"Demo\""),
+            "unexpected success message: {}",
+            status.message
+        );
+        assert_eq!(engine.projects.len(), 1);
+    }
+
+    #[test]
+    fn apply_wire_add_project_surfaces_rollback_error() {
+        // Direct web add, config write fails: the inline Add rolls back and returns
+        // an error Status; apply_wire must surface THAT, not the optimistic success.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
+            engine.paths.config_path.clone(),
+        );
+        let outcome = engine
+            .apply_wire(WireCommand::AddProject {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: "Demo".to_string(),
+            })
+            .expect("add");
+        let status = outcome
+            .status
+            .expect("a rolled-back add must surface a status");
+        assert_eq!(status.tone, "error", "unexpected status: {status:?}");
+        assert!(
+            !status.message.contains("Added project \"Demo\""),
+            "the optimistic success message leaked: {}",
+            status.message
+        );
+        assert!(engine.projects.is_empty());
     }
 
     #[test]

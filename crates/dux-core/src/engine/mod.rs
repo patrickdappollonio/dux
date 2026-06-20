@@ -211,13 +211,38 @@ pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250)
 /// "periodic refreshes use wall-clock time" design tenet.
 pub const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Rewrite an absolute path under the user's home directory to the portable
+/// `$HOME/...` form so config.toml stays machine-independent (the tenet:
+/// "Project config is portable desired state"). Paths outside `$HOME`, or when
+/// the home directory cannot be resolved, are returned unchanged. `expand_path`
+/// is the inverse applied on load. Mirrors the TUI's `portable_project_path` so
+/// both surfaces write identical config regardless of which one added the project.
+pub(crate) fn portable_project_path(path: &str) -> String {
+    let Some(home) = home::home_dir() else {
+        return path.to_string();
+    };
+    match std::path::Path::new(path).strip_prefix(&home) {
+        Ok(relative) => {
+            let relative = relative.to_string_lossy();
+            if relative.is_empty() {
+                "$HOME".to_string()
+            } else {
+                format!("$HOME/{relative}")
+            }
+        }
+        Err(_) => path.to_string(),
+    }
+}
+
 /// Map a runtime [`Project`] to a portable [`ProjectConfig`] for config.toml.
 /// Uses the same field mapping as the persistence worker's `Add` arm so the
-/// on-disk shape stays consistent regardless of which path wrote it.
+/// on-disk shape stays consistent regardless of which path wrote it. The path is
+/// stored in the portable `$HOME/...` form (via [`portable_project_path`]) so the
+/// config does not pin an absolute, machine-specific path.
 fn project_to_project_config(p: &Project) -> ProjectConfig {
     ProjectConfig {
         id: p.id.clone(),
-        path: p.path.clone(),
+        path: portable_project_path(&p.path),
         name: Some(p.name.clone()),
         default_provider: p
             .explicit_default_provider
@@ -1530,6 +1555,41 @@ mod tests {
             .find(|p| p.id == "p2")
             .expect("p2 present");
         assert_eq!(two.default_provider.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn persist_projects_to_config_writes_portable_home_path() {
+        // A project under $HOME must be written to config.toml in the portable
+        // `$HOME/...` form, not a machine-specific absolute path (the "portable
+        // desired state" tenet). The inline-Add handler is now the single config
+        // writer, so this guards against it pinning an absolute path.
+        let Some(home) = home::home_dir() else {
+            return; // no resolvable home in this environment; nothing to assert.
+        };
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(&engine.paths.config_path, "# dux config\n").expect("seed config");
+
+        let abs = home.join("code/myproject");
+        let mut p = sample_project("ph", abs.to_string_lossy().as_ref());
+        // sample_project sets an absolute path; ensure it is exactly under home.
+        p.path = abs.to_string_lossy().into_owned();
+        engine.projects.push(p);
+
+        engine
+            .persist_projects_to_config()
+            .expect("persist projects to config");
+
+        let saved = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        let entry = parsed
+            .projects
+            .iter()
+            .find(|p| p.id == "ph")
+            .expect("project present");
+        assert_eq!(
+            entry.path, "$HOME/code/myproject",
+            "config must store the portable $HOME form, not an absolute path"
+        );
     }
 
     #[test]
