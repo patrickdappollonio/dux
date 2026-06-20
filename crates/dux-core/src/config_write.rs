@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -25,34 +25,53 @@ use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
 /// and Linux (CLAUDE.md), so no `cfg(windows)` branch is needed.
 const CONFIG_FILE_MODE: u32 = 0o600;
 
-/// Write `contents` to `path`, restricting the file to owner-only `0600`. Used
-/// for every `config.toml` write so the secrets it carries (bcrypt hashes,
-/// `[env]` tokens) are never left group/world readable.
-///
-/// We create the file with the `0600` mode applied AT creation (via
-/// `OpenOptions::mode`) so a fresh file is never briefly world-readable: a plain
-/// `fs::write` would create the file at umask perms (typically `0644`) with the
-/// secrets already in it, then chmod afterward — a window where the hashes are
-/// readable. The mode arg only takes effect when the file is newly created, so
-/// for an EXISTING file (e.g. an older `0644` config) we still run an explicit
-/// `set_permissions(0600)` after writing to tighten it. Both behaviors live in
-/// this one helper so every write path is covered.
-pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(CONFIG_FILE_MODE)
-        .open(path)
-        .with_context(|| format!("failed to open {} for writing", path.display()))?;
-    file.write_all(contents.as_bytes())
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    // `mode` above only applies on creation; an existing file keeps its old
-    // perms, so tighten it explicitly to upgrade older `0644` configs to `0600`.
-    let perms = fs::Permissions::from_mode(CONFIG_FILE_MODE);
-    fs::set_permissions(path, perms)
-        .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+/// Whether an atomic write fsyncs the file before the rename. Eager (critical)
+/// writes use `Fsync` for power-loss durability of the file's data; lazy writes
+/// use `NoFsync` (crash-safe via rename, but not power-loss-durable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Durability {
+    Fsync,
+    NoFsync,
+}
+
+/// Atomically write `contents` to `path`: a temp file in the same directory
+/// (created `0600`), optionally fsync'd, then `rename`d into place. The temp file
+/// self-deletes on drop if the rename never happens, so a failed/panicking write
+/// leaves no orphan and never a partial real file.
+pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) -> Result<()> {
+    let dir = path
+        .parent()
+        .with_context(|| format!("config path {} has no parent directory", path.display()))?;
+    fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create config dir {}", dir.display()))?;
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".config.toml.")
+        .tempfile_in(dir)
+        .with_context(|| format!("failed to create temp file in {}", dir.display()))?;
+
+    // Explicit 0600 (tempfile already defaults to this; belt-and-suspenders).
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(CONFIG_FILE_MODE))
+        .with_context(|| format!("failed to chmod temp file in {}", dir.display()))?;
+
+    tmp.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write temp config in {}", dir.display()))?;
+
+    if durability == Durability::Fsync {
+        tmp.as_file()
+            .sync_all()
+            .with_context(|| format!("failed to fsync temp config in {}", dir.display()))?;
+    }
+
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("failed to rename temp config over {}", path.display()))?;
     Ok(())
+}
+
+/// Atomic write at the default (Fsync) durability. Kept for existing callers.
+pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
+    write_config_atomic(path, contents, Durability::Fsync)
 }
 
 use crate::config::{
@@ -61,17 +80,23 @@ use crate::config::{
 
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
 /// formatting, and any keys this writer doesn't manage. Reads the file, applies
-/// every section patch, and writes it back.
+/// every section patch, and writes it back atomically at [`Durability::Fsync`].
 pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
+    patch_config_file_with(config_path, config, Durability::Fsync)
+}
+
+pub fn patch_config_file_with(
+    config_path: &Path,
+    config: &Config,
+    durability: Durability,
+) -> Result<()> {
     let raw = fs::read_to_string(config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", config_path.display()))?;
-
     apply_patches(&mut doc, config);
-
-    write_config_secure(config_path, &doc.to_string())
+    write_config_atomic(config_path, &doc.to_string(), durability)
 }
 
 /// Save config: patch in place if the file exists, otherwise write a plain
@@ -79,10 +104,15 @@ pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
 /// don't have the TUI's canonical commented renderer (e.g. the web). The TUI
 /// keeps its own `save_config` for the pretty first-creation path.
 pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
+    save_config_with(config_path, config, Durability::Fsync)
+}
+
+pub fn save_config_with(config_path: &Path, config: &Config, durability: Durability) -> Result<()> {
     if config_path.exists() {
-        return patch_config_file(config_path, config);
+        patch_config_file_with(config_path, config, durability)
+    } else {
+        write_config_plain_with(config_path, config, durability)
     }
-    write_config_plain(config_path, config)
 }
 
 /// Unconditionally write a fresh plain (uncommented) `toml_edit` serialization,
@@ -91,12 +121,20 @@ pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
 /// corrupt or unparseable. Used by the web's "recover config" path, which must
 /// overwrite a broken file from the in-memory config.
 pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
+    write_config_plain_with(config_path, config, Durability::Fsync)
+}
+
+pub fn write_config_plain_with(
+    config_path: &Path,
+    config: &Config,
+    durability: Durability,
+) -> Result<()> {
     // Build a fresh document from scratch using the same patch helpers against
     // an empty document. No comments — this is the plain fallback, not the
     // TUI's pretty first-creation path.
     let mut doc = DocumentMut::new();
     apply_patches(&mut doc, config);
-    write_config_secure(config_path, &doc.to_string())
+    write_config_atomic(config_path, &doc.to_string(), durability)
 }
 
 /// Apply every section patch to `doc`. Mirrors the section sequence the TUI's
@@ -555,6 +593,28 @@ pub fn escape_toml_multiline(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_config_atomic_writes_0600_and_no_temp_left() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        write_config_atomic(&path, "[env]\nFOO = \"bar\"\n", Durability::Fsync).expect("write");
+
+        let saved = fs::read_to_string(&path).expect("read");
+        assert!(saved.contains("FOO = \"bar\""));
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config must be 0600, got {mode:o}");
+
+        // No leftover temp files in the config directory.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != "config.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
 
     #[test]
     fn patch_preserves_comments_and_unknown_keys() {
