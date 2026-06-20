@@ -67,6 +67,18 @@ pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) 
 }
 
 /// Atomic write at the default (Fsync) durability. Kept for existing callers.
+///
+/// # Migration lock
+///
+/// This function is intentionally `#[deprecated]` so that any new unrouted caller
+/// fails `cargo clippy --all-targets --all-features -- -D warnings`. This is a
+/// regression guard: all runtime config writes must go through `ConfigWriteQueue`.
+/// Legitimate sync-direct callers (boot, first-creation, `config regenerate`,
+/// recover, bootstrap project-sync) silence the lint with `#[allow(deprecated)]`
+/// and a short comment explaining why direct write is correct there.
+#[deprecated(
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+)]
 pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic(path, contents, Durability::Fsync)
 }
@@ -78,6 +90,9 @@ use crate::config::{
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
 /// formatting, and any keys this writer doesn't manage. Reads the file, applies
 /// every section patch, and writes it back atomically at [`Durability::Fsync`].
+#[deprecated(
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+)]
 pub fn patch_config_file(config_path: &Path, config: &Config) -> Result<()> {
     patch_config_file_with(config_path, config, Durability::Fsync)
 }
@@ -100,6 +115,9 @@ pub fn patch_config_file_with(
 /// (uncommented) `toml_edit` serialization from scratch. Used by surfaces that
 /// don't have the TUI's canonical commented renderer (e.g. the web). The TUI
 /// keeps its own `save_config` for the pretty first-creation path.
+#[deprecated(
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+)]
 pub fn save_config(config_path: &Path, config: &Config) -> Result<()> {
     save_config_with(config_path, config, Durability::Fsync)
 }
@@ -117,6 +135,9 @@ pub fn save_config_with(config_path: &Path, config: &Config, durability: Durabil
 /// an existing file, so it succeeds even when the current `config.toml` is
 /// corrupt or unparseable. Used by the web's "recover config" path, which must
 /// overwrite a broken file from the in-memory config.
+#[deprecated(
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+)]
 pub fn write_config_plain(config_path: &Path, config: &Config) -> Result<()> {
     write_config_plain_with(config_path, config, Durability::Fsync)
 }
@@ -599,6 +620,7 @@ pub fn escape_toml_multiline(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests call the deprecated wrappers directly to verify their behaviour
 mod tests {
     use super::*;
 

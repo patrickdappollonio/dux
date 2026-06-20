@@ -445,6 +445,7 @@ fn run_diff_summary(current: &Config) -> Result<()> {
 // dux config regenerate
 // ---------------------------------------------------------------------------
 
+#[allow(deprecated)] // blessed sync-direct: `dux config regenerate` is a CLI-only, one-shot boot tool
 fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
     let fresh = config::render_default_config();
 

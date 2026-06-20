@@ -10,6 +10,7 @@ use crate::keybindings;
 
 pub use dux_core::config::*;
 
+#[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
 pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     paths.ensure_dirs()?;
     if !paths.config_path.exists() {
@@ -23,6 +24,7 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         .parse()
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     if apply_config_deprecations(&mut doc)? {
+        // blessed sync-direct: deprecation migration also runs at boot before the queue exists
         dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
@@ -678,6 +680,16 @@ pub fn render_config_with(
 /// the keys that differ from the on-disk version are updated.  User comments,
 /// formatting, and unknown keys are preserved.  If the file does not yet exist,
 /// a fresh canonical config is rendered instead.
+///
+/// This wrapper is also deprecated: callers that used the TUI `save_config`
+/// bypassed the `ConfigWriteQueue` gate. All runtime writes must route through
+/// the queue; the only legitimate callers of this wrapper are the TUI bootstrap
+/// helpers (`persist_runtime_projects_to_config_and_store`,
+/// `sync_config_projects_with_store`) which are sync-direct by design.
+#[deprecated(
+    note = "route config writes through ConfigWriteQueue; sync-direct callers must #[allow(deprecated)]"
+)]
+#[allow(deprecated)] // internal delegation: body calls deprecated core fns (patch_config_file, write_config_secure)
 pub fn save_config(
     config_path: &Path,
     config: &Config,
@@ -1149,6 +1161,7 @@ pub fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests call the deprecated save_config wrapper directly to verify its behaviour
 mod tests {
     use indexmap::IndexMap;
 

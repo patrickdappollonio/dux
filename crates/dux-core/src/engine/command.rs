@@ -262,6 +262,7 @@ impl Engine {
     /// events; the web layer (sub-project #3) will call it with `Command`s
     /// deserialized from WebSocket messages. Returns an `EventReaction`
     /// the caller routes through its view-applier.
+    #[allow(deprecated)] // blessed sync-direct: Command::RecoverConfig quiesces the writer and writes directly
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
         // While a config reload barrier is open, hold any config-mutating
         // command until the reload lands so it re-applies against the
