@@ -1,5 +1,6 @@
 //! One ordered, off-thread, atomic config writer per process.
 
+use std::mem;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -119,6 +120,36 @@ impl ConfigWriteQueue {
         drop(rx); // receiver gone → the writer is effectively dead
         let _ = config_path;
         ConfigWriteQueue { tx, writer: None }
+    }
+}
+
+impl Drop for ConfigWriteQueue {
+    fn drop(&mut self) {
+        // Spec: flush pending lazy writes on clean process exit.  This fires when
+        // the engine (and thus the queue) is finally dropped at real exit.  It does
+        // NOT fire at the in-process TUI→web flip, which MOVES the engine rather
+        // than dropping it, so the queue keeps running across the flip.
+        //
+        // Step 1 — send a Flush and wait for the writer to drain any pending lazy
+        // write.  flush() is bounded by FLUSH_TIMEOUT so Drop cannot hang the
+        // process indefinitely.
+        self.flush();
+
+        // Step 2 — disconnect the sender so the writer loop exits after flush.
+        // We replace `self.tx` with a fresh disconnected channel; the old tx is
+        // then dropped, which disconnects the channel and causes the writer's
+        // blocking `recv()` to return `Err(Disconnected)` → `break`.
+        let (dead_tx, _dead_rx) = mpsc::channel::<WriteMsg>();
+        let _ = mem::replace(&mut self.tx, dead_tx);
+        // _dead_rx is dropped here, disconnecting dead_tx immediately.
+
+        // Step 3 — join the writer thread for a clean shutdown.  The writer exited
+        // (or will exit within one recv round-trip) because the original tx is now
+        // gone.  Joining is best-effort: if the thread already finished or panicked
+        // we just move on.
+        if let Some(handle) = self.writer.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -326,6 +357,31 @@ mod tests {
         assert!(
             err.to_lowercase().contains("retry") || err.to_lowercase().contains("busy"),
             "got: {err}"
+        );
+    }
+
+    /// Proves that a pending lazy write is flushed when the queue is dropped
+    /// (i.e. on clean process exit), not lost.  Without the `Drop` impl this
+    /// test is RED: the pending lazy sits in the channel and the writer loop
+    /// exits without writing it.  With the `Drop` impl it is GREEN.
+    #[test]
+    fn lazy_pending_is_flushed_on_drop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+
+        {
+            let q = ConfigWriteQueue::new(path.clone());
+            let mut cfg = Config::default();
+            cfg.env.insert("DROP_MARKER".into(), "flushed".into());
+            q.save_lazy(cfg);
+            // Drop q here — the Drop impl must flush the pending lazy write.
+        }
+
+        let saved = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            saved.contains("DROP_MARKER = \"flushed\""),
+            "pending lazy write was NOT flushed on drop: {saved}"
         );
     }
 }
