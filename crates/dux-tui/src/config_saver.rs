@@ -89,8 +89,8 @@ impl ConfigSaver for TuiConfigSaver {
         thread::spawn(move || {
             let bindings = RuntimeBindings::from_keys_config(&config.keys);
             let rendered = crate::config::render_config_with(&config, &bindings);
-            let result = std::fs::write(&config_path, rendered)
-                .map_err(|err| format!("failed to write {}: {err}", config_path.display()));
+            let result = dux_core::config_write::write_config_secure(&config_path, &rendered)
+                .map_err(|err| format!("{err:#}"));
             let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(result));
         });
     }

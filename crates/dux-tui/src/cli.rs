@@ -466,7 +466,8 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
     }
 
     paths.ensure_dirs()?;
-    fs::write(&paths.config_path, fresh).with_context_path(&paths.config_path)?;
+    dux_core::config_write::write_config_secure(&paths.config_path, &fresh)
+        .with_context_path(&paths.config_path)?;
     println!("config regenerated at {}", paths.config_path.display());
     Ok(())
 }
