@@ -210,10 +210,11 @@ export interface DuxState {
   // See `armCreateFocus` and `focusNewlyCreatedSession`.
   pendingCreateFocus: { knownIds: string[]; projectId: string } | null
   sidebarWidth: string
-  // Per-session override for the Changes pane's visibility (desktop). `null`
-  // follows the config default (`viewModel.show_changes_pane`); the palette and
-  // the Changes actions menu set an explicit bool. Not persisted — re-seeds from
-  // config on reload, mirroring the TUI's runtime remove-git-pane toggle.
+  // Optimistic override for the Changes pane's visibility (desktop). `null`
+  // follows the persisted config (`viewModel.show_changes_pane`); the palette and
+  // the Changes actions menu set an explicit bool for instant feedback. The
+  // toggle persists to config via the server; this clears once the broadcast
+  // confirms (or on command error / disconnect, which roll it back).
   changesPaneOverride: boolean | null
   // The session whose code-editor overlay is open, the file to auto-open on
   // launch (null = none preselected), and the view it opens in: "file" (editable
@@ -339,6 +340,17 @@ socket.onViewModel = (vm) => {
     // confirming our reorder will clear it; an error status clears it outright.
     pendingSessionOrder: reconcilePendingSessionOrder(vm, state.pendingSessionOrder),
     pendingProjectOrder: reconcilePendingProjectOrder(vm, state.pendingProjectOrder),
+    // Drop the optimistic Changes-pane override once the server confirms: when
+    // its persisted value matches the override, OR when the server omits the
+    // field entirely (a pre-feature server that can't persist it — otherwise the
+    // override would strand). Keeps config as the source of truth and honors
+    // another client's toggle.
+    changesPaneOverride:
+      state.changesPaneOverride !== null &&
+      (vm.show_changes_pane === undefined ||
+        state.changesPaneOverride === vm.show_changes_pane)
+        ? null
+        : state.changesPaneOverride,
   })
   // If an agent THIS client just created has now appeared, jump focus to it
   // (see `focusNewlyCreatedSession`). Run before the prune below: this only ever
@@ -514,15 +526,21 @@ function clearPendingOrders(): Partial<DuxState> {
   return { pendingSessionOrder: null, pendingProjectOrder: null }
 }
 
-// Clear every transient, optimistic client intent at once: the reorder overlays
-// AND any pending create-focus. Used on the failure/teardown paths (command
-// error, async error status, socket disconnect) where an in-flight create can no
-// longer be trusted to resolve — a surviving `pendingCreateFocus` snapshot would
-// otherwise mis-identify a later, unrelated session as the one we created. NOT
-// folded into `clearPendingOrders` because user actions like sorting also clear
-// the order overlays but must NOT cancel an in-flight create-focus.
+// Clear every transient, optimistic client intent at once: the reorder overlays,
+// any pending create-focus, AND the Changes-pane visibility override. Used on the
+// failure/teardown paths (command error, async error status, socket disconnect)
+// where an in-flight create can no longer be trusted to resolve — a surviving
+// `pendingCreateFocus` snapshot would otherwise mis-identify a later, unrelated
+// session as the one we created, and a surviving Changes-pane override would
+// strand the pane in the toggled state until reload. NOT folded into
+// `clearPendingOrders` because user actions like sorting also clear the order
+// overlays but must NOT cancel an in-flight create-focus.
 function clearPendingClientIntent(): Partial<DuxState> {
-  return { ...clearPendingOrders(), pendingCreateFocus: null }
+  return {
+    ...clearPendingOrders(),
+    pendingCreateFocus: null,
+    changesPaneOverride: null,
+  }
 }
 
 // Asynchronous status/lifecycle events (background push/pull completing, an
@@ -1501,8 +1519,13 @@ export function changesPaneVisible(s: DuxState): boolean {
 }
 
 // Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
-// Changes actions menu). Sets an explicit per-session override; the config
-// default seeds the first value via `changesPaneVisible`.
+// Changes actions menu) and persist the choice. The override is set
+// optimistically for an instant response; the server writes
+// config.ui.show_changes_pane and the next ViewModel broadcast confirms it, at
+// which point onViewModel drops the override so config is the single source of
+// truth across every connected client.
 export function toggleChangesPane(): void {
-  setState({ changesPaneOverride: !changesPaneVisible(state) })
+  const next = !changesPaneVisible(state)
+  setState({ changesPaneOverride: next })
+  socket.sendCommand("set_changes_pane_visible", { visible: next })
 }

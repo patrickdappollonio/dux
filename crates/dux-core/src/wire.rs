@@ -106,6 +106,13 @@ pub enum WireCommand {
     /// Overwrite `config.toml` from the current in-memory config. Empty struct
     /// variant for the same reason as [`WireCommand::ReloadConfig`].
     RecoverConfig {},
+    /// Persist the Changes (git) pane's visibility to `config.toml`
+    /// (`ui.show_changes_pane`). Sent by the web's hide/show toggle so the
+    /// choice sticks across restarts; the next ViewModel broadcast carries the
+    /// new value, and the client reconciles its optimistic override against it.
+    SetChangesPaneVisible {
+        visible: bool,
+    },
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
     AddProject {
@@ -536,6 +543,12 @@ impl Engine {
                     status: Some(status),
                 });
             }
+            WireCommand::SetChangesPaneVisible { visible } => {
+                let status = self.set_changes_pane_visible(visible)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                });
+            }
             _ => {}
         }
         let core = self.wire_to_command(command)?;
@@ -545,6 +558,46 @@ impl Engine {
             status = self.drive_delete_followup(&reaction).into_iter().next();
         }
         Ok(WireCommandOutcome { status })
+    }
+
+    /// Persist the Changes (git) pane's visibility to `config.toml`
+    /// (`ui.show_changes_pane`) so the choice survives a restart, mirroring the
+    /// TUI's persist-on-toggle. The field is the single persisted source of
+    /// truth: the next ViewModel broadcast carries it, and the web clears its
+    /// optimistic override once they match. A small synchronous config write,
+    /// like `persist_projects_to_config` (rare and user-initiated).
+    fn set_changes_pane_visible(&mut self, visible: bool) -> anyhow::Result<WireStatus> {
+        // Idempotent: skip the disk write when nothing changes (also blunts a
+        // client that spams the toggle).
+        if self.config.ui.show_changes_pane == visible {
+            let message = if visible {
+                "Changes pane is already shown."
+            } else {
+                "Changes pane is already hidden."
+            };
+            return Ok(WireStatus::new("info", message.to_string()));
+        }
+        // Persist on a clone first and only commit to the live config once the
+        // write succeeds. Otherwise a failed save would still flip the in-memory
+        // value (which the next ViewModel broadcasts), making a failure look like
+        // success while disk keeps the old value and a restart silently reverts.
+        let mut config = self.config.clone();
+        config.ui.show_changes_pane = visible;
+        if let Err(err) = crate::config_write::save_config(&self.paths.config_path, &config) {
+            // Log server-side too — otherwise the failure is only visible on the
+            // requesting client's status line and leaves no trace in dux.log.
+            crate::logger::error(&format!(
+                "Couldn't persist Changes pane visibility to config: {err:#}"
+            ));
+            return Err(err);
+        }
+        self.config.ui.show_changes_pane = visible;
+        let message = if visible {
+            "Changes pane shown. Hide it again from the command palette or the Changes menu."
+        } else {
+            "Changes pane hidden. Reopen it from the command palette or the Changes menu."
+        };
+        Ok(WireStatus::new("info", message.to_string()))
     }
 
     /// Rename an agent session's display title, mirroring the title half of the
@@ -1615,9 +1668,10 @@ impl Engine {
             | WireCommand::CheckoutProjectDefaultBranch { .. }
             | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::ChangeAgentProvider { .. }
-            | WireCommand::CreateAgentFromPr { .. } => {
+            | WireCommand::CreateAgentFromPr { .. }
+            | WireCommand::SetChangesPaneVisible { .. } => {
                 unreachable!(
-                    "rename/reconnect/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -2195,6 +2249,33 @@ mod tests {
         let json = r#"{"command":"recover_config","args":{}}"#;
         let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
         assert_eq!(cmd, WireCommand::RecoverConfig {});
+    }
+
+    #[test]
+    fn wire_set_changes_pane_visible_deserializes() {
+        let json = r#"{"command":"set_changes_pane_visible","args":{"visible":false}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(cmd, WireCommand::SetChangesPaneVisible { visible: false });
+    }
+
+    #[test]
+    fn apply_wire_set_changes_pane_visible_persists() {
+        let (mut engine, _tmp) = test_engine();
+        assert!(engine.config.ui.show_changes_pane);
+
+        // Succeeds only if the config save succeeded — the in-memory value is
+        // committed only after the write, so a passing call also proves it
+        // persisted (a failed save returns Err and leaves the value unchanged).
+        engine
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
+            .expect("apply set_changes_pane_visible");
+        assert!(!engine.config.ui.show_changes_pane);
+
+        // Idempotent: repeating the same value is a no-op that still succeeds.
+        engine
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
+            .expect("apply idempotent");
+        assert!(!engine.config.ui.show_changes_pane);
     }
 
     #[test]

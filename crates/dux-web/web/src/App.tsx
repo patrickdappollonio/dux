@@ -260,9 +260,11 @@ function DesktopShell() {
         <InsetHeader />
         <div className="min-h-0 flex-1">
           <ResizablePanelGroup orientation="horizontal" className="size-full">
-            {/* Stable ids so react-resizable-panels reconciles correctly when
-                the Changes panel is conditionally added/removed; a single
-                remaining panel fills the width (no leftover sliver). */}
+            {/* The terminal panel's defaultSize drops to 100 when the Changes
+                panel is absent so it fills the width (no leftover sliver). The
+                ids keep the two panels stable across the conditional mount.
+                Note: a user-dragged split is NOT yet persisted across hide/show
+                (defaultSize only applies on mount). */}
             <ResizablePanel
               id="terminal-pane"
               defaultSize={showChanges ? 74 : 100}

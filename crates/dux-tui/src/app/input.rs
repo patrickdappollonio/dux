@@ -550,12 +550,7 @@ impl App {
                         self.focus = FocusPane::Center;
                     }
                 }
-                Action::RemoveGitPane => {
-                    self.right_hidden = !self.right_hidden;
-                    if self.right_hidden && self.focus == FocusPane::Files {
-                        self.focus = FocusPane::Center;
-                    }
-                }
+                Action::RemoveGitPane => self.toggle_git_pane_removed(),
                 Action::ToggleResizeMode => {
                     self.resize_mode = !self.resize_mode;
                     if self.resize_mode {
@@ -5845,6 +5840,28 @@ impl App {
             ) {
                 self.set_error(format!("Couldn't persist pane sizes to config: {err:#}"));
             }
+        }
+    }
+
+    /// Toggle the git/Changes pane between hidden and restored, then persist the
+    /// new visibility to `config.toml` (`ui.show_changes_pane` seeds startup) so
+    /// the choice sticks across restarts. Shared by the keybinding and the
+    /// palette command so both stay in sync; mirrors `persist_pane_widths`'
+    /// synchronous canonical-config save.
+    pub(crate) fn toggle_git_pane_removed(&mut self) {
+        self.right_hidden = !self.right_hidden;
+        if self.right_hidden && self.focus == FocusPane::Files {
+            self.focus = FocusPane::Center;
+        }
+        self.engine.config.ui.show_changes_pane = !self.right_hidden;
+        if let Err(err) = save_config(
+            &self.engine.paths.config_path,
+            &self.engine.config,
+            &self.bindings,
+        ) {
+            self.set_error(format!(
+                "Couldn't persist Changes pane visibility to config: {err:#}"
+            ));
         }
     }
 
@@ -12100,14 +12117,18 @@ cyan = "#00ffff"
     fn remove_git_pane_hides_right() {
         let mut app = test_app(default_bindings());
         assert!(!app.right_hidden);
+        assert!(app.engine.config.ui.show_changes_pane);
 
         app.execute_command("toggle-remove-git-pane".to_string())
             .unwrap();
         assert!(app.right_hidden);
+        // The toggle keeps the persisted setting in sync with the pane state.
+        assert!(!app.engine.config.ui.show_changes_pane);
 
         app.execute_command("toggle-remove-git-pane".to_string())
             .unwrap();
         assert!(!app.right_hidden);
+        assert!(app.engine.config.ui.show_changes_pane);
     }
 
     #[test]
