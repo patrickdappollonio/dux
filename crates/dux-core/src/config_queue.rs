@@ -281,4 +281,51 @@ mod tests {
         );
         q.flush();
     }
+
+    #[test]
+    fn lazy_during_barrier_is_dropped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\nKEEP = \"recovered\"\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+
+        {
+            let _guard = q.quiesce(); // writer drained + paused
+            // Operation's own write, synchronous-direct, while paused:
+            let mut recovered = Config::default();
+            recovered.env.insert("KEEP".into(), "recovered".into());
+            crate::config_write::save_config_with(
+                &path,
+                &recovered,
+                crate::config_write::Durability::Fsync,
+            )
+            .unwrap();
+            // A concurrent stale lazy arrives during the barrier:
+            let mut stale = Config::default();
+            stale.env.insert("KEEP".into(), "stale".into());
+            q.save_lazy(stale);
+        } // guard drops → resume
+
+        q.flush();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.contains("KEEP = \"recovered\""),
+            "stale lazy clobbered the barrier write: {saved}"
+        );
+    }
+
+    #[test]
+    fn eager_during_barrier_gets_retry_not_stale_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+        let guard = q.quiesce();
+        let err = q.save_eager(Config::default()).unwrap_err();
+        drop(guard);
+        assert!(
+            err.to_lowercase().contains("retry") || err.to_lowercase().contains("busy"),
+            "got: {err}"
+        );
+    }
 }
