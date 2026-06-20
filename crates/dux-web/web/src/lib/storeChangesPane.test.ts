@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { ViewModel } from "@/lib/types"
 
 // Mirror the store test harness (see storeWatchChangedFiles.test.ts): the module
 // reads location/localStorage, registers listeners, and fires a boot probe on
@@ -50,6 +51,19 @@ async function loadStore() {
   return mod
 }
 
+// A minimal ViewModel for the reconcile path; onViewModel reads only
+// sessions/projects (empty here) plus show_changes_pane. `undefined` models a
+// pre-feature server that never sends the field.
+function vmWith(showChangesPane: boolean | undefined): ViewModel {
+  return {
+    sessions: [],
+    projects: [],
+    ...(showChangesPane === undefined
+      ? {}
+      : { show_changes_pane: showChangesPane }),
+  } as unknown as ViewModel
+}
+
 describe("Changes-pane visibility", () => {
   it("changesPaneVisible: override wins, else config default, else visible", async () => {
     const mod = await loadStore()
@@ -71,18 +85,56 @@ describe("Changes-pane visibility", () => {
     expect(v(false, true)).toBe(false)
   })
 
-  it("toggleChangesPane flips an explicit override off the effective value", async () => {
+  it("toggleChangesPane sets an optimistic override and persists via the socket", async () => {
     const mod = await loadStore()
+    const spy = vi.spyOn(mod.socket, "sendCommand")
     // Default: no override, no config default seeded → visible.
     expect(mod.getSnapshot().changesPaneOverride).toBe(null)
     expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(true)
-    // First toggle hides it (explicit override = false).
+    // First toggle hides it (optimistic override = false) and tells the server.
     mod.toggleChangesPane()
     expect(mod.getSnapshot().changesPaneOverride).toBe(false)
     expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(false)
-    // Second toggle shows it again.
+    expect(spy).toHaveBeenLastCalledWith("set_changes_pane_visible", {
+      visible: false,
+    })
+    // Second toggle shows it again, persisting the new value.
     mod.toggleChangesPane()
     expect(mod.getSnapshot().changesPaneOverride).toBe(true)
-    expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(true)
+    expect(spy).toHaveBeenLastCalledWith("set_changes_pane_visible", {
+      visible: true,
+    })
+  })
+
+  it("onViewModel clears the override once the server confirms the value", async () => {
+    const mod = await loadStore()
+    mod.toggleChangesPane() // optimistic hide → override = false
+    expect(mod.getSnapshot().changesPaneOverride).toBe(false)
+    mod.socket.onViewModel(vmWith(false)) // server confirms hidden
+    expect(mod.getSnapshot().changesPaneOverride).toBe(null)
+  })
+
+  it("onViewModel keeps the override until the server value matches", async () => {
+    const mod = await loadStore()
+    mod.toggleChangesPane() // override = false
+    mod.socket.onViewModel(vmWith(true)) // server still reports visible
+    expect(mod.getSnapshot().changesPaneOverride).toBe(false)
+  })
+
+  it("onViewModel clears the override against a server that omits the field", async () => {
+    const mod = await loadStore()
+    mod.toggleChangesPane() // override = false
+    mod.socket.onViewModel(vmWith(undefined)) // pre-feature server
+    expect(mod.getSnapshot().changesPaneOverride).toBe(null)
+  })
+
+  it("the toggle-remove-git-pane palette command runs the toggle", async () => {
+    const mod = await loadStore()
+    const { PALETTE_HANDLERS } = await import("./paletteRegistry")
+    const spy = vi.spyOn(mod.socket, "sendCommand")
+    PALETTE_HANDLERS["toggle-remove-git-pane"]()
+    expect(spy).toHaveBeenCalledWith("set_changes_pane_visible", {
+      visible: false,
+    })
   })
 })

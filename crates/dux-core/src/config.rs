@@ -331,8 +331,9 @@ pub struct UiConfig {
     pub github_integration: bool,
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.
-    /// A runtime toggle (command palette, or the web's Changes actions menu)
-    /// overrides this per session.
+    /// Toggling it from the command palette or the web's Changes actions menu
+    /// persists the new value here immediately — it is not a per-session
+    /// override.
     pub show_changes_pane: bool,
     pub pr_banner_position: String,
     pub theme: String,

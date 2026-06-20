@@ -1985,10 +1985,7 @@ impl App {
                 Ok(())
             }
             "toggle-remove-git-pane" => {
-                self.right_hidden = !self.right_hidden;
-                if self.right_hidden && self.focus == FocusPane::Files {
-                    self.focus = FocusPane::Center;
-                }
+                self.toggle_git_pane_removed();
                 Ok(())
             }
             "help" => {
@@ -2182,6 +2179,13 @@ impl App {
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
         self.engine.github_integration_enabled = config.ui.github_integration;
         self.pr_banner_at_bottom = config.ui.pr_banner_position == "bottom";
+        // Re-seed the changes (right) pane's hidden state from the reloaded
+        // config, mirroring startup; if it just became hidden while the Files
+        // pane was focused, move focus to the center (matching the toggle).
+        self.right_hidden = !config.ui.show_changes_pane;
+        if self.right_hidden && self.focus == FocusPane::Files {
+            self.focus = FocusPane::Center;
+        }
         self.engine.projects = load_projects(
             &self.engine.session_store.load_projects()?,
             &self.engine.session_store.load_project_created_ats()?,
