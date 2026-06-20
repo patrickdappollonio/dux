@@ -81,8 +81,10 @@ impl App {
         self.finish_add_project(path_str, name, branch, leading_branch)
     }
 
-    /// Starts saving the project to SQLite and adds it to the runtime project
-    /// list only after the worker confirms the write.
+    /// Saves the project to SQLite and config.toml INLINE (no background worker):
+    /// the engine writes both synchronously, rolling back the SQLite row if the
+    /// config write fails, and the project is in the runtime list with a final
+    /// status (success or rollback error) by the time this returns.
     /// Called directly when no branch warning is needed, or after the user
     /// confirms "Add Anyway" in the non-default-branch dialog.
     pub(crate) fn finish_add_project(
@@ -147,8 +149,11 @@ impl App {
                 status_message,
             },
         )))?;
+        // The add is INLINE now: the reaction already carries the FINAL status
+        // (the success info from the `Added` arm, or the rollback error). A
+        // trailing `set_busy` here would run last and never resolve, leaving a
+        // stuck spinner — so apply the reaction and stop.
         self.apply_reaction(reaction);
-        self.set_busy(format!("Saving project \"{display_name}\" to workspace..."));
         Ok(())
     }
 
@@ -2912,6 +2917,147 @@ mod tests {
                 .message()
                 .contains("could not start the web server")
         );
+    }
+
+    #[test]
+    fn finish_add_project_ends_on_final_status_not_stuck_busy() {
+        // Regression: the add is INLINE, so the reaction already carries the
+        // FINAL status (the `Added` arm's success info). A trailing
+        // `set_busy("Saving project…")` after `apply_reaction` would run last and
+        // never resolve, leaving a stuck spinner. The post-add status must be the
+        // success Info, not a Busy.
+        // `finish_add_project_with_status` only persists the project; it does not
+        // validate the path as a git repo, so a plain tempdir suffices.
+        let repo = tempdir().expect("repo tempdir");
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+
+        app.finish_add_project_with_status(
+            repo.path().to_string_lossy().into_owned(),
+            "Demo".to_string(),
+            "main".to_string(),
+            "main".to_string(),
+            "Added project \"Demo\" to the workspace.".to_string(),
+        )
+        .expect("finish add");
+
+        assert_eq!(
+            app.status.tone(),
+            dux_core::statusline::StatusTone::Info,
+            "post-add status must be the final Info, not a stuck Busy: {:?} {}",
+            app.status.tone(),
+            app.status.message()
+        );
+        assert!(
+            app.status.message().contains("Added project \"Demo\""),
+            "expected the success message to remain, got: {}",
+            app.status.message()
+        );
+    }
+
+    #[test]
+    fn finish_add_project_surfaces_rollback_error_on_config_write_failure() {
+        // The TUI failure path: when the inline config write fails, the engine
+        // rolls back and returns an error `Status`; `apply_reaction` must surface
+        // it as an Error on the status line (not a stuck Busy, not a false Info),
+        // and nothing must persist.
+        let repo = tempdir().expect("repo tempdir");
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        // Point the writer at a nonexistent directory so the eager save fails with
+        // an I/O error, forcing the rollback path. (`with_dead_writer` is
+        // cfg(test)-gated to dux-core and not visible from this crate's tests.)
+        app.engine.config_writer =
+            dux_core::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
+
+        app.finish_add_project_with_status(
+            repo.path().to_string_lossy().into_owned(),
+            "Demo".to_string(),
+            "main".to_string(),
+            "main".to_string(),
+            "Added project \"Demo\" to the workspace.".to_string(),
+        )
+        .expect("finish add");
+
+        assert_eq!(
+            app.status.tone(),
+            dux_core::statusline::StatusTone::Error,
+            "a rolled-back add must show an Error, got {:?}: {}",
+            app.status.tone(),
+            app.status.message()
+        );
+        assert!(
+            !app.status.message().contains("Added project \"Demo\""),
+            "the optimistic success message leaked on a failed add: {}",
+            app.status.message()
+        );
+        // The rollback undid the in-memory list and the SQLite row.
+        assert!(app.engine.projects.is_empty());
+        assert!(
+            app.engine
+                .session_store
+                .load_projects()
+                .expect("load projects")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn finish_add_project_writes_config_once_through_the_queue() {
+        // Regression: the engine handler already writes config.toml through the
+        // eager queue (authoritative, with SQLite rollback). The `Added` reaction
+        // arm must NOT also write it off-queue via
+        // `persist_config_projects_from_runtime` — that was a DOUBLE write.
+        //
+        // The two writes leave byte-identical content, so the only observable that
+        // distinguishes one write from two is the WRITE COUNT. We isolate the
+        // off-queue write: point the eager queue at a DIFFERENT, writable path
+        // than `config_path`, so the handler's (queue) write lands elsewhere and
+        // leaves `config_path` untouched. Then `config_path` exists on disk if and
+        // only if the off-queue `persist_config_projects_from_runtime` ran. With
+        // the fix it must NOT exist; under the bug it would.
+        let repo = tempdir().expect("repo tempdir");
+        let raw_path = repo.path().to_string_lossy().into_owned();
+
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        // Redirect the eager queue to a separate file so only the off-queue write
+        // (if any) would touch `config_path`. `config_path` is the file ONLY an
+        // off-queue `save_config` would create, so its absence after the add is
+        // the oracle. (No pre-check needed: the test infra never writes it.)
+        let queue_target = repo.path().join("queued-config.toml");
+        app.engine.config_writer =
+            dux_core::config_queue::ConfigWriteQueue::new(queue_target.clone());
+
+        app.finish_add_project_with_status(
+            raw_path.clone(),
+            "Demo".to_string(),
+            "main".to_string(),
+            "main".to_string(),
+            "Added project \"Demo\" to the workspace.".to_string(),
+        )
+        .expect("finish add");
+        app.engine.config_writer.flush();
+
+        // The handler's authoritative (queue) write landed on the redirected path.
+        assert!(
+            queue_target.exists(),
+            "the inline-Add handler must write config through the queue"
+        );
+        // The `Added` arm must NOT have written config off-queue: with the fix the
+        // original config_path is never touched.
+        assert!(
+            !app.engine.paths.config_path.exists(),
+            "the Added arm wrote config off-queue (double write) — config_path \
+             should never be touched after the queue write"
+        );
+        // And the add still succeeded end to end. The path is stored in the
+        // portable form (the queue handler now portabilizes it, matching what the
+        // old off-queue write produced), so compare against that mapping rather
+        // than the raw absolute path.
+        assert_eq!(app.engine.config.projects.len(), 1);
+        assert_eq!(
+            app.engine.config.projects[0].path,
+            portable_project_path(&raw_path)
+        );
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Info);
     }
 
     #[test]

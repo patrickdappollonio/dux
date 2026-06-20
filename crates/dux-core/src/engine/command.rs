@@ -41,10 +41,14 @@ pub enum Command {
         session_id: String,
         delete_worktree: bool,
     },
-    /// Persist a project mutation via the background worker. Fire-and-
-    /// forget — the worker posts `WorkerEvent::ProjectPersistenceCompleted`
-    /// back, which surfaces as `EventReaction::ProjectPersistenceOutcome`
-    /// in the next `drain_events` pass.
+    /// Persist a project mutation. The `Add` action is handled INLINE
+    /// (synchronously): the handler writes SQLite and config.toml in `apply` and
+    /// returns `EventReaction::ProjectPersistenceOutcome(Added)` on success or an
+    /// error-toned `EventReaction::Status` (the add rolled back) on failure — both
+    /// immediately, no worker. All OTHER actions go through the background worker:
+    /// fire-and-forget, the worker posts `WorkerEvent::ProjectPersistenceCompleted`
+    /// back, which surfaces as `EventReaction::ProjectPersistenceOutcome` in the
+    /// next `drain_events` pass.
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold (`ProjectPersistenceAction` is 248 bytes unboxed).
@@ -361,8 +365,8 @@ impl Engine {
                                 ))));
                             }
                             Ok(EventReaction::Status(StatusUpdate::error(format!(
-                                "Project add failed and couldn't be cleaned up — it may \
-                                 reappear on restart. Config error: {e:#}"
+                                "Project add failed and was rolled back — config.toml could \
+                                 not be updated: {e:#}"
                             ))))
                         }
                     }
