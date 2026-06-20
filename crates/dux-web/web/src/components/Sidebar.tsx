@@ -519,7 +519,7 @@ function ProjectItem({
             {...attributes}
             {...listeners}
             render={
-              <SidebarMenuButton className="min-w-0 flex-1 touch-manipulation hover:bg-transparent active:bg-transparent data-active:bg-transparent data-open:hover:bg-transparent group-has-data-[sidebar=menu-action]/menu-item:pr-2" />
+              <SidebarMenuButton className="min-w-0 flex-1 touch-manipulation hover:bg-transparent active:bg-transparent data-active:bg-transparent group-has-data-[sidebar=menu-action]/menu-item:pr-2" />
             }
           >
             {/* The folder doubles as two signals: it is FILLED when the project
@@ -530,16 +530,18 @@ function ProjectItem({
             {sessions.length > 0 ? (
               // Crossfade the closed↔open folder on expand instead of an instant
               // swap: both icons are stacked in a fixed-size box and their
-              // opacity + a subtle scale transition when the collapsible's
-              // data-state flips. Respects reduced motion.
+              // opacity + a subtle scale transition when the collapsible flips
+              // open. Base UI's Collapsible marks the open root with `data-open`
+              // (not `data-state=open`), so the reveal keys off that. Respects
+              // reduced motion.
               <span className="relative inline-flex size-4 shrink-0">
                 <Folder
                   fill="currentColor"
-                  className="absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out group-data-[state=open]/collapsible:scale-90 group-data-[state=open]/collapsible:opacity-0 motion-reduce:transition-none"
+                  className="absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out group-data-[open]/collapsible:scale-90 group-data-[open]/collapsible:opacity-0 motion-reduce:transition-none"
                 />
                 <FolderOpen
                   fill="currentColor"
-                  className="absolute inset-0 size-4 scale-90 opacity-0 transition-[opacity,transform] duration-200 ease-out group-data-[state=open]/collapsible:scale-100 group-data-[state=open]/collapsible:opacity-100 motion-reduce:transition-none"
+                  className="absolute inset-0 size-4 scale-90 opacity-0 transition-[opacity,transform] duration-200 ease-out group-data-[open]/collapsible:scale-100 group-data-[open]/collapsible:opacity-100 motion-reduce:transition-none"
                 />
               </span>
             ) : (
@@ -810,20 +812,20 @@ export function AppSidebar() {
       <SidebarFooter>
         {/* Add-project lives next to the collapse toggle (not in the scrolling
             project list, where it slid off-screen once there were enough
-            projects). Both are icon buttons: a right-aligned row when expanded,
-            stacked and centered on the icon rail when collapsed. On mobile the
+            projects). It keeps its "Add project" label whenever the sidebar is
+            open and collapses to just the + icon on the icon rail. On mobile the
             hub keeps its own "Add project" entry — this footer is desktop-only. */}
-        <div className="flex items-center justify-end gap-2 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center">
-          <SimpleTooltip content="Add project" side="right">
-            <Button
-              variant="outline"
-              size="icon"
-              aria-label="Add project"
-              onClick={openAddProject}
-            >
-              <Plus />
-            </Button>
-          </SimpleTooltip>
+        <div className="flex items-center gap-2 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center">
+          <Button
+            variant="outline"
+            size="sm"
+            aria-label="Add project"
+            onClick={openAddProject}
+            className="flex-1 group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
+          >
+            <Plus />
+            <span className="group-data-[collapsible=icon]:hidden">Add project</span>
+          </Button>
           <SidebarTrigger />
         </div>
       </SidebarFooter>
