@@ -1137,14 +1137,14 @@ impl App {
         }
         let previous = self.engine.config.defaults.provider.clone();
         self.engine.config.defaults.provider = selected.provider.as_str().to_string();
-        if let Err(err) = save_config(
-            &self.engine.paths.config_path,
-            &self.engine.config,
-            &self.bindings,
-        ) {
+        if let Err(err) = self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
             self.engine.config.defaults.provider = previous;
             self.set_error(format!(
-                "Couldn't persist the global default provider change: {err:#}"
+                "Couldn't persist the global default provider change: {err}"
             ));
             return Ok(());
         }
@@ -1695,14 +1695,14 @@ impl App {
         };
         let previous = self.engine.config.ui.theme.clone();
         self.engine.config.ui.theme = selected.id.clone();
-        if let Err(err) = save_config(
-            &self.engine.paths.config_path,
-            &self.engine.config,
-            &self.bindings,
-        ) {
+        if let Err(err) = self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
             self.engine.config.ui.theme = previous;
             self.set_error(format!(
-                "Couldn't persist the theme change: {err:#}. The new theme is loaded for this session only."
+                "Couldn't persist the theme change: {err}. The new theme is loaded for this session only."
             ));
             // Still apply to the running session — the user explicitly asked
             // for it and we'd rather flash a wrong-color UI than silently

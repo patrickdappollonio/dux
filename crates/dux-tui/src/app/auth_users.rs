@@ -11,13 +11,13 @@
 //! privilege-escalation surface).
 //!
 //! Hashing is bcrypt at the default cost (~250ms), which would freeze the UI if
-//! run inline, so the add path hashes AND writes config on a background thread
-//! and reports completion via [`WorkerEvent::AuthUsersPersisted`] (per the
-//! workers tenet).
+//! run inline, so the add path hashes on a background thread and sends
+//! [`WorkerEvent::AuthUsersPersisted`] with the computed users list; the engine
+//! handler performs the eager config write and rollback. The removal path needs
+//! no hashing, so it saves eagerly on the TUI thread inline.
 
 use super::*;
 
-use crate::keybindings::RuntimeBindings;
 use dux_core::auth;
 use dux_core::engine::InFlightKey;
 
@@ -171,19 +171,39 @@ impl App {
         // running server stays bound and becomes open once it reloads config.
         let no_users_left = auth::parse_users(&remaining).is_empty();
         let (message, warn) = remove_user_status(&username, no_users_left);
-        self.set_busy(format!("Removing web UI login user \"{username}\"\u{2026}"));
-        self.spawn_auth_users_persist(remaining, message, warn);
+        // Removal does not hash — save eagerly on the TUI thread with rollback.
+        let previous = self.engine.config.auth.users.clone();
+        self.engine.config.auth.users = remaining;
+        match self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
+            Ok(()) => {
+                if warn {
+                    self.set_warning(message);
+                } else {
+                    self.set_info(message);
+                }
+            }
+            Err(err) => {
+                self.engine.config.auth.users = previous;
+                self.set_error(format!(
+                    "Could not save web UI login users to config.toml: {err}"
+                ));
+            }
+        }
     }
 
     /// Append `username:hash` to the configured users (last-wins replaces an
-    /// existing password) and persist. Hashing happens on the worker thread.
+    /// existing password). Hashing (~250 ms bcrypt) runs on a background thread
+    /// so the TUI stays responsive; the config write happens in the engine's
+    /// `AuthUsersPersisted` handler once the hash arrives.
     fn spawn_auth_user_add(&mut self, username: String, password: String, is_update: bool) {
         // Set the single-flight guard at the spawn point; the engine's
         // AuthUsersPersisted arm clears it on completion (success and failure).
         self.engine.mark_in_flight(InFlightKey::AuthUsers);
         let mut users = self.engine.config.auth.users.clone();
-        let config = self.engine.config.clone();
-        let config_path = self.engine.paths.config_path.clone();
         let tx = self.engine.worker_tx.clone();
         std::thread::spawn(move || {
             let hash = match auth::hash_password(&password) {
@@ -204,46 +224,15 @@ impl App {
                 "Web UI login user \"{username}\" {verb}. A running web server picks this up after reload-config; otherwise it applies on the next server start."
             );
             // An add never empties the list, so it is always an info-tone result.
-            persist_auth_users(users, config, config_path, message, false, tx);
+            // The config write happens in the engine's AuthUsersPersisted handler.
+            let _ = tx.send(WorkerEvent::AuthUsersPersisted {
+                users,
+                message,
+                warn: false,
+                result: Ok(()),
+            });
         });
     }
-
-    /// Persist an already-computed users list (no hashing needed) on a worker
-    /// thread. Used by removal.
-    fn spawn_auth_users_persist(&mut self, users: Vec<String>, message: String, warn: bool) {
-        // Set the single-flight guard at the spawn point; the engine's
-        // AuthUsersPersisted arm clears it on completion (success and failure).
-        self.engine.mark_in_flight(InFlightKey::AuthUsers);
-        let config = self.engine.config.clone();
-        let config_path = self.engine.paths.config_path.clone();
-        let tx = self.engine.worker_tx.clone();
-        std::thread::spawn(move || {
-            persist_auth_users(users, config, config_path, message, warn, tx);
-        });
-    }
-}
-
-/// Write the updated `users` list to `config_path` via the canonical config
-/// writer (which owns the `[auth]` section) and report the outcome. Runs on a
-/// worker thread.
-fn persist_auth_users(
-    users: Vec<String>,
-    mut config: Config,
-    config_path: std::path::PathBuf,
-    message: String,
-    warn: bool,
-    tx: std::sync::mpsc::Sender<WorkerEvent>,
-) {
-    config.auth.users = users.clone();
-    let bindings = RuntimeBindings::from_keys_config(&config.keys);
-    let result = crate::config::save_config(&config_path, &config, &bindings)
-        .map_err(|err| format!("{err:#}"));
-    let _ = tx.send(WorkerEvent::AuthUsersPersisted {
-        users,
-        message,
-        warn,
-        result,
-    });
 }
 
 /// Build the status line (and warn tone) shown after removing a login user.

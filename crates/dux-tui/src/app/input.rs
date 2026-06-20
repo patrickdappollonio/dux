@@ -7176,10 +7176,11 @@ not_a_real_action = ["x"]
             other => panic!("expected remove-user picker, got {other:?}"),
         }
         // alice is selected (index 0); confirm removes ALL alice entries.
+        // Removal is now inline (no background thread), so the result is
+        // applied synchronously on handle_key.
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
         assert!(matches!(app.prompt, PromptState::None));
-        await_one_worker_event(&mut app);
 
         assert_eq!(app.engine.config.auth.users.len(), 1);
         assert!(app.engine.config.auth.users[0].starts_with("bob:"));
@@ -7264,9 +7265,10 @@ not_a_real_action = ["x"]
 
         app.open_server_remove_user();
         // alice is the only (selected) user; removing her empties the list.
+        // Removal is now inline (no background thread), so the result is
+        // applied synchronously on handle_key.
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
-        await_one_worker_event(&mut app);
 
         assert!(app.engine.config.auth.users.is_empty());
         // Finding 2(a): the completion status is a WARNING, not info, and spells
