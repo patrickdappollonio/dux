@@ -58,9 +58,11 @@ impl ConfigSurface for WebConfigSurface {
 /// is running yet, so a session whose worktree still exists is `Detached` and one
 /// whose worktree vanished is `Exited`.
 pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
+    // The single-instance lock must be held before any config read, DB open, or
+    // config write — matching the TUI's invariant.
+    let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
-    let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
     let sessions = session_store.load_sessions()?;
     let projects = dux_core::project_browser::load_projects(
         &session_store.load_projects()?,
