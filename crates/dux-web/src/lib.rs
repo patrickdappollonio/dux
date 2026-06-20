@@ -1773,81 +1773,54 @@ mod tests {
 }
 
 #[cfg(test)]
-mod config_saver_tests {
+mod config_surface_tests {
     use dux_core::config::{Config, DuxPaths};
-    use dux_core::engine::ConfigSaver;
+    use dux_core::engine::{ConfigSurface, ReloadCompletionGuard};
     use dux_core::worker::WorkerEvent;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use std::sync::mpsc::{self, Sender};
 
-    /// Web-layer placeholder: today no-op. Sub-project #3 will replace this
-    /// with whatever persistence semantics the web layer actually needs.
-    struct WebConfigSaver;
+    /// Minimal web-layer `ConfigSurface`: reload re-reads config (here a default)
+    /// and posts `ConfigReloadReady`; recover_render produces a plain config text.
+    struct WebConfigSurface;
 
-    impl ConfigSaver for WebConfigSaver {
-        fn persist_global_env(
-            &self,
-            env: BTreeMap<String, String>,
-            _config: Config,
-            _config_path: PathBuf,
-            worker_tx: Sender<WorkerEvent>,
-        ) {
-            let _ = worker_tx.send(WorkerEvent::GlobalEnvPersistenceCompleted {
-                env,
-                result: Ok(()),
-            });
+    impl ConfigSurface for WebConfigSurface {
+        fn reload(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
+            // Drive completion through the guard, matching the production surfaces
+            // so the test exercises the F5-safe path rather than a bare send.
+            ReloadCompletionGuard::new(worker_tx).complete(Ok(Config::default()));
         }
 
-        fn persist_macros(
-            &self,
-            config: Config,
-            _config_path: PathBuf,
-            worker_tx: Sender<WorkerEvent>,
-        ) {
-            let _ = worker_tx.send(WorkerEvent::MacrosPersistenceCompleted {
-                macros: config.macros,
-                result: Ok(()),
-            });
-        }
-
-        fn reload_config(&self, _paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
-            let _ = worker_tx.send(WorkerEvent::ConfigReloadReady(Box::new(Ok(
-                Config::default(),
-            ))));
-        }
-
-        fn recover_config(
-            &self,
-            _config_path: PathBuf,
-            _config: Config,
-            worker_tx: Sender<WorkerEvent>,
-        ) {
-            let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(Ok(())));
+        fn recover_render(&self, config: &Config) -> String {
+            dux_core::config_write::render_config_plain(config)
         }
     }
 
-    /// Proves the web layer can implement `ConfigSaver` against `dux-core`
-    /// alone (no TUI deps). This is what unblocks sub-project #3 from
-    /// reusing the engine's config-persistence command dispatch.
+    /// Proves the web layer can implement `ConfigSurface` against `dux-core`
+    /// alone (no TUI deps).
     #[test]
-    fn web_can_implement_config_saver() {
+    fn web_can_implement_config_surface() {
         let (tx, rx) = mpsc::channel();
-        let saver: Box<dyn ConfigSaver> = Box::new(WebConfigSaver);
-        let mut env = BTreeMap::new();
-        env.insert("X".into(), "1".into());
-        saver.persist_global_env(
-            env,
-            Config::default(),
-            PathBuf::from("/tmp/dux-web-test"),
+        let surface: Box<dyn ConfigSurface> = Box::new(WebConfigSurface);
+        surface.reload(
+            DuxPaths {
+                root: std::path::PathBuf::from("/tmp/dux-web-test"),
+                config_path: std::path::PathBuf::from("/tmp/dux-web-test/config.toml"),
+                sessions_db_path: std::path::PathBuf::from("/tmp/dux-web-test/sessions.sqlite3"),
+                worktrees_root: std::path::PathBuf::from("/tmp/dux-web-test/worktrees"),
+                lock_path: std::path::PathBuf::from("/tmp/dux-web-test/dux.lock"),
+            },
             tx,
         );
         let event = rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("event");
-        assert!(matches!(
-            event,
-            WorkerEvent::GlobalEnvPersistenceCompleted { result: Ok(()), .. }
-        ));
+        assert!(matches!(event, WorkerEvent::ConfigReloadReady(_)));
+
+        // recover_render produces structured plain config text.
+        let body = surface.recover_render(&Config::default());
+        assert!(
+            body.contains("[defaults]"),
+            "render missing defaults: {body}"
+        );
     }
 }

@@ -198,6 +198,24 @@ fn server_rebind_settings_changed(
         || a.cache_dir != b.cache_dir
 }
 
+/// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.
+///
+/// The engine returns `ApplyReloadedConfig` bare in the common case, but folds it
+/// into a `Multi` (alongside the deferred saves' status reactions) when
+/// config-mutating commands were deferred during the reload. The actor must
+/// handle BOTH so the auth-gate rebuild and server-restart warning always fire.
+/// Returns `None` for any reaction that is not (and does not wrap) an
+/// `ApplyReloadedConfig`.
+fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::config::Config>> {
+    match reaction {
+        EventReaction::ApplyReloadedConfig(config) => Some(config),
+        EventReaction::Multi(reactions) => {
+            reactions.into_iter().find_map(take_apply_reloaded_config)
+        }
+        _ => None,
+    }
+}
+
 /// Bound on the engine request channel. A burst buffer, not a steady-state
 /// queue: the engine drains the WHOLE channel every `TICK` (50ms), so under
 /// normal use it holds only a handful of in-flight requests. The cap exists so a
@@ -718,7 +736,17 @@ pub(crate) fn run_engine_loop(
             // use of it in the loop body (all `&reaction` borrows above end
             // first). `ApplyReloadedConfig` and `ProjectPersistenceOutcome` are
             // distinct variants, so consuming here never skips the project sync.
-            if let EventReaction::ApplyReloadedConfig(config) = reaction {
+            //
+            // The reload follow-up reaction may arrive WRAPPED in a `Multi` when
+            // config-mutating commands were deferred during the reload (the
+            // engine folds the `ApplyReloadedConfig` in with the deferred saves'
+            // status reactions). Pull the `ApplyReloadedConfig` out of either the
+            // bare or the wrapped form so the auth-gate rebuild + server-restart
+            // warning always run — an auth/user change made during a reload must
+            // take effect without a restart. The deferred saves' own status
+            // reactions were already surfaced by the `wire_statuses_from_reaction`
+            // drain above (it flattens `Multi`).
+            if let Some(config) = take_apply_reloaded_config(reaction) {
                 // Capture the rebind-relevant [server]/[server.acme] settings
                 // BEFORE the swap so we can tell whether the reload touched
                 // anything that only takes effect at startup (listeners are

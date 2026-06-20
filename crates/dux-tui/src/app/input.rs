@@ -5526,10 +5526,12 @@ impl App {
         }
         self.prompt = PromptState::None;
         if apply && recover {
+            // RecoverConfig now writes synchronously and returns a FINAL status
+            // (restored / failed); surface that and do NOT set a trailing Busy,
+            // which would never clear (the recovery already completed).
             match self.engine.apply(Command::RecoverConfig) {
                 Ok(reaction) => {
                     self.apply_reaction(reaction);
-                    self.set_busy("Restoring the last working config.toml.");
                 }
                 Err(err) => {
                     self.set_error(format!("Could not start config recovery: {err:#}"));
@@ -6638,7 +6640,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn reload_config_failure_can_recover_last_working_config_file_async() {
+    fn reload_config_failure_can_recover_last_working_config_file() {
         let mut app = test_app(default_bindings());
         app.engine.config.ui.right_width_pct = 42;
         std::fs::write(&app.engine.paths.config_path, "this is not valid toml")
@@ -6650,15 +6652,14 @@ not_a_real_action = ["x"]
         };
 
         app.resolve_config_reload_failed(true);
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        // RecoverConfig is now synchronous (Task 5): it writes through the engine
+        // while holding the quiesce barrier and returns the FINAL status directly.
+        // There is no trailing Busy (which would never clear) and nothing to drain.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(
             app.status.message(),
-            "Restoring the last working config.toml."
+            "Restored the last working configuration to config.toml."
         );
-
-        drain_until(&mut app, |app| {
-            app.status.message() == "Restored the last working configuration to config.toml."
-        });
 
         assert!(matches!(app.prompt, PromptState::None));
         let recovered =

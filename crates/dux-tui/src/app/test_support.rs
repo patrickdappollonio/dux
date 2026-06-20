@@ -119,6 +119,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
     let (worker_tx, worker_rx) = mpsc::channel();
     let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
         .expect("single-instance lock for test App");
+    let config_writer = dux_core::config_queue::ConfigWriteQueue::new(paths.config_path.clone());
     let engine = dux_core::engine::Engine {
         config: Config::default(),
         paths,
@@ -132,7 +133,11 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         single_instance_lock,
         worker_tx,
         worker_rx,
-        config_saver: Box::new(crate::TuiConfigSaver),
+        config_writer,
+        surface: Box::new(crate::TuiConfigSurface),
+        reloading: false,
+        deferred_commands: Vec::new(),
+        reload_guard: None,
         providers: std::collections::HashMap::new(),
         running_provider_pins: std::collections::HashMap::new(),
         companion_terminals: std::collections::HashMap::new(),

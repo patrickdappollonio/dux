@@ -126,12 +126,23 @@ pub fn write_config_plain_with(
     config: &Config,
     durability: Durability,
 ) -> Result<()> {
-    // Build a fresh document from scratch using the same patch helpers against
-    // an empty document. No comments — this is the plain fallback, not the
-    // TUI's pretty first-creation path.
+    // Render the same plain (comment-free) document `render_config_plain`
+    // produces, then write it atomically. Sharing the renderer keeps the on-disk
+    // shape and the `recover_render` string byte-identical.
+    write_config_atomic(config_path, &render_config_plain(config), durability)
+}
+
+/// Render `config` to a fresh, plain (comment-free) `config.toml` text using the
+/// shared patch set against an empty document — no comments (this is the plain
+/// fallback, not the TUI's pretty first-creation path). The same shape
+/// [`write_config_plain`] writes, but returned as a `String` instead of written.
+/// Used by a surface's `recover_render` (e.g. the web's plain recovery render) so
+/// the Engine can perform the atomic write through its own writer while holding
+/// the quiesce barrier.
+pub fn render_config_plain(config: &Config) -> String {
     let mut doc = DocumentMut::new();
     apply_patches(&mut doc, config);
-    write_config_atomic(config_path, &doc.to_string(), durability)
+    doc.to_string()
 }
 
 /// Apply every section patch to `doc`. Mirrors the section sequence the TUI's

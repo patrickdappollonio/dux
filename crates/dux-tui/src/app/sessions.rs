@@ -1357,9 +1357,11 @@ impl App {
         };
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
+        // PersistGlobalEnv now eager-saves and returns a FINAL status synchronously
+        // (success or rollback error); surface that and do NOT set a trailing Busy,
+        // which would never clear (the work already completed).
         let reaction = self.engine.apply(Command::PersistGlobalEnv { env })?;
         self.apply_reaction(reaction);
-        self.set_busy("Saving global environment variables to config.toml...");
         Ok(())
     }
 
@@ -2582,6 +2584,8 @@ mod tests {
         let (worker_tx, worker_rx) = mpsc::channel();
         let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)
             .expect("single-instance lock for test App");
+        let config_writer =
+            dux_core::config_queue::ConfigWriteQueue::new(paths.config_path.clone());
         let engine = dux_core::engine::Engine {
             config: Config::default(),
             paths,
@@ -2595,7 +2599,11 @@ mod tests {
             single_instance_lock,
             worker_tx,
             worker_rx,
-            config_saver: Box::new(crate::TuiConfigSaver),
+            config_writer,
+            surface: Box::new(crate::TuiConfigSurface),
+            reloading: false,
+            deferred_commands: Vec::new(),
+            reload_guard: None,
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
@@ -2744,6 +2752,8 @@ mod tests {
         // auto_reopen on so bootstrap WOULD relaunch — proving resume's skip.
         let mut config = Config::default();
         config.ui.auto_reopen_agents = true;
+        let config_writer =
+            dux_core::config_queue::ConfigWriteQueue::new(paths.config_path.clone());
         dux_core::engine::Engine {
             config,
             paths,
@@ -2757,7 +2767,11 @@ mod tests {
             single_instance_lock,
             worker_tx,
             worker_rx,
-            config_saver: Box::new(crate::TuiConfigSaver),
+            config_writer,
+            surface: Box::new(crate::TuiConfigSurface),
+            reloading: false,
+            deferred_commands: Vec::new(),
+            reload_guard: None,
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
