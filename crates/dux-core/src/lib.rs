@@ -8,6 +8,7 @@ pub mod agent_job;
 pub mod auth;
 pub mod browser;
 pub mod config;
+pub mod config_queue;
 pub mod config_write;
 pub mod diff;
 pub mod editor;
