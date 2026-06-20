@@ -1888,7 +1888,11 @@ impl App {
         self.engine.pr_agent_command_available()
     }
 
-    pub(crate) fn persist_config_projects_from_runtime(&mut self) -> Result<()> {
+    /// Rebuilds `config.projects` from the live project list without writing to
+    /// disk. Runtime reaction sites call this then route the save through
+    /// `engine.config_writer.save_eager` so the write joins the queue instead
+    /// of bypassing it.
+    pub(crate) fn update_config_projects_from_runtime(&mut self) {
         let existing_projects = self.engine.config.projects.clone();
         self.engine.config.projects = self
             .engine
@@ -1896,21 +1900,43 @@ impl App {
             .iter()
             .map(|project| runtime_project_to_config(project, &existing_projects))
             .collect();
-        save_config(
-            &self.engine.paths.config_path,
-            &self.engine.config,
-            &self.bindings,
-        )
     }
 
-    pub(crate) fn persist_projects_to_config_and_store(&mut self) -> Result<()> {
-        persist_runtime_projects_to_config_and_store(
-            &self.engine.projects,
-            &mut self.engine.config,
-            &self.engine.paths,
-            &self.bindings,
-            &self.engine.session_store,
-        )
+    /// Syncs all runtime projects to SQLite and rebuilds `config.projects`
+    /// (stripping `leading_branch` for portability) without writing to disk.
+    /// Runtime reaction sites call this then route the save through
+    /// `engine.config_writer.save_eager` so the write joins the queue.
+    pub(crate) fn sync_projects_to_store_and_update_config(&mut self) -> Result<()> {
+        let existing_projects = self.engine.config.projects.clone();
+        let stored_project_configs = self
+            .engine
+            .projects
+            .iter()
+            .map(|project| runtime_project_to_config(project, &existing_projects))
+            .collect::<Vec<_>>();
+        let config_project_configs = stored_project_configs
+            .iter()
+            .cloned()
+            .map(|mut project| {
+                project.leading_branch = None;
+                project
+            })
+            .collect::<Vec<_>>();
+        let stored_projects = self.engine.session_store.load_projects()?;
+        for (index, project_config) in stored_project_configs.iter().enumerate() {
+            let stored_project = stored_projects.iter().find(|stored| {
+                stored.id == project_config.id || same_expanded_project_path(stored, project_config)
+            });
+            if stored_project != Some(project_config) {
+                self.engine
+                    .session_store
+                    .upsert_project_at(project_config, index as i64)?;
+            }
+        }
+        if self.engine.config.projects != config_project_configs {
+            self.engine.config.projects = config_project_configs;
+        }
+        Ok(())
     }
 
     pub(crate) fn filtered_palette_commands(
@@ -2028,37 +2054,24 @@ impl App {
             "toggle-diff-line-numbers" => {
                 self.show_diff_line_numbers = !self.show_diff_line_numbers;
                 self.engine.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;
-                let save_result = save_config(
-                    &self.engine.paths.config_path,
-                    &self.engine.config,
-                    &self.bindings,
-                );
+                self.engine
+                    .config_writer
+                    .save_lazy(self.engine.config.clone());
                 let _ = self.refresh_current_diff();
                 let state = if self.show_diff_line_numbers {
                     "enabled"
                 } else {
                     "disabled"
                 };
-                if let Err(err) = save_result {
-                    self.set_error(format!(
-                        "Diff line numbers {state} for this session, but couldn't persist the change to config: {err:#}"
-                    ));
-                } else {
-                    let palette_key = self.bindings.label_for(Action::OpenPalette);
-                    self.set_info(format!(
-                        "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
-                    ));
-                }
+                let palette_key = self.bindings.label_for(Action::OpenPalette);
+                self.set_info(format!(
+                    "Diff line numbers {state}. Press {palette_key} to open the palette and toggle back."
+                ));
                 Ok(())
             }
             "toggle-github-integration" => {
                 self.engine.github_integration_enabled = !self.engine.github_integration_enabled;
                 self.engine.config.ui.github_integration = self.engine.github_integration_enabled;
-                let save_result = save_config(
-                    &self.engine.paths.config_path,
-                    &self.engine.config,
-                    &self.bindings,
-                );
                 if self.engine.github_integration_enabled
                     && matches!(self.engine.gh_status, crate::model::GhStatus::Available)
                 {
@@ -2075,9 +2088,13 @@ impl App {
                 } else {
                     "disabled"
                 };
-                if let Err(err) = save_result {
+                if let Err(err) = self
+                    .engine
+                    .config_writer
+                    .save_eager(self.engine.config.clone())
+                {
                     self.set_error(format!(
-                        "GitHub integration {state} for this session, but couldn't persist the change to config: {err:#}"
+                        "GitHub integration toggled this session, but saving to config failed: {err}"
                     ));
                 } else {
                     self.set_info(format!("GitHub integration {state}."));
@@ -2093,11 +2110,9 @@ impl App {
                     .config
                     .defaults
                     .enable_randomized_pet_name_by_default;
-                let save_result = save_config(
-                    &self.engine.paths.config_path,
-                    &self.engine.config,
-                    &self.bindings,
-                );
+                self.engine
+                    .config_writer
+                    .save_lazy(self.engine.config.clone());
                 let state = if self
                     .engine
                     .config
@@ -2108,16 +2123,10 @@ impl App {
                 } else {
                     "disabled — new agent prompts start empty"
                 };
-                if let Err(err) = save_result {
-                    self.set_error(format!(
-                        "Random pet-name defaults {state} for this session, but couldn't persist the change to config: {err:#}"
-                    ));
-                } else {
-                    let palette_key = self.bindings.label_for(Action::OpenPalette);
-                    self.set_info(format!(
-                        "Random pet-name defaults {state}. Press {palette_key} to toggle back."
-                    ));
-                }
+                let palette_key = self.bindings.label_for(Action::OpenPalette);
+                self.set_info(format!(
+                    "Random pet-name defaults {state}. Press {palette_key} to toggle back."
+                ));
                 Ok(())
             }
             "toggle-pr-banner-position" => {
@@ -2128,17 +2137,10 @@ impl App {
                     "top"
                 };
                 self.engine.config.ui.pr_banner_position = pos.to_string();
-                if let Err(err) = save_config(
-                    &self.engine.paths.config_path,
-                    &self.engine.config,
-                    &self.bindings,
-                ) {
-                    self.set_error(format!(
-                        "PR banner moved to {pos} for this session, but couldn't persist the change to config: {err:#}"
-                    ));
-                } else {
-                    self.set_info(format!("PR banner moved to {pos} of agent pane."));
-                }
+                self.engine
+                    .config_writer
+                    .save_lazy(self.engine.config.clone());
+                self.set_info(format!("PR banner moved to {pos} of agent pane."));
                 Ok(())
             }
             "force-redraw" => {

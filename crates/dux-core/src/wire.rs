@@ -545,7 +545,7 @@ impl Engine {
                 });
             }
             WireCommand::SetChangesPaneVisible { visible } => {
-                let status = self.set_changes_pane_visible(visible)?;
+                let status = self.set_changes_pane_visible(visible);
                 return Ok(WireCommandOutcome {
                     status: Some(status),
                 });
@@ -588,9 +588,10 @@ impl Engine {
     /// (`ui.show_changes_pane`) so the choice survives a restart, mirroring the
     /// TUI's persist-on-toggle. The field is the single persisted source of
     /// truth: the next ViewModel broadcast carries it, and the web clears its
-    /// optimistic override once they match. A small synchronous config write,
-    /// like `persist_projects_to_config` (rare and user-initiated).
-    fn set_changes_pane_visible(&mut self, visible: bool) -> anyhow::Result<WireStatus> {
+    /// optimistic override once they match. Visibility is a low-stakes
+    /// preference, so the write is lazy: the queue coalesces concurrent toggles
+    /// and logs any disk failure; no rollback is needed.
+    fn set_changes_pane_visible(&mut self, visible: bool) -> WireStatus {
         // Idempotent: skip the disk write when nothing changes (also blunts a
         // client that spams the toggle).
         if self.config.ui.show_changes_pane == visible {
@@ -599,29 +600,16 @@ impl Engine {
             } else {
                 "Changes pane is already hidden."
             };
-            return Ok(WireStatus::new("info", message.to_string()));
-        }
-        // Persist on a clone first and only commit to the live config once the
-        // write succeeds. Otherwise a failed save would still flip the in-memory
-        // value (which the next ViewModel broadcasts), making a failure look like
-        // success while disk keeps the old value and a restart silently reverts.
-        let mut config = self.config.clone();
-        config.ui.show_changes_pane = visible;
-        if let Err(err) = crate::config_write::save_config(&self.paths.config_path, &config) {
-            // Log server-side too — otherwise the failure is only visible on the
-            // requesting client's status line and leaves no trace in dux.log.
-            crate::logger::error(&format!(
-                "Couldn't persist Changes pane visibility to config: {err:#}"
-            ));
-            return Err(err);
+            return WireStatus::new("info", message.to_string());
         }
         self.config.ui.show_changes_pane = visible;
+        self.config_writer.save_lazy(self.config.clone());
         let message = if visible {
             "Changes pane shown. Hide it again from the command palette or the Changes menu."
         } else {
             "Changes pane hidden. Reopen it from the command palette or the Changes menu."
         };
-        Ok(WireStatus::new("info", message.to_string()))
+        WireStatus::new("info", message.to_string())
     }
 
     /// Rename an agent session's display title, mirroring the title half of the
@@ -2302,19 +2290,38 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         assert!(engine.config.ui.show_changes_pane);
 
-        // Succeeds only if the config save succeeded — the in-memory value is
-        // committed only after the write, so a passing call also proves it
-        // persisted (a failed save returns Err and leaves the value unchanged).
+        // Toggle off — the write is lazy (fire-and-forget via config_writer).
         engine
             .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
             .expect("apply set_changes_pane_visible");
-        assert!(!engine.config.ui.show_changes_pane);
+        assert!(
+            !engine.config.ui.show_changes_pane,
+            "in-memory value must flip immediately"
+        );
+
+        // Flush the lazy queue and verify the change reached disk.
+        engine.config_writer.flush();
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains("show_changes_pane = false"),
+            "flushed config must contain show_changes_pane = false, got:\n{disk}"
+        );
+
+        // Toggle back on — in-memory must flip again.
+        engine
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: true })
+            .expect("apply toggle back");
+        assert!(
+            engine.config.ui.show_changes_pane,
+            "in-memory value must flip back"
+        );
 
         // Idempotent: repeating the same value is a no-op that still succeeds.
         engine
-            .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: true })
             .expect("apply idempotent");
-        assert!(!engine.config.ui.show_changes_pane);
+        assert!(engine.config.ui.show_changes_pane);
     }
 
     #[test]
