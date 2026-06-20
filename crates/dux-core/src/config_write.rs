@@ -42,9 +42,6 @@ pub fn write_config_atomic(path: &Path, contents: &str, durability: Durability) 
     let dir = path
         .parent()
         .with_context(|| format!("config path {} has no parent directory", path.display()))?;
-    fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create config dir {}", dir.display()))?;
-
     let mut tmp = tempfile::Builder::new()
         .prefix(".config.toml.")
         .tempfile_in(dir)
