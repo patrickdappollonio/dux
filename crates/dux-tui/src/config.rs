@@ -13,7 +13,7 @@ pub use dux_core::config::*;
 pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     paths.ensure_dirs()?;
     if !paths.config_path.exists() {
-        fs::write(&paths.config_path, render_default_config())
+        dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
@@ -23,7 +23,7 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         .parse()
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     if apply_config_deprecations(&mut doc)? {
-        fs::write(&paths.config_path, doc.to_string())
+        dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
 
@@ -2356,5 +2356,29 @@ args = [\"-l\"]
         assert!(rendered.contains("[env]"));
         assert!(rendered.contains("# EDITOR = \"true\""));
         assert!(rendered.contains("# API_KEY = \"${FOOBAR_API_KEY}\""));
+    }
+
+    #[test]
+    fn ensure_config_first_creation_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+        crate::config::ensure_config(&paths).expect("ensure");
+        let mode = std::fs::metadata(&paths.config_path)
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "first-created config must be 0600, got {mode:o}"
+        );
     }
 }
