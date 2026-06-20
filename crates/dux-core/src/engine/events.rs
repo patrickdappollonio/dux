@@ -984,6 +984,133 @@ impl Engine {
         }
     }
 
+    /// Close the reload barrier opened by `Command::ReloadConfig` and drive the
+    /// follow-up: drop the writer quiesce guard, clear `reloading`, and drain
+    /// any commands that were deferred while the reload was in flight.
+    ///
+    /// Ordering matters (see F1): on success the engine first applies the
+    /// reloaded config to its own state, then clears the barrier flags, then
+    /// drains the deferred commands — each of which re-mutates the now-current
+    /// config and eager-writes. The deferred command's write is therefore the
+    /// LAST write to disk, and the config it carries (reloaded + the deferred
+    /// change) is the final on-disk state.
+    ///
+    /// To keep in-memory state in lockstep with disk, the `ApplyReloadedConfig`
+    /// reaction carries the FINAL config (reloaded + drained) whenever deferred
+    /// commands ran. The surface's richer apply (theme/keybindings/projects, and
+    /// for the web the auth-gate rebuild) then re-applies that same final config,
+    /// so it never reverts a deferred change back to the pre-deferral snapshot.
+    ///
+    /// In the common no-deferral case the engine leaves `self.config` untouched
+    /// and returns the bare reloaded config: the surface's apply does the swap
+    /// and must see the still-running (pre-swap) config so it can diff old vs new
+    /// (the web actor's "restart to apply server settings" detection). The one
+    /// tradeoff: when a deferral coincides with a [server] change in the same
+    /// reload, the engine pre-swaps before the actor diffs, so that advisory
+    /// restart warning is suppressed — the auth-gate rebuild, which reads the
+    /// final users, still takes effect. This is acceptable for that rare overlap.
+    ///
+    /// On failure (the reload could not be parsed, OR it parsed but could not be
+    /// applied to engine state) the in-memory config is unchanged (still current),
+    /// so the deferred user commands are re-applied against it rather than dropped
+    /// (F6). The reload-failed reaction is placed LAST in the returned `Multi` so
+    /// its error status wins the surface's status line instead of being overwritten
+    /// by a deferred save's success message.
+    fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
+        let deferred = std::mem::take(&mut self.deferred_commands);
+        let has_deferred = !deferred.is_empty();
+
+        // Step 1: compute the primary reaction and, on success, apply the reloaded
+        // config to engine state BEFORE clearing the barrier — but only when we
+        // must drain deferred commands (they re-mutate and re-save the config, so
+        // they need the reloaded config as their base). With no deferral the engine
+        // leaves `self.config` alone and lets the surface do the swap (so the
+        // surface can still diff old vs new). `failure` carries a reload-failed
+        // reaction when the reload could not be applied — including the case where
+        // the parse succeeded but applying it to engine state failed: that is a
+        // genuine reload failure, not a silent success on a stale config.
+        let mut failure: Option<EventReaction> = None;
+        let bare_apply: Option<EventReaction> = match result {
+            Ok(config) => {
+                if has_deferred {
+                    // Apply the reloaded config so the deferred drain re-mutates it.
+                    // If applying it FAILS, do not pretend the reload worked: open
+                    // the reload-failed modal and leave `self.config` as-is (the
+                    // deferred commands below still re-apply against the current
+                    // config, so they are never dropped — F6).
+                    if let Err(err) = self.apply_reloaded_config(config) {
+                        failure = Some(EventReaction::OpenConfigReloadFailedModal(format!(
+                            "Config validated but could not be applied: {err:#}"
+                        )));
+                    }
+                    // On success the FINAL config (reloaded + deferred) is surfaced
+                    // after the drain below, so there is no bare reaction here.
+                    None
+                } else {
+                    Some(EventReaction::ApplyReloadedConfig(Box::new(config)))
+                }
+            }
+            Err(message) => {
+                failure = Some(EventReaction::OpenConfigReloadFailedModal(message));
+                None
+            }
+        };
+
+        // Step 2: clear the barrier — resume the writer and stop deferring. Done
+        // AFTER applying the reloaded config (so deferred re-applies write the
+        // reloaded-plus-change config) and BEFORE the drain (so the re-applied
+        // commands take the normal, non-deferred path).
+        self.reload_guard = None;
+        self.reloading = false;
+
+        if !has_deferred {
+            // No deferral: return the single reaction directly. Exactly one of
+            // `bare_apply` (success) / `failure` (parse error) is set; fall back to
+            // Nothing defensively.
+            return bare_apply.or(failure).unwrap_or(EventReaction::Nothing);
+        }
+
+        // Step 3: re-apply each deferred command now that the barrier is closed.
+        // Each re-mutates the current config and eager-writes — the deferred write
+        // is therefore the LAST write to disk. On a failed reload the config is
+        // unchanged/current, so re-applying against it is still correct (F6:
+        // deferred commands are never dropped). Collect status reactions so the
+        // surface still reports each save's success/failure.
+        let mut deferred_reactions = Vec::new();
+        for command in deferred {
+            match self.apply(command) {
+                Ok(EventReaction::Nothing) => {}
+                Ok(reaction) => deferred_reactions.push(reaction),
+                Err(err) => deferred_reactions.push(EventReaction::Status(StatusUpdate::error(
+                    format!("A deferred config change failed after reload: {err:#}"),
+                ))),
+            }
+        }
+
+        // Step 4: assemble the final reaction list.
+        let mut reactions = Vec::new();
+        if failure.is_none() {
+            // Success: surface the FINAL config (reloaded + the deferred changes
+            // that JUST landed) FIRST so the surface's config swap matches the
+            // engine + disk state and never reverts a deferred change. Snapshot
+            // `self.config` AFTER the drain above so it carries the deferred edits.
+            reactions.push(EventReaction::ApplyReloadedConfig(Box::new(
+                self.config.clone(),
+            )));
+        }
+        reactions.extend(deferred_reactions);
+        if let Some(failure) = failure {
+            // Failure: append the reload-failed modal/error LAST so its error
+            // status wins the surface's status line instead of being overwritten by
+            // a deferred save's success message (the deferred saves did land against
+            // the still-current config, but the headline state the user needs is
+            // "reload failed — review the modal").
+            reactions.push(failure);
+        }
+
+        EventReaction::Multi(reactions)
+    }
+
     /// Process a `WorkerEvent`: perform engine-side mutations and return the
     /// view follow-up the App caller should apply.
     ///
@@ -1413,60 +1540,11 @@ impl Engine {
                     ))),
                 }
             }
-            WorkerEvent::ConfigReloadReady(result) => match *result {
-                Ok(config) => EventReaction::ApplyReloadedConfig(Box::new(config)),
-                Err(message) => EventReaction::OpenConfigReloadFailedModal(message),
-            },
-            WorkerEvent::ConfigRecoverCompleted(result) => match result {
-                Ok(()) => EventReaction::Status(StatusUpdate::info(
-                    "Restored the last working configuration to config.toml.",
-                )),
-                Err(message) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Couldn't restore the last working configuration: {message}"
-                ))),
-            },
+            WorkerEvent::ConfigReloadReady(result) => self.process_config_reload_ready(*result),
             WorkerEvent::ProjectPersistenceCompleted { action, result } => {
                 let outcome = self.process_project_persistence_completed(action, result);
                 EventReaction::ProjectPersistenceOutcome(Box::new(outcome))
             }
-            WorkerEvent::GlobalEnvPersistenceCompleted { env, result } => match result {
-                Ok(()) => {
-                    self.config.env = env;
-                    if self.config.env.is_empty() {
-                        EventReaction::Status(StatusUpdate::info(
-                            "Global environment variables cleared.",
-                        ))
-                    } else {
-                        EventReaction::Status(StatusUpdate::info(format!(
-                            "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
-                            self.config.env.len()
-                        )))
-                    }
-                }
-                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Could not save global environment variables to config.toml: {err}"
-                ))),
-            },
-            WorkerEvent::MacrosPersistenceCompleted { macros, result } => match result {
-                Ok(()) => {
-                    // The engine already adopted these on dispatch; re-affirm in
-                    // case the saver normalized anything, then report.
-                    self.config.macros = macros;
-                    let count = self.config.macros.entries.len();
-                    if count == 0 {
-                        EventReaction::Status(StatusUpdate::info(
-                            "All macros removed. The macro list is now empty.",
-                        ))
-                    } else {
-                        EventReaction::Status(StatusUpdate::info(format!(
-                            "Saved {count} macro(s) to config.toml."
-                        )))
-                    }
-                }
-                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Could not save macros to config.toml: {err}"
-                ))),
-            },
             WorkerEvent::AuthUsersPersisted {
                 users,
                 message,
@@ -2039,48 +2117,6 @@ mod tests {
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
         assert_eq!(status.message, "nope");
-    }
-
-    // ── GlobalEnvPersistenceCompleted ────────────────────────────────────
-
-    #[test]
-    fn global_env_persistence_completed_ok_empty_clears_and_reports() {
-        let (mut engine, _tmp) = test_engine();
-        // Seed a non-empty env to prove it gets replaced by the empty map.
-        let mut prior = BTreeMap::new();
-        prior.insert("OLD".to_string(), "1".to_string());
-        engine.config.env = prior;
-
-        let reaction = engine.process_worker_event(WorkerEvent::GlobalEnvPersistenceCompleted {
-            env: BTreeMap::new(),
-            result: Ok(()),
-        });
-
-        assert!(engine.config.env.is_empty());
-        let status = unwrap_status(reaction);
-        assert_eq!(status.tone, StatusTone::Info);
-        assert_eq!(status.message, "Global environment variables cleared.");
-    }
-
-    #[test]
-    fn global_env_persistence_completed_ok_nonempty_replaces_env() {
-        let (mut engine, _tmp) = test_engine();
-        let mut env = BTreeMap::new();
-        env.insert("FOO".to_string(), "bar".to_string());
-        env.insert("BAZ".to_string(), "qux".to_string());
-
-        let reaction = engine.process_worker_event(WorkerEvent::GlobalEnvPersistenceCompleted {
-            env: env.clone(),
-            result: Ok(()),
-        });
-
-        assert_eq!(engine.config.env, env);
-        let status = unwrap_status(reaction);
-        assert_eq!(status.tone, StatusTone::Info);
-        assert_eq!(
-            status.message,
-            "Saved 2 global environment variable(s). New agents and terminals will receive them unless a project overrides the same key."
-        );
     }
 
     // Sanity: the unused-import linter won't catch AgentLaunchFailedData
@@ -2906,112 +2942,87 @@ mod tests {
 
     // ── Command::PersistGlobalEnv / ReloadConfig / RecoverConfig ────────────
     //
-    // These three tests prove that `Engine::apply` dispatches into the
-    // `ConfigSaver` trait. Any front-end (TUI, web) can plug in its own
-    // saver and observe the same dispatch shape.
+    // PersistGlobalEnv now eager-saves through the engine's config writer;
+    // ReloadConfig opens the reload barrier and drives the surface's reload;
+    // RecoverConfig renders via the surface and writes synchronously.
 
-    /// A recording `ConfigSaver` used by the three dispatch tests below. It
-    /// logs which method was called (with a small distinguishing payload)
-    /// into a shared `Vec<String>` so the test can assert on dispatch.
+    /// A recording `ConfigSurface` used by the dispatch tests below. It logs
+    /// which method was called into a shared `Vec<String>` so the test can
+    /// assert on dispatch, and posts `ConfigReloadReady` on reload.
     #[derive(Clone)]
-    struct RecordingConfigSaver(Arc<Mutex<Vec<String>>>);
+    struct RecordingConfigSurface(Arc<Mutex<Vec<String>>>);
 
-    impl crate::engine::ConfigSaver for RecordingConfigSaver {
-        fn persist_global_env(
-            &self,
-            env: BTreeMap<String, String>,
-            _config: crate::config::Config,
-            _config_path: PathBuf,
-            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
-        ) {
-            self.0
-                .lock()
-                .unwrap()
-                .push(format!("persist_global_env:{}", env.len()));
-            let _ = worker_tx.send(crate::worker::WorkerEvent::GlobalEnvPersistenceCompleted {
-                env,
-                result: Ok(()),
-            });
-        }
-
-        fn reload_config(
+    impl crate::engine::ConfigSurface for RecordingConfigSurface {
+        fn reload(
             &self,
             _paths: crate::config::DuxPaths,
-            _worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
-        ) {
-            self.0.lock().unwrap().push("reload_config".into());
-        }
-
-        fn persist_macros(
-            &self,
-            config: crate::config::Config,
-            _config_path: PathBuf,
             worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
         ) {
-            self.0
-                .lock()
-                .unwrap()
-                .push(format!("persist_macros:{}", config.macros.entries.len()));
-            let _ = worker_tx.send(crate::worker::WorkerEvent::MacrosPersistenceCompleted {
-                macros: config.macros,
-                result: Ok(()),
-            });
+            self.0.lock().unwrap().push("reload".into());
+            crate::engine::ReloadCompletionGuard::new(worker_tx)
+                .complete(Ok(crate::config::Config::default()));
         }
 
-        fn recover_config(
-            &self,
-            _config_path: PathBuf,
-            _config: crate::config::Config,
-            _worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
-        ) {
-            self.0.lock().unwrap().push("recover_config".into());
+        fn recover_render(&self, _config: &crate::config::Config) -> String {
+            self.0.lock().unwrap().push("recover_render".into());
+            "# recovered\n".to_string()
         }
     }
 
     #[test]
-    fn apply_persist_global_env_invokes_config_saver() {
+    fn apply_persist_global_env_writes_through_queue() {
         let (mut engine, _tmp) = test_engine();
-        let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.config_saver = Box::new(RecordingConfigSaver(recorder.clone()));
-
         let mut env = BTreeMap::new();
         env.insert("FOO".into(), "bar".into());
         let reaction = engine
             .apply(crate::engine::Command::PersistGlobalEnv { env })
             .expect("apply PersistGlobalEnv");
-        assert!(matches!(reaction, EventReaction::Nothing));
-        assert_eq!(
-            *recorder.lock().unwrap(),
-            vec!["persist_global_env:1".to_string()],
+        // Eager save returns a synchronous Info status.
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        engine.config_writer.flush();
+        assert!(
+            std::fs::read_to_string(&engine.paths.config_path)
+                .unwrap()
+                .contains("FOO = \"bar\"")
         );
     }
 
     #[test]
-    fn apply_reload_config_invokes_config_saver() {
+    fn apply_reload_config_opens_barrier_and_invokes_surface() {
         let (mut engine, _tmp) = test_engine();
         let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.config_saver = Box::new(RecordingConfigSaver(recorder.clone()));
+        engine.surface = Box::new(RecordingConfigSurface(recorder.clone()));
 
         let reaction = engine
             .apply(crate::engine::Command::ReloadConfig)
             .expect("apply ReloadConfig");
         assert!(matches!(reaction, EventReaction::Nothing));
-        assert_eq!(*recorder.lock().unwrap(), vec!["reload_config".to_string()],);
+        assert_eq!(*recorder.lock().unwrap(), vec!["reload".to_string()]);
+        // The barrier is open until ConfigReloadReady lands.
+        assert!(engine.reloading);
+        assert!(engine.reload_guard.is_some());
     }
 
     #[test]
-    fn apply_recover_config_invokes_config_saver() {
+    fn apply_recover_config_renders_via_surface_and_writes() {
         let (mut engine, _tmp) = test_engine();
         let recorder = Arc::new(Mutex::new(Vec::new()));
-        engine.config_saver = Box::new(RecordingConfigSaver(recorder.clone()));
+        engine.surface = Box::new(RecordingConfigSurface(recorder.clone()));
 
         let reaction = engine
             .apply(crate::engine::Command::RecoverConfig)
             .expect("apply RecoverConfig");
-        assert!(matches!(reaction, EventReaction::Nothing));
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
         assert_eq!(
             *recorder.lock().unwrap(),
-            vec!["recover_config".to_string()],
+            vec!["recover_render".to_string()]
+        );
+        // The rendered body was written to disk.
+        assert_eq!(
+            std::fs::read_to_string(&engine.paths.config_path).unwrap(),
+            "# recovered\n"
         );
     }
 

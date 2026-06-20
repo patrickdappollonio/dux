@@ -1,51 +1,30 @@
-//! TUI implementation of `dux_core::engine::ConfigSaver`. Wraps the existing
-//! save/reload/recover spawn helpers so the engine can dispatch
-//! configuration persistence through its `Command` enum.
+//! TUI implementation of `dux_core::engine::ConfigSurface`. Owns the two
+//! front-end-specific config concerns the engine can't: reloading + validating
+//! config (the TUI validates `[keys]` via `RuntimeBindings` and runs the
+//! project-sync helpers) and rendering a fully-commented canonical config for
+//! recovery. The engine owns the config *write* path (the `ConfigWriteQueue`).
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 
 use dux_core::config::{Config, DuxPaths};
-use dux_core::engine::ConfigSaver;
+use dux_core::engine::{ConfigSurface, ReloadCompletionGuard};
 use dux_core::worker::WorkerEvent;
 
 use crate::keybindings::RuntimeBindings;
 use crate::storage::SessionStore;
 
-/// The TUI's `ConfigSaver` implementation. Stateless because each operation
+/// The TUI's `ConfigSurface` implementation. Stateless because each operation
 /// derives the runtime bindings it needs from the `Config` passed in.
-pub struct TuiConfigSaver;
+pub struct TuiConfigSurface;
 
-impl ConfigSaver for TuiConfigSaver {
-    fn persist_global_env(
-        &self,
-        env: BTreeMap<String, String>,
-        config: Config,
-        config_path: PathBuf,
-        worker_tx: Sender<WorkerEvent>,
-    ) {
+impl ConfigSurface for TuiConfigSurface {
+    fn reload(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
         thread::spawn(move || {
-            let bindings = RuntimeBindings::from_keys_config(&config.keys);
-            let result = crate::config::save_config(&config_path, &config, &bindings)
-                .map_err(|err| format!("{err:#}"));
-            let _ = worker_tx.send(WorkerEvent::GlobalEnvPersistenceCompleted { env, result });
-        });
-    }
-
-    fn persist_macros(&self, config: Config, config_path: PathBuf, worker_tx: Sender<WorkerEvent>) {
-        thread::spawn(move || {
-            let bindings = RuntimeBindings::from_keys_config(&config.keys);
-            let result = crate::config::save_config(&config_path, &config, &bindings)
-                .map_err(|err| format!("{err:#}"));
-            let macros = config.macros;
-            let _ = worker_tx.send(WorkerEvent::MacrosPersistenceCompleted { macros, result });
-        });
-    }
-
-    fn reload_config(&self, paths: DuxPaths, worker_tx: Sender<WorkerEvent>) {
-        thread::spawn(move || {
+            // The guard guarantees a `ConfigReloadReady` is posted even if the
+            // load/validate/sync work below panics — otherwise the engine's
+            // reload barrier would never close and config saves would freeze (F5).
+            let guard = ReloadCompletionGuard::new(worker_tx);
             let result = crate::config::ensure_config(&paths)
                 .map_err(|err| format!("{err:#}"))
                 .and_then(
@@ -81,17 +60,12 @@ impl ConfigSaver for TuiConfigSaver {
                         Err(message) => Err(message),
                     },
                 );
-            let _ = worker_tx.send(WorkerEvent::ConfigReloadReady(Box::new(result)));
+            guard.complete(result);
         });
     }
 
-    fn recover_config(&self, config_path: PathBuf, config: Config, worker_tx: Sender<WorkerEvent>) {
-        thread::spawn(move || {
-            let bindings = RuntimeBindings::from_keys_config(&config.keys);
-            let rendered = crate::config::render_config_with(&config, &bindings);
-            let result = dux_core::config_write::write_config_secure(&config_path, &rendered)
-                .map_err(|err| format!("{err:#}"));
-            let _ = worker_tx.send(WorkerEvent::ConfigRecoverCompleted(result));
-        });
+    fn recover_render(&self, config: &Config) -> String {
+        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        crate::config::render_config_with(config, &bindings)
     }
 }

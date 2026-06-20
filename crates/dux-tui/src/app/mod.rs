@@ -1264,6 +1264,8 @@ impl App {
             status.warning(message);
         }
         let gh_integration_val = config.ui.github_integration;
+        let config_writer =
+            dux_core::config_queue::ConfigWriteQueue::new(paths.config_path.clone());
         let engine = Engine {
             config,
             paths,
@@ -1277,7 +1279,11 @@ impl App {
             single_instance_lock,
             worker_tx,
             worker_rx,
-            config_saver: Box::new(crate::TuiConfigSaver),
+            config_writer,
+            surface: Box::new(crate::TuiConfigSurface),
+            reloading: false,
+            deferred_commands: Vec::new(),
+            reload_guard: None,
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             companion_terminals: HashMap::new(),

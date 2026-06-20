@@ -289,9 +289,9 @@ pub enum WireCommand {
     /// save semantics (the dialog rewrites the whole map). `entries` is an ORDERED
     /// list of `(name, {text, surface})` — order is preserved into the config
     /// IndexMap and thus into the ViewModel's `macros`. Persisted through the
-    /// canonical config writer following the global-env precedent
-    /// (`PersistGlobalEnv` → `ConfigSaver` → background write → completion event),
-    /// so user comments survive the in-place patch. Validation (server-side, the
+    /// engine's config writer following the global-env precedent
+    /// (`PersistGlobalEnv` → eager save through `Engine::config_writer`), so user
+    /// comments survive the in-place patch. Validation (server-side, the
     /// client is never trusted): empty names rejected, duplicate names rejected,
     /// empty text rejected (the TUI editor refuses to save an empty-text macro),
     /// unknown surface strings rejected.
@@ -4839,10 +4839,10 @@ mod tests {
     #[test]
     fn apply_wire_update_macros_adopts_and_round_trips_through_real_config_writer() {
         // Two things proven here: (1) apply_wire(UpdateMacros) validates, adopts
-        // the new macros into the engine config immediately, and dispatches the
-        // saver (fire-and-forget, no synchronous status); (2) the SAME adopted
-        // config, when written by the shared canonical writer the WebConfigSaver
-        // uses, persists [macros] in place while preserving user comments.
+        // the new macros into the engine config immediately, and eager-saves
+        // through the config writer (returning a synchronous success status); (2)
+        // the persisted [macros] table preserves user comments via the in-place
+        // patch the writer performs.
         let (mut engine, _tmp) = test_engine();
         // Seed an existing config file with a user comment so the in-place patch
         // path runs and comment preservation is meaningful.
@@ -4857,20 +4857,15 @@ mod tests {
                 }],
             })
             .expect("apply_wire");
-        // UpdateMacros is fire-and-forget, so there is no synchronous status.
-        assert!(outcome.status.is_none());
+        // The eager save reports success synchronously.
+        let status = outcome.status.expect("save status");
+        assert_eq!(status.tone, "info");
 
         // The engine adopted the new macros immediately.
         assert!(engine.config.macros.entries.contains_key("greet"));
 
-        // The test engine's NoopConfigSaver posts a completion event without
-        // touching disk; drain it so the channel stays clean.
-        let _ = engine.worker_rx.recv().expect("completion event");
-
-        // Round-trip the adopted config through the real canonical writer (the
-        // exact path WebConfigSaver::persist_macros runs on its worker thread).
-        crate::config_write::save_config(&engine.paths.config_path, &engine.config)
-            .expect("save_config");
+        // The eager save wrote through the queue; flush so it lands deterministically.
+        engine.config_writer.flush();
         let written = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
         assert!(written.contains("[macros]"), "macros table: {written}");
         assert!(written.contains("greet"), "macro name: {written}");

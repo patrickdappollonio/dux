@@ -15,7 +15,7 @@ mod spawn_worker;
 pub(crate) mod test_support;
 
 pub use command::Command;
-pub use config_saver::{ConfigSaver, NoopConfigSaver};
+pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 
 use crate::config::{Config, DuxPaths, ProjectConfig};
+use crate::config_queue::{ConfigWriteQueue, QuiesceGuard};
 use crate::lockfile::SingleInstanceLock;
 use crate::model::{
     AgentSession, ChangedFile, CompanionTerminal, GhStatus, PrInfo, Project, ProviderKind,
@@ -63,11 +64,28 @@ pub struct Engine {
     // Batch B fields
     pub worker_tx: Sender<WorkerEvent>,
     pub worker_rx: Receiver<WorkerEvent>,
-    /// Front-end-specific configuration persistence. Engine delegates the
-    /// three `Command::PersistGlobalEnv` / `ReloadConfig` / `RecoverConfig`
-    /// arms here so the web layer can plug in its own implementation
-    /// without depending on TUI-only helpers (e.g., `RuntimeBindings`).
-    pub config_saver: Box<dyn ConfigSaver>,
+    /// The single ordered, off-thread, atomic config writer for this process.
+    /// `PersistGlobalEnv` / `UpdateMacros` (and, in later tasks, the other
+    /// config-mutating handlers) write through this so saves never block the
+    /// engine thread and never race each other.
+    pub config_writer: ConfigWriteQueue,
+    /// Front-end-specific config concerns the Engine cannot own itself: reload
+    /// (validation + project-sync) and recover rendering. The TUI plugs in a
+    /// `RuntimeBindings`-aware impl; the web a plain one.
+    pub surface: Box<dyn ConfigSurface>,
+    /// True while a `ReloadConfig` barrier is open (between `ReloadConfig`
+    /// dispatch and the `ConfigReloadReady` it produces). While set, incoming
+    /// config-mutating commands are deferred (see `deferred_commands`) so they
+    /// re-apply against the reloaded config instead of racing it. Constructed as
+    /// `false`; only the engine's reload handlers mutate it.
+    pub reloading: bool,
+    /// Config-mutating commands that arrived while `reloading` was set. Drained
+    /// (re-applied) when the reload completes. Constructed empty.
+    pub deferred_commands: Vec<Command>,
+    /// Holds the config-writer quiesce barrier open for the lifetime of a
+    /// reload. Dropped (resuming the writer) when `ConfigReloadReady` lands.
+    /// Constructed as `None`.
+    pub reload_guard: Option<QuiesceGuard>,
     pub providers: HashMap<String, PtyClient>,
     /// When a provider swap happens while the agent's PTY is still running,
     /// the currently-spawned provider is pinned here so UI labels keep
@@ -222,6 +240,31 @@ impl Engine {
     /// Clear an in-flight key after a worker's completion event arrives.
     pub fn clear_in_flight(&mut self, key: &InFlightKey) {
         self.in_flight.remove(key);
+    }
+
+    /// Whether `cmd`'s handler must be deferred while a `ReloadConfig` barrier is
+    /// open, so it re-applies against the freshly-reloaded config rather than
+    /// racing it.
+    ///
+    /// `PersistGlobalEnv` / `UpdateMacros` write `config.toml` directly through
+    /// the engine's config writer. `PersistProject` / `RemoveProject` write
+    /// SQLite first and only mirror the change into `config.toml` afterward (via
+    /// `persist_projects_to_config`, wired up in Task 6); deferring them is still
+    /// correct so that mirror runs against the reloaded project set rather than a
+    /// stale one. `ReloadConfig` / `RecoverConfig` drive the barrier themselves
+    /// and are deliberately excluded. Provider/theme/pane-width saves are surface
+    /// (TUI App) handlers that currently write `config.toml` directly (not through
+    /// `Engine::config_writer`), so they are NOT covered by this deferral nor by
+    /// the writer's quiesce backstop; routing them through the writer is later-task
+    /// work, and until then a save from those paths during a reload is unguarded.
+    fn is_config_mutating(cmd: &Command) -> bool {
+        matches!(
+            cmd,
+            Command::PersistGlobalEnv { .. }
+                | Command::UpdateMacros { .. }
+                | Command::PersistProject(_)
+                | Command::RemoveProject { .. }
+        )
     }
 
     /// Poll each PTY provider for recent data and update the per-agent activity
@@ -1506,6 +1549,365 @@ mod tests {
         assert!(engine.config.ui.github_integration);
         assert!(engine.github_integration_enabled);
         assert_eq!(engine.config.defaults.provider, "codex");
+    }
+
+    // -- Config writer on the engine: env/macros now save through the queue. --
+
+    #[test]
+    fn persist_global_env_writes_through_queue() {
+        let (mut engine, _tmp) = test_engine();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".into(), "k".into());
+        engine
+            .apply(Command::PersistGlobalEnv { env })
+            .expect("apply");
+        assert_eq!(engine.config.env.get("API").map(String::as_str), Some("k"));
+        engine.config_writer.flush();
+        assert!(
+            std::fs::read_to_string(&engine.paths.config_path)
+                .unwrap()
+                .contains("API = \"k\"")
+        );
+    }
+
+    #[test]
+    fn persist_global_env_rolls_back_on_write_failure() {
+        // Eager save through a dead writer fails; the in-memory env must roll back
+        // so it never diverges from disk.
+        let (mut engine, _tmp) = test_engine();
+        engine.config.env.insert("OLD".into(), "v".into());
+        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
+            engine.paths.config_path.clone(),
+        );
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("NEW".into(), "x".into());
+
+        let reaction = engine
+            .apply(Command::PersistGlobalEnv { env })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, crate::statusline::StatusTone::Error)
+            }
+            _ => panic!("expected Error status"),
+        }
+        // Rolled back to the previous env.
+        assert_eq!(engine.config.env.get("OLD").map(String::as_str), Some("v"));
+        assert!(!engine.config.env.contains_key("NEW"));
+    }
+
+    // -- Reload command deferral. --
+
+    /// A test `ConfigSurface` whose `reload` posts a config carrying a known,
+    /// distinguishing marker (`defaults.provider`) so a test can prove the
+    /// reloaded config actually landed (and is not just `Config::default()`).
+    /// Drives completion through `ReloadCompletionGuard`, the real F5-safe path.
+    struct MarkerReloadSurface {
+        provider: String,
+    }
+
+    impl crate::engine::ConfigSurface for MarkerReloadSurface {
+        fn reload(
+            &self,
+            _paths: DuxPaths,
+            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            let mut config = Config::default();
+            config.defaults.provider = self.provider.clone();
+            crate::engine::ReloadCompletionGuard::new(worker_tx).complete(Ok(config));
+        }
+
+        fn recover_render(&self, config: &Config) -> String {
+            crate::config_write::render_config_plain(config)
+        }
+    }
+
+    #[test]
+    fn config_mutating_commands_defer_while_reloading() {
+        let (mut engine, _tmp) = test_engine();
+        // Drive a REAL reload so the barrier is opened by the engine itself
+        // (quiesce + `reloading`), not hand-set — a missing-quiesce or
+        // wiring regression would then be visible (F13). The surface's reload
+        // posts immediately, but the engine only drains on the next
+        // `process_worker_event`, so the command dispatched here still defers.
+        engine.surface = Box::new(MarkerReloadSurface {
+            provider: "codex".to_string(),
+        });
+        let reaction = engine.apply(Command::ReloadConfig).expect("reload");
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert!(engine.reloading, "ReloadConfig must open the barrier");
+        assert!(
+            engine.reload_guard.is_some(),
+            "ReloadConfig must hold the writer quiesce open"
+        );
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".into(), "k".into());
+        let reaction = engine
+            .apply(Command::PersistGlobalEnv { env })
+            .expect("apply");
+        // Deferred: no state change, no status.
+        assert!(matches!(reaction, EventReaction::Nothing));
+        assert!(!engine.config.env.contains_key("API"));
+        assert_eq!(engine.deferred_commands.len(), 1);
+    }
+
+    #[test]
+    fn config_reload_ready_drains_deferred_commands() {
+        let (mut engine, _tmp) = test_engine();
+        // Baseline provider differs from the value the reload will deliver, so we
+        // can prove the reloaded config actually landed (F12: the reloaded config
+        // must DIFFER from the initial one, not both be `Config::default()`).
+        engine.config.defaults.provider = "claude".to_string();
+
+        // Drive a REAL `ReloadConfig` (F13): the engine opens the barrier and the
+        // surface posts a `ConfigReloadReady` carrying the codex-marked config.
+        engine.surface = Box::new(MarkerReloadSurface {
+            provider: "codex".to_string(),
+        });
+        engine.apply(Command::ReloadConfig).expect("reload");
+        assert!(engine.reloading);
+
+        // Defer a PersistGlobalEnv during the in-flight reload.
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".into(), "k".into());
+        engine
+            .apply(Command::PersistGlobalEnv { env })
+            .expect("apply");
+        assert_eq!(engine.deferred_commands.len(), 1);
+
+        // The surface already posted the completion; drain it through the real
+        // worker-event path so the barrier closes and the deferred command drains.
+        let event = engine.worker_rx.recv().expect("reload completion");
+        let reaction = engine.process_worker_event(event);
+
+        // Deferral folds the reload + the deferred save into one Multi.
+        assert!(matches!(reaction, EventReaction::Multi(_)));
+        assert!(!engine.reloading);
+        assert!(engine.reload_guard.is_none(), "barrier must be released");
+        assert!(engine.deferred_commands.is_empty());
+
+        // The reloaded config landed (provider swapped from claude → codex).
+        assert_eq!(
+            engine.config.defaults.provider, "codex",
+            "the reloaded config must be applied"
+        );
+
+        // The deferred env change survives IN MEMORY after the reload — this is
+        // the F1 regression guard. Simulate the surface re-applying the reaction
+        // it was handed: under the F1 bug that reaction carried the BARE reloaded
+        // config (no env), so re-applying would wipe the env back out of memory.
+        let EventReaction::Multi(reactions) = reaction else {
+            panic!("expected Multi");
+        };
+        let surfaced_config = reactions
+            .into_iter()
+            .find_map(|r| match r {
+                EventReaction::ApplyReloadedConfig(cfg) => Some(*cfg),
+                _ => None,
+            })
+            .expect("Multi must carry an ApplyReloadedConfig for the surface");
+        engine
+            .apply_reloaded_config(surfaced_config)
+            .expect("surface re-apply");
+        assert_eq!(
+            engine.config.env.get("API").map(String::as_str),
+            Some("k"),
+            "the deferred env change must survive the surface's re-apply (F1)"
+        );
+        // …and the reloaded provider must still be present after that re-apply.
+        assert_eq!(engine.config.defaults.provider, "codex");
+
+        // The deferred env save also landed on disk (the LAST write wins).
+        engine.config_writer.flush();
+        assert!(
+            std::fs::read_to_string(&engine.paths.config_path)
+                .unwrap()
+                .contains("API = \"k\"")
+        );
+    }
+
+    /// A test `ConfigSurface` whose `reload` reports a validation FAILURE (posts an
+    /// `Err` completion) through the F5-safe guard.
+    struct FailingReloadSurface;
+
+    impl crate::engine::ConfigSurface for FailingReloadSurface {
+        fn reload(
+            &self,
+            _paths: DuxPaths,
+            worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+            crate::engine::ReloadCompletionGuard::new(worker_tx)
+                .complete(Err("invalid config".to_string()));
+        }
+
+        fn recover_render(&self, config: &Config) -> String {
+            crate::config_write::render_config_plain(config)
+        }
+    }
+
+    #[test]
+    fn failed_reload_still_drains_deferred_and_surfaces_the_failure() {
+        // F6 + the failure-with-deferral ordering: when a reload FAILS while
+        // commands were deferred, the deferred commands must still be applied
+        // against the unchanged (current) config rather than dropped, AND the
+        // reload-failed reaction must be the LAST element so its error wins the
+        // surface's status line over the deferred save's success message.
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(FailingReloadSurface);
+
+        engine.apply(Command::ReloadConfig).expect("reload");
+        assert!(engine.reloading);
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("API".into(), "k".into());
+        engine
+            .apply(Command::PersistGlobalEnv { env })
+            .expect("apply");
+        assert_eq!(engine.deferred_commands.len(), 1);
+
+        let event = engine.worker_rx.recv().expect("reload completion");
+        let reaction = engine.process_worker_event(event);
+
+        // Barrier closed, deferred drained.
+        assert!(!engine.reloading);
+        assert!(engine.reload_guard.is_none());
+        assert!(engine.deferred_commands.is_empty());
+
+        // The deferred env command was applied against the still-current config
+        // (NOT dropped) and persisted.
+        assert_eq!(engine.config.env.get("API").map(String::as_str), Some("k"));
+        engine.config_writer.flush();
+        assert!(
+            std::fs::read_to_string(&engine.paths.config_path)
+                .unwrap()
+                .contains("API = \"k\"")
+        );
+
+        // The Multi carries no ApplyReloadedConfig (the reload failed), and the
+        // LAST reaction is the reload-failed modal so its error survives.
+        let EventReaction::Multi(reactions) = reaction else {
+            panic!("expected Multi");
+        };
+        assert!(
+            !reactions
+                .iter()
+                .any(|r| matches!(r, EventReaction::ApplyReloadedConfig(_))),
+            "a failed reload must not surface an ApplyReloadedConfig"
+        );
+        assert!(
+            matches!(
+                reactions.last(),
+                Some(EventReaction::OpenConfigReloadFailedModal(_))
+            ),
+            "the reload-failed reaction must be LAST so its error wins the status line"
+        );
+    }
+
+    /// A test `ConfigSurface` whose `reload` does NOTHING (never posts a
+    /// completion), leaving the engine's reload barrier open. Lets a test observe
+    /// the in-flight state and exercise the reentrancy/recover-during-reload
+    /// rejections without a worker race.
+    struct StuckReloadSurface;
+
+    impl crate::engine::ConfigSurface for StuckReloadSurface {
+        fn reload(
+            &self,
+            _paths: DuxPaths,
+            _worker_tx: std::sync::mpsc::Sender<crate::worker::WorkerEvent>,
+        ) {
+        }
+
+        fn recover_render(&self, config: &Config) -> String {
+            crate::config_write::render_config_plain(config)
+        }
+    }
+
+    #[test]
+    fn reentrant_reload_is_rejected_and_keeps_the_first_barrier() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(StuckReloadSurface);
+
+        engine.apply(Command::ReloadConfig).expect("first reload");
+        assert!(engine.reloading);
+        assert!(engine.reload_guard.is_some());
+
+        // A second reload while one is in flight must be refused — it must NOT
+        // drop the live guard or spawn a second worker (F4).
+        let reaction = engine.apply(Command::ReloadConfig).expect("second reload");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert!(
+                    update.message.contains("already in progress"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected an 'already in progress' status"),
+        }
+        // The first barrier is intact.
+        assert!(engine.reloading);
+        assert!(engine.reload_guard.is_some());
+    }
+
+    #[test]
+    fn recover_config_is_rejected_during_a_reload() {
+        let (mut engine, _tmp) = test_engine();
+        engine.surface = Box::new(StuckReloadSurface);
+
+        engine.apply(Command::ReloadConfig).expect("reload");
+        assert!(engine.reloading);
+
+        // Recovery during an open reload would, on its own quiesce-guard drop,
+        // resume the writer while the reload still holds it. It must be refused
+        // instead (F7), and the reload barrier must stay open.
+        let reaction = engine.apply(Command::RecoverConfig).expect("recover");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert!(
+                    update.message.contains("reload is in progress"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected a 'reload is in progress' status"),
+        }
+        assert!(engine.reloading, "the reload barrier must remain open");
+        assert!(engine.reload_guard.is_some());
+    }
+
+    #[test]
+    fn reload_worker_panic_still_closes_the_barrier() {
+        // F5: the reload completion guard guarantees a `ConfigReloadReady` is
+        // posted even when the reload worker drops without calling `complete`.
+        // Build the guard and drop it without completing (the panic/early-return
+        // shape) — it must post an Err completion.
+        let (mut engine, _tmp) = test_engine();
+        engine.apply(Command::ReloadConfig).expect("reload");
+        assert!(engine.reloading);
+        // Drain the NoopConfigSurface's completion that ReloadConfig already
+        // posted so the channel is clean, then simulate a DIFFERENT worker that
+        // dies: a guard that drops without completing.
+        let _ = engine.worker_rx.recv().expect("noop completion");
+
+        drop(crate::engine::ReloadCompletionGuard::new(
+            engine.worker_tx.clone(),
+        ));
+        let event = engine
+            .worker_rx
+            .recv()
+            .expect("drop-guard must post a completion");
+        let reaction = engine.process_worker_event(event);
+        // The Err completion opens the reload-failed modal and closes the barrier.
+        assert!(matches!(
+            reaction,
+            EventReaction::OpenConfigReloadFailedModal(_)
+        ));
+        assert!(
+            !engine.reloading,
+            "the barrier must close on the Err completion"
+        );
+        assert!(engine.reload_guard.is_none());
     }
 
     // -- Global worker spawn idempotence (lifecycle flip: the flipped engine

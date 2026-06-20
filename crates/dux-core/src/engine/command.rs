@@ -163,23 +163,24 @@ pub enum Command {
     DeleteTerminal { terminal_id: String },
 
     /// Persist the global `env` block to the user config file. The engine
-    /// delegates to `Engine::config_saver` so the TUI can render the
-    /// `[keys]` section with `RuntimeBindings` while the web layer can plug
-    /// in its own persistence. Fire-and-forget: completion arrives as
-    /// `WorkerEvent::GlobalEnvPersistenceCompleted`.
+    /// eager-saves through `Engine::config_writer` (the shared off-thread
+    /// queue) and reports the result synchronously, rolling the in-memory env
+    /// back if the write fails.
     PersistGlobalEnv {
         env: std::collections::BTreeMap<String, String>,
     },
 
     /// Reload the user config from disk, validate it, and resync project
-    /// records against the session store. Fire-and-forget: completion
-    /// arrives as `WorkerEvent::ConfigReloadReady`.
+    /// records against the session store. Opens a reload barrier (quiesces the
+    /// config writer + defers config-mutating commands) and kicks off the
+    /// surface's reload worker; completion arrives as
+    /// `WorkerEvent::ConfigReloadReady`, which closes the barrier.
     ReloadConfig,
 
     /// Write a canonical (fully-templated) config to disk, overwriting the
     /// existing file. Used by the config-reload-failed modal to restore a
-    /// known-good config. Fire-and-forget: completion arrives as
-    /// `WorkerEvent::ConfigRecoverCompleted`.
+    /// known-good config. Renders via `Engine::surface` and writes synchronously
+    /// through `config_write::write_config_secure`, returning the result status.
     RecoverConfig,
 
     /// Generate an AI commit message for a session by running the session's
@@ -225,10 +226,9 @@ pub enum Command {
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
     /// into the running `config.macros` immediately (so the ViewModel's `macros`
-    /// refreshes without a manual reload) and delegates the on-disk write to
-    /// `Engine::config_saver` following the `PersistGlobalEnv` precedent.
-    /// Fire-and-forget: completion arrives as
-    /// `WorkerEvent::MacrosPersistenceCompleted`.
+    /// refreshes without a manual reload) and eager-saves through
+    /// `Engine::config_writer`, reporting the result synchronously. Keep-and-
+    /// report: a failed write leaves the new macros active for the session.
     ///
     /// Last-write-wins: the replacement is the editor's whole set, seeded from a
     /// pre-edit snapshot of `[macros]`. A Save therefore clobbers any concurrent
@@ -258,6 +258,14 @@ impl Engine {
     /// deserialized from WebSocket messages. Returns an `EventReaction`
     /// the caller routes through its view-applier.
     pub fn apply(&mut self, command: Command) -> anyhow::Result<EventReaction> {
+        // While a config reload barrier is open, hold any config-mutating
+        // command until the reload lands so it re-applies against the
+        // freshly-reloaded config instead of racing it (see
+        // `Engine::is_config_mutating` and the `ConfigReloadReady` handler).
+        if self.reloading && Self::is_config_mutating(&command) {
+            self.deferred_commands.push(command);
+            return Ok(EventReaction::Nothing);
+        }
         match command {
             Command::FinishDeleteSession {
                 session_id,
@@ -641,30 +649,72 @@ impl Engine {
             }
 
             Command::PersistGlobalEnv { env } => {
-                let mut config = self.config.clone();
-                config.env = env.clone();
-                self.config_saver.persist_global_env(
-                    env,
-                    config,
-                    self.paths.config_path.clone(),
-                    self.worker_tx.clone(),
-                );
-                Ok(EventReaction::Nothing)
+                // Eager save through the queue, with rollback: swap the new env
+                // in, persist synchronously, and restore the previous env if the
+                // write fails so in-memory state never diverges from disk.
+                let previous = std::mem::replace(&mut self.config.env, env);
+                if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
+                    self.config.env = previous;
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Couldn't save global environment variables: {e}"
+                    ))));
+                }
+                let msg = if self.config.env.is_empty() {
+                    "Global environment variables cleared.".to_string()
+                } else {
+                    format!(
+                        "Saved {} global environment variable(s). New agents and terminals will receive them unless a project overrides the same key.",
+                        self.config.env.len()
+                    )
+                };
+                Ok(EventReaction::Status(StatusUpdate::info(msg)))
             }
 
             Command::ReloadConfig => {
-                self.config_saver
-                    .reload_config(self.paths.clone(), self.worker_tx.clone());
+                // Reject a reentrant reload: a second reload while one is in
+                // flight would drop the live `reload_guard` (resuming the writer
+                // mid-reload) and spawn a second worker whose completion would
+                // close a barrier that is no longer the one it opened. Refuse
+                // instead — the in-flight reload will land on its own.
+                if self.reloading {
+                    return Ok(EventReaction::Status(StatusUpdate::info(
+                        "A config reload is already in progress.",
+                    )));
+                }
+                // Open the reload barrier: quiesce the writer (so no queued save
+                // races the reload), mark `reloading` (so config-mutating
+                // commands defer), and kick off the surface's reload worker. The
+                // barrier closes when `ConfigReloadReady` lands.
+                self.reloading = true;
+                self.reload_guard = Some(self.config_writer.quiesce());
+                self.surface
+                    .reload(self.paths.clone(), self.worker_tx.clone());
                 Ok(EventReaction::Nothing)
             }
 
             Command::RecoverConfig => {
-                self.config_saver.recover_config(
-                    self.paths.config_path.clone(),
-                    self.config.clone(),
-                    self.worker_tx.clone(),
-                );
-                Ok(EventReaction::Nothing)
+                // Reject recovery while a reload barrier is open: a reload already
+                // holds the writer quiesce, and recovery taking its OWN quiesce
+                // would, on its guard drop, resume the writer while the reload is
+                // still mid-flight. Refuse and let the reload finish first.
+                if self.reloading {
+                    return Ok(EventReaction::Status(StatusUpdate::info(
+                        "A config reload is in progress; try recovering again in a moment.",
+                    )));
+                }
+                // Overwrite a corrupt on-disk config with a fresh render of the
+                // in-memory config. Quiesce the writer for the duration of the
+                // direct write so a queued save can't clobber the recovery.
+                let _guard = self.config_writer.quiesce();
+                let body = self.surface.recover_render(&self.config);
+                match crate::config_write::write_config_secure(&self.paths.config_path, &body) {
+                    Ok(()) => Ok(EventReaction::Status(StatusUpdate::info(
+                        "Restored the last working configuration to config.toml.",
+                    ))),
+                    Err(e) => Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Couldn't restore the last working configuration: {e:#}"
+                    )))),
+                }
             }
 
             Command::GenerateCommitMessage { session_id } => {
@@ -741,20 +791,24 @@ impl Engine {
             Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
 
             Command::UpdateMacros { macros } => {
-                // Adopt the new macros into the running config immediately so the
-                // ViewModel's `macros` reflects the change without waiting for a
-                // reload, then persist on a background thread (the on-disk write
-                // outcome arrives as `MacrosPersistenceCompleted`). Mirrors the
-                // `PersistGlobalEnv` shape: mutate in-memory config, hand a config
-                // clone carrying the change to the saver.
+                // Keep-and-report (no rollback): adopt the new macros into the
+                // running config immediately so the ViewModel reflects them, then
+                // eager-save through the queue. If the write fails the macros stay
+                // active for this session — we only report that the on-disk file
+                // may be stale, rather than reverting a change the user made.
                 self.config.macros = macros;
-                let config = self.config.clone();
-                self.config_saver.persist_macros(
-                    config,
-                    self.paths.config_path.clone(),
-                    self.worker_tx.clone(),
-                );
-                Ok(EventReaction::Nothing)
+                let count = self.config.macros.entries.len();
+                if let Err(e) = self.config_writer.save_eager(self.config.clone()) {
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Macros updated this session, but saving to config failed: {e}"
+                    ))));
+                }
+                let msg = if count == 0 {
+                    "All macros removed. The macro list is now empty.".to_string()
+                } else {
+                    format!("Saved {count} macro(s).")
+                };
+                Ok(EventReaction::Status(StatusUpdate::info(msg)))
             }
 
             Command::WatchChangedFiles { session_id } => {
@@ -1461,7 +1515,7 @@ mod tests {
     // ── Command::UpdateMacros ───────────────────────────────────────────────
 
     #[test]
-    fn update_macros_adopts_into_engine_config_and_dispatches_saver() {
+    fn update_macros_adopts_into_engine_config_and_writes_through_queue() {
         let (mut engine, _tmp) = test_engine();
         let mut macros = crate::config::MacrosConfig::default();
         macros.entries.insert(
@@ -1477,15 +1531,81 @@ mod tests {
                 macros: macros.clone(),
             })
             .expect("apply");
-        assert!(matches!(reaction, EventReaction::Nothing));
+        // Eager save reports synchronously.
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Info);
+                assert!(
+                    update.message.contains("Saved 1 macro"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Info status reaction"),
+        }
         // The engine adopted the new macros immediately so the ViewModel refreshes.
         assert!(engine.config.macros.entries.contains_key("greet"));
-        // The NoopConfigSaver posts a completion event; drain it.
-        let event = engine.worker_rx.recv().expect("completion event");
-        assert!(matches!(
-            event,
-            WorkerEvent::MacrosPersistenceCompleted { result: Ok(()), .. }
-        ));
+        // The eager save lands on disk through the queue.
+        engine.config_writer.flush();
+        let written = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
+        assert!(written.contains("greet"), "macro persisted: {written}");
+    }
+
+    #[test]
+    fn update_macros_keeps_macros_when_write_fails() {
+        // Keep-and-report: a failed write means the on-disk file can't be updated,
+        // but the new macros stay active for the session AND the existing config
+        // file is left intact (the atomic temp-file-then-rename primitive never
+        // truncates or partially-writes the real file on failure — F14).
+        let (mut engine, _tmp) = test_engine();
+
+        // Seed a known-good, parseable config on disk so we can prove a failed
+        // write does not corrupt or truncate it.
+        let original = "[defaults]\nprovider = \"claude\"\n\n[env]\nSEED = \"keep-me\"\n";
+        std::fs::write(&engine.paths.config_path, original).expect("seed config");
+
+        engine.config_writer = crate::config_queue::ConfigWriteQueue::with_dead_writer(
+            engine.paths.config_path.clone(),
+        );
+        let mut macros = crate::config::MacrosConfig::default();
+        macros.entries.insert(
+            "greet".to_string(),
+            MacroEntry {
+                text: "hi".to_string(),
+                surface: MacroSurface::Both,
+            },
+        );
+
+        let reaction = engine
+            .apply(Command::UpdateMacros { macros })
+            .expect("apply");
+        match reaction {
+            EventReaction::Status(update) => {
+                assert_eq!(update.tone, StatusTone::Error);
+                assert!(
+                    update.message.contains("Macros updated this session"),
+                    "got: {}",
+                    update.message
+                );
+            }
+            _ => panic!("expected Error status reaction"),
+        }
+        // Despite the failed write, the macros are still active in memory.
+        assert!(engine.config.macros.entries.contains_key("greet"));
+
+        // The on-disk file is byte-for-byte the original — not truncated, emptied,
+        // or partially overwritten — and still parses as valid config.
+        let on_disk = std::fs::read_to_string(&engine.paths.config_path).expect("read back");
+        assert_eq!(
+            on_disk, original,
+            "a failed write must leave config.toml untouched"
+        );
+        let parsed: crate::config::Config = toml::from_str(&on_disk).expect("config still valid");
+        assert_eq!(parsed.env.get("SEED").map(String::as_str), Some("keep-me"));
+        assert!(
+            !parsed.macros.entries.contains_key("greet"),
+            "the failed write must not have leaked the new macro to disk"
+        );
     }
 
     // ── Engine::set_watched_session + spawn_changed_files_refresh +

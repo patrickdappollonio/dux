@@ -34,6 +34,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
     let single_instance_lock =
         SingleInstanceLock::acquire(&paths.lock_path).expect("single-instance lock");
     let (worker_tx, worker_rx) = mpsc::channel();
+    let config_writer = crate::config_queue::ConfigWriteQueue::new(paths.config_path.clone());
     let engine = Engine {
         config: Config::default(),
         paths,
@@ -47,7 +48,11 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         single_instance_lock,
         worker_tx,
         worker_rx,
-        config_saver: Box::new(crate::engine::NoopConfigSaver),
+        config_writer,
+        surface: Box::new(crate::engine::NoopConfigSurface),
+        reloading: false,
+        deferred_commands: Vec::new(),
+        reload_guard: None,
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),

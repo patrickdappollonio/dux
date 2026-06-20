@@ -12,7 +12,7 @@ mod server_screen;
 mod theme;
 mod tui_color;
 
-pub(crate) use config_saver::TuiConfigSaver;
+pub(crate) use config_saver::TuiConfigSurface;
 
 /// Server status screen shown by the binary while serving after a TUI↔server
 /// flip. Re-exported so `crates/dux/src/main.rs` can drive it as the
