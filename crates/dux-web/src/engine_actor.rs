@@ -684,10 +684,13 @@ pub(crate) fn run_engine_loop(
 
             // A project mutation just updated SQLite + in-memory projects; mirror
             // it into the portable config.toml so a later TUI start doesn't clobber it.
+            // Skip for `Added` — that arm already wrote config inline in command.rs,
+            // and Skip for `PersistenceFailed` — nothing was saved.
             if let EventReaction::ProjectPersistenceOutcome(outcome) = &reaction
                 && !matches!(
                     outcome.view,
                     ProjectPersistenceView::PersistenceFailed { .. }
+                        | ProjectPersistenceView::Added { .. }
                 )
                 && let Err(e) = engine.persist_projects_to_config()
             {

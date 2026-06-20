@@ -1557,18 +1557,28 @@ impl Engine {
                 self.clear_in_flight(&InFlightKey::AuthUsers);
                 match result {
                     Ok(()) => {
-                        // Adopt the persisted list so the running config matches
-                        // disk; a flip to the web server rebuilds AuthState from
-                        // this config, and a running server picks it up on reload.
+                        // Adopt the new user list and write it to config via the
+                        // eager queue; roll back in-memory state on write failure.
+                        let previous = self.config.auth.users.clone();
                         self.config.auth.users = users;
-                        // A removal that empties the list disables the gate, so
-                        // its message carries a warning tone, not info.
-                        let update = if warn {
-                            StatusUpdate::warning(message)
-                        } else {
-                            StatusUpdate::info(message)
-                        };
-                        EventReaction::Status(update)
+                        match self.config_writer.save_eager(self.config.clone()) {
+                            Ok(()) => {
+                                // A removal that empties the list disables the
+                                // gate, so its message carries a warning tone.
+                                let update = if warn {
+                                    StatusUpdate::warning(message)
+                                } else {
+                                    StatusUpdate::info(message)
+                                };
+                                EventReaction::Status(update)
+                            }
+                            Err(err) => {
+                                self.config.auth.users = previous;
+                                EventReaction::Status(StatusUpdate::error(format!(
+                                    "Could not save web UI login users to config.toml: {err}"
+                                )))
+                            }
+                        }
                     }
                     Err(err) => EventReaction::Status(StatusUpdate::error(format!(
                         "Could not save web UI login users to config.toml: {err}"
@@ -2665,32 +2675,37 @@ mod tests {
     }
 
     #[test]
-    fn apply_persist_project_returns_nothing_and_dispatches_worker() {
+    fn apply_persist_project_add_writes_config_and_returns_outcome() {
+        use crate::engine::events::ProjectPersistenceView;
         use crate::worker::ProjectPersistenceAction;
         let (mut engine, _tmp) = test_engine();
         let project = sample_project("p1", "/tmp/p1");
         let action = ProjectPersistenceAction::Add {
-            project,
+            project: project.clone(),
             status_message: "added".to_string(),
         };
         let reaction = engine
             .apply(crate::engine::Command::PersistProject(Box::new(action)))
             .expect("apply succeeds");
-        assert!(matches!(reaction, EventReaction::Nothing));
-        // Drain the worker channel to confirm ProjectPersistenceCompleted was
-        // posted. The worker only does an in-memory SQLite write so it returns
-        // quickly; a 2-second timeout is generous.
-        let event = engine
-            .worker_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("worker posted a result");
-        assert!(matches!(
-            event,
-            WorkerEvent::ProjectPersistenceCompleted {
-                action: ProjectPersistenceAction::Add { .. },
-                ..
-            }
-        ));
+        // Add is now inline: returns ProjectPersistenceOutcome directly, not Nothing.
+        assert!(
+            matches!(
+                reaction,
+                EventReaction::ProjectPersistenceOutcome(ref o)
+                if matches!(o.view, ProjectPersistenceView::Added { ref project_id, .. } if project_id == "p1")
+            ),
+            "expected Added outcome for p1"
+        );
+        // The project must be in the in-memory list.
+        assert!(engine.projects.iter().any(|p| p.id == "p1"));
+        // The worker channel must be empty — no background worker was dispatched.
+        assert!(
+            engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "Add no longer dispatches a background worker"
+        );
     }
 
     // ── Engine::apply on the agent-creation dispatch family (E4c) ───────────

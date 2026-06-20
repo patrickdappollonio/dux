@@ -2618,8 +2618,8 @@ mod tests {
     // does: pull worker 2's switch-completion off `worker_rx`, run
     // `process_worker_event`, feed the reaction through both
     // `wire_statuses_from_reaction` (switch FAILURE error) and
-    // `drive_add_project_followup` (switch SUCCESS → spawn the persistence add),
-    // then drain the persistence worker so `engine.projects` actually updates.
+    // `drive_add_project_followup` (switch SUCCESS → inline persistence add).
+    // The Add path is now inline so no second worker event is drained.
     fn drive_add_project_chain(engine: &mut Engine) -> Vec<WireStatus> {
         let mut statuses = Vec::new();
         let event = engine
@@ -2627,21 +2627,8 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("switch worker event");
         let reaction = engine.process_worker_event(event);
-        let added = matches!(
-            reaction,
-            EventReaction::AddProjectAfterBranchCheckout { .. }
-        );
         statuses.extend(wire_statuses_from_reaction(&reaction));
         statuses.extend(engine.drive_add_project_followup(&reaction));
-        if added {
-            // The follow-up spawned the persistence worker; drain it so the
-            // project lands in `engine.projects` (mirrors the actor loop).
-            let event = engine
-                .worker_rx
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .expect("persistence worker event");
-            let _ = engine.process_worker_event(event);
-        }
         statuses
     }
 

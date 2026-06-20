@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use crate::engine::events::{
     BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView, DoDeleteSessionView,
-    EventReaction, FinishDeleteSessionView, StatusUpdate, WorktreeRemoval,
+    EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome, ProjectPersistenceView,
+    StatusUpdate, WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
 use crate::worker::{
@@ -311,8 +312,64 @@ impl Engine {
                 )))
             }
             Command::PersistProject(action) => {
-                self.spawn_project_persistence(*action);
-                Ok(EventReaction::Nothing)
+                if let ProjectPersistenceAction::Add {
+                    project,
+                    status_message,
+                } = *action
+                {
+                    // Insert the project into SQLite inline so we can roll back
+                    // the row if the subsequent config write fails.
+                    self.session_store
+                        .upsert_project(&crate::config::ProjectConfig {
+                            id: project.id.clone(),
+                            path: project.path.clone(),
+                            name: Some(project.name.clone()),
+                            default_provider: project
+                                .explicit_default_provider
+                                .as_ref()
+                                .map(|p| p.as_str().to_string()),
+                            leading_branch: project.leading_branch.clone(),
+                            auto_reopen_agents: project.auto_reopen_agents,
+                            startup_command: project.startup_command.clone(),
+                            env: project.env.clone(),
+                        })?;
+                    let id = project.id.clone();
+                    // Add to in-memory list before the config write.
+                    self.projects.push(project.clone());
+                    match self.persist_projects_to_config() {
+                        Ok(()) => Ok(EventReaction::ProjectPersistenceOutcome(Box::new(
+                            ProjectPersistenceOutcome {
+                                action: ProjectPersistenceAction::Add {
+                                    project,
+                                    status_message: status_message.clone(),
+                                },
+                                view: ProjectPersistenceView::Added {
+                                    project_id: id,
+                                    status_message,
+                                },
+                            },
+                        ))),
+                        Err(e) => {
+                            // Config write failed — roll back the in-memory project
+                            // and the SQLite row so the state stays consistent.
+                            self.projects.retain(|p| p.id != id);
+                            if let Err(db_err) = self.session_store.delete_project(&id) {
+                                return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                                    "Project add failed and couldn't be cleaned up — it may \
+                                     reappear on restart. Config error: {e:#}. DB cleanup error: \
+                                     {db_err:#}"
+                                ))));
+                            }
+                            Ok(EventReaction::Status(StatusUpdate::error(format!(
+                                "Project add failed and couldn't be cleaned up — it may \
+                                 reappear on restart. Config error: {e:#}"
+                            ))))
+                        }
+                    }
+                } else {
+                    self.spawn_project_persistence(*action);
+                    Ok(EventReaction::Nothing)
+                }
             }
 
             Command::RemoveProject {

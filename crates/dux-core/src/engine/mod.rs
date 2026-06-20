@@ -451,15 +451,17 @@ impl Engine {
     /// Rebuild config.toml's `[[projects]]` from the current runtime projects and
     /// persist via the shared writer. Surfaces (web) call this after a project
     /// persistence so the portable config stays in sync with SQLite. (The TUI has
-    /// its own config-sync path.) Small synchronous write; runs on the caller.
-    pub fn persist_projects_to_config(&self) -> anyhow::Result<()> {
-        let mut config = self.config.clone();
-        config.projects = self
+    /// its own config-sync path.) Eager synchronous write via the queue; blocks
+    /// until the writer confirms or times out.
+    pub fn persist_projects_to_config(&mut self) -> anyhow::Result<()> {
+        self.config.projects = self
             .projects
             .iter()
             .map(project_to_project_config)
             .collect();
-        crate::config_write::save_config(&self.paths.config_path, &config)
+        self.config_writer
+            .save_eager(self.config.clone())
+            .map_err(|e| anyhow::anyhow!(e))
     }
 
     /// Apply a freshly-reloaded config to the running engine (headless subset of
@@ -1594,6 +1596,31 @@ mod tests {
         // Rolled back to the previous env.
         assert_eq!(engine.config.env.get("OLD").map(String::as_str), Some("v"));
         assert!(!engine.config.env.contains_key("NEW"));
+    }
+
+    // -- Project add: SQLite rollback on config-write failure. --
+
+    #[test]
+    fn project_add_config_failure_removes_sqlite_row() {
+        // Force a config-write failure by pointing the writer at a nonexistent
+        // directory so save_eager gets an I/O error. The SQLite insert that
+        // happens first must be rolled back so the project row does not survive.
+        let (mut engine, _tmp) = test_engine();
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
+        let before = engine.session_store.load_projects().unwrap().len();
+        let project = test_support::sample_project("p1", "/tmp/p1");
+        let _ = engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::Add {
+                project,
+                status_message: "added".into(),
+            },
+        )));
+        assert_eq!(
+            engine.session_store.load_projects().unwrap().len(),
+            before,
+            "a failed config write must not leave a SQLite row"
+        );
     }
 
     // -- Reload command deferral. --
