@@ -25,6 +25,8 @@ use ratatui::widgets::{
 use uuid::Uuid;
 
 use crate::clipboard::Clipboard;
+#[allow(deprecated)]
+// importing the deprecated TUI save_config for use in the blessed sync-direct project-sync helpers
 use crate::config::{
     Config, DuxPaths, MacroSurface, ensure_config, provider_config, save_config, validate_keys,
 };
@@ -2779,6 +2781,7 @@ impl App {
 
 pub(crate) use dux_core::project_browser::load_projects;
 
+#[allow(deprecated)] // blessed sync-direct: bootstrap/reload-worker project-sync runs before/outside the queue
 pub(crate) fn persist_runtime_projects_to_config_and_store(
     projects: &[Project],
     config: &mut Config,
@@ -2818,6 +2821,7 @@ pub(crate) fn persist_runtime_projects_to_config_and_store(
     Ok(())
 }
 
+#[allow(deprecated)] // blessed sync-direct: bootstrap/reload-worker project-sync runs before/outside the queue
 pub(crate) fn sync_config_projects_with_store(
     config: &mut Config,
     paths: &DuxPaths,
