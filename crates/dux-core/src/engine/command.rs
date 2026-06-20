@@ -338,6 +338,10 @@ impl Engine {
                             env: project.env.clone(),
                         })?;
                     let id = project.id.clone();
+                    // Snapshot config.projects BEFORE persist_projects_to_config
+                    // rewrites it. On failure we restore this so the phantom
+                    // project can't resurrect on the next unrelated eager save.
+                    let prev_config_projects = self.config.projects.clone();
                     // Add to in-memory list before the config write.
                     self.projects.push(project.clone());
                     match self.persist_projects_to_config() {
@@ -354,9 +358,12 @@ impl Engine {
                             },
                         ))),
                         Err(e) => {
-                            // Config write failed — roll back the in-memory project
-                            // and the SQLite row so the state stays consistent.
+                            // Config write failed — roll back the in-memory project,
+                            // the SQLite row, and self.config.projects so the state
+                            // stays consistent. Without restoring config.projects the
+                            // phantom would resurrect on the next unrelated eager save.
                             self.projects.retain(|p| p.id != id);
+                            self.config.projects = prev_config_projects;
                             if let Err(db_err) = self.session_store.delete_project(&id) {
                                 return Ok(EventReaction::Status(StatusUpdate::error(format!(
                                     "Project add failed and couldn't be cleaned up — it may \
