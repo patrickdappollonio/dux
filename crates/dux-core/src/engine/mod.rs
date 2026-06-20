@@ -1683,6 +1683,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_add_config_failure_does_not_resurrect_phantom_on_next_save() {
+        // Prove that a rolled-back add does NOT pollute self.config.projects so
+        // the phantom project cannot be written to disk by the next unrelated
+        // eager save. Without the fix, persist_projects_to_config() rewrote
+        // self.config.projects before failing, and the next eager save (e.g.
+        // PersistGlobalEnv) would clone that mutated config and write the ghost.
+        let (mut engine, tmp) = test_engine();
+
+        // Point the writer at a nonexistent path to force the initial add to fail.
+        engine.config_writer =
+            crate::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
+        let project = test_support::sample_project("ghost", "/tmp/ghost");
+        let _ = engine.apply(Command::PersistProject(Box::new(
+            ProjectPersistenceAction::Add {
+                project,
+                status_message: "added".into(),
+            },
+        )));
+
+        // Both self.projects and self.config.projects must not contain "ghost".
+        assert!(
+            !engine.projects.iter().any(|p| p.id == "ghost"),
+            "ghost must not be in engine.projects after rollback"
+        );
+        assert!(
+            !engine.config.projects.iter().any(|p| p.id == "ghost"),
+            "ghost must not be in engine.config.projects after rollback"
+        );
+
+        // Swap in a working writer pointed at the real config path and fire an
+        // unrelated eager save (PersistGlobalEnv). This clones self.config and
+        // writes it — the ghost must NOT appear in the resulting file.
+        let config_path = tmp.path().join("config.toml");
+        engine.config_writer = crate::config_queue::ConfigWriteQueue::new(config_path.clone());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("K".into(), "v".into());
+        engine
+            .apply(Command::PersistGlobalEnv { env })
+            .expect("PersistGlobalEnv must succeed");
+        engine.config_writer.flush();
+
+        let on_disk = std::fs::read_to_string(&config_path).expect("config written");
+        assert!(
+            !on_disk.contains("ghost"),
+            "ghost project must not appear in config after an unrelated save: {on_disk}"
+        );
+    }
+
     // -- Reload command deferral. --
 
     /// A test `ConfigSurface` whose `reload` posts a config carrying a known,
