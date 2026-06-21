@@ -32,6 +32,12 @@ use crate::worker::{
 pub struct StatusUpdate {
     pub tone: StatusTone,
     pub message: String,
+    /// Optional correlation key. `None` = an unkeyed transient. `Some` = a
+    /// keyed op whose later success/error/clear carries the same key so both
+    /// surfaces can correlate the pair. Ignored by the TUI today; copied into
+    /// `WireStatus::key` by `WireStatus::from_update` so the web layer can
+    /// dismiss the matching toast when the final status arrives.
+    pub key: Option<String>,
 }
 
 impl StatusUpdate {
@@ -39,12 +45,14 @@ impl StatusUpdate {
         Self {
             tone: StatusTone::Info,
             message: message.into(),
+            key: None,
         }
     }
     pub fn busy(message: impl Into<String>) -> Self {
         Self {
             tone: StatusTone::Busy,
             message: message.into(),
+            key: None,
         }
     }
     #[allow(dead_code)]
@@ -52,13 +60,34 @@ impl StatusUpdate {
         Self {
             tone: StatusTone::Warning,
             message: message.into(),
+            key: None,
         }
     }
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             tone: StatusTone::Error,
             message: message.into(),
+            key: None,
         }
+    }
+
+    /// Construct a keyed status update. Both the busy and the final
+    /// (info/error) for the same operation should carry the same key so
+    /// `WireStatus::from_update` can propagate it and the web layer can
+    /// dismiss the correct toast.
+    pub fn keyed(key: impl Into<String>, tone: StatusTone, message: impl Into<String>) -> Self {
+        Self {
+            tone,
+            message: message.into(),
+            key: Some(key.into()),
+        }
+    }
+
+    /// Attach a correlation key to this update (builder form). Lets callers
+    /// start from one of the tone helpers and then chain `.with_key(k)`.
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
     }
 }
 
@@ -1198,54 +1227,70 @@ impl Engine {
                 target,
                 result,
             } => {
-                self.clear_in_flight(&InFlightKey::Pull(repo_path));
+                self.clear_in_flight(&InFlightKey::Pull(repo_path.clone()));
                 match target {
                     PullTarget::Project {
                         project_id,
                         project_name,
                         ..
-                    } => match result {
-                        Ok(branch_name) => {
-                            if let Some(existing) =
-                                self.projects.iter_mut().find(|c| c.id == project_id)
-                                && let Some(branch_name) = branch_name
-                            {
-                                existing.current_branch = branch_name;
-                                existing.branch_status = if existing.leading_branch.as_deref()
-                                    == Some(&existing.current_branch)
+                    } => {
+                        let status_key = format!("pull-project:{project_id}");
+                        match result {
+                            Ok(branch_name) => {
+                                if let Some(existing) =
+                                    self.projects.iter_mut().find(|c| c.id == project_id)
+                                    && let Some(branch_name) = branch_name
                                 {
-                                    ProjectBranchStatus::Leading
-                                } else if existing.leading_branch.is_some() {
-                                    ProjectBranchStatus::NotLeading
-                                } else {
-                                    let warning = crate::git::branch_warning_kind(
-                                        Path::new(&existing.path),
-                                        &existing.current_branch,
-                                    );
-                                    crate::git::branch_status_from_warning(warning.as_ref())
-                                };
+                                    existing.current_branch = branch_name;
+                                    existing.branch_status = if existing.leading_branch.as_deref()
+                                        == Some(&existing.current_branch)
+                                    {
+                                        ProjectBranchStatus::Leading
+                                    } else if existing.leading_branch.is_some() {
+                                        ProjectBranchStatus::NotLeading
+                                    } else {
+                                        let warning = crate::git::branch_warning_kind(
+                                            Path::new(&existing.path),
+                                            &existing.current_branch,
+                                        );
+                                        crate::git::branch_status_from_warning(warning.as_ref())
+                                    };
+                                }
+                                EventReaction::Status(
+                                    StatusUpdate::info(format!(
+                                        "Refreshed project \"{}\". Local branch is up to date with remote.",
+                                        project_name,
+                                    ))
+                                    .with_key(status_key),
+                                )
                             }
-                            EventReaction::Status(StatusUpdate::info(format!(
-                                "Refreshed project \"{}\". Local branch is up to date with remote.",
-                                project_name,
-                            )))
+                            Err(e) => EventReaction::Status(
+                                StatusUpdate::error(format!(
+                                    "Project refresh failed for \"{}\": {e}",
+                                    project_name
+                                ))
+                                .with_key(status_key),
+                            ),
                         }
-                        Err(e) => EventReaction::Status(StatusUpdate::error(format!(
-                            "Project refresh failed for \"{}\": {e}",
-                            project_name
-                        ))),
-                    },
-                    PullTarget::Session => match result {
-                        Ok(_) => EventReaction::Multi(vec![
-                            EventReaction::Status(StatusUpdate::info(
-                                "Pulled latest changes from remote successfully. Local branch is up to date.",
-                            )),
-                            EventReaction::ReloadChangedFiles,
-                        ]),
-                        Err(e) => EventReaction::Status(StatusUpdate::error(format!(
-                            "Pull from remote failed: {e}"
-                        ))),
-                    },
+                    }
+                    PullTarget::Session => {
+                        let status_key = format!("pull-session:{repo_path}");
+                        match result {
+                            Ok(_) => EventReaction::Multi(vec![
+                                EventReaction::Status(
+                                    StatusUpdate::info(
+                                        "Pulled latest changes from remote successfully. Local branch is up to date.",
+                                    )
+                                    .with_key(status_key),
+                                ),
+                                EventReaction::ReloadChangedFiles,
+                            ]),
+                            Err(e) => EventReaction::Status(
+                                StatusUpdate::error(format!("Pull from remote failed: {e}"))
+                                    .with_key(status_key),
+                            ),
+                        }
+                    }
                 }
             }
             WorkerEvent::ClipboardCopyCompleted { label, result } => match result {
@@ -3249,6 +3294,139 @@ mod tests {
     }
 
     // ── spawn_loop_worker primitive ───────────────────────────────────────
+
+    // ── Keyed status pairs (Task 9) ──────────────────────────────────────
+
+    #[test]
+    fn pull_completed_project_ok_carries_keyed_status() {
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project);
+        let repo_path = "/tmp/p1".to_string();
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path: repo_path.clone(),
+            target: PullTarget::Project {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+                leading_branch: None,
+            },
+            result: Ok(None),
+        });
+
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        assert_eq!(
+            status.key.as_deref(),
+            Some("pull-project:p1"),
+            "pull-project completion must carry the keyed correlation key"
+        );
+    }
+
+    #[test]
+    fn pull_completed_project_err_carries_keyed_status() {
+        let (mut engine, _tmp) = test_engine();
+        let repo_path = "/tmp/p1".to_string();
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path,
+            target: PullTarget::Project {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+                leading_branch: None,
+            },
+            result: Err("network error".to_string()),
+        });
+
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Error);
+        assert_eq!(
+            status.key.as_deref(),
+            Some("pull-project:p1"),
+            "pull-project failure must carry the same key as the busy"
+        );
+    }
+
+    #[test]
+    fn pull_completed_session_ok_carries_keyed_status() {
+        let (mut engine, _tmp) = test_engine();
+        let repo_path = "/tmp/wt-session".to_string();
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path: repo_path.clone(),
+            target: PullTarget::Session,
+            result: Ok(None),
+        });
+
+        // Session pull success returns Multi([Status, ReloadChangedFiles]).
+        let status = match reaction {
+            EventReaction::Multi(ref items) => items
+                .iter()
+                .find_map(|r| {
+                    if let EventReaction::Status(s) = r {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .expect("expected a Status inside Multi"),
+            other => panic!("expected Multi, got {}", reaction_kind(&other)),
+        };
+        assert_eq!(status.tone, StatusTone::Info);
+        assert_eq!(
+            status.key.as_deref(),
+            Some("pull-session:/tmp/wt-session"),
+            "pull-session completion must carry the keyed correlation key"
+        );
+    }
+
+    #[test]
+    fn pull_completed_session_err_carries_keyed_status() {
+        let (mut engine, _tmp) = test_engine();
+        let repo_path = "/tmp/wt-session".to_string();
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path: repo_path.clone(),
+            target: PullTarget::Session,
+            result: Err("no remote".to_string()),
+        });
+
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Error);
+        assert_eq!(
+            status.key.as_deref(),
+            Some("pull-session:/tmp/wt-session"),
+            "pull-session failure must carry the same key as the busy"
+        );
+    }
+
+    #[test]
+    fn status_update_with_key_builder_roundtrips() {
+        let s = StatusUpdate::info("hello").with_key("my-key");
+        assert_eq!(s.tone, StatusTone::Info);
+        assert_eq!(s.message, "hello");
+        assert_eq!(s.key.as_deref(), Some("my-key"));
+    }
+
+    #[test]
+    fn status_update_keyed_constructor() {
+        let s = StatusUpdate::keyed("op-key", StatusTone::Busy, "working…");
+        assert_eq!(s.tone, StatusTone::Busy);
+        assert_eq!(s.message, "working\u{2026}");
+        assert_eq!(s.key.as_deref(), Some("op-key"));
+    }
+
+    #[test]
+    fn status_update_helpers_default_to_no_key() {
+        assert!(StatusUpdate::info("x").key.is_none());
+        assert!(StatusUpdate::busy("x").key.is_none());
+        assert!(StatusUpdate::warning("x").key.is_none());
+        assert!(StatusUpdate::error("x").key.is_none());
+    }
 
     #[test]
     fn loop_worker_continues_after_iteration_panic() {

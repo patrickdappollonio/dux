@@ -402,7 +402,7 @@ impl WireStatus {
         Self {
             tone: update.tone.as_wire().to_string(),
             message: update.message.clone(),
-            key: None,
+            key: update.key.clone(),
         }
     }
 }

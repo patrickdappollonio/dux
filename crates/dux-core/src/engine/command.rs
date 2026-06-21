@@ -604,11 +604,22 @@ impl Engine {
                 // consumes the originals.
                 let repo_key_for_panic = repo_key.clone();
                 let target_for_panic = target.clone();
+                // Build the correlation key for the busy→final pair. Both ends
+                // must use the same key so the web layer can dismiss the busy
+                // toast when the completion arrives.
+                let pull_status_key = match &target {
+                    PullTarget::Session => format!("pull-session:{repo_key}"),
+                    PullTarget::Project { project_id, .. } => {
+                        format!("pull-project:{project_id}")
+                    }
+                };
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: format!("pull:{repo_key}"),
                         in_flight_key: Some(InFlightKey::Pull(repo_key.clone())),
-                        busy_status: Some(StatusUpdate::busy(busy_message)),
+                        busy_status: Some(
+                            StatusUpdate::busy(busy_message).with_key(pull_status_key),
+                        ),
                         already_running_status: Some(StatusUpdate::warning(
                             already_running_message,
                         )),
@@ -798,6 +809,9 @@ impl Engine {
                 let cfg = crate::config::provider_config(&self.config, &session.provider);
                 let prov = crate::provider::create_provider(session.provider.as_str(), cfg);
                 let tx = self.worker_tx.clone();
+                // Clone the id before the thread consumes it; the original is
+                // needed below to build the correlation key for the busy status.
+                let session_id_for_busy = session_id.clone();
                 // Read the staged diff AND run the provider off the engine thread.
                 // `git diff --staged` can be slow on a large staged set, and on the
                 // web server every request runs on the single engine thread —
@@ -839,9 +853,12 @@ impl Engine {
                         }
                     }
                 });
-                Ok(EventReaction::Status(StatusUpdate::busy(
-                    "Generating an AI commit message from the staged diff\u{2026}",
-                )))
+                Ok(EventReaction::Status(
+                    StatusUpdate::busy(
+                        "Generating an AI commit message from the staged diff\u{2026}",
+                    )
+                    .with_key(format!("commit-msg:{session_id_for_busy}")),
+                ))
             }
 
             Command::ReorderSessions {

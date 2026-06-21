@@ -723,7 +723,8 @@ pub(crate) fn run_engine_loop(
                 )
                 && let Err(e) = engine.persist_projects_to_config()
             {
-                let _ = thread_status_tx.send(WireStatus::new(
+                let _ = thread_status_tx.send(WireStatus::keyed(
+                    "config-write",
                     "error",
                     format!("Saved to the database, but config.toml could not be updated: {e:#}"),
                 ));
@@ -747,15 +748,18 @@ pub(crate) fn run_engine_loop(
                     // The Instant stamps generation time for the snapshot TTL.
                     let _ = commit_snapshot_tx.send(Some((event.clone(), Instant::now())));
                     let _ = thread_commit_tx.send(event);
+                    // The busy toast for commit-message generation carries
+                    // `commit-msg:{session_id}`. Success routes the draft through
+                    // the commit-message lane (not the status stream), so the
+                    // busy toast never gets replaced by a succeeding status. Clear
+                    // it explicitly so it does not linger.
+                    thread_status_tx.clear(format!("commit-msg:{session_id}"));
                 }
-                EventReaction::CommitMessageFailed {
-                    session_id: _,
-                    error,
-                } => {
-                    // Failures ride the generic status toast (not the scoped
-                    // commit-message lane): a generation error is not a draft to
-                    // route, so the user just needs to know it didn't work.
-                    let _ = thread_status_tx.send(WireStatus::new(
+                EventReaction::CommitMessageFailed { session_id, error } => {
+                    // Failures ride the generic status toast, keyed so they
+                    // replace the matching busy rather than stacking beside it.
+                    let _ = thread_status_tx.send(WireStatus::keyed(
+                        format!("commit-msg:{session_id}"),
                         "error",
                         format!("Couldn't generate a commit message: {error}"),
                     ));
@@ -1019,6 +1023,17 @@ impl StatusEmitter {
         );
         let _ = self.snapshot_tx.send(self.controller.snapshot());
         self.tx.send(status)
+    }
+
+    /// Explicitly clear a keyed entry (remove from the controller, push the
+    /// key onto `clear_tx` so the WS forwarder sends a `StatusCleared` frame,
+    /// refresh the snapshot). Used when a success path does NOT emit a
+    /// replacing status — e.g. commit-message generation, which routes success
+    /// through the commit-message lane rather than the status stream.
+    fn clear(&mut self, key: String) {
+        self.controller.clear(&key, None);
+        let _ = self.snapshot_tx.send(self.controller.snapshot());
+        let _ = self.clear_tx.send(Some(key));
     }
 
     /// Expire timed-out entries (auto-clear Info, upgrade stale Busy→Warning).
