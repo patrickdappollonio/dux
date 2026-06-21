@@ -73,14 +73,20 @@ impl ConfigWriteQueue {
     pub fn save_lazy(&self, config: Config) {
         // Bound in-flight lazy snapshots so a stalled or paused writer cannot let
         // the channel grow without limit. Lazy writes are coalesced anyway, so
-        // dropping a snapshot once the backlog is already deep is acceptable — the
-        // fixed deadline still lands a write.
-        if self.lazy_inflight.load(Ordering::Relaxed) >= LAZY_INFLIGHT_CAP {
+        // dropping a snapshot at the cap is acceptable — the fixed deadline still
+        // lands a write. The reservation is a single atomic update (not a separate
+        // load-then-add) so concurrent callers cannot overshoot the cap.
+        if self
+            .lazy_inflight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < LAZY_INFLIGHT_CAP).then_some(n + 1)
+            })
+            .is_err()
+        {
             return;
         }
-        self.lazy_inflight.fetch_add(1, Ordering::Relaxed);
         if self.tx.send(WriteMsg::Lazy(config)).is_err() {
-            self.lazy_inflight.fetch_sub(1, Ordering::Relaxed);
+            decr_inflight(&self.lazy_inflight);
         }
     }
 
@@ -207,9 +213,20 @@ impl Drop for ConfigWriteQueue {
     }
 }
 
+/// Decrement the in-flight counter without ever wrapping past zero. A concurrent
+/// panic-reset (`store(0)`) could otherwise race a send-failure rollback and wrap
+/// the counter to `usize::MAX`, latching the cap gate shut forever.
+fn decr_inflight(counter: &AtomicUsize) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_sub(1))
+    });
+}
+
 fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicUsize>) {
-    // Keep a handle to the in-flight counter; the closure moves its own clone in.
+    // Clone the counter before moving the original into the inner loop, so the
+    // panic handler below still has a handle to reset it after the loop exits.
     let counter = lazy_inflight.clone();
+    // Note: under panic = "abort" this guard is inert (the process aborts); it is active under the default unwind strategy.
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         writer_loop_inner(rx, path, lazy_inflight)
     })) {
@@ -250,7 +267,7 @@ fn writer_loop_inner(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<A
         match msg {
             None => flush_pending(&path, &mut pending, &mut deadline),
             Some(WriteMsg::Lazy(cfg)) => {
-                lazy_inflight.fetch_sub(1, Ordering::Relaxed);
+                decr_inflight(&lazy_inflight);
                 pending = Some(cfg);
                 if deadline.is_none() {
                     deadline = Some(Instant::now() + QUIET_WINDOW);
@@ -278,14 +295,14 @@ fn writer_loop_inner(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<A
                 loop {
                     match rx.recv() {
                         Ok(WriteMsg::Resume) => {
-                            depth -= 1;
+                            depth = depth.saturating_sub(1);
                             if depth == 0 {
                                 break;
                             }
                         }
                         Ok(WriteMsg::Shutdown) => return, // exit even while paused
                         Ok(WriteMsg::Lazy(_)) => {
-                            lazy_inflight.fetch_sub(1, Ordering::Relaxed);
+                            decr_inflight(&lazy_inflight);
                         } // stale snapshot — drop
                         Ok(WriteMsg::Eager { reply, .. }) => {
                             let _ =
@@ -299,7 +316,7 @@ fn writer_loop_inner(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<A
                             let _ = ack.send(());
                         }
                         Ok(WriteMsg::Pause(ack)) => {
-                            depth += 1;
+                            depth = depth.saturating_add(1);
                             let _ = ack.send(());
                         }
                         Err(_) => return,
@@ -517,9 +534,8 @@ mod tests {
         );
     }
 
-    /// A lazy write queued BEFORE the barrier opened must still land when the
-    /// queue is dropped while the barrier is open (proves Drop's flush drains the
-    /// pre-barrier pending write even in the paused-writer case).
+    /// A lazy queued before a barrier opens must survive the quiesce-then-drop
+    /// sequence (quiesce flushes it on pause entry; the drop must not lose it).
     #[test]
     fn lazy_before_barrier_is_flushed_on_drop() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -539,5 +555,47 @@ mod tests {
             saved.contains("PRE_BARRIER = \"kept\""),
             "pre-barrier lazy was not flushed on drop: {saved}"
         );
+    }
+
+    /// Lazies sent during an open barrier are discarded by the paused writer, and
+    /// their in-flight count must be decremented so the cap gate re-opens — a
+    /// post-barrier lazy must still land.
+    #[test]
+    fn inflight_counter_drains_during_barrier_and_gate_reopens() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path.clone());
+
+        {
+            let _guard = q.quiesce(); // writer drained + paused
+            // Send a burst during the barrier; all are discarded by the paused writer.
+            for i in 0..(LAZY_INFLIGHT_CAP * 2) {
+                let mut cfg = Config::default();
+                cfg.env.insert("N".into(), i.to_string());
+                q.save_lazy(cfg);
+            }
+        } // guard drops → resume
+
+        // The writer drains the discarded burst asynchronously after resuming, so
+        // the counter returns below the cap without a fixed timing guarantee. Poll
+        // (bounded) until a fresh lazy lands — proving the gate re-opens once the
+        // backlog drains, without depending on drain timing.
+        let mut landed = false;
+        for _ in 0..200 {
+            let mut cfg = Config::default();
+            cfg.env.insert("AFTER".into(), "barrier".into());
+            q.save_lazy(cfg);
+            q.flush();
+            if std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains("AFTER = \"barrier\"")
+            {
+                landed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(landed, "cap gate did not re-open after the barrier drained");
     }
 }
