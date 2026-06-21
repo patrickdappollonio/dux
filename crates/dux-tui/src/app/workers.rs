@@ -894,6 +894,7 @@ impl App {
             AgentLaunchFailedOutcome::Reconnect {
                 branch_name,
                 message,
+                ..
             } => {
                 self.set_error(format!(
                     "Reconnect failed for agent \"{branch_name}\": {message}"
@@ -902,6 +903,7 @@ impl App {
             AgentLaunchFailedOutcome::ForceReconnect {
                 branch_name,
                 message,
+                ..
             } => {
                 self.set_error(format!(
                     "Fresh restart failed for agent \"{branch_name}\": {message}"
@@ -913,6 +915,7 @@ impl App {
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 branch_name,
                 message,
+                ..
             } => {
                 self.set_warning(format!(
                     "Couldn't auto-reopen agent \"{branch_name}\": {message}"

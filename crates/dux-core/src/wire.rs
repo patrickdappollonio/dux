@@ -5,6 +5,28 @@
 //! wire-safe `WireCommandOutcome` (the full `EventReaction` is engine-internal
 //! and view-coupled; web clients re-fetch `view_model()` for fresh state).
 
+/// Stable string keys for correlated status pairs (busy → final). The TUI and
+/// the web actor MUST use the SAME string so a final status replaces the busy
+/// on the same key slot rather than opening a second slot.
+///
+/// Keys are per-OPERATION-TYPE where the operation is globally unique (e.g.
+/// config reload), and per-OPERATION-INSTANCE (including the entity id) where
+/// multiple operations of the same type can be in flight concurrently (e.g.
+/// per-session launch or delete).
+pub mod status_keys {
+    /// Config-reload failure key. Singleton: only one reload can run at a time.
+    pub const CONFIG_RELOAD: &str = "config-reload";
+    /// Worktree-list failure key. Parameterised by project id at call sites:
+    /// `format!("{WORKTREE_LIST_PREFIX}:{project_id}")`.
+    pub const WORKTREE_LIST_PREFIX: &str = "worktree-list";
+    /// Agent-launch key prefix. Parameterised by session id at call sites:
+    /// `format!("{LAUNCH_PREFIX}:{session_id}")`.
+    pub const LAUNCH_PREFIX: &str = "launch";
+    /// Session-delete key prefix. Parameterised by session id at call sites:
+    /// `format!("{DELETE_PREFIX}:{session_id}")`.
+    pub const DELETE_PREFIX: &str = "delete";
+}
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -405,27 +427,37 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         EventReaction::Status(update) => vec![WireStatus::from_update(update)],
         EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
         EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
+            // Create-kind: failed before a session existed, so there is no busy
+            // to replace. The error stays unkeyed (an anonymous persistent toast).
             AgentLaunchFailedOutcome::Create { message } => {
                 vec![WireStatus::new("error", message.clone())]
             }
+            // Reconnect-family variants carry session_id (added in Task 4) so the
+            // failure replaces the "launching…" busy that shares the same key.
             AgentLaunchFailedOutcome::Reconnect {
+                session_id,
                 branch_name,
                 message,
-            } => vec![WireStatus::new(
+            } => vec![WireStatus::keyed(
+                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
                 "error",
                 format!("Reconnect failed for agent \"{branch_name}\": {message}"),
             )],
             AgentLaunchFailedOutcome::ForceReconnect {
+                session_id,
                 branch_name,
                 message,
-            } => vec![WireStatus::new(
+            } => vec![WireStatus::keyed(
+                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
                 "error",
                 format!("Fresh restart failed for agent \"{branch_name}\": {message}"),
             )],
             AgentLaunchFailedOutcome::StartupAutoReopen {
+                session_id,
                 branch_name,
                 message,
-            } => vec![WireStatus::new(
+            } => vec![WireStatus::keyed(
+                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
                 "warning",
                 format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
             )],
@@ -435,35 +467,51 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         // dispatch set, or it lingers forever on the web. Mirror the TUI's
         // `apply_agent_launch_ready_view`: the create/reconnect status on success,
         // an error if persistence or the startup command failed.
-        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
-            AgentLaunchReadyView::CreatePersistFailed { error } => {
-                vec![WireStatus::new(
-                    "error",
-                    format!("Failed to persist session: {error}"),
-                )]
+        EventReaction::AgentLaunchReadyView(outcome) => {
+            let session_id = &outcome.session.id;
+            let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
+            match &outcome.view {
+                AgentLaunchReadyView::CreatePersistFailed { error } => {
+                    vec![WireStatus::keyed(
+                        launch_key,
+                        "error",
+                        format!("Failed to persist session: {error}"),
+                    )]
+                }
+                AgentLaunchReadyView::CreateCommitted {
+                    status_message,
+                    startup_result_error,
+                } => match startup_result_error {
+                    Some(err) => vec![WireStatus::keyed(
+                        launch_key,
+                        "error",
+                        format!(
+                            "Startup command failed for agent \"{}\": {err}. Run \
+                             read-startup-command-logs for details.",
+                            outcome.session.branch_name
+                        ),
+                    )],
+                    None => vec![WireStatus::keyed(
+                        launch_key,
+                        "info",
+                        status_message.clone(),
+                    )],
+                },
+                AgentLaunchReadyView::Reconnect { status_message }
+                | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
+                    vec![WireStatus::keyed(
+                        launch_key,
+                        "info",
+                        status_message.clone(),
+                    )]
+                }
+                AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
+                    vec![]
+                }
             }
-            AgentLaunchReadyView::CreateCommitted {
-                status_message,
-                startup_result_error,
-            } => match startup_result_error {
-                Some(err) => vec![WireStatus::new(
-                    "error",
-                    format!(
-                        "Startup command failed for agent \"{}\": {err}. Run \
-                         read-startup-command-logs for details.",
-                        outcome.session.branch_name
-                    ),
-                )],
-                None => vec![WireStatus::new("info", status_message.clone())],
-            },
-            AgentLaunchReadyView::Reconnect { status_message }
-            | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
-                vec![WireStatus::new("info", status_message.clone())]
-            }
-            AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
-                vec![]
-            }
-        },
+        }
+        // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
+        // unkeyed (anonymous slot).
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
@@ -471,18 +519,19 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
             .into_iter()
             .collect(),
         EventReaction::OpenConfigReloadFailedModal(message) => {
-            vec![WireStatus::new(
-                "error",
-                format!("Config reload failed: {message}"),
-            )]
+            vec![
+                WireStatus::new("error", format!("Config reload failed: {message}"))
+                    .with_key(status_keys::CONFIG_RELOAD),
+            ]
         }
         EventReaction::ProjectWorktreesArrived {
+            project_id,
             result: Err(message),
-            ..
-        } => vec![WireStatus::new(
-            "error",
-            format!("Failed to list worktrees: {message}"),
-        )],
+        } => vec![
+            WireStatus::new("error", format!("Failed to list worktrees: {message}")).with_key(
+                format!("{}:{project_id}", status_keys::WORKTREE_LIST_PREFIX),
+            ),
+        ],
         _ => vec![],
     }
 }
@@ -1287,20 +1336,23 @@ impl Engine {
     /// deletions finish without a view layer. Non-delete reactions return `[]`.
     pub fn drive_delete_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
         match reaction {
-            EventReaction::BeginDeleteSessionView(view) => match &view.outcome {
-                BeginDeleteSessionOutcome::AlreadyInFlight => vec![WireStatus::new(
-                    "error",
-                    "Deletion already in progress for this agent. Wait for it to finish.",
-                )],
-                BeginDeleteSessionOutcome::NotFound => vec![],
-                BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                    vec![WireStatus::new("busy", busy_message.clone())]
+            EventReaction::BeginDeleteSessionView(view) => {
+                let delete_key = format!("{}:{}", status_keys::DELETE_PREFIX, view.session_id);
+                match &view.outcome {
+                    BeginDeleteSessionOutcome::AlreadyInFlight => vec![WireStatus::new(
+                        "error",
+                        "Deletion already in progress for this agent. Wait for it to finish.",
+                    )],
+                    BeginDeleteSessionOutcome::NotFound => vec![],
+                    BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
+                        vec![WireStatus::new("busy", busy_message.clone()).with_key(delete_key)]
+                    }
+                    BeginDeleteSessionOutcome::Inline { removal } => {
+                        let removal = *removal;
+                        self.finish_delete_and_status(&view.session_id, removal)
+                    }
                 }
-                BeginDeleteSessionOutcome::Inline { removal } => {
-                    let removal = *removal;
-                    self.finish_delete_and_status(&view.session_id, removal)
-                }
-            },
+            }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branch_already_deleted,
@@ -1317,11 +1369,14 @@ impl Engine {
                     vec![]
                 }
             }
-            EventReaction::WorktreeRemoveFailed { message, .. } => {
-                vec![WireStatus::new(
-                    "error",
-                    format!("Worktree delete failed: {message}"),
-                )]
+            EventReaction::WorktreeRemoveFailed {
+                session_id,
+                message,
+            } => {
+                vec![
+                    WireStatus::new("error", format!("Worktree delete failed: {message}"))
+                        .with_key(format!("{}:{session_id}", status_keys::DELETE_PREFIX)),
+                ]
             }
             _ => vec![],
         }
@@ -1332,20 +1387,24 @@ impl Engine {
         session_id: &str,
         removal: WorktreeRemoval,
     ) -> Vec<WireStatus> {
+        let delete_key = format!("{}:{session_id}", status_keys::DELETE_PREFIX);
         match self.apply(Command::FinishDeleteSession {
             session_id: session_id.to_string(),
             removal,
             update_status: true,
         }) {
-            Ok(EventReaction::FinishDeleteSessionView(view)) => vec![WireStatus::new(
-                "info",
-                delete_session_status_message(&view.outcome, &view.removal),
-            )],
+            Ok(EventReaction::FinishDeleteSessionView(view)) => vec![
+                WireStatus::new(
+                    "info",
+                    delete_session_status_message(&view.outcome, &view.removal),
+                )
+                .with_key(delete_key),
+            ],
             Ok(_) => vec![],
-            Err(e) => vec![WireStatus::new(
-                "error",
-                format!("Session cleanup failed: {e:#}"),
-            )],
+            Err(e) => vec![
+                WireStatus::new("error", format!("Session cleanup failed: {e:#}"))
+                    .with_key(delete_key),
+            ],
         }
     }
 
@@ -2966,6 +3025,7 @@ mod tests {
     fn wire_statuses_formats_launch_failure() {
         let r =
             EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+                session_id: "s1".to_string(),
                 branch_name: "feat".to_string(),
                 message: "nope".to_string(),
             }));
@@ -5137,5 +5197,101 @@ mod tests {
             keyed_json.contains("\"pull\""),
             "key value must appear in JSON: {keyed_json}"
         );
+    }
+
+    #[test]
+    fn wire_statuses_key_config_reload_and_worktree_failures() {
+        let r = EventReaction::OpenConfigReloadFailedModal("x".into());
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("config-reload")
+        );
+
+        let r = EventReaction::ProjectWorktreesArrived {
+            project_id: "p1".into(),
+            result: Err("boom".into()),
+        };
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("worktree-list:p1")
+        );
+    }
+
+    #[test]
+    fn wire_statuses_key_launch_ready_replaces_busy() {
+        // All AgentLaunchReadyView arms that emit a status must carry the
+        // `launch:{session_id}` key so the final replaces the busy on the web.
+        let session = sample_session("s1", "p1", "feat");
+
+        let outcome = crate::engine::AgentLaunchReadyOutcome {
+            session: session.clone(),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Launched.".to_string(),
+                startup_result_error: None,
+            },
+        };
+        let s =
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
+        assert_eq!(s[0].key.as_deref(), Some("launch:s1"));
+
+        let outcome_fail = crate::engine::AgentLaunchReadyOutcome {
+            session: session.clone(),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreatePersistFailed {
+                error: "db error".to_string(),
+            },
+        };
+        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
+            outcome_fail,
+        )));
+        assert_eq!(s[0].key.as_deref(), Some("launch:s1"));
+    }
+
+    #[test]
+    fn wire_statuses_key_launch_failed_reconnect_variants() {
+        // Reconnect-family failures carry the session_id so they replace the busy.
+        let r =
+            EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+                session_id: "s1".to_string(),
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            }));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("launch:s1")
+        );
+
+        let r = EventReaction::AgentLaunchFailedView(Box::new(
+            AgentLaunchFailedOutcome::ForceReconnect {
+                session_id: "s2".to_string(),
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            },
+        ));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("launch:s2")
+        );
+
+        let r = EventReaction::AgentLaunchFailedView(Box::new(
+            AgentLaunchFailedOutcome::StartupAutoReopen {
+                session_id: "s3".to_string(),
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            },
+        ));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("launch:s3")
+        );
+
+        // Create-kind must remain UNKEYED (no busy was set for it).
+        let r = EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Create {
+            message: "boom".to_string(),
+        }));
+        assert_eq!(wire_statuses_from_reaction(&r)[0].key, None);
     }
 }
