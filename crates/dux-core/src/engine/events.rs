@@ -247,17 +247,27 @@ pub enum AgentLaunchFailedOutcome {
     Create {
         message: String,
     },
+    /// Reconnect-family failure. `session_id` is the pre-existing session that
+    /// was being relaunched — used by the wire layer to key the failure status
+    /// so it replaces the corresponding "launching…" busy toast.
     Reconnect {
+        session_id: String,
         branch_name: String,
         message: String,
     },
+    /// Force-reconnect failure. `session_id` carries the pre-existing session
+    /// id for the same keying purpose as `Reconnect`.
     ForceReconnect {
+        session_id: String,
         branch_name: String,
         message: String,
     },
     /// Engine logged + marked Detached; App has nothing to do.
     ResumeFallback,
+    /// Startup-auto-reopen failure. `session_id` carries the pre-existing
+    /// session id for the same keying purpose as `Reconnect`.
     StartupAutoReopen {
+        session_id: String,
         branch_name: String,
         message: String,
     },
@@ -956,10 +966,12 @@ impl Engine {
                 AgentLaunchFailedOutcome::Create { message }
             }
             AgentLaunchKind::Reconnect { .. } => AgentLaunchFailedOutcome::Reconnect {
+                session_id: session.id,
                 branch_name: session.branch_name,
                 message,
             },
             AgentLaunchKind::ForceReconnect { .. } => AgentLaunchFailedOutcome::ForceReconnect {
+                session_id: session.id,
                 branch_name: session.branch_name,
                 message,
             },
@@ -977,6 +989,7 @@ impl Engine {
                     session.branch_name, message,
                 ));
                 AgentLaunchFailedOutcome::StartupAutoReopen {
+                    session_id: session.id,
                     branch_name: session.branch_name,
                     message,
                 }
@@ -2225,8 +2238,8 @@ mod tests {
         let outcome = engine.process_agent_launch_failed(data);
         assert!(matches!(
             outcome,
-            AgentLaunchFailedOutcome::Reconnect { branch_name, message }
-                if branch_name == "feat/x" && message == "boom"
+            AgentLaunchFailedOutcome::Reconnect { session_id, branch_name, message }
+                if session_id == "s1" && branch_name == "feat/x" && message == "boom"
         ));
     }
 
@@ -2237,8 +2250,8 @@ mod tests {
         let outcome = engine.process_agent_launch_failed(data);
         assert!(matches!(
             outcome,
-            AgentLaunchFailedOutcome::StartupAutoReopen { branch_name, message }
-                if branch_name == "feat/x" && message == "boom"
+            AgentLaunchFailedOutcome::StartupAutoReopen { session_id, branch_name, message }
+                if session_id == "s1" && branch_name == "feat/x" && message == "boom"
         ));
     }
 
