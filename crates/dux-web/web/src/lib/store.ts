@@ -485,8 +485,11 @@ async function recheckAuthAfterFailure(): Promise<void> {
   }
 }
 
-// Engine command results route to sonner toasts. The status line was removed
-// in T14; toasts are the sole web surface for engine-driven status.
+// Engine command results (direct command/reorder responses) route to sonner
+// toasts via showStatusToast. Toasts are the sole web surface for engine-driven
+// status; keyed toasts use the status key as the sonner id so a later
+// success/clear dismisses exactly the right entry. A `status_cleared` event
+// on the WS channel calls toast.dismiss(key) for the same reason.
 socket.onCommandResult = (status, error) => {
   if (error) {
     // A rejected reorder (stale/partial id set) comes back as an error here;
