@@ -1311,6 +1311,7 @@ impl App {
             pty_activity: HashMap::new(),
             pty_input: HashMap::new(),
             last_foreground_refresh: None,
+            pending_auth_users: None,
         };
         Self::assemble(
             engine,
