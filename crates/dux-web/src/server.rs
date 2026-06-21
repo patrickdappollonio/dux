@@ -633,6 +633,7 @@ async fn handle_socket(
             let _ = send_json(
                 &sink,
                 &ServerMessage::Status {
+                    key: None,
                     tone: snapshot.tone,
                     message: snapshot.message,
                 },
@@ -652,6 +653,7 @@ async fn handle_socket(
                 match status_rx.recv().await {
                     Ok(status) => {
                         let msg = ServerMessage::Status {
+                            key: None,
                             tone: status.tone,
                             message: status.message,
                         };
