@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,9 +172,264 @@ impl StatusLine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Keyed multi-status controller
+// ---------------------------------------------------------------------------
+
+/// A monotonic per-key generation token. A producer that re-emits on the same
+/// key bumps the token; a clear/success only removes the entry when the token it
+/// carries MATCHES the stored one, so a stale success can never dismiss a newer
+/// status that a concurrent retry placed on the same key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Generation(pub u64);
+
+/// One open status, keyed or anonymous.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyedStatus {
+    /// `None` = the anonymous slot (unkeyed transients); `Some` = a keyed op.
+    pub key: Option<String>,
+    pub tone: StatusTone,
+    pub message: String,
+    pub generation: Generation,
+    /// Wall-clock time when this status was last set. Used for auto-clear and
+    /// busy-timeout decisions in `tick`.
+    since: Instant,
+    /// Monotonic insertion counter for `most_recent()` disambiguation when two
+    /// entries share the same `since` timestamp.
+    seq: u64,
+}
+
+/// The wire-safe projection of one open keyed status (snapshot + broadcast).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyedWireStatus {
+    pub key: Option<String>,
+    pub tone: String, // StatusTone::as_wire()
+    pub message: String,
+}
+
+/// What `tick` changed, so the web actor can broadcast precise StatusCleared /
+/// status frames and the TUI can re-render.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusTickChanges {
+    pub cleared_keys: Vec<Option<String>>, // None = the anonymous slot cleared
+    pub upgraded: Vec<KeyedWireStatus>,    // busy→warning replacements
+}
+
+/// A keyed multi-status controller.
+///
+/// Holds one anonymous slot (for unkeyed transient messages) and a
+/// `String → KeyedStatus` map for named operations. Each emit bumps a
+/// generation token on its key so that a stale-success clear from a prior
+/// attempt can never silently dismiss a newer, live status.
+pub struct KeyedStatusController {
+    /// The anonymous slot; most-recent-wins.
+    anon: Option<KeyedStatus>,
+    /// Named entries in insertion order.
+    entries: IndexMap<String, KeyedStatus>,
+    clear_after: Duration,
+    /// Monotonic counter incremented on every `set` call. Used to order entries
+    /// when two share the same `since` timestamp.
+    next_seq: u64,
+    /// Monotonic generation counter incremented for every `set` call.
+    next_gen: u64,
+}
+
+impl KeyedStatusController {
+    pub fn with_clear_after(clear_after: Duration) -> Self {
+        Self {
+            anon: None,
+            entries: IndexMap::new(),
+            clear_after,
+            next_seq: 0,
+            next_gen: 0,
+        }
+    }
+
+    pub fn set_clear_after(&mut self, clear_after: Duration) {
+        self.clear_after = clear_after;
+    }
+
+    /// Set/replace a status.
+    ///
+    /// - `key == None` writes the anonymous slot (most-recent-wins).
+    /// - `key == Some(_)` upserts the named entry and bumps its generation.
+    ///
+    /// Returns the stored entry's generation so a producer can correlate a
+    /// later explicit clear.
+    pub fn set(
+        &mut self,
+        now: Instant,
+        key: Option<String>,
+        tone: StatusTone,
+        message: impl Into<String>,
+    ) -> Generation {
+        let generation = Generation(self.next_gen);
+        let seq = self.next_seq;
+        self.next_gen += 1;
+        self.next_seq += 1;
+
+        let entry = KeyedStatus {
+            key: key.clone(),
+            tone,
+            message: message.into(),
+            generation,
+            since: now,
+            seq,
+        };
+
+        match key {
+            None => {
+                self.anon = Some(entry);
+            }
+            Some(k) => {
+                self.entries.insert(k, entry);
+            }
+        }
+
+        generation
+    }
+
+    /// Remove a keyed entry IFF the carried generation matches the stored one
+    /// (the clear-race guard).
+    ///
+    /// - `generation == None` clears unconditionally (used by the auto-clear
+    ///   tick for expired Info entries).
+    ///
+    /// Returns `true` if anything was removed.
+    pub fn clear(&mut self, key: &str, generation: Option<Generation>) -> bool {
+        if let Some(entry) = self.entries.get(key) {
+            let matches = match generation {
+                None => true,
+                Some(g) => entry.generation == g,
+            };
+            if matches {
+                self.entries.swap_remove(key);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Expire timed-out entries.
+    ///
+    /// - `Info`/success entries older than `clear_after` are removed.
+    /// - `Busy` entries older than `busy_timeout` are upgraded in-place to a
+    ///   `Warning` with a "timed out" message, so a leaked busy is never
+    ///   immortal.
+    ///
+    /// Returns the set of changes the caller must broadcast.
+    pub fn tick(&mut self, now: Instant, busy_timeout: Duration) -> StatusTickChanges {
+        let mut changes = StatusTickChanges::default();
+
+        // Check the anonymous slot.
+        let anon_expired = self.anon.as_ref().is_some_and(|a| {
+            a.tone.auto_clears()
+                && !self.clear_after.is_zero()
+                && now.duration_since(a.since) >= self.clear_after
+        });
+        if anon_expired {
+            self.anon = None;
+            changes.cleared_keys.push(None);
+        }
+
+        // Collect keys to operate on; two passes to avoid borrow issues.
+        let mut to_clear: Vec<String> = Vec::new();
+        let mut to_upgrade: Vec<String> = Vec::new();
+
+        for (key, entry) in &self.entries {
+            let age = now.duration_since(entry.since);
+            match entry.tone {
+                StatusTone::Info if !self.clear_after.is_zero() && age >= self.clear_after => {
+                    to_clear.push(key.clone());
+                }
+                StatusTone::Busy if age >= busy_timeout => {
+                    to_upgrade.push(key.clone());
+                }
+                _ => {}
+            }
+        }
+
+        for key in to_clear {
+            self.entries.swap_remove(&key);
+            changes.cleared_keys.push(Some(key));
+        }
+
+        for key in to_upgrade {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                let generation = Generation(self.next_gen);
+                let seq = self.next_seq;
+                self.next_gen += 1;
+                self.next_seq += 1;
+                entry.tone = StatusTone::Warning;
+                entry.message = "timed out — check dux.log".to_string();
+                entry.generation = generation;
+                entry.since = now;
+                entry.seq = seq;
+                changes.upgraded.push(KeyedWireStatus {
+                    key: Some(key.clone()),
+                    tone: StatusTone::Warning.as_wire().to_string(),
+                    message: entry.message.clone(),
+                });
+            }
+        }
+
+        changes
+    }
+
+    /// All open statuses (anonymous slot first if present, then keyed entries
+    /// in insertion order), for the reconnect snapshot.
+    pub fn snapshot(&self) -> Vec<KeyedWireStatus> {
+        let mut out = Vec::new();
+        if let Some(ref anon) = self.anon {
+            out.push(KeyedWireStatus {
+                key: None,
+                tone: anon.tone.as_wire().to_string(),
+                message: anon.message.clone(),
+            });
+        }
+        for entry in self.entries.values() {
+            out.push(KeyedWireStatus {
+                key: Some(entry.key.clone().unwrap_or_default()),
+                tone: entry.tone.as_wire().to_string(),
+                message: entry.message.clone(),
+            });
+        }
+        out
+    }
+
+    /// The single line the TUI shows: the most-recently-set open status (keyed
+    /// or anonymous), or `None` when nothing is open.
+    ///
+    /// When two entries share the same `since` timestamp the one with the
+    /// higher sequence number wins (the later `set` call).
+    pub fn most_recent(&self) -> Option<KeyedWireStatus> {
+        let anon_ref = self.anon.as_ref();
+        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
+
+        let winner = match (anon_ref, keyed_ref) {
+            (None, None) => return None,
+            (Some(a), None) => a,
+            (None, Some(k)) => k,
+            (Some(a), Some(k)) => {
+                if (a.since, a.seq) >= (k.since, k.seq) {
+                    a
+                } else {
+                    k
+                }
+            }
+        };
+
+        Some(KeyedWireStatus {
+            key: winner.key.clone(),
+            tone: winner.tone.as_wire().to_string(),
+            message: winner.message.clone(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{StatusLine, StatusTone};
+    use super::{KeyedStatusController, StatusLine, StatusTone};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -263,5 +519,86 @@ mod tests {
         }
         // Unknown tones fall back to Info.
         assert_eq!(StatusTone::from_wire("nonsense"), StatusTone::Info);
+    }
+
+    // -----------------------------------------------------------------------
+    // KeyedStatusController tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn keyed_clear_only_fires_on_matching_generation() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        // First emit on "pull" (busy).
+        let g1 = c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling…");
+        // A concurrent retry replaces it (new generation).
+        let g2 = c.set(t0, Some("pull".into()), StatusTone::Error, "Pull failed.");
+        assert_ne!(g1, g2, "re-emit must bump the generation");
+        // The STALE success (g1) must NOT dismiss the newer error (g2).
+        assert!(
+            !c.clear("pull", Some(g1)),
+            "stale-gen clear must be ignored"
+        );
+        assert_eq!(c.most_recent().unwrap().tone, "error");
+        // The matching clear (g2) removes it.
+        assert!(c.clear("pull", Some(g2)));
+        assert!(c.most_recent().is_none());
+    }
+
+    #[test]
+    fn keyed_busy_expires_to_warning_after_timeout() {
+        let t0 = Instant::now();
+        let busy_timeout = Duration::from_secs(20);
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        c.set(
+            t0,
+            Some("launch".into()),
+            StatusTone::Busy,
+            "Launching agent…",
+        );
+        // Before the bound: untouched.
+        let changes = c.tick(t0 + Duration::from_secs(19), busy_timeout);
+        assert!(changes.upgraded.is_empty());
+        assert_eq!(c.most_recent().unwrap().tone, "busy");
+        // After the bound: upgraded to warning IN PLACE, broadcast in `upgraded`.
+        let changes = c.tick(t0 + Duration::from_secs(20), busy_timeout);
+        assert_eq!(changes.upgraded.len(), 1);
+        assert_eq!(changes.upgraded[0].key.as_deref(), Some("launch"));
+        assert_eq!(changes.upgraded[0].tone, "warning");
+        let mr = c.most_recent().unwrap();
+        assert_eq!(mr.tone, "warning");
+        assert!(mr.message.to_lowercase().contains("timed out"));
+    }
+
+    #[test]
+    fn keyed_info_auto_clears_anonymous_and_keyed() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        c.set(t0, None, StatusTone::Info, "Saved.");
+        c.set(t0, Some("commit".into()), StatusTone::Info, "Committed.");
+        // Warning/error do not auto-clear.
+        c.set(t0, Some("acme".into()), StatusTone::Error, "ACME error.");
+        let changes = c.tick(t0 + Duration::from_secs(6), Duration::from_secs(20));
+        // Both Info entries cleared; the error persists.
+        assert_eq!(changes.cleared_keys.len(), 2);
+        assert!(changes.cleared_keys.contains(&None));
+        assert!(changes.cleared_keys.contains(&Some("commit".to_string())));
+        assert_eq!(c.snapshot().len(), 1);
+        assert_eq!(c.snapshot()[0].key.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn snapshot_lists_every_open_status_for_reconnect() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO); // no auto-clear
+        c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling…");
+        c.set(t0, Some("launch".into()), StatusTone::Busy, "Launching…");
+        c.set(t0, None, StatusTone::Warning, "Heads up.");
+        let snap = c.snapshot();
+        assert_eq!(
+            snap.len(),
+            3,
+            "every open status must appear in the snapshot"
+        );
     }
 }
