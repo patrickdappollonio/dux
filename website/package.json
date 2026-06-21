@@ -18,7 +18,7 @@
     "@astrojs/rss": "^4.0.18",
     "@astrojs/sitemap": "^3.7.3",
     "@tailwindcss/postcss": "^4.3.0",
-    "astro": "^6.4.3",
+    "astro": "^6.4.8",
     "astro-pagefind": "^2.0.0",
     "pagefind": "^1.5.2",
     "rehype-autolink-headings": "^7.1.0",
