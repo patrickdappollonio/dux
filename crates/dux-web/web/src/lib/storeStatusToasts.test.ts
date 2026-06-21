@@ -147,4 +147,19 @@ describe("engine status → sonner toast routing", () => {
       message: "Status bar message.",
     })
   })
+
+  it("commit-success status routes through engine (not a local CommitDialog toast)", async () => {
+    // The engine emits a keyed "commit" status on success; that reaches the
+    // client as an onStatus event and surfaces as a toast.success here.
+    // CommitDialog.tsx must NOT fire its own toast.success — this test confirms
+    // the engine path works so there is nothing for the component to duplicate.
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+
+    mod.socket.onStatus("commit", "info", "Changes committed successfully.")
+    expect(toast.success).toHaveBeenCalledWith("Changes committed successfully.", {
+      id: "commit",
+      duration: 6000,
+    })
+  })
 })
