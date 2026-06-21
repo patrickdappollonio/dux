@@ -25,6 +25,15 @@ pub mod status_keys {
     /// Session-delete key prefix. Parameterised by session id at call sites:
     /// `format!("{DELETE_PREFIX}:{session_id}")`.
     pub const DELETE_PREFIX: &str = "delete";
+    /// Checkout-project-default-branch key prefix. Parameterised by project id
+    /// at call sites: `format!("{CHECKOUT_DEFAULT_PREFIX}:{project_id}")`.
+    pub const CHECKOUT_DEFAULT_PREFIX: &str = "checkout-default";
+    /// Add-project-checkout-default key prefix. Parameterised by path at call
+    /// sites: `format!("{ADD_PROJECT_CHECKOUT_PREFIX}:{path}")`.
+    pub const ADD_PROJECT_CHECKOUT_PREFIX: &str = "add-project-checkout";
+    /// PR-lookup key prefix. Parameterised by project id at call sites:
+    /// `format!("{PR_LOOKUP_PREFIX}:{project_id}")`.
+    pub const PR_LOOKUP_PREFIX: &str = "pr-lookup";
 }
 
 use std::collections::BTreeMap;
@@ -956,10 +965,11 @@ impl Engine {
         } else {
             format!("Launching agent \"{branch_name}\"...")
         };
+        let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
         match reaction {
             EventReaction::DispatchAgentLaunchView(view) => {
                 if view.launched {
-                    Ok(Some(WireStatus::new("busy", busy)))
+                    Ok(Some(WireStatus::new("busy", busy).with_key(launch_key)))
                 } else {
                     Ok(view.status.as_ref().map(WireStatus::from_update))
                 }
@@ -1011,13 +1021,14 @@ impl Engine {
             "Checking the default branch for project \"{}\"...",
             project.name
         );
+        let checkout_key = format!("{}:{project_id}", status_keys::CHECKOUT_DEFAULT_PREFIX);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_checkout_project_default_branch_inspection_job(
                 project, worker_tx,
             );
         });
-        Ok(WireStatus::new("busy", busy))
+        Ok(WireStatus::new("busy", busy).with_key(checkout_key))
     }
 
     /// Check out the repo's default branch first, then add it as a project,
@@ -1061,11 +1072,12 @@ impl Engine {
         // (reason "before adding the project").
         let busy =
             format!("Checking out \"{default_branch}\" in {path_str} before adding the project...");
+        let checkout_add_key = format!("{}:{path_str}", status_keys::ADD_PROJECT_CHECKOUT_PREFIX);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_add_project_checkout_job(action, default_branch, worker_tx);
         });
-        Ok(WireStatus::new("busy", busy))
+        Ok(WireStatus::new("busy", busy).with_key(checkout_add_key))
     }
 
     /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
@@ -1144,12 +1156,13 @@ impl Engine {
         // does the same with `None` for the name). Busy copy mirrors the TUI's
         // `set_busy` in `dispatch_pull_request_lookup`.
         let busy = format!("Resolving PR for project \"{}\"...", project.name);
+        let pr_key = format!("{}:{project_id}", status_keys::PR_LOOKUP_PREFIX);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::gh::run_pull_request_lookup_job(project, raw_input, custom_name, worker_tx);
         });
-        Ok(WireStatus::new("busy", busy))
+        Ok(WireStatus::new("busy", busy).with_key(pr_key))
     }
 
     /// Drive a PR-lookup follow-up to completion, returning user-facing statuses.
@@ -2721,6 +2734,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checkout_default_branch_busy_is_keyed() {
+        // `sample_project` has path_missing=false, so the busy is returned
+        // synchronously (the inspection worker is spawned in the background and
+        // its result is irrelevant to this test).
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".into(),
+            })
+            .expect("apply");
+        let s = outcome.status.expect("busy status");
+        assert_eq!(s.tone, "busy");
+        assert_eq!(
+            s.key.as_deref(),
+            Some("checkout-default:p1"),
+            "checkout busy must carry the keyed project id"
+        );
+    }
+
+    #[test]
+    fn create_agent_from_pr_busy_is_keyed() {
+        // When gh is available and the project exists, the synchronous busy
+        // returned by `CreateAgentFromPr` must carry `pr-lookup:{project_id}`.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: "my-agent".to_string(),
+            })
+            .expect("dispatch lookup");
+        let status = outcome.status.expect("synchronous busy status");
+        assert_eq!(status.tone, "busy");
+        assert_eq!(
+            status.key.as_deref(),
+            Some("pr-lookup:p1"),
+            "PR busy must carry the pr-lookup key"
+        );
+    }
+
     // Clone `origin` (init'd on `default_branch`) into a fresh working tree and
     // check out `feature/x`, so HEAD sits off the KNOWN default — `git clone`
     // sets refs/remotes/origin/HEAD, so `branch_warning_kind` resolves Known.
@@ -2920,6 +2981,31 @@ mod tests {
         assert!(
             err.to_string().contains("not a git repository"),
             "err: {err}"
+        );
+    }
+
+    #[test]
+    fn add_project_checkout_default_busy_is_keyed() {
+        // Known default ("main") differs from HEAD ("feature/x"): the wire
+        // returns a keyed busy with `add-project-checkout:{path}` so the web
+        // can replace it when the switch worker completes.
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        let path_str = work.to_string_lossy().to_string();
+        let (mut engine, _tmp) = test_engine();
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: path_str.clone(),
+                name: "Demo".to_string(),
+            })
+            .expect("add-checkout");
+        let status = outcome.status.expect("busy status");
+        assert_eq!(status.tone, "busy");
+        let expected_key = format!("add-project-checkout:{path_str}");
+        assert_eq!(
+            status.key.as_deref(),
+            Some(expected_key.as_str()),
+            "add-project-checkout busy must carry the keyed path"
         );
     }
 
@@ -4253,6 +4339,34 @@ mod tests {
             status.message.contains("Starting fresh agent \"feat\""),
             "msg: {}",
             status.message
+        );
+    }
+
+    #[test]
+    fn reconnect_session_busy_is_keyed_with_launch_session_id() {
+        // The busy emitted by a successful reconnect dispatch must carry
+        // `launch:{session_id}` so the web can replace it in place when the
+        // launch later completes or fails.
+        let (mut engine, tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat");
+        let wt = tmp.path().join("wt-s1-keyed");
+        std::fs::create_dir_all(&wt).unwrap();
+        session.worktree_path = wt.to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: false,
+            })
+            .expect("apply_wire");
+        let status = outcome.status.expect("busy status");
+        assert_eq!(status.tone, "busy");
+        assert_eq!(
+            status.key.as_deref(),
+            Some("launch:s1"),
+            "reconnect busy must carry launch key"
         );
     }
 
