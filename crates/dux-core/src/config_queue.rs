@@ -1,6 +1,8 @@
 //! One ordered, off-thread, atomic config writer per process.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,6 +13,7 @@ use crate::config_write::{Durability, save_config_with};
 const QUIET_WINDOW: Duration = Duration::from_millis(250);
 const EAGER_TIMEOUT: Duration = Duration::from_secs(2);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const LAZY_INFLIGHT_CAP: usize = 128;
 
 enum WriteMsg {
     Lazy(Config),
@@ -31,6 +34,7 @@ enum WriteMsg {
 pub struct ConfigWriteQueue {
     tx: Sender<WriteMsg>,
     writer: Option<JoinHandle<()>>,
+    lazy_inflight: Arc<AtomicUsize>,
 }
 
 /// Holds a reload/recover barrier open. The writer is paused (drained) while the
@@ -49,20 +53,35 @@ impl Drop for QuiesceGuard {
 impl ConfigWriteQueue {
     pub fn new(config_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
+        let lazy_inflight = Arc::new(AtomicUsize::new(0));
         let writer = thread::Builder::new()
             .name("config-writer".into())
-            .spawn(move || writer_loop(rx, config_path))
+            .spawn({
+                let lazy_inflight = lazy_inflight.clone();
+                move || writer_loop(rx, config_path, lazy_inflight)
+            })
             .expect("spawn config-writer thread");
         ConfigWriteQueue {
             tx,
             writer: Some(writer),
+            lazy_inflight,
         }
     }
 
     /// Deferred, coalesced, fire-and-forget. A dead writer is surfaced lazily via
     /// the next eager/flush; lazy itself never blocks.
     pub fn save_lazy(&self, config: Config) {
-        let _ = self.tx.send(WriteMsg::Lazy(config));
+        // Bound in-flight lazy snapshots so a stalled or paused writer cannot let
+        // the channel grow without limit. Lazy writes are coalesced anyway, so
+        // dropping a snapshot once the backlog is already deep is acceptable — the
+        // fixed deadline still lands a write.
+        if self.lazy_inflight.load(Ordering::Relaxed) >= LAZY_INFLIGHT_CAP {
+            return;
+        }
+        self.lazy_inflight.fetch_add(1, Ordering::Relaxed);
+        if self.tx.send(WriteMsg::Lazy(config)).is_err() {
+            self.lazy_inflight.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Awaited write: blocks (a few ms) for the result, ~2 s timeout. On a dead
@@ -99,7 +118,15 @@ impl ConfigWriteQueue {
     pub fn flush(&self) {
         let (ack, rx) = mpsc::sync_channel(0);
         if self.tx.send(WriteMsg::Flush(ack)).is_ok() {
-            let _ = rx.recv_timeout(FLUSH_TIMEOUT);
+            match rx.recv_timeout(FLUSH_TIMEOUT) {
+                Ok(()) => {}
+                Err(RecvTimeoutError::Timeout) => crate::logger::error(
+                    "config flush timed out (disk may be stalled); a pending write may be lost",
+                ),
+                Err(RecvTimeoutError::Disconnected) => crate::logger::error(
+                    "config writer thread died before flush; a pending write may be lost",
+                ),
+            }
         }
     }
 
@@ -108,8 +135,24 @@ impl ConfigWriteQueue {
     /// while holding the guard.
     pub fn quiesce(&self) -> QuiesceGuard {
         let (ack, rx) = mpsc::sync_channel(0);
-        if self.tx.send(WriteMsg::Pause(ack)).is_ok() {
-            let _ = rx.recv_timeout(FLUSH_TIMEOUT);
+        let dead = if self.tx.send(WriteMsg::Pause(ack)).is_ok() {
+            match rx.recv_timeout(FLUSH_TIMEOUT) {
+                Ok(()) => false,
+                Err(RecvTimeoutError::Timeout) => {
+                    crate::logger::error(
+                        "config writer did not acknowledge pause within timeout; a direct config write may race a stalled flush",
+                    );
+                    false
+                }
+                Err(RecvTimeoutError::Disconnected) => true,
+            }
+        } else {
+            true
+        };
+        if dead {
+            crate::logger::error(
+                "config writer thread is gone; reload/recover proceeding without an active write barrier",
+            );
         }
         QuiesceGuard {
             tx: self.tx.clone(),
@@ -123,7 +166,11 @@ impl ConfigWriteQueue {
         let (tx, rx) = mpsc::channel::<WriteMsg>();
         drop(rx); // receiver gone → the writer is effectively dead
         let _ = config_path;
-        ConfigWriteQueue { tx, writer: None }
+        ConfigWriteQueue {
+            tx,
+            writer: None,
+            lazy_inflight: Arc::new(AtomicUsize::new(0)),
+        }
     }
 }
 
@@ -134,9 +181,11 @@ impl Drop for ConfigWriteQueue {
         // NOT fire at the in-process TUI→web flip, which MOVES the engine rather
         // than dropping it, so the queue keeps running across the flip.
         //
-        // Step 1 — send a Flush and wait for the writer to drain any pending lazy
-        // write.  flush() is bounded by FLUSH_TIMEOUT so Drop cannot hang the
-        // process indefinitely.
+        // Step 1 — drain any pending lazy write queued before the current state.
+        // flush() is bounded by FLUSH_TIMEOUT so Drop cannot hang indefinitely.
+        // Note: if a reload barrier is open, lazies that arrived *during* the
+        // barrier were intentionally discarded as stale snapshots (see the paused
+        // loop), so only writes from before the barrier land here.
         self.flush();
 
         // Step 2 — tell the writer to exit.  We cannot rely on channel disconnect:
@@ -149,13 +198,29 @@ impl Drop for ConfigWriteQueue {
 
         // Step 3 — join the writer thread for a clean shutdown.  Best-effort: if it
         // already finished or panicked (so the `Shutdown` send failed) we move on.
+        // join() is intentionally unbounded: an in-progress disk write must finish
+        // for a clean shutdown, so on a stalled disk Drop can wait up to
+        // FLUSH_TIMEOUT plus one write duration.
         if let Some(handle) = self.writer.take() {
             let _ = handle.join();
         }
     }
 }
 
-fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf) {
+fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicUsize>) {
+    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        writer_loop_inner(rx, path, lazy_inflight)
+    })) {
+        let msg = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        crate::logger::error(&format!("config-writer thread panicked: {msg}"));
+    }
+}
+
+fn writer_loop_inner(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicUsize>) {
     let mut pending: Option<Config> = None;
     let mut deadline: Option<Instant> = None;
 
@@ -178,6 +243,7 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf) {
         match msg {
             None => flush_pending(&path, &mut pending, &mut deadline),
             Some(WriteMsg::Lazy(cfg)) => {
+                lazy_inflight.fetch_sub(1, Ordering::Relaxed);
                 pending = Some(cfg);
                 if deadline.is_none() {
                     deadline = Some(Instant::now() + QUIET_WINDOW);
@@ -201,19 +267,32 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf) {
                 flush_pending(&path, &mut pending, &mut deadline);
                 let _ = ack.send(());
                 // Hold paused until Resume; drop stray lazies, reject stray eagers.
+                let mut depth: usize = 1;
                 loop {
                     match rx.recv() {
-                        Ok(WriteMsg::Resume) => break,
+                        Ok(WriteMsg::Resume) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
                         Ok(WriteMsg::Shutdown) => return, // exit even while paused
-                        Ok(WriteMsg::Lazy(_)) => {}       // stale snapshot — drop
+                        Ok(WriteMsg::Lazy(_)) => {
+                            lazy_inflight.fetch_sub(1, Ordering::Relaxed);
+                        } // stale snapshot — drop
                         Ok(WriteMsg::Eager { reply, .. }) => {
                             let _ =
                                 reply.send(Err("config busy (reload in progress); retry".into()));
                         }
                         Ok(WriteMsg::Flush(ack)) => {
+                            // pending was drained on pause entry and lazies arriving
+                            // during the barrier are discarded below, so nothing is
+                            // pending here — the ack truthfully means "drained".
+                            debug_assert!(pending.is_none());
                             let _ = ack.send(());
                         }
                         Ok(WriteMsg::Pause(ack)) => {
+                            depth += 1;
                             let _ = ack.send(());
                         }
                         Err(_) => return,
@@ -221,7 +300,13 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf) {
                 }
             }
             Some(WriteMsg::Resume) => {} // no-op when not paused
-            Some(WriteMsg::Shutdown) => break,
+            Some(WriteMsg::Shutdown) => {
+                // Drain any pending lazy before exiting, so a Shutdown that did
+                // not arrive through Drop's flush-first sequence still cannot drop
+                // a write. `return` matches the paused-loop exit below.
+                flush_pending(&path, &mut pending, &mut deadline);
+                return;
+            }
         }
     }
 }
@@ -390,6 +475,8 @@ mod tests {
         match done_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(()) => h.join().unwrap(),
             Err(_) => {
+                // On a real regression drop(q) is genuinely deadlocked, so the spawned
+                // thread cannot be joined (that would re-hang); we abandon it and fail.
                 panic!("ConfigWriteQueue::drop deadlocked while a QuiesceGuard was still alive")
             }
         }
@@ -420,6 +507,30 @@ mod tests {
         assert!(
             saved.contains("DROP_MARKER = \"flushed\""),
             "pending lazy write was NOT flushed on drop: {saved}"
+        );
+    }
+
+    /// A lazy write queued BEFORE the barrier opened must still land when the
+    /// queue is dropped while the barrier is open (proves Drop's flush drains the
+    /// pre-barrier pending write even in the paused-writer case).
+    #[test]
+    fn lazy_before_barrier_is_flushed_on_drop() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+
+        let saved = {
+            let q = ConfigWriteQueue::new(path.clone());
+            let mut cfg = Config::default();
+            cfg.env.insert("PRE_BARRIER".into(), "kept".into());
+            q.save_lazy(cfg); // queued before the barrier
+            let _guard = q.quiesce(); // drains the pre-barrier lazy, then pauses
+            drop(q); // guard still alive → paused-writer drop path
+            std::fs::read_to_string(&path).unwrap_or_default()
+        };
+        assert!(
+            saved.contains("PRE_BARRIER = \"kept\""),
+            "pre-barrier lazy was not flushed on drop: {saved}"
         );
     }
 }
