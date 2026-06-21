@@ -329,10 +329,10 @@ pub(crate) fn spawn_global_workers(engine: &mut Engine) {
     engine.spawn_gh_status_check();
 }
 
-/// How long to wait for an agent provider to come up before failing a subscribe.
-/// The launch runs in a background worker and the provider appears via the
-/// worker-event drain, so the subscribe reply is deferred until then.
-const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for an agent provider to come up before failing a subscribe,
+/// and the threshold after which a stale `Busy` entry is upgraded to `Warning`.
+/// Shared with the TUI via `dux_core::statusline::BUSY_TIMEOUT`.
+const LAUNCH_TIMEOUT: Duration = dux_core::statusline::BUSY_TIMEOUT;
 
 /// A subscribe that is waiting for its provider to be launched/resumed. The reply
 /// is held until `engine.providers` contains the session (success) or the
