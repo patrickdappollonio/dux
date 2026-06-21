@@ -208,7 +208,7 @@ impl App {
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
         match reaction {
             EventReaction::Nothing => {}
-            EventReaction::Status(StatusUpdate { tone, message }) => match tone {
+            EventReaction::Status(StatusUpdate { tone, message, .. }) => match tone {
                 StatusTone::Info => self.set_info(message),
                 StatusTone::Busy => self.set_busy(message),
                 StatusTone::Warning => self.set_warning(message),
