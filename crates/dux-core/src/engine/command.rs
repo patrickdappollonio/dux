@@ -779,8 +779,18 @@ impl Engine {
                 // races the reload), mark `reloading` (so config-mutating
                 // commands defer), and kick off the surface's reload worker. The
                 // barrier closes when `ConfigReloadReady` lands.
+                //
+                // If the writer never acknowledged the pause, the barrier is
+                // not effective — a still-running writer could clobber the
+                // reload's config write. Abort and let the caller retry.
+                let guard = self.config_writer.quiesce();
+                if !guard.is_acknowledged() {
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        "Config writer is busy; please retry.",
+                    )));
+                }
                 self.reloading = true;
-                self.reload_guard = Some(self.config_writer.quiesce());
+                self.reload_guard = Some(guard);
                 self.surface
                     .reload(self.paths.clone(), self.worker_tx.clone());
                 Ok(EventReaction::Nothing)
@@ -799,7 +809,15 @@ impl Engine {
                 // Overwrite a corrupt on-disk config with a fresh render of the
                 // in-memory config. Quiesce the writer for the duration of the
                 // direct write so a queued save can't clobber the recovery.
-                let _guard = self.config_writer.quiesce();
+                let guard = self.config_writer.quiesce();
+                if !guard.is_acknowledged() {
+                    // The writer never confirmed the pause (timeout or dead). Performing
+                    // the direct write would race a still-running writer. Abort and let
+                    // the caller retry once the writer is responsive.
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        "Config writer is busy; please retry.",
+                    )));
+                }
                 let body = self.surface.recover_render(&self.config);
                 match crate::config_write::write_config_secure(&self.paths.config_path, &body) {
                     Ok(()) => Ok(EventReaction::Status(StatusUpdate::info(
