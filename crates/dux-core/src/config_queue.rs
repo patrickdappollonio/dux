@@ -1,6 +1,5 @@
 //! One ordered, off-thread, atomic config writer per process.
 
-use std::mem;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -22,6 +21,11 @@ enum WriteMsg {
     Flush(SyncSender<()>),
     Pause(SyncSender<()>),
     Resume,
+    /// Stop the writer thread unconditionally — obeyed even while paused. Sent by
+    /// `Drop` so shutdown never depends on channel disconnect (a `QuiesceGuard`
+    /// holds a sender clone, so the channel can stay connected) or on guard drop
+    /// order.
+    Shutdown,
 }
 
 pub struct ConfigWriteQueue {
@@ -135,18 +139,16 @@ impl Drop for ConfigWriteQueue {
         // process indefinitely.
         self.flush();
 
-        // Step 2 — disconnect the sender so the writer loop exits after flush.
-        // We replace `self.tx` with a fresh disconnected channel; the old tx is
-        // then dropped, which disconnects the channel and causes the writer's
-        // blocking `recv()` to return `Err(Disconnected)` → `break`.
-        let (dead_tx, _dead_rx) = mpsc::channel::<WriteMsg>();
-        let _ = mem::replace(&mut self.tx, dead_tx);
-        // _dead_rx is dropped here, disconnecting dead_tx immediately.
+        // Step 2 — tell the writer to exit.  We cannot rely on channel disconnect:
+        // an outstanding `QuiesceGuard` holds a clone of the sender, so dropping
+        // our own `tx` would not disconnect the channel, and a paused writer would
+        // wait forever for a `Resume` that only arrives when the guard drops —
+        // which, on `Engine`, happens AFTER the queue.  `Shutdown` is obeyed even
+        // while paused, so shutdown is independent of guard lifetime/drop order.
+        let _ = self.tx.send(WriteMsg::Shutdown);
 
-        // Step 3 — join the writer thread for a clean shutdown.  The writer exited
-        // (or will exit within one recv round-trip) because the original tx is now
-        // gone.  Joining is best-effort: if the thread already finished or panicked
-        // we just move on.
+        // Step 3 — join the writer thread for a clean shutdown.  Best-effort: if it
+        // already finished or panicked (so the `Shutdown` send failed) we move on.
         if let Some(handle) = self.writer.take() {
             let _ = handle.join();
         }
@@ -202,7 +204,8 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf) {
                 loop {
                     match rx.recv() {
                         Ok(WriteMsg::Resume) => break,
-                        Ok(WriteMsg::Lazy(_)) => {} // stale snapshot — drop
+                        Ok(WriteMsg::Shutdown) => return, // exit even while paused
+                        Ok(WriteMsg::Lazy(_)) => {}       // stale snapshot — drop
                         Ok(WriteMsg::Eager { reply, .. }) => {
                             let _ =
                                 reply.send(Err("config busy (reload in progress); retry".into()));
@@ -218,6 +221,7 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf) {
                 }
             }
             Some(WriteMsg::Resume) => {} // no-op when not paused
+            Some(WriteMsg::Shutdown) => break,
         }
     }
 }
@@ -358,6 +362,40 @@ mod tests {
             err.to_lowercase().contains("retry") || err.to_lowercase().contains("busy"),
             "got: {err}"
         );
+    }
+
+    /// Dropping the queue while a `QuiesceGuard` is still alive (a reload barrier
+    /// left open — e.g. an `Engine` torn down mid-reload) must NOT deadlock. The
+    /// guard holds a clone of the writer's channel sender, so the channel never
+    /// disconnects; the paused writer must be stopped by an explicit shutdown
+    /// signal, independent of guard drop order. The drop runs on a worker thread
+    /// and signals completion so a regression times out here instead of hanging
+    /// the whole suite.
+    #[test]
+    fn drop_with_open_barrier_does_not_deadlock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+
+        let q = ConfigWriteQueue::new(path);
+        // Open the barrier and keep the guard alive PAST the queue's drop.
+        let guard = q.quiesce();
+
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
+        let h = thread::spawn(move || {
+            drop(q);
+            let _ = done_tx.send(());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(()) => h.join().unwrap(),
+            Err(_) => {
+                panic!("ConfigWriteQueue::drop deadlocked while a QuiesceGuard was still alive")
+            }
+        }
+        // The guard outlives the queue; dropping it now sends Resume to a writer
+        // that is already gone — a harmless no-op (mirrors Engine field order).
+        drop(guard);
     }
 
     /// Proves that a pending lazy write is flushed when the queue is dropped
