@@ -76,9 +76,15 @@ struct RawQuery {
     path: String,
 }
 
+fn is_false(v: &bool) -> bool {
+    !v
+}
+
 #[derive(Serialize)]
 struct FileList {
     files: Vec<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -104,7 +110,11 @@ async fn list_files(State(state): State<AppState>, Json(op): Json<SessionOp>) ->
         Err(r) => return r,
     };
     match tokio::task::spawn_blocking(move || dux_core::git::worktree_files(&worktree)).await {
-        Ok(Ok(files)) => Json(FileList { files }).into_response(),
+        Ok(Ok(listing)) => Json(FileList {
+            files: listing.files,
+            truncated: listing.truncated,
+        })
+        .into_response(),
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

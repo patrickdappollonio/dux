@@ -524,65 +524,84 @@ pub fn remove_worktree(
     })
 }
 
-/// List the worktree's browsable files for the editor tree: tracked files, plus
-/// untracked-not-ignored files, plus "loose" gitignored FILES (e.g. `.env`, a
-/// local config, a generated file you want to tweak). Paths are worktree-relative,
-/// NUL-parsed (so spaces/Unicode/newlines are safe), sorted and deduped.
-///
-/// Ignored files are surfaced because the editor edits the worktree, not git's
-/// changed set. A WHOLLY-ignored DIRECTORY (every entry ignored, e.g.
-/// `node_modules`, `target`, `dist`) is collapsed by `--directory` to a single
-/// `dir/` entry which we drop, so build output doesn't flood the tree. Ignored
-/// files sitting in a directory that ALSO has tracked content (a stray `*.log` or
-/// `.env` next to source) are not collapsed and appear individually — like the
-/// tracked/untracked listing itself, this set is uncapped, so a repo with
-/// thousands of such scattered ignored files will list them all. `.git/`
-/// internals are never listed by `ls-files`. Editing is gated separately by
-/// [`resolve_worktree_path`] containment, so a path need not appear here to be
-/// editable (e.g. a brand-new, uncommitted file).
-pub fn worktree_files(worktree_path: &Path) -> Result<Vec<String>> {
-    let wt = worktree_path.to_string_lossy();
-    // Tracked + untracked-not-ignored — the bulk of the set. Required.
-    let mut files = ls_files(&wt, &["--cached", "--others", "--exclude-standard", "-z"])?;
-    // Loose ignored files. Best-effort: a failure here (e.g. an older git) must
-    // not blank the whole listing. `--directory` collapses a fully-ignored dir to
-    // a single `dir/` entry, which we drop, so node_modules/target/etc. don't
-    // flood the tree; ignored files outside such a dir come through as real paths.
-    if let Ok(ignored) = ls_files(
-        &wt,
-        &[
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "-z",
-        ],
-    ) {
-        files.extend(ignored.into_iter().filter(|p| !p.ends_with('/')));
-    }
-    files.sort();
-    files.dedup();
-    Ok(files)
+/// Server-side cap on the number of entries returned by [`worktree_files`].
+/// Above this a `truncated` flag is set so the client can show a banner.
+/// 50 000 entries is ~5 MB of JSON at 100 bytes/path — reasonable for a
+/// single HTTP response. Most repos are well under 10 000.
+pub const WORKTREE_FILES_CAP: usize = 50_000;
+
+/// The file listing returned by [`worktree_files`].
+#[derive(Debug, Clone)]
+pub struct WorktreeFileList {
+    pub files: Vec<String>,
+    /// `true` when the walk hit [`WORKTREE_FILES_CAP`] and some entries were
+    /// omitted. The client should surface a banner.
+    pub truncated: bool,
 }
 
-/// Run `git -C <wt> ls-files <extra...>` and NUL-parse the output into
-/// worktree-relative paths. `extra` must include `-z` for the NUL parsing below.
-fn ls_files(wt: &str, extra: &[&str]) -> Result<Vec<String>> {
-    let mut args = vec!["-C", wt, "ls-files"];
-    args.extend_from_slice(extra);
-    let output = Command::new("git").args(&args).output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+/// Walk the worktree's filesystem and return every file path (worktree-relative)
+/// except the contents of `.git/objects/` and `.git/logs/` (excluded for
+/// performance — tens of thousands of loose/pack entries that nobody edits).
+/// The rest of `.git/` is included so the editor can open `.git/config`,
+/// `.git/HEAD`, hooks, etc. as read-only. Symlinked directories are NOT
+/// recursed (`follow_links(false)`); a symlinked dir appears as a leaf entry.
+/// Returns at most [`WORKTREE_FILES_CAP`] entries; sets `truncated` if
+/// more exist.
+pub fn worktree_files(worktree_path: &Path) -> Result<WorktreeFileList> {
+    use walkdir::WalkDir;
+
+    let wt = worktree_path.to_path_buf();
+    let mut files: Vec<String> = Vec::new();
+    let mut truncated = false;
+
+    let walker = WalkDir::new(worktree_path)
+        .follow_links(false)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|e| {
+            // Prune .git/objects and .git/logs subtrees entirely.
+            if e.file_type().is_dir() {
+                let pruned = e.path().strip_prefix(&wt).is_ok_and(|rel| {
+                    let r = rel.to_string_lossy();
+                    r == ".git/objects"
+                        || r.starts_with(".git/objects/")
+                        || r == ".git/logs"
+                        || r.starts_with(".git/logs/")
+                });
+                if pruned {
+                    return false; // don't descend into this directory
+                }
+            }
+            true
+        });
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                // Permission error, broken symlink, etc. — skip and continue;
+                // a broken entry should not blank the entire listing.
+                logger::warn(&format!("worktree_files: skipping entry: {e}"));
+                continue;
+            }
+        };
+        // Only emit leaf paths — directories are structural, not files.
+        // Symlinked dirs appear as Symlink (follow_links=false), so they ARE
+        // emitted here (the symlink target is not recursed).
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if let Ok(rel) = entry.path().strip_prefix(worktree_path) {
+            if files.len() >= WORKTREE_FILES_CAP {
+                truncated = true;
+                break;
+            }
+            files.push(rel.to_string_lossy().into_owned());
+        }
     }
-    Ok(output
-        .stdout
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect())
+
+    files.sort();
+    Ok(WorktreeFileList { files, truncated })
 }
 
 pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
@@ -1491,31 +1510,105 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "d").unwrap();
         std::fs::write(p.join("src/debug.log"), "e").unwrap();
 
-        let files = worktree_files(p).unwrap();
+        let result = worktree_files(p).unwrap();
+        let files = result.files;
         assert!(files.contains(&"tracked.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
         assert!(files.contains(&".gitignore".to_string()));
-        // A loose gitignored FILE is now surfaced so the editor can open it.
+        // A loose gitignored FILE is surfaced so the editor can open it.
         assert!(
             files.contains(&"ignored.txt".to_string()),
             "loose ignored file should be listed: {files:?}"
         );
-        // An ignored file inside a directory that ALSO has tracked content is not
-        // collapsed (only wholly-ignored dirs are) — so it is listed too.
+        // An ignored file inside a directory that ALSO has tracked content is
+        // listed too (the walk is filesystem-based, not git-based).
         assert!(
             files.contains(&"src/debug.log".to_string()),
             "ignored file in a partially-tracked dir should be listed: {files:?}"
         );
-        // A fully-ignored DIRECTORY is collapsed out by `--directory` (and the
-        // collapsed `node_modules/` entry is dropped), so its contents never
-        // flood the tree.
+        // With the walkdir-based implementation, fully-ignored dir contents ARE
+        // listed (node_modules/dep.js appears). That is intentional — the new
+        // walk surfaces everything. The old ls-files collapse is gone.
         assert!(
-            !files.iter().any(|f| f.starts_with("node_modules")),
-            "ignored directory contents must be collapsed out: {files:?}"
+            files.iter().any(|f| f.starts_with("node_modules")),
+            "walkdir lists ignored directory contents: {files:?}"
+        );
+        // .git/ contents are listed (except objects/ and logs/).
+        assert!(
+            files.iter().any(|f| f.starts_with(".git/")),
+            "walkdir lists git internals: {files:?}"
+        );
+    }
+
+    #[test]
+    fn worktree_files_walk_lists_git_internals_and_ignored_dir_contents() {
+        let repo = init_test_repo();
+        let p = repo.path();
+        let g = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+        };
+        // A tracked file and a fully-ignored directory with content.
+        std::fs::write(p.join("src.rs"), "fn main() {}").unwrap();
+        g(&["add", "src.rs"]);
+        g(&["commit", "-m", "add file"]);
+        std::fs::write(p.join(".gitignore"), "node_modules/\n").unwrap();
+        std::fs::create_dir(p.join("node_modules")).unwrap();
+        std::fs::write(p.join("node_modules/dep.js"), "x").unwrap();
+        // .git/config always exists in an initialized repo.
+
+        let result = worktree_files(p).unwrap();
+
+        // Tracked file is included.
+        assert!(
+            result.files.contains(&"src.rs".to_string()),
+            "files: {:?}",
+            result.files
+        );
+        // node_modules contents are included (full walk, not ls-files).
+        assert!(
+            result.files.contains(&"node_modules/dep.js".to_string()),
+            "ignored dir contents must appear: {:?}",
+            result.files
+        );
+        // .git/config is readable in the listing.
+        assert!(
+            result.files.iter().any(|f| f.starts_with(".git/config")),
+            ".git/config must be listed: {:?}",
+            result.files
+        );
+        // .git/objects and .git/logs are excluded for performance.
+        assert!(
+            !result.files.iter().any(|f| f.starts_with(".git/objects")),
+            ".git/objects must be excluded: {:?}",
+            result.files
         );
         assert!(
-            !files.iter().any(|f| f.starts_with(".git/")),
-            "never lists git internals: {files:?}"
+            !result.files.iter().any(|f| f.starts_with(".git/logs")),
+            ".git/logs must be excluded: {:?}",
+            result.files
+        );
+        assert!(!result.truncated, "small repo must not be truncated");
+    }
+
+    #[test]
+    fn worktree_files_walk_sets_truncated_when_cap_exceeded() {
+        let repo = init_test_repo();
+        let p = repo.path();
+        // Create enough files to exceed the cap.
+        std::fs::create_dir(p.join("bulk")).unwrap();
+        for i in 0..WORKTREE_FILES_CAP + 5 {
+            std::fs::write(p.join(format!("bulk/f{i}.txt")), "x").unwrap();
+        }
+        let result = worktree_files(p).unwrap();
+        assert!(result.truncated, "must set truncated when walk exceeds cap");
+        assert_eq!(
+            result.files.len(),
+            WORKTREE_FILES_CAP,
+            "must return exactly cap entries"
         );
     }
 
