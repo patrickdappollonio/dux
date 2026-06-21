@@ -170,11 +170,13 @@ async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) ->
 }
 
 /// Serve a worktree file's raw bytes for the markdown preview's relative-image
-/// proxy (an `<img src>` backed by this GET). Same worktree containment as the
-/// other file routes — `resolve_worktree_path` rejects `..`/absolute/`.git`, a
-/// no-follow stat refuses symlinks, and the size is capped before reading.
-/// Content-Type is guessed from the extension; SVGs served to `<img>` never run
-/// scripts. Auth-gated like every `/api/file/*` route.
+/// proxy (an `<img src>` backed by this GET). Uses the same read-permissive
+/// resolver as `read_file` so `.git/` assets and symlinked images reach this
+/// proxy. Symlinks are followed: `canonicalize()` resolves the real target,
+/// then `read_nofollow` re-opens it with `O_NOFOLLOW` to close the TOCTOU
+/// window between the canonicalize and the read. The write path is unaffected.
+/// Content-Type is guessed from the extension; SVGs served to `<img>` never
+/// run scripts. Auth-gated like every `/api/file/*` route.
 async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> Response {
     let worktree = match resolve_worktree(&state, q.session_id).await {
         Ok(w) => w,
@@ -182,18 +184,28 @@ async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> R
     };
     let path = q.path;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
-        let abs = dux_core::git::resolve_worktree_path(&worktree, &path)?;
+        // Use the read-permissive resolver so .git/ assets and symlinked images
+        // reach this proxy. The write path is unaffected.
+        let (abs, _is_git, _is_outside) =
+            dux_core::worktree_file::resolve_worktree_path_for_read(&worktree, &path)?;
         let meta = std::fs::symlink_metadata(&abs)?;
-        if meta.file_type().is_symlink() {
-            anyhow::bail!("refusing to serve a symlink");
-        }
-        if meta.len() > MAX_RAW_BYTES {
+        // Resolve symlinks to get the real target for the size check and read.
+        let real = if meta.file_type().is_symlink() {
+            std::fs::canonicalize(&abs)? // follows the link; dangling → error
+        } else {
+            abs.clone()
+        };
+        let real_meta = std::fs::metadata(&real)?;
+        if real_meta.len() > MAX_RAW_BYTES {
             anyhow::bail!(
                 "file too large to serve: {} bytes (limit {MAX_RAW_BYTES})",
-                meta.len()
+                real_meta.len()
             );
         }
-        let bytes = std::fs::read(&abs)?;
+        // Use read_nofollow (O_NOFOLLOW) to close the TOCTOU window between
+        // canonicalize() above and the actual read. If `real` was swapped to a
+        // symlink in the interim, the open fails safely rather than following it.
+        let bytes = dux_core::worktree_file::read_nofollow(&real)?;
         Ok((mime_for_path(&path), bytes))
     })
     .await;

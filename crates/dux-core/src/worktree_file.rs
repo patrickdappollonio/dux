@@ -51,7 +51,10 @@ fn is_text(bytes: &[u8]) -> bool {
 ///   surfaced as an error, same as today.)
 ///
 /// Traversal attacks (absolute paths, `..`) are still rejected with an error.
-fn resolve_worktree_path_for_read(
+///
+/// This is `pub` (not `pub(crate)`) because `dux-web`'s `file_routes` uses it
+/// for the read-permissive resolver in `read_raw` (cross-crate call).
+pub fn resolve_worktree_path_for_read(
     worktree: &Path,
     rel_path: &str,
 ) -> anyhow::Result<(PathBuf, bool, bool)> {
@@ -128,7 +131,10 @@ fn resolve_worktree_path_for_read(
 /// already confirmed (via stat) that the target is the intended file; if a race
 /// causes the path to change to a symlink between stat and here, this open will
 /// fail rather than silently following the new link.
-fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
+///
+/// This is `pub` (not `pub(crate)`) because `dux-web`'s `file_routes` uses it
+/// for the TOCTOU-safe read in `read_raw` after `canonicalize()` (cross-crate call).
+pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
     use rustix::fs::{Mode, OFlags, open as rustix_open};
     use std::io::Read;
     use std::os::unix::io::FromRawFd;
