@@ -26,6 +26,7 @@ pub enum Action {
     ReconnectAgent,
     DeleteSession,
     DeleteTerminal,
+    SearchAgents,
     // Agent pane
     InteractAgent,
     ShowTerminal,
@@ -220,6 +221,7 @@ impl Action {
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
             Action::DeleteTerminal => "delete_terminal",
+            Action::SearchAgents => "search_agents",
             Action::InteractAgent => "interact_agent",
             Action::ShowTerminal => "show_terminal",
             Action::ExitInteractive => "exit_interactive",
@@ -329,6 +331,9 @@ impl Action {
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
             Action::DeleteSession => "Delete the selected session and worktree.",
             Action::DeleteTerminal => "Delete the selected companion terminal.",
+            Action::SearchAgents => {
+                "Filter agents in the projects pane by title, branch, or project name."
+            }
             Action::InteractAgent => "Start a prompt turn for the agent.",
             Action::ShowTerminal => {
                 "Open the first companion terminal for the selected agent, or launch a new one if none exists."
@@ -445,7 +450,8 @@ impl Action {
             | Action::InteractAgent
             | Action::ReconnectAgent
             | Action::DeleteSession
-            | Action::DeleteTerminal => Some("Projects pane"),
+            | Action::DeleteTerminal
+            | Action::SearchAgents => Some("Projects pane"),
             Action::NewAgentFromPr => None,
             Action::ExitInteractive
             | Action::OpenMacroBar
@@ -955,6 +961,23 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             name: "delete-terminal",
             description: "Delete the selected companion terminal",
         }),
+    },
+    BindingDef {
+        action: Action::SearchAgents,
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )],
+        scopes: &[BindingScope::Left],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Search agents",
+        }),
+        hint_contexts: &[
+            (HintContext::LeftProject, "Search"),
+            (HintContext::LeftSession, "Search"),
+        ],
+        palette: None,
     },
     // ── Agent pane ────────────────────────────────────────────────
     BindingDef {
@@ -2730,7 +2753,18 @@ mod tests {
         assert!(actions_in_defs.contains(&Action::ExitPathEditorOnProjectAdd));
         assert!(actions_in_defs.contains(&Action::SearchFiles));
         assert!(actions_in_defs.contains(&Action::SearchNext));
+        assert!(actions_in_defs.contains(&Action::SearchAgents));
         assert!(actions_in_defs.contains(&Action::ForceRedraw));
+    }
+
+    #[test]
+    fn left_scope_resolves_slash_to_search_agents() {
+        let bindings = default_bindings();
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(
+            bindings.lookup(&slash, BindingScope::Left),
+            Some(Action::SearchAgents)
+        );
     }
 
     #[test]
