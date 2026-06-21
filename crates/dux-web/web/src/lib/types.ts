@@ -212,7 +212,8 @@ export type ServerMessage =
   | { type: "subscribed"; session_id: string }
   | { type: "terminal_created"; session_id: string; terminal_id: string }
   | { type: "error"; message: string }
-  | { type: "status"; tone: string; message: string }
+  | { type: "status"; key?: string; tone: string; message: string }
+  | { type: "status_cleared"; key?: string }
   | { type: "commit_message"; session_id: string; message: string }
   | {
       type: "commit_message_snapshot"
