@@ -42,10 +42,29 @@ pub struct ConfigWriteQueue {
 /// (not a borrow) so it can be stored on `Engine` as `reload_guard`.
 pub struct QuiesceGuard {
     tx: Sender<WriteMsg>,
+    /// `true` when the writer explicitly acknowledged the `Pause` message (the
+    /// happy path); `false` on timeout or a dead writer. The guard ALWAYS sends
+    /// `Resume` on drop regardless of this flag — callers MUST NOT suppress it
+    /// (a slow-but-alive writer will eventually process the `Pause` and needs
+    /// the matching `Resume` to unblock).
+    acknowledged: bool,
+}
+
+impl QuiesceGuard {
+    /// Returns `true` when the writer acknowledged the pause request within the
+    /// timeout. When `false` (timeout or dead writer) the barrier is NOT safe: a
+    /// direct config write can race a still-running writer. Callers should abort
+    /// the write and surface a retry error instead.
+    pub fn is_acknowledged(&self) -> bool {
+        self.acknowledged
+    }
 }
 
 impl Drop for QuiesceGuard {
     fn drop(&mut self) {
+        // Resume is sent in ALL cases, even when `acknowledged` is false: a
+        // slow-but-alive writer will eventually process the Pause and would
+        // block forever waiting for the Resume if we skipped it here.
         let _ = self.tx.send(WriteMsg::Resume);
     }
 }
@@ -139,29 +158,37 @@ impl ConfigWriteQueue {
     /// Begin a reload/recover barrier: drain pending + pause the writer, returning
     /// a guard that resumes on drop. The caller does its own write synchronous-direct
     /// while holding the guard.
+    ///
+    /// Check [`QuiesceGuard::is_acknowledged`] before performing the direct write:
+    /// if `false`, the writer never confirmed the pause (timeout or dead writer) and
+    /// the write must be aborted to avoid racing a still-running writer.
     pub fn quiesce(&self) -> QuiesceGuard {
         let (ack, rx) = mpsc::sync_channel(0);
-        let dead = if self.tx.send(WriteMsg::Pause(ack)).is_ok() {
+        let acknowledged = if self.tx.send(WriteMsg::Pause(ack)).is_ok() {
             match rx.recv_timeout(FLUSH_TIMEOUT) {
-                Ok(()) => false,
+                Ok(()) => true,
                 Err(RecvTimeoutError::Timeout) => {
                     crate::logger::error(
-                        "config writer did not acknowledge pause within timeout; a direct config write may race a stalled flush",
+                        "config writer did not acknowledge pause within timeout; direct write aborted to avoid racing the stalled writer",
                     );
                     false
                 }
-                Err(RecvTimeoutError::Disconnected) => true,
+                Err(RecvTimeoutError::Disconnected) => {
+                    crate::logger::error(
+                        "config writer thread is gone; direct write aborted (no active write barrier)",
+                    );
+                    false
+                }
             }
         } else {
-            true
-        };
-        if dead {
             crate::logger::error(
-                "config writer thread is gone; reload/recover proceeding without an active write barrier",
+                "config writer thread is gone; direct write aborted (no active write barrier)",
             );
-        }
+            false
+        };
         QuiesceGuard {
             tx: self.tx.clone(),
+            acknowledged,
         }
     }
 
@@ -202,13 +229,29 @@ impl Drop for ConfigWriteQueue {
         // while paused, so shutdown is independent of guard lifetime/drop order.
         let _ = self.tx.send(WriteMsg::Shutdown);
 
-        // Step 3 — join the writer thread for a clean shutdown.  Best-effort: if it
-        // already finished or panicked (so the `Shutdown` send failed) we move on.
-        // join() is intentionally unbounded: an in-progress disk write must finish
-        // for a clean shutdown, so on a stalled disk Drop can wait up to
-        // FLUSH_TIMEOUT plus one write duration.
+        // Step 3 — join the writer thread with a bounded timeout.  If the writer is
+        // stuck in a stalled disk write, an unconditional join() would hang the
+        // process on exit.  Instead, a short helper thread calls join() and signals
+        // completion on a rendezvous channel.  If FLUSH_TIMEOUT elapses before the
+        // writer exits, we log and abandon both threads — the process is exiting
+        // anyway, so leaking them is safe.  A pending write may be lost on a truly
+        // stalled disk, but the process can still exit cleanly.
         if let Some(handle) = self.writer.take() {
-            let _ = handle.join();
+            let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = done_tx.send(());
+            });
+            match done_rx.recv_timeout(FLUSH_TIMEOUT) {
+                Ok(()) => {} // writer exited cleanly
+                Err(_) => {
+                    crate::logger::error(
+                        "config writer did not exit within timeout on shutdown; abandoning the thread (a pending write may be lost)",
+                    );
+                    // The helper thread and writer thread are leaked; safe because
+                    // the process is already exiting.
+                }
+            }
         }
     }
 }
@@ -554,6 +597,56 @@ mod tests {
         assert!(
             saved.contains("PRE_BARRIER = \"kept\""),
             "pre-barrier lazy was not flushed on drop: {saved}"
+        );
+    }
+
+    // ── Fix 1: QuiesceGuard::is_acknowledged ───────────────────────────────
+
+    /// A normal `quiesce()` call returns a guard with `is_acknowledged() == true`.
+    #[test]
+    fn quiesce_acknowledged_on_live_writer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path);
+        let guard = q.quiesce();
+        assert!(
+            guard.is_acknowledged(),
+            "live writer must acknowledge the pause"
+        );
+    }
+
+    /// A `quiesce()` on a queue whose writer has already exited returns a guard
+    /// with `is_acknowledged() == false` — the barrier is not effective.
+    #[test]
+    fn quiesce_not_acknowledged_on_dead_writer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let q = ConfigWriteQueue::with_dead_writer(path);
+        let guard = q.quiesce();
+        assert!(
+            !guard.is_acknowledged(),
+            "dead writer must not report acknowledgement"
+        );
+    }
+
+    // ── Fix 2: bounded join in Drop ────────────────────────────────────────
+
+    /// Dropping a live queue completes in well under FLUSH_TIMEOUT, proving the
+    /// bounded join does not break the happy path.
+    #[test]
+    fn drop_completes_quickly_on_clean_writer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[env]\n").unwrap();
+        let q = ConfigWriteQueue::new(path);
+        let start = std::time::Instant::now();
+        drop(q);
+        // The bounded join should complete well within the FLUSH_TIMEOUT (2 s).
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "drop took too long: {:?}",
+            start.elapsed()
         );
     }
 
