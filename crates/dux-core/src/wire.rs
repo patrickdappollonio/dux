@@ -445,6 +445,19 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
             .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")))
             .into_iter()
             .collect(),
+        EventReaction::OpenConfigReloadFailedModal(message) => {
+            vec![WireStatus::new(
+                "error",
+                format!("Config reload failed: {message}"),
+            )]
+        }
+        EventReaction::ProjectWorktreesArrived {
+            result: Err(message),
+            ..
+        } => vec![WireStatus::new(
+            "error",
+            format!("Failed to list worktrees: {message}"),
+        )],
         _ => vec![],
     }
 }
@@ -5020,5 +5033,53 @@ mod tests {
         let entry = reloaded.macros.entries.get("greet").expect("greet entry");
         assert_eq!(entry.text, "hello\nworld");
         assert_eq!(entry.surface, crate::config::MacroSurface::Agent);
+    }
+
+    #[test]
+    fn wire_statuses_surface_config_reload_failure() {
+        let msg = "bad key 'foo' in [keys]".to_string();
+        let bare = EventReaction::OpenConfigReloadFailedModal(msg.clone());
+        let s = wire_statuses_from_reaction(&bare);
+        assert_eq!(s.len(), 1, "bare reload failure must produce one status");
+        assert_eq!(s[0].tone, "error");
+        assert!(s[0].message.contains("Config reload failed"));
+        assert!(s[0].message.contains("bad key 'foo'"));
+
+        // The deferred-reload path wraps it in Multi; the Multi arm recurses.
+        let wrapped = EventReaction::Multi(vec![EventReaction::OpenConfigReloadFailedModal(msg)]);
+        let s = wire_statuses_from_reaction(&wrapped);
+        assert_eq!(
+            s.len(),
+            1,
+            "Multi-wrapped reload failure must still be one status"
+        );
+        assert_eq!(s[0].tone, "error");
+    }
+
+    #[test]
+    fn wire_statuses_surface_worktree_list_failure() {
+        let bare = EventReaction::ProjectWorktreesArrived {
+            project_id: "p1".to_string(),
+            result: Err("git worktree list failed".to_string()),
+        };
+        let s = wire_statuses_from_reaction(&bare);
+        assert_eq!(
+            s.len(),
+            1,
+            "a failed worktree listing must produce one status"
+        );
+        assert_eq!(s[0].tone, "error");
+        assert!(s[0].message.contains("Failed to list worktrees"));
+
+        // A SUCCESSFUL listing must stay silent on the status stream (it has its
+        // own ProjectWorktrees reply path); only the Err arm surfaces.
+        let ok = EventReaction::ProjectWorktreesArrived {
+            project_id: "p1".to_string(),
+            result: Ok(Vec::new()),
+        };
+        assert!(
+            wire_statuses_from_reaction(&ok).is_empty(),
+            "a successful worktree listing must not emit a status"
+        );
     }
 }
