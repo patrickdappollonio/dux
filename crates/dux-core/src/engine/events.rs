@@ -948,13 +948,23 @@ impl Engine {
             let branch_name = session.branch_name.clone();
             let tx = self.worker_tx.clone();
             std::thread::spawn(move || {
-                let result = crate::git::remove_worktree(
-                    std::path::Path::new(&project_path),
-                    std::path::Path::new(&worktree_path),
-                    &branch_name,
-                )
-                .map(|r| r.branch_already_deleted)
-                .map_err(|e| format!("{e:#}"));
+                use std::panic::AssertUnwindSafe;
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    crate::git::remove_worktree(
+                        std::path::Path::new(&project_path),
+                        std::path::Path::new(&worktree_path),
+                        &branch_name,
+                    )
+                    .map(|r| r.branch_already_deleted)
+                    .map_err(|e| format!("{e:#}"))
+                }))
+                .unwrap_or_else(|payload| {
+                    let reason = crate::engine::spawn_worker::format_panic_payload(payload);
+                    crate::logger::error(&format!(
+                        "worktree-remove worker panicked for session {sid}: {reason}"
+                    ));
+                    Err(format!("Worker panicked: {reason}"))
+                });
                 let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
                     session_id: sid,
                     result,
@@ -3678,5 +3688,82 @@ mod tests {
             stashed_msg.contains("bob"),
             "message must be from last event"
         );
+    }
+
+    // ── Panic-safety: worktree-remove worker ─────────────────────────────
+
+    /// A panicking worktree-remove worker must still post
+    /// `WorktreeRemoveCompleted { result: Err(_) }` so the engine can clear
+    /// `pending_deletions` and surface the failure. This test exercises the
+    /// `catch_unwind` wrapper added to `begin_delete_session` by spawning an
+    /// equivalent thread, triggering a deliberate panic, and asserting that the
+    /// synthesised error event arrives on the channel and that
+    /// `process_worker_event` then clears the pending state.
+    #[test]
+    fn worktree_remove_panic_posts_failure_event_and_clears_pending() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Pre-load the pending state as `begin_delete_session` would.
+        engine.pending_deletions.insert("s1".to_string());
+        engine
+            .deletion_busy_messages
+            .insert("s1".to_string(), "Removing worktree…".to_string());
+
+        // Spawn a thread that mimics the catch_unwind wrapper in
+        // `begin_delete_session` but with a deliberately panicking body.
+        let tx = engine.worker_tx.clone();
+        let sid = "s1".to_string();
+        let handle = std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<bool, String> {
+                panic!("simulated git failure");
+            }))
+            .unwrap_or_else(|payload| {
+                let reason = crate::engine::format_panic_payload(payload);
+                Err(format!("Worker panicked: {reason}"))
+            });
+            let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
+                session_id: sid,
+                result,
+            });
+        });
+        handle
+            .join()
+            .expect("thread should not panic at outer level");
+
+        // The event must have arrived.
+        let event = engine
+            .worker_rx
+            .try_recv()
+            .expect("WorktreeRemoveCompleted must be on the channel");
+        let reaction = engine.process_worker_event(event);
+
+        // Pending state must be cleared by the event handler.
+        assert!(
+            !engine.pending_deletions.contains("s1"),
+            "pending_deletions must be cleared after a panicked removal"
+        );
+        assert!(
+            !engine.deletion_busy_messages.contains_key("s1"),
+            "deletion_busy_messages must be cleared after a panicked removal"
+        );
+
+        // The reaction must be the failure variant so the UI surfaces the error.
+        match reaction {
+            EventReaction::WorktreeRemoveFailed {
+                session_id,
+                message,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(
+                    message.contains("simulated git failure"),
+                    "failure message must include the panic reason; got: {message}"
+                );
+            }
+            other => panic!(
+                "expected WorktreeRemoveFailed after a panicked removal, got {}",
+                reaction_kind(&other)
+            ),
+        }
     }
 }
