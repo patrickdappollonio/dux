@@ -24,5 +24,6 @@ serde_json.workspace = true
 sysinfo.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
+walkdir = "2"
 
 [dev-dependencies]
