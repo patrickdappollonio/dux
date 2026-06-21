@@ -208,6 +208,8 @@ impl Drop for ConfigWriteQueue {
 }
 
 fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicUsize>) {
+    // Keep a handle to the in-flight counter; the closure moves its own clone in.
+    let counter = lazy_inflight.clone();
     if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         writer_loop_inner(rx, path, lazy_inflight)
     })) {
@@ -217,6 +219,11 @@ fn writer_loop(rx: Receiver<WriteMsg>, path: PathBuf, lazy_inflight: Arc<AtomicU
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown panic".to_string());
         crate::logger::error(&format!("config-writer thread panicked: {msg}"));
+        // A panic can leave received-but-not-decremented Lazy messages counted.
+        // Reset so save_lazy's cap gate can't latch shut and silently drop every
+        // future lazy write: with the writer gone, save_lazy will then reach the
+        // (failing) send and surface the dead-writer state like the other ops do.
+        counter.store(0, Ordering::Relaxed);
     }
 }
 
