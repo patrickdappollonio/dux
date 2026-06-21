@@ -155,9 +155,10 @@ pub fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
 /// Read a worktree file's working copy as text. A missing file is an error.
 /// Binary content yields `binary: true` with empty `content`.
 ///
-/// Symlinks whose target resolves INSIDE the worktree are read normally
-/// (`read_only: false`). Symlinks whose target resolves OUTSIDE the worktree
-/// are read with `read_only: true`. `.git/` paths are always `read_only: true`.
+/// ANY symlink leaf is read with `read_only: true` regardless of where its
+/// target lives — `write_file` refuses all symlinks so the Save button would
+/// always fail for them; marking them read-only surfaces this immediately.
+/// `.git/` paths are always `read_only: true`.
 /// Dangling symlinks (target does not exist) return an error.
 pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile> {
     // Use the read-permissive resolver (allows .git/ paths).
@@ -199,10 +200,14 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         // millisecond-scale and the failure is safe).
         let bytes = read_nofollow(&target)?;
 
-        // `read_only` is true when: the real path is outside the worktree
-        // (is_outside), OR the leaf is a symlink pointing outside (captured by
-        // is_outside from the resolver), OR the path is inside .git/.
-        (bytes, is_outside || is_git_dir)
+        // `read_only` is true when: the leaf is ANY symlink (write_file refuses
+        // all symlinks, so Save would always fail — mark it read-only up front),
+        // OR the real path is outside the worktree (is_outside), OR the path is
+        // inside .git/.
+        (
+            bytes,
+            meta.file_type().is_symlink() || is_outside || is_git_dir,
+        )
     } else {
         if meta.len() > MAX_EDITABLE_BYTES {
             anyhow::bail!(
@@ -393,14 +398,16 @@ mod tests {
     // --- Symlink tests (updated for new read-permissive behavior) ---
 
     #[test]
-    fn read_file_follows_symlink_inside_worktree_as_read_write() {
+    fn read_file_follows_symlink_inside_worktree_as_read_only() {
         let dir = worktree();
         // A symlink INSIDE the worktree pointing to another file inside it.
+        // Even in-tree symlinks are read_only because write_file refuses ALL
+        // symlinks — the Save button must be disabled rather than lie to the user.
         std::os::unix::fs::symlink(dir.path().join("hello.txt"), dir.path().join("link.txt"))
             .unwrap();
         let f = read_file(dir.path(), "link.txt").unwrap();
         assert_eq!(f.content, "hi\nthere\n");
-        assert!(!f.read_only, "in-tree symlink must not be read_only");
+        assert!(f.read_only, "any symlink leaf must be read_only");
     }
 
     #[test]
