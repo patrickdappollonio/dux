@@ -1,0 +1,57 @@
+---
+// Homepage "thank you" strip: a left-to-right wrapping row of contributor
+// avatars, each linking to their GitHub profile. The data is a build-time
+// snapshot (src/data/contributors.json) populated by scripts/fetch-contributors.mjs;
+// renders nothing when the snapshot is empty so the page never shows a hollow
+// section.
+import contributors from "../data/contributors.json";
+
+// Defend against a malformed snapshot (e.g. a bad merge): treat anything that
+// isn't an array as empty so the section simply hides instead of throwing.
+const list = Array.isArray(contributors) ? contributors : [];
+---
+
+{
+  list.length > 0 && (
+    <section class="py-16 sm:py-24">
+      <div class="container-app">
+        <div class="max-w-2xl">
+          <span class="pill">▸ contributors</span>
+          <h2 class="heading mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+            We couldn't have made it happen without our{" "}
+            <span class="text-[color:var(--color-accent)]">contributors</span>
+          </h2>
+          <p class="mt-4 leading-relaxed text-[color:var(--color-muted)]">
+            Every fix, feature, and bug report from the community helps dux get
+            better. Thank you.
+          </p>
+        </div>
+
+        <ul class="mt-8 flex flex-wrap gap-2.5">
+          {list.map((c) => (
+            <li>
+              <a
+                href={c.profileUrl}
+                target="_blank"
+                rel="nofollow noreferrer noopener"
+                title={c.login}
+                aria-label={`${c.login} on GitHub`}
+                class="group block rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-ink)]"
+              >
+                <img
+                  src={c.avatar}
+                  alt={c.login}
+                  width="40"
+                  height="40"
+                  loading="lazy"
+                  decoding="async"
+                  class="h-10 w-10 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-panel)] object-cover transition duration-200 group-hover:-translate-y-0.5 group-hover:border-[color:var(--color-accent)]"
+                />
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  )
+}

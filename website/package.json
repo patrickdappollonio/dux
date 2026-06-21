@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "node scripts/copy-install.mjs && node scripts/generate-webp.mjs && astro build",
+    "build": "node scripts/copy-install.mjs && node scripts/fetch-contributors.mjs && node scripts/generate-webp.mjs && astro build",
     "preview": "astro preview",
     "astro": "astro",
+    "contributors": "node scripts/fetch-contributors.mjs",
     "test": "vitest run",
     "test:search": "node scripts/verify-search-index.mjs"
   },
