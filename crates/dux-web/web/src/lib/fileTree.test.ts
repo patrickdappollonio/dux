@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest"
-
-import { ancestorDirs, buildFileTree } from "./fileTree"
+import { ancestorDirs, buildFileTree, FILETREE_NODE_CAP } from "./fileTree"
 
 describe("buildFileTree", () => {
   it("nests files under their directories", () => {
-    const tree = buildFileTree(["src/app/main.rs", "src/lib.rs", "README.md"])
+    const { nodes: tree } = buildFileTree(["src/app/main.rs", "src/lib.rs", "README.md"])
     // Top level: dir `src` first, then file `README.md`.
     expect(tree.map((n) => `${n.name}:${n.isDir}`)).toEqual([
       "src:true",
@@ -19,7 +18,7 @@ describe("buildFileTree", () => {
   })
 
   it("sorts directories before files, case-insensitively", () => {
-    const tree = buildFileTree(["Zoo.txt", "apple.txt", "dir/x", "Banana.txt"])
+    const { nodes: tree } = buildFileTree(["Zoo.txt", "apple.txt", "dir/x", "Banana.txt"])
     expect(tree.map((n) => n.name)).toEqual([
       "dir",
       "apple.txt",
@@ -29,10 +28,30 @@ describe("buildFileTree", () => {
   })
 
   it("handles a single root-level file", () => {
-    const tree = buildFileTree(["a.txt"])
+    const { nodes: tree } = buildFileTree(["a.txt"])
     expect(tree).toEqual([
       { name: "a.txt", path: "a.txt", isDir: false, children: [] },
     ])
+  })
+})
+
+describe("buildFileTree node cap", () => {
+  it("returns capped=false for a small input", () => {
+    const result = buildFileTree(["a.ts", "b.ts", "src/c.ts"])
+    expect(result.capped).toBe(false)
+    expect(result.nodes.length).toBeGreaterThan(0)
+  })
+
+  it("returns capped=true and truncates nodes when input exceeds cap", () => {
+    // Generate more paths than the cap.
+    const paths = Array.from({ length: FILETREE_NODE_CAP + 10 }, (_, i) => `f${i}.txt`)
+    const result = buildFileTree(paths)
+    expect(result.capped).toBe(true)
+    // Node count must not exceed the cap (each flat file is one node).
+    const count = result.nodes.reduce(function countNodes(acc: number, n: import("./fileTree").FileTreeNode): number {
+      return acc + 1 + (n.isDir ? n.children.reduce(countNodes, 0) : 0)
+    }, 0)
+    expect(count).toBeLessThanOrEqual(FILETREE_NODE_CAP)
   })
 })
 
