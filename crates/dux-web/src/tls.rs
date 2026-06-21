@@ -228,24 +228,33 @@ pub enum AcmeStatusEvent {
 ///   renewal on the status line, with `dux.log` named for the detail.
 pub fn acme_status_for_event(event: &AcmeStatusEvent, domains: &[String]) -> Option<WireStatus> {
     match event {
-        AcmeStatusEvent::CertDeployed => Some(WireStatus::new(
-            "info",
-            format!(
-                "TLS certificate acquired/renewed for {}.",
-                domains.join(", ")
-            ),
-        )),
+        AcmeStatusEvent::CertDeployed => Some(
+            WireStatus::new(
+                "info",
+                format!(
+                    "TLS certificate acquired/renewed for {}.",
+                    domains.join(", ")
+                ),
+            )
+            .with_key("acme"),
+        ),
         AcmeStatusEvent::CacheStore => None,
-        AcmeStatusEvent::Error(e) => Some(WireStatus::new(
-            "error",
-            format!("ACME certificate error: {e} — renewal will retry; see dux.log."),
-        )),
-        AcmeStatusEvent::StreamEnded => Some(WireStatus::new(
-            "error",
-            "ACME certificate lifecycle stopped — certificates will no longer renew. \
-             Restart dux to recover automatic renewal; see dux.log."
-                .to_string(),
-        )),
+        AcmeStatusEvent::Error(e) => Some(
+            WireStatus::new(
+                "error",
+                format!("ACME certificate error: {e} — renewal will retry; see dux.log."),
+            )
+            .with_key("acme"),
+        ),
+        AcmeStatusEvent::StreamEnded => Some(
+            WireStatus::new(
+                "error",
+                "ACME certificate lifecycle stopped — certificates will no longer renew. \
+                 Restart dux to recover automatic renewal; see dux.log."
+                    .to_string(),
+            )
+            .with_key("acme"),
+        ),
     }
 }
 
@@ -1215,6 +1224,15 @@ mod tests {
             classify_event_ok(&EventOk::AccountCacheStore),
             AcmeStatusEvent::CacheStore
         );
+    }
+
+    #[test]
+    fn acme_statuses_carry_the_acme_key() {
+        let domains = vec!["example.com".to_string()];
+        let deployed = acme_status_for_event(&AcmeStatusEvent::CertDeployed, &domains).unwrap();
+        assert_eq!(deployed.key.as_deref(), Some("acme"));
+        let err = acme_status_for_event(&AcmeStatusEvent::Error("x".into()), &domains).unwrap();
+        assert_eq!(err.key.as_deref(), Some("acme"));
     }
 
     // ── HSTS ──────────────────────────────────────────────────────────────
