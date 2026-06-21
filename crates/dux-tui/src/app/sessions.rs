@@ -277,10 +277,23 @@ impl App {
         self.set_busy(format!("Resolving PR for project \"{}\"...", project.name));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
             // The TUI resolves the PR first and then prompts for a name, so it
             // carries no custom name through the lookup (the prompt seeds the
             // head branch as the default).
-            dux_core::gh::run_pull_request_lookup_job(project, raw_input, None, worker_tx);
+            //
+            // `worker_tx` is moved into the job; `tx_panic` is kept outside
+            // `catch_unwind` so it remains valid if the job panics.
+            let tx_panic = worker_tx.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                dux_core::gh::run_pull_request_lookup_job(project, raw_input, None, worker_tx);
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
+                let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
+                    result: Err(format!("Worker panicked: {reason}")),
+                });
+            }
         });
         Ok(())
     }
@@ -357,11 +370,29 @@ impl App {
         ));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            dux_core::project_browser::run_add_project_checkout_job(
-                action,
-                target_branch,
-                worker_tx,
-            );
+            use std::panic::AssertUnwindSafe;
+            // Pre-clone the values needed for the panic-path event before
+            // they are moved into the job closure.
+            let tx_panic = worker_tx.clone();
+            let action_panic = action.clone();
+            let branch_panic = target_branch.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                dux_core::project_browser::run_add_project_checkout_job(
+                    action,
+                    target_branch,
+                    worker_tx,
+                );
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!(
+                    "non-default-branch-checkout worker panicked: {reason}"
+                ));
+                let _ = tx_panic.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                    action: action_panic,
+                    target_branch: branch_panic,
+                    result: Err(format!("Worker panicked: {reason}")),
+                });
+            }
         });
     }
 
@@ -372,7 +403,22 @@ impl App {
         ));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            super::workers::run_create_agent_branch_inspection_job(project, worker_tx);
+            use std::panic::AssertUnwindSafe;
+            let tx_panic = worker_tx.clone();
+            let project_panic = project.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                super::workers::run_create_agent_branch_inspection_job(project, worker_tx);
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!(
+                    "create-agent-branch-inspection worker panicked for project \"{}\": {reason}",
+                    project_panic.name
+                ));
+                let _ = tx_panic.send(WorkerEvent::CreateAgentBranchInspected {
+                    project: project_panic,
+                    result: Err(format!("Worker panicked: {reason}")),
+                });
+            }
         });
     }
 
@@ -396,9 +442,25 @@ impl App {
         ));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
-            dux_core::project_browser::run_checkout_project_default_branch_inspection_job(
-                project, worker_tx,
-            );
+            use std::panic::AssertUnwindSafe;
+            let tx_panic = worker_tx.clone();
+            let project_panic = project.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                dux_core::project_browser::run_checkout_project_default_branch_inspection_job(
+                    project, worker_tx,
+                );
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!(
+                    "checkout-default-branch-inspection worker panicked for project \"{}\": \
+                     {reason}",
+                    project_panic.name
+                ));
+                let _ = tx_panic.send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                    project: project_panic,
+                    result: Err(format!("Worker panicked: {reason}")),
+                });
+            }
         });
         Ok(())
     }

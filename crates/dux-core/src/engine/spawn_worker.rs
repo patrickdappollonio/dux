@@ -52,7 +52,7 @@ pub struct CommandWorkerSpec {
 /// Format a `Box<dyn Any + Send>` panic payload as a human-readable
 /// string, matching the `&str` / `String` cases stdlib normally surfaces
 /// through the default panic hook.
-pub(crate) fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+pub fn format_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {

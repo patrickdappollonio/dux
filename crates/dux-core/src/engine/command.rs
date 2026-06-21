@@ -844,6 +844,16 @@ impl Engine {
                 // Clone the id before the thread consumes it; the original is
                 // needed below to build the correlation key for the busy status.
                 let session_id_for_busy = session_id.clone();
+                // A second clone kept outside the spawn for the busy-status
+                // return value at the bottom of this arm (session_id_for_busy
+                // is moved into the spawn closure for the panic handler).
+                let session_id_for_status = session_id_for_busy.clone();
+                // A second sender clone reserved for the panic handler. `tx`
+                // is moved into `run`, which is wrapped in `catch_unwind`; if
+                // `run` panics, `tx` is unwound with it and is no longer
+                // usable. `tx_panic` is captured at the outer thread level,
+                // outside `run`, so it remains valid in the panic arm.
+                let tx_panic = tx.clone();
                 // Read the staged diff AND run the provider off the engine thread.
                 // `git diff --staged` can be slow on a large staged set, and on the
                 // web server every request runs on the single engine thread —
@@ -851,45 +861,60 @@ impl Engine {
                 // and read-error cases are reported through the same failure event
                 // the provider path uses, so the UI surfaces them the same way.
                 std::thread::spawn(move || {
-                    let diff_text = match crate::git::staged_diff_text(&worktree) {
-                        Ok(d) if d.trim().is_empty() => {
-                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
-                                session_id,
-                                error: "No staged changes to summarize. Stage files first."
-                                    .to_string(),
-                            });
-                            return;
-                        }
-                        Ok(d) => d,
-                        Err(e) => {
-                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
-                                session_id,
-                                error: format!("Failed to read the staged diff: {e}"),
-                            });
-                            return;
+                    use std::panic::AssertUnwindSafe;
+                    let run = move || {
+                        let diff_text = match crate::git::staged_diff_text(&worktree) {
+                            Ok(d) if d.trim().is_empty() => {
+                                let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                                    session_id,
+                                    error: "No staged changes to summarize. Stage files first."
+                                        .to_string(),
+                                });
+                                return;
+                            }
+                            Ok(d) => d,
+                            Err(e) => {
+                                let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                                    session_id,
+                                    error: format!("Failed to read the staged diff: {e}"),
+                                });
+                                return;
+                            }
+                        };
+                        let prompt = format!("{prompt_prefix}\n\n{diff_text}");
+                        match prov.run_oneshot(&prompt, &worktree) {
+                            Ok(message) => {
+                                let _ =
+                                    tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
+                                        session_id,
+                                        message,
+                                    });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                                    session_id,
+                                    error: e.to_string(),
+                                });
+                            }
                         }
                     };
-                    let prompt = format!("{prompt_prefix}\n\n{diff_text}");
-                    match prov.run_oneshot(&prompt, &worktree) {
-                        Ok(message) => {
-                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
-                                session_id,
-                                message,
-                            });
-                        }
-                        Err(e) => {
-                            let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
-                                session_id,
-                                error: e.to_string(),
-                            });
-                        }
+                    if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(run)) {
+                        let reason = crate::engine::spawn_worker::format_panic_payload(payload);
+                        crate::logger::error(&format!(
+                            "commit-message worker panicked for session \
+                             {session_id_for_busy}: {reason}"
+                        ));
+                        let _ = tx_panic.send(crate::worker::WorkerEvent::CommitMessageFailed {
+                            session_id: session_id_for_busy,
+                            error: format!("Worker panicked: {reason}"),
+                        });
                     }
                 });
                 Ok(EventReaction::Status(
                     StatusUpdate::busy(
                         "Generating an AI commit message from the staged diff\u{2026}",
                     )
-                    .with_key(format!("commit-msg:{session_id_for_busy}")),
+                    .with_key(format!("commit-msg:{session_id_for_status}")),
                 ))
             }
 

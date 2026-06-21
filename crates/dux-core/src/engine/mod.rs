@@ -26,7 +26,9 @@ pub use events::{
 pub use in_flight::{InFlightKey, InFlightSet};
 pub use lifecycle::{PrunedPty, PrunedPtyKind};
 pub use resume_fallback::ResumeFallbackOutcome;
-pub use spawn_worker::{BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec};
+pub use spawn_worker::{
+    BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec, format_panic_payload,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
