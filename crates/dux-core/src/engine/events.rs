@@ -1075,6 +1075,16 @@ impl Engine {
     fn process_config_reload_ready(&mut self, result: Result<Config, String>) -> EventReaction {
         let deferred = std::mem::take(&mut self.deferred_commands);
         let has_deferred = !deferred.is_empty();
+        // Pre-swap `self.config` to the reloaded config (rather than leaving the
+        // surface to do the swap) whenever we must base a follow-up write on the
+        // reloaded config: a deferred command drain, OR an auth-users replay.
+        // Without this, the auth replay would write/surface the OLD config (the
+        // no-deferral path leaves `self.config` untouched), reverting both the
+        // reloaded file on disk and the in-flight user change in memory + the live
+        // auth gate. The cost is the same rare tradeoff documented above: the
+        // surface's old-vs-new diff ("restart to apply server settings") is
+        // suppressed when an auth change coincides with a [server] change.
+        let must_preswap = has_deferred || self.pending_auth_users.is_some();
 
         // Step 1: compute the primary reaction and, on success, apply the reloaded
         // config to engine state BEFORE clearing the barrier — but only when we
@@ -1088,8 +1098,9 @@ impl Engine {
         let mut failure: Option<EventReaction> = None;
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
-                if has_deferred {
-                    // Apply the reloaded config so the deferred drain re-mutates it.
+                if must_preswap {
+                    // Apply the reloaded config so the deferred drain / auth replay
+                    // re-mutates it (and the surfaced config carries those edits).
                     // If applying it FAILS, do not pretend the reload worked: open
                     // the reload-failed modal and leave `self.config` as-is (the
                     // deferred commands below still re-apply against the current
@@ -1149,15 +1160,12 @@ impl Engine {
                 }
             });
 
-        if !has_deferred {
-            // No command deferral: assemble the reaction from the primary result
-            // plus the optional auth-users replay. Exactly one of `bare_apply`
-            // (success) / `failure` (parse error) is set; fall back to Nothing.
-            let primary = bare_apply.or(failure).unwrap_or(EventReaction::Nothing);
-            return match pending_auth_reaction {
-                None => primary,
-                Some(auth_reaction) => EventReaction::Multi(vec![primary, auth_reaction]),
-            };
+        if !must_preswap {
+            // No pre-swap needed (no deferral, no auth replay): the bare reloaded
+            // config is surfaced for the surface to swap. Exactly one of
+            // `bare_apply` (success) / `failure` (parse error) is set; fall back to
+            // Nothing. (`pending_auth_reaction` is always None here.)
+            return bare_apply.or(failure).unwrap_or(EventReaction::Nothing);
         }
 
         // Step 3: re-apply each deferred command now that the barrier is closed.
@@ -3605,11 +3613,31 @@ mod tests {
             engine.pending_auth_users.is_none(),
             "pending_auth_users must be cleared after replay"
         );
-        // The in-memory config must carry the in-flight users, not the
-        // reloaded (empty) list.
+        // Reproduce the SURFACE step: the surface (web actor / TUI) applies the
+        // returned ApplyReloadedConfig back onto the engine and rebuilds the web
+        // auth gate from it. The in-flight users must SURVIVE that re-apply. The
+        // previous version of this test skipped this step and asserted only the
+        // transient pre-surface `self.config`, masking a bug where the surfaced
+        // config carried the OLD (reloaded, empty) user list — so the surface
+        // reverted the change in memory and at the live auth gate.
+        let surfaced = match &reaction {
+            EventReaction::ApplyReloadedConfig(c) => Some((**c).clone()),
+            EventReaction::Multi(v) => v.iter().find_map(|r| match r {
+                EventReaction::ApplyReloadedConfig(c) => Some((**c).clone()),
+                _ => None,
+            }),
+            _ => None,
+        }
+        .expect("a successful reload must surface an ApplyReloadedConfig for the surface to swap");
+        engine
+            .apply_reloaded_config(surfaced)
+            .expect("surface re-apply of the reloaded config must succeed");
+
+        // After the surface re-apply, the in-flight user update must still win over
+        // the reloaded (empty) list.
         assert_eq!(
             engine.config.auth.users, users,
-            "in-flight user update must win over reloaded config"
+            "in-flight user update must survive the surface's config re-apply"
         );
         // The reaction must include the auth-users status message.
         let contains_auth_status = match &reaction {
