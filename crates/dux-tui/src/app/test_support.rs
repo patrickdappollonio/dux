@@ -13,7 +13,7 @@ use crate::clipboard::Clipboard;
 use crate::config::{Config, DuxPaths, ProjectConfig};
 use crate::keybindings::{BINDING_DEFS, RuntimeBindings};
 use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind, SessionStatus};
-use crate::statusline::StatusLine;
+use crate::statusline::KeyedStatusController;
 use crate::storage::SessionStore;
 use crate::theme::Theme;
 use chrono::Utc;
@@ -192,7 +192,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_help_lines: 0,
         fullscreen_overlay: FullscreenOverlay::None,
         startup_log_viewer: None,
-        status: StatusLine::new("ready"),
+        status: KeyedStatusController::with_clear_after(std::time::Duration::ZERO),
         prompt: PromptState::None,
         input_target: InputTarget::None,
         session_surface: crate::model::SessionSurface::Agent,

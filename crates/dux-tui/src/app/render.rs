@@ -256,7 +256,10 @@ impl App {
             .buffer_mut()
             .set_style(frame_area, Style::default().bg(self.theme.app_bg));
 
-        let status_text = self.status.text();
+        let status_tui = self.status.most_recent_tui();
+        let status_text = status_tui
+            .as_ref()
+            .map_or(String::new(), |(_, t)| t.clone());
         let status_lines = status_footer_lines(&status_text, frame_area.width);
         let footer_h = 1 + status_lines; // 1 for hints + status lines
         let [header, body, footer] = Layout::default()
@@ -1865,9 +1868,11 @@ impl App {
             .style(Style::default().bg(self.theme.hint_bar_bg))
             .render(hints_area, frame.buffer_mut());
 
-        let tone = self.status.tone();
+        let (tone, status_text) = self
+            .status
+            .most_recent_tui()
+            .unwrap_or((StatusTone::Info, String::new()));
         let (dot, dot_color) = self.theme.status_dot(tone);
-        let status_text = self.status.text();
         let msg_color = match tone {
             StatusTone::Info => self.theme.status_info_fg,
             StatusTone::Busy => self.theme.status_busy_fg,
@@ -6881,7 +6886,10 @@ impl App {
     fn render_dim_overlay(&self, frame: &mut Frame) {
         let full = frame.area();
         // Keep the statusline (bottom rows) undimmed so errors stay visible.
-        let status_text = self.status.text();
+        let status_text = self
+            .status
+            .most_recent_tui()
+            .map_or(String::new(), |(_, t)| t);
         let status_lines = status_footer_lines(&status_text, full.width);
         let footer_h = 1 + status_lines; // hints bar + status line(s)
         let dim_h = full.height.saturating_sub(footer_h);

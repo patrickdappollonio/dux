@@ -15,7 +15,7 @@ use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
 use dux_core::pty::PtyClient;
-use dux_core::statusline::{StatusLine, StatusTone};
+use dux_core::statusline::{Generation, KeyedStatusController, KeyedWireStatus, StatusTone};
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -118,7 +118,8 @@ pub(crate) struct ActorLoopEnds {
     req_rx: mpsc::Receiver<EngineRequest>,
     vm_tx: watch::Sender<String>,
     status_tx: broadcast::Sender<WireStatus>,
-    status_snapshot_tx: watch::Sender<WireStatus>,
+    status_clear_tx: broadcast::Sender<Option<String>>,
+    status_snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
     commit_snapshot_tx: watch::Sender<Option<(CommitMessageEvent, Instant)>>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
@@ -266,15 +267,18 @@ pub(crate) fn build_actor_channels_with_auth(
 ) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::channel::<EngineRequest>(REQ_CHANNEL_CAPACITY);
     let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
-    // Status uses TWO channels driven from one place (the StatusEmitter):
+    // Status uses THREE channels driven from one place (the StatusEmitter):
     //  - `status_tx` (broadcast) delivers every status LIVE, so a transient
     //    pending flash ("Pulling…", "Launching…") is never coalesced away.
-    //  - `status_snapshot_tx` (watch) always holds the LATEST status so a client
-    //    connecting mid-status reads it once on connect (see `status_snapshot`),
-    //    rather than waiting blank for the next update. Empty renders as nothing.
+    //  - `status_clear_tx` (broadcast) delivers each key that was cleared so
+    //    clients can dismiss the matching toast without waiting for a replacement.
+    //    `None` = the anonymous slot; `Some(key)` = a named keyed op.
+    //  - `status_snapshot_tx` (watch) always holds ALL OPEN statuses so a client
+    //    connecting mid-status reads the full set once on connect (see
+    //    `status_snapshot`), rather than waiting blank for the next update.
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
-    let (status_snapshot_tx, status_snapshot_rx) =
-        watch::channel(WireStatus::new("info", String::new()));
+    let (status_clear_tx, _status_clear_rx) = broadcast::channel::<Option<String>>(256);
+    let (status_snapshot_tx, status_snapshot_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
     let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<CommitMessageEvent>(64);
     // The commit-message snapshot mirrors the status snapshot watch: it holds the
     // LAST generated message (or `None` before any), stamped with the `Instant` it
@@ -292,6 +296,7 @@ pub(crate) fn build_actor_channels_with_auth(
             req_tx,
             view_model_rx: vm_rx,
             status_tx: status_tx.clone(),
+            status_clear_tx: status_clear_tx.clone(),
             status_snapshot_rx,
             commit_msg_tx: commit_msg_tx.clone(),
             commit_snapshot_rx,
@@ -301,6 +306,7 @@ pub(crate) fn build_actor_channels_with_auth(
             req_rx,
             vm_tx,
             status_tx,
+            status_clear_tx,
             status_snapshot_tx,
             commit_msg_tx,
             commit_snapshot_tx,
@@ -323,10 +329,10 @@ pub(crate) fn spawn_global_workers(engine: &mut Engine) {
     engine.spawn_gh_status_check();
 }
 
-/// How long to wait for an agent provider to come up before failing a subscribe.
-/// The launch runs in a background worker and the provider appears via the
-/// worker-event drain, so the subscribe reply is deferred until then.
-const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for an agent provider to come up before failing a subscribe,
+/// and the threshold after which a stale `Busy` entry is upgraded to `Warning`.
+/// Shared with the TUI via `dux_core::statusline::BUSY_TIMEOUT`.
+const LAUNCH_TIMEOUT: Duration = dux_core::statusline::BUSY_TIMEOUT;
 
 /// A subscribe that is waiting for its provider to be launched/resumed. The reply
 /// is held until `engine.providers` contains the session (success) or the
@@ -342,7 +348,8 @@ pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
     view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
-    status_snapshot_rx: watch::Receiver<WireStatus>,
+    status_clear_tx: broadcast::Sender<Option<String>>,
+    status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
     commit_snapshot_rx: watch::Receiver<Option<(CommitMessageEvent, Instant)>>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
@@ -385,13 +392,31 @@ impl EngineHandle {
         self.status_tx.subscribe()
     }
 
-    /// The current status (latest-wins), from the snapshot watch. A client
-    /// connecting mid-status sends this once so it shows the active status
-    /// immediately — e.g. a "Launching agent…" Busy that hasn't resolved yet —
-    /// instead of a blank line until the next live update arrives over the
-    /// broadcast. Mirrors `view_model_json` for the ViewModel.
-    pub fn status_snapshot(&self) -> WireStatus {
+    /// Subscribe to the clear broadcast. Each item is the key that was removed:
+    /// `None` = the anonymous slot cleared, `Some(key)` = a named keyed op.
+    /// Task 7's WS forwarder converts each into a `ServerMessage::StatusCleared`.
+    pub fn subscribe_status_clears(&self) -> broadcast::Receiver<Option<String>> {
+        self.status_clear_tx.subscribe()
+    }
+
+    /// All currently open statuses (anonymous + keyed), from the snapshot watch.
+    /// A client connecting mid-operation reads this once and sends each entry as
+    /// a `Status` frame so it sees all active toasts immediately — e.g. a
+    /// "Launching agent…" Busy that hasn't resolved yet — instead of a blank
+    /// line until the next live update. An empty `Vec` means nothing is showing.
+    /// Mirrors `view_model_json` for the ViewModel and `commit_message_snapshot`
+    /// for the commit lane.
+    pub fn status_snapshot(&self) -> Vec<KeyedWireStatus> {
         self.status_snapshot_rx.borrow().clone()
+    }
+
+    /// Like [`emit_status`] but attaches a correlation key so a later success,
+    /// error, or clear on the same key replaces or dismisses the same toast.
+    /// Prefer this over `emit_status` for any operation that has a keyed lifecycle
+    /// (e.g. ACME certificate renewal, where a "Renewing…" busy should be
+    /// replaced by a "Renewed." info on success and dismissed by `StatusCleared`).
+    pub fn emit_keyed_status(&self, key: impl Into<String>, status: WireStatus) {
+        self.emit_status(status.with_key(key));
     }
 
     /// Publish a status from a non-engine producer (the ACME certificate-lifecycle
@@ -620,22 +645,26 @@ pub(crate) fn run_engine_loop(
         mut req_rx,
         vm_tx,
         status_tx: thread_status_tx,
+        status_clear_tx,
         status_snapshot_tx,
         commit_msg_tx: thread_commit_tx,
         commit_snapshot_tx,
         shutdown_flag,
         auth_reload,
     } = ends;
-    // Route every status through the shared StatusLine controller so the web gets
+    // Route every status through the shared KeyedStatusController so the web gets
     // the SAME auto-clear + pending→final behaviour as the TUI from one place.
-    // The emitter broadcasts each status LIVE and keeps the snapshot watch in
-    // sync; keeping the binding name `thread_status_tx` and a `send` method means
-    // the loop's existing broadcast sites need no changes. `tick` (called once per
-    // iteration below) publishes the cleared state when a transient status
-    // expires. The timeout is captured at startup (like the TUI), so changing
-    // `status_clear_seconds` takes effect on the next server start.
+    // The emitter upserts by key, broadcasts each status LIVE, and keeps the Vec
+    // snapshot watch in sync so connecting clients see all open toasts at once.
+    // Keeping the binding name `thread_status_tx` and a `send` method means the
+    // loop's existing call sites need no changes. `tick` (called once per
+    // iteration below) expires timed-out Info entries, upgrades stale Busy→Warning,
+    // and pushes cleared keys onto `clear_tx`. The timeout is captured at startup
+    // (like the TUI), so changing `status_clear_seconds` takes effect on the next
+    // server start.
     let mut thread_status_tx = StatusEmitter::new(
         thread_status_tx,
+        status_clear_tx,
         status_snapshot_tx,
         Duration::from_secs(engine.config.ui.status_clear_seconds as u64),
     );
@@ -694,7 +723,8 @@ pub(crate) fn run_engine_loop(
                 )
                 && let Err(e) = engine.persist_projects_to_config()
             {
-                let _ = thread_status_tx.send(WireStatus::new(
+                let _ = thread_status_tx.send(WireStatus::keyed(
+                    "config-write",
                     "error",
                     format!("Saved to the database, but config.toml could not be updated: {e:#}"),
                 ));
@@ -718,15 +748,18 @@ pub(crate) fn run_engine_loop(
                     // The Instant stamps generation time for the snapshot TTL.
                     let _ = commit_snapshot_tx.send(Some((event.clone(), Instant::now())));
                     let _ = thread_commit_tx.send(event);
+                    // The busy toast for commit-message generation carries
+                    // `commit-msg:{session_id}`. Success routes the draft through
+                    // the commit-message lane (not the status stream), so the
+                    // busy toast never gets replaced by a succeeding status. Clear
+                    // it explicitly so it does not linger.
+                    thread_status_tx.clear(format!("commit-msg:{session_id}"));
                 }
-                EventReaction::CommitMessageFailed {
-                    session_id: _,
-                    error,
-                } => {
-                    // Failures ride the generic status toast (not the scoped
-                    // commit-message lane): a generation error is not a draft to
-                    // route, so the user just needs to know it didn't work.
-                    let _ = thread_status_tx.send(WireStatus::new(
+                EventReaction::CommitMessageFailed { session_id, error } => {
+                    // Failures ride the generic status toast, keyed so they
+                    // replace the matching busy rather than stacking beside it.
+                    let _ = thread_status_tx.send(WireStatus::keyed(
+                        format!("commit-msg:{session_id}"),
                         "error",
                         format!("Couldn't generate a commit message: {error}"),
                     ));
@@ -944,57 +977,94 @@ pub(crate) fn run_engine_loop(
 }
 
 /// Wraps the WS status channels so every status flows through one shared
-/// [`StatusLine`] controller: [`send`](Self::send) records the status, updates
-/// the snapshot watch (latest-wins, for clients connecting mid-status), and
-/// broadcasts it LIVE so a transient pending flash is never coalesced away;
-/// [`tick`](Self::tick) — called once per loop iteration — publishes a cleared
-/// status to both once a transient Info/success message has outlived
-/// `status_clear_seconds`. Busy/warning/error never auto-clear (the controller
-/// enforces the tone rules), so the web matches the TUI 1:1. The `send` method
-/// name and broadcast return type let the loop's existing send sites stay
-/// unchanged.
+/// [`KeyedStatusController`]: [`send`](Self::send) upserts the status by key,
+/// refreshes the Vec snapshot watch (all open statuses, for clients connecting
+/// mid-operation), and broadcasts it LIVE so a transient pending flash is never
+/// coalesced away; [`tick`](Self::tick) — called once per loop iteration —
+/// expires timed-out entries, pushes removed keys onto `clear_tx` (so Task 7's
+/// WS forwarder sends `StatusCleared` frames), and upgrades stale Busy entries
+/// to Warning (busy-timeout). The `send` method name and broadcast return type
+/// let the loop's existing call sites stay unchanged.
 struct StatusEmitter {
     tx: broadcast::Sender<WireStatus>,
-    snapshot_tx: watch::Sender<WireStatus>,
-    controller: StatusLine,
+    clear_tx: broadcast::Sender<Option<String>>,
+    snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
+    controller: KeyedStatusController,
+    /// Most recent generation for each keyed status so `clear` can guard
+    /// against dismissing a newer status placed on the same key by a
+    /// concurrent operation (e.g. a rapid retry during commit-msg generation).
+    generations: std::collections::HashMap<String, Generation>,
 }
 
 impl StatusEmitter {
     fn new(
         tx: broadcast::Sender<WireStatus>,
-        snapshot_tx: watch::Sender<WireStatus>,
+        clear_tx: broadcast::Sender<Option<String>>,
+        snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
         clear_after: Duration,
     ) -> Self {
         Self {
             tx,
+            clear_tx,
             snapshot_tx,
-            controller: StatusLine::with_clear_after("", clear_after),
+            controller: KeyedStatusController::with_clear_after(clear_after),
+            generations: std::collections::HashMap::new(),
         }
     }
 
-    /// Record the status in the controller, refresh the snapshot, then broadcast
-    /// it live. Returns the broadcast `send` result so the call sites keep
-    /// discarding it with `let _ =` exactly as before.
+    /// Upsert the status in the controller (keyed or anonymous), refresh the
+    /// Vec snapshot, then broadcast it live. Returns the broadcast `send` result
+    /// so the call sites keep discarding it with `let _ =` exactly as before.
     fn send(
         &mut self,
         status: WireStatus,
     ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
-        self.controller.set(
+        let tone = StatusTone::from_wire(&status.tone);
+        let generation = self.controller.set(
             Instant::now(),
-            StatusTone::from_wire(&status.tone),
+            status.key.clone(),
+            tone,
             status.message.as_str(),
         );
-        let _ = self.snapshot_tx.send(status.clone());
+        if let Some(ref k) = status.key {
+            self.generations.insert(k.clone(), generation);
+        }
+        let _ = self.snapshot_tx.send(self.controller.snapshot());
         self.tx.send(status)
     }
 
-    /// Publish the cleared state — to both the snapshot and the live broadcast —
-    /// if the current transient status just expired.
+    /// Explicitly clear a keyed entry (remove from the controller, push the
+    /// key onto `clear_tx` so the WS forwarder sends a `StatusCleared` frame,
+    /// refresh the snapshot). Guards with the generation stored when the busy
+    /// was emitted so a concurrent in-flight cannot be prematurely dismissed.
+    fn clear(&mut self, key: String) {
+        let generation = self.generations.get(&key).copied();
+        if self.controller.clear(&key, generation) {
+            self.generations.remove(&key);
+            let _ = self.snapshot_tx.send(self.controller.snapshot());
+            let _ = self.clear_tx.send(Some(key));
+        }
+    }
+
+    /// Expire timed-out entries (auto-clear Info, upgrade stale Busy→Warning).
+    /// Pushes cleared keys onto `clear_tx` (for the WS forwarder's
+    /// `StatusCleared` frames) and broadcasts upgraded entries as live `WireStatus`
+    /// updates. Short-circuits when nothing changed so idle ticks cost nothing.
     fn tick(&mut self, now: Instant) {
-        if self.controller.tick(now) {
-            let cleared = WireStatus::new("info", String::new());
-            let _ = self.snapshot_tx.send(cleared.clone());
-            let _ = self.tx.send(cleared);
+        let changes = self.controller.tick(now, LAUNCH_TIMEOUT);
+        if changes.cleared_keys.is_empty() && changes.upgraded.is_empty() {
+            return;
+        }
+        let _ = self.snapshot_tx.send(self.controller.snapshot());
+        for key in changes.cleared_keys {
+            let _ = self.clear_tx.send(key);
+        }
+        for up in changes.upgraded {
+            let _ = self.tx.send(WireStatus {
+                key: up.key,
+                tone: up.tone,
+                message: up.message,
+            });
         }
     }
 }
@@ -1275,8 +1345,14 @@ mod tests {
         let want = outcome.status.expect("command produced a status").message;
 
         // …apply_wire updates the watch before it replies, so the shared snapshot
-        // a newly-connected client would read now holds the same status…
-        assert_eq!(handle.status_snapshot().message, want);
+        // a newly-connected client would read now holds the same status. The
+        // snapshot is now a Vec of all open statuses; the anonymous slot (key=None)
+        // is the expected entry for unkeyed command-result statuses.
+        let snap = handle.status_snapshot();
+        assert!(
+            snap.iter().any(|s| s.message == want),
+            "snapshot did not contain the expected status: {snap:?}"
+        );
 
         // …AND it is delivered live on the broadcast to every connected client.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1426,6 +1502,163 @@ mod tests {
             .await
             .expect("join task")
             .expect("engine thread joined");
+    }
+
+    // -----------------------------------------------------------------------
+    // StatusEmitter unit tests (no Engine, no I/O — channels only)
+    // -----------------------------------------------------------------------
+
+    /// Build a `StatusEmitter` directly from inline channels (no engine needed)
+    /// so the shape of the struct and its snapshot behaviour can be tested
+    /// without spawning a thread. Mirrors the channel setup in
+    /// `build_actor_channels_with_auth`.
+    fn make_emitter() -> (StatusEmitter, watch::Receiver<Vec<KeyedWireStatus>>) {
+        let (tx, _rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let emitter = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
+        };
+        (emitter, snap_rx)
+    }
+
+    #[test]
+    fn emitter_snapshot_holds_all_open_keyed_statuses() {
+        // Both a keyed "pull" busy and a keyed "launch" busy must appear in the
+        // snapshot together so a reconnecting client receives every active toast,
+        // not just the latest one.
+        let (mut e, snap_rx) = make_emitter();
+        let _ = e.send(WireStatus::keyed("pull", "busy", "Pulling\u{2026}"));
+        let _ = e.send(WireStatus::keyed("launch", "busy", "Launching\u{2026}"));
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(snap.len(), 2, "snapshot must list both open busys");
+        assert!(
+            snap.iter().any(|s| s.key.as_deref() == Some("pull")),
+            "pull must appear in snapshot"
+        );
+        assert!(
+            snap.iter().any(|s| s.key.as_deref() == Some("launch")),
+            "launch must appear in snapshot"
+        );
+    }
+
+    #[test]
+    fn emitter_tick_clears_expired_info_and_broadcasts_clear_key() {
+        // An expired Info entry is removed from the snapshot AND its key is
+        // pushed onto the clear broadcast so the WS forwarder can send
+        // `StatusCleared`.
+        let (tx, _rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, mut crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let mut e = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
+        };
+        // One keyed Info that will expire and one anonymous Info that will too.
+        let _ = e.send(WireStatus::keyed("commit", "info", "Committed."));
+        let _ = e.send(WireStatus::new("info", "Saved."));
+        assert_eq!(snap_rx.borrow().len(), 2, "both statuses in snapshot");
+
+        // Advance wall-clock past clear_after — use the controller's tick directly.
+        // Simulate by calling tick with a far-future instant.
+        let far_future = Instant::now() + Duration::from_secs(100);
+        e.tick(far_future);
+
+        // Snapshot must now be empty.
+        assert!(
+            snap_rx.borrow().is_empty(),
+            "snapshot must be empty after expiry"
+        );
+
+        // Both cleared keys must have been broadcast.
+        let mut cleared = Vec::new();
+        while let Ok(key) = crx.try_recv() {
+            cleared.push(key);
+        }
+        assert_eq!(cleared.len(), 2, "both keys must be broadcast on clear_tx");
+        assert!(
+            cleared.contains(&Some("commit".to_string())),
+            "keyed clear expected"
+        );
+        assert!(cleared.contains(&None), "anonymous clear expected");
+    }
+
+    #[test]
+    fn emitter_clear_is_a_no_op_when_a_newer_status_replaced_the_key() {
+        // LOW 5: a commit-msg clear must not dismiss a concurrent same-key
+        // generate's busy. The emitter stores the generation from the busy it
+        // emitted and guards the clear with it; once a newer status (a fresh
+        // generate) replaces the key, the stale clear becomes a no-op.
+        let (mut e, snap_rx) = make_emitter();
+        let key = "commit-msg:s1";
+
+        // First generate sets the busy and remembers its generation.
+        let _ = e.send(WireStatus::keyed(key, "busy", "Generating\u{2026}"));
+        let stale_generation = *e.generations.get(key).expect("busy stored a generation");
+
+        // A concurrent second generate replaces the key with a newer generation.
+        let _ = e.send(WireStatus::keyed(key, "busy", "Generating again\u{2026}"));
+        assert_ne!(
+            *e.generations.get(key).unwrap(),
+            stale_generation,
+            "the replacement must bump the generation"
+        );
+
+        // Simulate the FIRST generate's clear arriving late by restoring the
+        // stale generation it captured, then clearing.
+        e.generations.insert(key.to_string(), stale_generation);
+        e.clear(key.to_string());
+
+        // The newer busy must still be present — the stale clear was a no-op.
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(
+            snap.len(),
+            1,
+            "the concurrent generate's busy must survive a stale clear"
+        );
+        assert_eq!(snap[0].key.as_deref(), Some(key));
+        assert_eq!(snap[0].tone, "busy");
+    }
+
+    #[test]
+    fn emitter_tick_upgrades_stale_busy_and_broadcasts_upgraded_wire_status() {
+        // A Busy that outlives LAUNCH_TIMEOUT must be upgraded to Warning
+        // in-place and broadcast as a live WireStatus update so the client sees
+        // the change without a full reconnect.
+        let (tx, mut rx) = broadcast::channel::<WireStatus>(16);
+        let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
+        let (snap_tx, snap_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
+        let mut e = StatusEmitter {
+            tx,
+            clear_tx,
+            snapshot_tx: snap_tx,
+            controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
+        };
+        // Drain the initial send so `rx` only sees the upgrade.
+        let _ = e.send(WireStatus::keyed("launch", "busy", "Launching\u{2026}"));
+        let _ = rx.try_recv(); // consume the live send
+
+        // Advance past LAUNCH_TIMEOUT.
+        let far_future = Instant::now() + LAUNCH_TIMEOUT + Duration::from_secs(1);
+        e.tick(far_future);
+
+        // The snapshot entry must have been upgraded to Warning.
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(snap.len(), 1, "entry remains after busy→warning upgrade");
+        assert_eq!(snap[0].tone, "warning");
+
+        // The upgraded status must have been broadcast live.
+        let upgraded = rx.try_recv().expect("upgraded status must be broadcast");
+        assert_eq!(upgraded.key.as_deref(), Some("launch"));
+        assert_eq!(upgraded.tone, "warning");
     }
 
     #[test]
