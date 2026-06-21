@@ -157,6 +157,12 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     std::fs::create_dir_all(&paths.root)?;
     let config = dux_core::config::load_config(&paths);
 
+    // Initialize the logger early so every subsequent logger::* call in the server
+    // path (bootstrap, bind, auth-reload, ACME lifecycle) actually reaches dux.log.
+    // OnceLock::set is idempotent — safe if the TUI already initialized it (flip).
+    dux_core::logger::init(&config.logging, &paths);
+    dux_core::logger::info("bootstrapping dux server");
+
     let auth_enabled = dux_core::auth::auth_enabled(&config, cli_disable_auth);
 
     // Detect the Tailscale address up front (blocking is fine at CLI startup).
