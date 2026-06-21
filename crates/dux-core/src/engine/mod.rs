@@ -67,12 +67,10 @@ pub struct Engine {
     /// The single ordered, off-thread, atomic config writer for this process.
     /// `PersistGlobalEnv` / `UpdateMacros` (and, in later tasks, the other
     /// config-mutating handlers) write through this so saves never block the
-    /// engine thread and never race each other.
-    ///
-    /// The off-thread config writer. Its `Drop` sends an explicit `Shutdown` that
-    /// the writer obeys even while paused, so a `QuiesceGuard` in `reload_guard`
-    /// can outlive it without deadlocking — field declaration order relative to
-    /// `reload_guard` no longer affects correctness.
+    /// engine thread and never race each other. Its `Drop` sends an explicit
+    /// `Shutdown` that the writer obeys even while paused, so a `QuiesceGuard`
+    /// in `reload_guard` can outlive it without deadlocking — field declaration
+    /// order relative to `reload_guard` no longer affects correctness.
     pub config_writer: ConfigWriteQueue,
     /// Front-end-specific config concerns the Engine cannot own itself: reload
     /// (validation + project-sync) and recover rendering. The TUI plugs in a
