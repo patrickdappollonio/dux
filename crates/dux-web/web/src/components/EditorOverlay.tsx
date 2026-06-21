@@ -236,7 +236,10 @@ function EditorBody({
   // This file's save is in flight (path-scoped — see `saving`).
   const isSaving = saving !== null && saving === openPath
 
-  const tree = useMemo(() => buildFileTree(treeFiles), [treeFiles])
+  const { nodes: tree, capped: treeCapped } = useMemo(
+    () => buildFileTree(treeFiles),
+    [treeFiles],
+  )
   const defaultExpanded = useMemo(
     () => new Set(initialPath ? ancestorDirs(initialPath) : []),
     [initialPath],
@@ -665,6 +668,7 @@ function EditorBody({
                   changed={changedMap}
                   defaultExpanded={defaultExpanded}
                   onOpen={requestSwitch}
+                  capped={treeCapped}
                 />
               )}
             </div>
