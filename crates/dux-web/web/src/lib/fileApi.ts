@@ -14,6 +14,9 @@ export interface WorktreeFile {
   // True when the file is binary — `content` is empty and the editor refuses it.
   binary: boolean
   content: string
+  /** True when the server opened this file read-only (outside-resolving symlink
+   *  or a .git/ path). The editor must not allow saving. */
+  read_only?: boolean
 }
 
 // The two raw sides of a changed file (HEAD vs working copy) for the editor's
@@ -62,9 +65,9 @@ export const fileApi = {
   // out server-side). Editing is NOT limited to this set — any path inside the
   // worktree can be read/written/created (the server enforces containment).
   list: (sessionId: string) =>
-    postFile<{ files: string[] }>("/api/file/list", {
+    postFile<{ files: string[]; truncated?: boolean }>("/api/file/list", {
       session_id: sessionId,
-    }).then((r) => r.files),
+    }),
   read: (sessionId: string, path: string) =>
     postFile<WorktreeFile>("/api/file/read", { session_id: sessionId, path }),
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
