@@ -1109,11 +1109,45 @@ impl Engine {
         self.reload_guard = None;
         self.reloading = false;
 
+        // Step 2b: replay any auth-users update that arrived while the barrier
+        // was open. The barrier is now cleared so the eager writer will accept
+        // the write. The user-initiated update wins over the on-disk reloaded
+        // value: we write AFTER apply_reloaded_config has swapped in the
+        // reloaded config, so the final on-disk state is reloaded-config +
+        // in-flight user change. Multiple arrivals folded into one by the
+        // stash: last one wins.
+        let pending_auth_reaction = self
+            .pending_auth_users
+            .take()
+            .map(|(users, message, warn)| {
+                let previous = self.config.auth.users.clone();
+                self.config.auth.users = users;
+                match self.config_writer.save_eager(self.config.clone()) {
+                    Ok(()) => {
+                        if warn {
+                            EventReaction::Status(StatusUpdate::warning(message))
+                        } else {
+                            EventReaction::Status(StatusUpdate::info(message))
+                        }
+                    }
+                    Err(err) => {
+                        self.config.auth.users = previous;
+                        EventReaction::Status(StatusUpdate::error(format!(
+                            "Could not save web UI login users to config.toml: {err}"
+                        )))
+                    }
+                }
+            });
+
         if !has_deferred {
-            // No deferral: return the single reaction directly. Exactly one of
-            // `bare_apply` (success) / `failure` (parse error) is set; fall back to
-            // Nothing defensively.
-            return bare_apply.or(failure).unwrap_or(EventReaction::Nothing);
+            // No command deferral: assemble the reaction from the primary result
+            // plus the optional auth-users replay. Exactly one of `bare_apply`
+            // (success) / `failure` (parse error) is set; fall back to Nothing.
+            let primary = bare_apply.or(failure).unwrap_or(EventReaction::Nothing);
+            return match pending_auth_reaction {
+                None => primary,
+                Some(auth_reaction) => EventReaction::Multi(vec![primary, auth_reaction]),
+            };
         }
 
         // Step 3: re-apply each deferred command now that the barrier is closed.
@@ -1145,6 +1179,12 @@ impl Engine {
             )));
         }
         reactions.extend(deferred_reactions);
+        if let Some(auth_reaction) = pending_auth_reaction {
+            // Auth-users replay: append after deferred command reactions so its
+            // status (info or warning) is the last thing shown to the user.
+            // Appended before failure so a reload error still wins the headline.
+            reactions.push(auth_reaction);
+        }
         if let Some(failure) = failure {
             // Failure: append the reload-failed modal/error LAST so its error
             // status wins the surface's status line instead of being overwritten by
@@ -1622,6 +1662,16 @@ impl Engine {
                 self.clear_in_flight(&InFlightKey::AuthUsers);
                 match result {
                     Ok(()) => {
+                        // If a config reload is in progress, the eager writer is
+                        // quiesced and would reject this write. Stash the payload
+                        // and replay it when `ConfigReloadReady` closes the barrier
+                        // (after the reloaded config is applied), so the
+                        // user-initiated change is never silently lost. Multiple
+                        // arrivals within one reload window fold: the last one wins.
+                        if self.reloading {
+                            self.pending_auth_users = Some((users, message, warn));
+                            return EventReaction::Nothing;
+                        }
                         // Adopt the new user list and write it to config via the
                         // eager queue; roll back in-memory state on write failure.
                         let previous = self.config.auth.users.clone();
@@ -3482,6 +3532,151 @@ mod tests {
             counter.load(Ordering::Relaxed) >= 2,
             "loop did not continue past panic; counter = {}",
             counter.load(Ordering::Relaxed),
+        );
+    }
+
+    // ── AuthUsersPersisted reload-barrier deferral ───────────────────────
+
+    /// Deliver AuthUsersPersisted while the reload barrier is open. The write
+    /// must be deferred (Nothing returned, no config mutation), the in-flight
+    /// guard must be cleared, and the payload stashed in pending_auth_users.
+    #[test]
+    fn auth_users_persisted_deferred_while_reloading() {
+        let (mut engine, _tmp) = test_engine();
+        // Open the reload barrier manually (mirrors what ReloadConfig does).
+        engine.reloading = true;
+        engine.mark_in_flight(InFlightKey::AuthUsers);
+
+        let users = vec!["alice:hash".to_string()];
+        let reaction = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
+            users: users.clone(),
+            message: "Added user alice.".to_string(),
+            warn: false,
+            result: Ok(()),
+        });
+
+        // The reaction must be Nothing — not an error, not a status.
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "expected Nothing during reload, got {}",
+            reaction_kind(&reaction),
+        );
+        // In-flight guard is cleared regardless of deferral.
+        assert!(!engine.is_in_flight(&InFlightKey::AuthUsers));
+        // The payload is stashed, not applied to config yet.
+        assert!(
+            engine.pending_auth_users.is_some(),
+            "payload must be stashed"
+        );
+        assert!(
+            engine.config.auth.users.is_empty(),
+            "config must not be mutated before barrier closes"
+        );
+    }
+
+    /// When ConfigReloadReady closes the barrier, a stashed auth-users payload
+    /// must be replayed: config.auth.users updated + config written to disk.
+    #[test]
+    fn auth_users_replayed_on_config_reload_ready() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Stash a pending update as if AuthUsersPersisted arrived during reload.
+        let users = vec!["bob:hash".to_string()];
+        engine.pending_auth_users = Some((users.clone(), "Added user bob.".to_string(), false));
+
+        // Deliver a successful ConfigReloadReady with a config that has a
+        // different (or empty) auth.users — the in-flight update must win.
+        let reloaded = Config::default(); // auth.users is empty
+        let reaction =
+            engine.process_worker_event(WorkerEvent::ConfigReloadReady(Box::new(Ok(reloaded))));
+
+        // pending_auth_users must be consumed.
+        assert!(
+            engine.pending_auth_users.is_none(),
+            "pending_auth_users must be cleared after replay"
+        );
+        // The in-memory config must carry the in-flight users, not the
+        // reloaded (empty) list.
+        assert_eq!(
+            engine.config.auth.users, users,
+            "in-flight user update must win over reloaded config"
+        );
+        // The reaction must include the auth-users status message.
+        let contains_auth_status = match &reaction {
+            EventReaction::Status(s) => s.message.contains("Added user bob"),
+            EventReaction::Multi(v) => v.iter().any(
+                |r| matches!(r, EventReaction::Status(s) if s.message.contains("Added user bob")),
+            ),
+            _ => false,
+        };
+        assert!(
+            contains_auth_status,
+            "reaction must surface the auth-users status message; got {}",
+            reaction_kind(&reaction),
+        );
+    }
+
+    /// An AuthUsersPersisted failure (bcrypt or DB) arriving during a reload
+    /// must NOT be stashed — the error is surfaced immediately and the
+    /// in-flight guard is cleared.
+    #[test]
+    fn auth_users_error_during_reload_surfaces_immediately() {
+        let (mut engine, _tmp) = test_engine();
+        engine.reloading = true;
+        engine.mark_in_flight(InFlightKey::AuthUsers);
+
+        let reaction = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
+            users: vec![],
+            message: String::new(),
+            warn: false,
+            result: Err("bcrypt failed".to_string()),
+        });
+
+        // Error is surfaced immediately, not deferred.
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Error);
+        assert!(
+            status.message.contains("bcrypt failed"),
+            "error message must be surfaced; got: {}",
+            status.message,
+        );
+        // Nothing stashed.
+        assert!(engine.pending_auth_users.is_none());
+        // In-flight guard cleared.
+        assert!(!engine.is_in_flight(&InFlightKey::AuthUsers));
+    }
+
+    /// When multiple AuthUsersPersisted events arrive during a single reload,
+    /// only the last one is replayed (last-write-wins fold).
+    #[test]
+    fn auth_users_last_write_wins_within_one_reload() {
+        let (mut engine, _tmp) = test_engine();
+        engine.reloading = true;
+
+        // First event.
+        let _ = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
+            users: vec!["alice:hash".to_string()],
+            message: "Added alice.".to_string(),
+            warn: false,
+            result: Ok(()),
+        });
+        // Second event (arrives before barrier closes).
+        let _ = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
+            users: vec!["alice:hash".to_string(), "bob:hash".to_string()],
+            message: "Added bob.".to_string(),
+            warn: false,
+            result: Ok(()),
+        });
+
+        // Only the second payload is stashed.
+        let (stashed_users, stashed_msg, _) = engine
+            .pending_auth_users
+            .take()
+            .expect("payload must be stashed");
+        assert_eq!(stashed_users.len(), 2, "second (last) event must win");
+        assert!(
+            stashed_msg.contains("bob"),
+            "message must be from last event"
         );
     }
 }
