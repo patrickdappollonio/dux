@@ -458,6 +458,7 @@ function EditorBody({
       .then(() => fileApi.list(sessionId))
       .then((result) => {
         setTreeFiles(result.files)
+        setTreeServerTruncated(result.truncated ?? false)
         setNewFileOpen(false)
         setNewFilePath("")
         // A brand-new file is for editing, so land in file mode.

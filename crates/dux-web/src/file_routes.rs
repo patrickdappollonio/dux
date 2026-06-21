@@ -199,9 +199,11 @@ async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> R
     };
     let path = q.path;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
-        // Use the read-permissive resolver so .git/ assets and symlinked images
-        // inside the worktree reach this proxy. The write path is unaffected.
-        let (abs, _is_git, is_outside) =
+        // Use the read-permissive resolver so symlinked images inside the
+        // worktree reach this proxy. The image proxy intentionally does NOT
+        // serve .git/ internals — those never contain renderable assets and
+        // exposing them (e.g. .git/config, pack files) is unnecessary risk.
+        let (abs, is_git, is_outside) =
             dux_core::worktree_file::resolve_worktree_path_for_read(&worktree, &path)?;
 
         // Stage 1: reject immediately when the resolver determined the path
@@ -209,6 +211,11 @@ async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> R
         // host files outside the worktree.
         if is_outside {
             anyhow::bail!("refusing to serve path outside the worktree");
+        }
+
+        // Also refuse .git/ internals — they are not renderable image assets.
+        if is_git {
+            anyhow::bail!("refusing to serve git internal path via image proxy");
         }
 
         let meta = std::fs::symlink_metadata(&abs)?;
@@ -563,6 +570,73 @@ mod tests {
                 real.starts_with(&wt_real),
                 "canonicalized target of inlink.png must be inside the worktree"
             );
+        }
+    }
+
+    /// `read_raw` git-dir guard: the image proxy must refuse `.git/` paths even
+    /// though `resolve_worktree_path_for_read` permits them (for the text editor).
+    mod git_dir_guard {
+        use dux_core::worktree_file::resolve_worktree_path_for_read;
+
+        fn setup_worktree_with_git() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let wt = dir.path();
+            // Minimal .git directory with a config file (stands in for any git internal).
+            std::fs::create_dir(wt.join(".git")).unwrap();
+            std::fs::write(
+                wt.join(".git/config"),
+                "[core]\n\trepositoryformatversion = 0\n",
+            )
+            .unwrap();
+            // A normal image inside the worktree.
+            std::fs::write(wt.join("logo.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+            dir
+        }
+
+        /// `.git/config` must have `is_git = true` from the resolver so the
+        /// guard in `read_raw` can reject it.
+        #[test]
+        fn git_config_is_flagged_as_git_dir() {
+            let dir = setup_worktree_with_git();
+            let (_, is_git, _) = resolve_worktree_path_for_read(dir.path(), ".git/config").unwrap();
+            assert!(
+                is_git,
+                ".git/config must be flagged as a git-dir path by the resolver"
+            );
+        }
+
+        /// Mirroring `read_raw`'s `if is_git { bail! }` guard: a `.git/` path
+        /// must be refused by the image proxy logic.
+        #[test]
+        fn read_raw_refuses_git_internal_path() {
+            let dir = setup_worktree_with_git();
+            let result: anyhow::Result<()> = (|| {
+                let (_, is_git, is_outside) =
+                    resolve_worktree_path_for_read(dir.path(), ".git/config")?;
+                if is_outside {
+                    anyhow::bail!("refusing to serve path outside the worktree");
+                }
+                if is_git {
+                    anyhow::bail!("refusing to serve git internal path via image proxy");
+                }
+                Ok(())
+            })();
+            assert!(result.is_err(), "read_raw must refuse .git/ paths");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("git internal"),
+                "error should mention 'git internal', got: {msg}"
+            );
+        }
+
+        /// A normal image inside the worktree must NOT be refused.
+        #[test]
+        fn read_raw_allows_normal_in_worktree_image() {
+            let dir = setup_worktree_with_git();
+            let (_, is_git, is_outside) =
+                resolve_worktree_path_for_read(dir.path(), "logo.png").unwrap();
+            assert!(!is_outside, "logo.png must not be flagged as outside");
+            assert!(!is_git, "logo.png must not be flagged as git-dir");
         }
     }
 }
