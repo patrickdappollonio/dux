@@ -226,7 +226,7 @@ describe("auto-focus the agent this client created", () => {
     mod.openCreateAgent("p1")
     mod.submitNameDialog("my-agent")
     // The async agent launch fails — surfaced as an error-toned status.
-    mod.socket.onStatus("error", "Agent launch failed")
+    mod.socket.onStatus(null, "error", "Agent launch failed")
     expect(mod.getSnapshot().pendingCreateFocus).toBeNull()
     // A later unrelated session in the same project must NOT be auto-focused.
     mod.socket.onViewModel(
