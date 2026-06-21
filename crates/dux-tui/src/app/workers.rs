@@ -208,12 +208,15 @@ impl App {
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
         match reaction {
             EventReaction::Nothing => {}
-            EventReaction::Status(StatusUpdate { tone, message, .. }) => match tone {
-                StatusTone::Info => self.set_info(message),
-                StatusTone::Busy => self.set_busy(message),
-                StatusTone::Warning => self.set_warning(message),
-                StatusTone::Error => self.set_error(message),
-            },
+            EventReaction::Status(StatusUpdate { tone, message, key }) => {
+                // When a `StatusUpdate` carries a key (keyed operation), write it
+                // into the named slot so `most_recent_tui` can pick it up.
+                // Unkeyed updates (`key == None`) write the anonymous slot.
+                // Info entries auto-clear after `clear_after`; Busy persists until
+                // replaced; Warning/Error persist until the next status.
+                self.status.set(Instant::now(), key, tone, message);
+            }
+
             EventReaction::Multi(reactions) => {
                 for r in reactions {
                     self.apply_reaction(r);
@@ -343,10 +346,9 @@ impl App {
                 // overwritten it, we should not clobber their message — the
                 // session will visually disappear from the list, which is
                 // sufficient feedback.
-                let our_busy_still_showing = our_busy_message.as_ref().is_some_and(|msg| {
-                    self.status.tone() == crate::statusline::StatusTone::Busy
-                        && self.status.message() == msg.as_str()
-                });
+                let our_busy_still_showing = our_busy_message
+                    .as_ref()
+                    .is_some_and(|msg| self.status.anon_busy_matches(msg.as_str()));
 
                 if self.engine.sessions.iter().any(|s| s.id == session_id) {
                     if let Err(e) = self.finish_delete_session(

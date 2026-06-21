@@ -2663,7 +2663,9 @@ mod tests {
             last_help_lines: 0,
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
-            status: StatusLine::new("ready"),
+            status: crate::statusline::KeyedStatusController::with_clear_after(
+                std::time::Duration::ZERO,
+            ),
             prompt: PromptState::None,
             input_target: InputTarget::None,
             session_surface: crate::model::SessionSurface::Agent,

@@ -46,7 +46,7 @@ use crate::model::{
 use crate::provider;
 use crate::pty::PtyClient;
 use crate::pty::TerminalSnapshot;
-use crate::statusline::{StatusLine, StatusTone};
+use crate::statusline::{BUSY_TIMEOUT, KeyedStatusController, StatusTone};
 use crate::storage::SessionStore;
 use crate::theme::Theme;
 use dux_core::engine::{Command, Engine};
@@ -89,7 +89,7 @@ pub struct App {
     pub(crate) last_help_lines: u16,
     pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
-    pub(crate) status: StatusLine,
+    pub(crate) status: KeyedStatusController,
     pub(crate) prompt: PromptState,
     pub(crate) input_target: InputTarget,
     pub(crate) session_surface: SessionSurface,
@@ -1257,13 +1257,15 @@ impl App {
             bindings.label_for(Action::ToggleHelp),
         );
         let (theme, theme_warning) = crate::theme::load_or_fallback(&config.ui.theme, &paths);
-        let mut status = StatusLine::new(initial_status);
-        status.set_clear_after(Duration::from_secs(config.ui.status_clear_seconds as u64));
-        // The first-run help hint should persist until the user's first action,
-        // not auto-clear after the timeout like a confirmation does.
+        let mut status = KeyedStatusController::with_clear_after(Duration::from_secs(
+            config.ui.status_clear_seconds as u64,
+        ));
+        // Write the first-run hint into the anonymous slot and pin it so it
+        // persists until the user's first action replaces it.
+        status.set(Instant::now(), None, StatusTone::Info, initial_status);
         status.pin();
         if let Some(message) = theme_warning {
-            status.warning(message);
+            status.set(Instant::now(), None, StatusTone::Warning, message);
         }
         let gh_integration_val = config.ui.github_integration;
         let config_writer =
@@ -1337,7 +1339,7 @@ impl App {
         bindings: RuntimeBindings,
         interactive_patterns: InteractiveBytePatterns,
         sigwinch: SigwinchHandle,
-        status: StatusLine,
+        status: KeyedStatusController,
         theme: Theme,
         restore: SessionRestore,
     ) -> Result<Self> {
@@ -1457,17 +1459,20 @@ impl App {
             signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
-        let mut status = StatusLine::new(
-            "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
-        );
-        status.set_clear_after(Duration::from_secs(
+        let mut status = KeyedStatusController::with_clear_after(Duration::from_secs(
             engine.config.ui.status_clear_seconds as u64,
         ));
-        // The post-flip guidance ("Web server stopped… reconnect to pick up")
-        // should persist until the user acts, not auto-clear like a confirmation.
+        // Write the post-flip guidance into the anonymous slot and pin it so it
+        // persists until the user acts, not auto-clear like a confirmation.
+        status.set(
+            Instant::now(),
+            None,
+            StatusTone::Info,
+            "Web server stopped. Your agents kept running — reconnect to any session to pick up where it left off.",
+        );
         status.pin();
         if let Some(message) = theme_warning {
-            status.warning(message);
+            status.set(Instant::now(), None, StatusTone::Warning, message);
         }
         Self::assemble(
             engine,
@@ -1513,9 +1518,9 @@ impl App {
                 self.engine.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
                 // Expire a transient status (e.g. a success confirmation) after
-                // its configured lifetime. Busy/warning/error persist; the
-                // controller handles the tone rules. Wall-clock, not tick count.
-                self.status.tick(Instant::now());
+                // its configured lifetime. Busy entries older than BUSY_TIMEOUT
+                // are upgraded to Warning. Wall-clock, not tick count.
+                self.status.tick(Instant::now(), BUSY_TIMEOUT);
 
                 // Check SIGWINCH — needed when bypassing crossterm's event
                 // reader (which would otherwise deliver Resize events).
@@ -1816,19 +1821,23 @@ impl App {
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
-        self.status.info(message);
+        self.status
+            .set(Instant::now(), None, StatusTone::Info, message);
     }
 
     pub(crate) fn set_busy(&mut self, message: impl Into<String>) {
-        self.status.busy(message);
+        self.status
+            .set(Instant::now(), None, StatusTone::Busy, message);
     }
 
     pub(crate) fn set_warning(&mut self, message: impl Into<String>) {
-        self.status.warning(message);
+        self.status
+            .set(Instant::now(), None, StatusTone::Warning, message);
     }
 
     pub(crate) fn set_error(&mut self, message: impl Into<String>) {
-        self.status.error(message);
+        self.status
+            .set(Instant::now(), None, StatusTone::Error, message);
     }
 
     /// Show a status-line warning when a missing project is highlighted, or
@@ -1849,9 +1858,13 @@ impl App {
             self.set_warning(format!("Project path not found: {path}"));
             return;
         }
-        // Only clear if the current tone is Warning – don't clobber Info/Busy/Error.
-        if matches!(self.status.tone(), crate::statusline::StatusTone::Warning) {
-            self.set_info("");
+        // Only clear if the current (most-recent) tone is Warning — don't clobber
+        // Info/Busy/Error statuses from other operations.
+        if matches!(
+            self.status.most_recent_tui(),
+            Some((StatusTone::Warning, _))
+        ) {
+            self.set_info(String::new());
         }
     }
 

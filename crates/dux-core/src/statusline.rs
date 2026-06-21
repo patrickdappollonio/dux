@@ -1,6 +1,11 @@
 use indexmap::IndexMap;
 use std::time::{Duration, Instant};
 
+/// Shared timeout for upgrading stale `Busy` entries to `Warning`. Used by
+/// both the TUI tick and the web engine actor so the behaviour is identical on
+/// both surfaces and the value only lives in one place.
+pub const BUSY_TIMEOUT: Duration = Duration::from_secs(20);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusTone {
     Info,
@@ -166,10 +171,21 @@ impl StatusLine {
     }
 
     fn spinner_frame(&self) -> &'static str {
-        const FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let index = ((self.since.elapsed().as_millis() / 100) as usize) % FRAMES.len();
-        FRAMES[index]
+        spinner_frame_for(self.since)
     }
+}
+
+/// Braille spinner frames, shared between `StatusLine::text()` and the TUI
+/// render path for the keyed controller's `most_recent()` result.
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Return the braille spinner frame appropriate for the given wall-clock
+/// `since` instant (advances every 100 ms). Used by `StatusLine::text()` and
+/// by the TUI's `render_footer` when displaying a `Busy` status from the
+/// keyed controller.
+pub fn spinner_frame_for(since: Instant) -> &'static str {
+    let index = ((since.elapsed().as_millis() / 100) as usize) % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[index]
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +248,11 @@ pub struct KeyedStatusController {
     next_seq: u64,
     /// Monotonic generation counter incremented for every `set` call.
     next_gen: u64,
+    /// When `true` the anonymous slot is exempt from auto-clear even if its
+    /// tone would normally expire. Used for the TUI's first-run hint so it
+    /// persists until the user's first action replaces it. Any later `set` on
+    /// the anonymous slot clears the pin.
+    anon_pinned: bool,
 }
 
 impl KeyedStatusController {
@@ -242,7 +263,15 @@ impl KeyedStatusController {
             clear_after,
             next_seq: 0,
             next_gen: 0,
+            anon_pinned: false,
         }
+    }
+
+    /// Exempt the CURRENT anonymous-slot message from auto-clear. Used for the
+    /// TUI's first-run help hint so it persists until the user's first action
+    /// replaces it. A subsequent anonymous `set` clears the pin.
+    pub fn pin(&mut self) {
+        self.anon_pinned = true;
     }
 
     pub fn set_clear_after(&mut self, clear_after: Duration) {
@@ -280,6 +309,9 @@ impl KeyedStatusController {
         match key {
             None => {
                 self.anon = Some(entry);
+                // A new anonymous set always clears the pin so the new message
+                // follows normal auto-clear rules (the pin was for the old one).
+                self.anon_pinned = false;
             }
             Some(k) => {
                 self.entries.insert(k, entry);
@@ -323,7 +355,8 @@ impl KeyedStatusController {
 
         // Check the anonymous slot.
         let anon_expired = self.anon.as_ref().is_some_and(|a| {
-            a.tone.auto_clears()
+            !self.anon_pinned
+                && a.tone.auto_clears()
                 && !self.clear_after.is_zero()
                 && now.duration_since(a.since) >= self.clear_after
         });
@@ -424,6 +457,93 @@ impl KeyedStatusController {
             tone: winner.tone.as_wire().to_string(),
             message: winner.message.clone(),
         })
+    }
+
+    /// Whether the anonymous (unkeyed) slot currently holds a `Busy` entry
+    /// with the exact given message. Used by deletion workers to guard against
+    /// clobbering a newer status that replaced their Busy while they ran.
+    pub fn anon_busy_matches(&self, message: &str) -> bool {
+        self.anon
+            .as_ref()
+            .is_some_and(|a| a.tone == StatusTone::Busy && a.message == message)
+    }
+
+    /// TUI projection: the most-recently-set open status as a `(tone, text)`
+    /// pair suitable for direct rendering. For `Busy` entries the braille
+    /// spinner is prepended exactly as [`StatusLine::text()`] does, using the
+    /// entry's `since` instant so the animation stays wall-clock based.
+    /// Returns `None` when no status is open.
+    pub fn most_recent_tui(&self) -> Option<(StatusTone, String)> {
+        let anon_ref = self.anon.as_ref();
+        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
+
+        let winner = match (anon_ref, keyed_ref) {
+            (None, None) => return None,
+            (Some(a), None) => a,
+            (None, Some(k)) => k,
+            (Some(a), Some(k)) => {
+                if (a.since, a.seq) >= (k.since, k.seq) {
+                    a
+                } else {
+                    k
+                }
+            }
+        };
+
+        let text = match winner.tone {
+            StatusTone::Busy => {
+                format!("{} {}", spinner_frame_for(winner.since), winner.message)
+            }
+            _ => winner.message.clone(),
+        };
+        Some((winner.tone, text))
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-status compatibility surface — thin wrappers over the most-recent
+    // projection used by TUI tests and existing call sites.
+    // -----------------------------------------------------------------------
+
+    /// The tone of the most-recently-set open status, or `Info` when nothing
+    /// is open (mirrors the previous `StatusLine::tone()` API).
+    pub fn tone(&self) -> StatusTone {
+        self.most_recent_tui()
+            .map(|(t, _)| t)
+            .unwrap_or(StatusTone::Info)
+    }
+
+    /// The rendered text of the most-recently-set open status (spinner
+    /// prepended for `Busy`), or an empty string when nothing is open.
+    /// Mirrors the previous `StatusLine::text()` API.
+    pub fn text(&self) -> String {
+        self.most_recent_tui().map(|(_, t)| t).unwrap_or_default()
+    }
+
+    /// The raw message of the most-recently-set open status without any
+    /// spinner prefix, or an empty string when nothing is open. Mirrors the
+    /// previous `StatusLine::message()` API.
+    pub fn message(&self) -> String {
+        let anon_ref = self.anon.as_ref();
+        let keyed_ref = self.entries.values().max_by_key(|e| (e.since, e.seq));
+        let winner = match (anon_ref, keyed_ref) {
+            (None, None) => return String::new(),
+            (Some(a), None) => a,
+            (None, Some(k)) => k,
+            (Some(a), Some(k)) => {
+                if (a.since, a.seq) >= (k.since, k.seq) {
+                    a
+                } else {
+                    k
+                }
+            }
+        };
+        winner.message.clone()
+    }
+
+    /// Whether no status is currently open. Mirrors the previous
+    /// `StatusLine::is_empty()` API.
+    pub fn is_empty(&self) -> bool {
+        self.anon.is_none() && self.entries.is_empty()
     }
 }
 
@@ -585,6 +705,68 @@ mod tests {
         assert!(changes.cleared_keys.contains(&Some("commit".to_string())));
         assert_eq!(c.snapshot().len(), 1);
         assert_eq!(c.snapshot()[0].key.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn tui_keyed_clear_dismisses_the_line() {
+        // Verifies the TUI most-recent-wins projection: a matching keyed clear
+        // removes the entry so the TUI line becomes empty (Task 11).
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+        let g = c.set(t0, Some("pull".into()), StatusTone::Busy, "Pulling\u{2026}");
+        assert!(c.most_recent().is_some());
+        assert!(c.clear("pull", Some(g)));
+        assert!(
+            c.most_recent().is_none(),
+            "a matching clear must empty the TUI line"
+        );
+    }
+
+    #[test]
+    fn tui_most_recent_tui_prepends_spinner_for_busy() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::ZERO);
+        c.set(t0, None, StatusTone::Busy, "Pulling\u{2026}");
+        let (tone, text) = c.most_recent_tui().expect("should have a status");
+        assert_eq!(tone, StatusTone::Busy);
+        // The spinner is one braille char followed by a space and the message.
+        assert!(
+            text.starts_with(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']),
+            "expected spinner prefix, got: {text:?}"
+        );
+        assert!(
+            text.ends_with("Pulling\u{2026}"),
+            "message must be in text: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tui_anon_pin_survives_tick_but_clears_on_new_set() {
+        let t0 = Instant::now();
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        c.set(t0, None, StatusTone::Info, "Press ? for help");
+        c.pin();
+        // Pinned anon slot must NOT auto-clear even well past the timeout.
+        let changes = c.tick(t0 + Duration::from_secs(3600), Duration::from_secs(20));
+        assert!(
+            changes.cleared_keys.is_empty(),
+            "pinned anon slot must not auto-clear"
+        );
+        assert!(c.most_recent().is_some());
+        // A new set on the anonymous slot resets the pin and resumes normal rules.
+        c.set(
+            t0 + Duration::from_secs(3600),
+            None,
+            StatusTone::Info,
+            "Saved.",
+        );
+        let changes = c.tick(t0 + Duration::from_secs(3607), Duration::from_secs(20));
+        assert_eq!(
+            changes.cleared_keys,
+            vec![None],
+            "after a new set the pin is gone and auto-clear must fire"
+        );
+        assert!(c.most_recent().is_none());
     }
 
     #[test]
