@@ -543,14 +543,41 @@ function clearPendingClientIntent(): Partial<DuxState> {
   }
 }
 
+// Route a keyed (or anonymous) engine status to both the status bar and a
+// sonner toast. The key acts as the sonner id so updates re-render in place
+// (busy → success swaps the spinner without a new toast) and clears can dismiss
+// by id. Busy must not auto-dismiss before its final state arrives, so its
+// duration is Infinity.
+function showStatusToast(
+  key: string | null | undefined,
+  tone: string,
+  message: string,
+): void {
+  if (!message) return
+  const id = key ?? undefined // unkeyed → sonner auto-id (transient)
+  const duration = tone === "info" ? 6000 : Infinity
+  const opts = { id, duration }
+  if (tone === "error") toast.error(message, opts)
+  else if (tone === "warning") toast.warning(message, opts)
+  else if (tone === "busy") toast.loading(message, opts)
+  else toast.success(message, opts) // info/success
+}
+
 // Asynchronous status/lifecycle events (background push/pull completing, an
-// agent launch finishing or failing, a PTY exiting). These mirror the TUI's
-// status line 1:1 — keep the latest in the status bar, no separate toast.
-socket.onStatus = (tone, message) => {
+// agent launch finishing or failing, a PTY exiting). Route to both the status
+// bar (1:1 with the TUI) and a sonner toast keyed by the engine key.
+socket.onStatus = (key, tone, message) => {
   // An error-toned async status also voids any in-flight create-focus (the
   // create likely just failed) and unwinds any optimistic reorder overlay.
   const patch = tone === "error" ? clearPendingClientIntent() : {}
   setState({ statusLine: { tone, message }, ...patch })
+  showStatusToast(key, tone, message)
+}
+
+// Dismiss the toast whose id matches the cleared key. A null key means the
+// anonymous transient — sonner auto-ids those, so there is nothing to dismiss.
+socket.onStatusCleared = (key) => {
+  if (key) toast.dismiss(key)
 }
 
 // A freshly created terminal auto-focuses so the user lands on it immediately.
