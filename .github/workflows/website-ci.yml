@@ -65,6 +65,10 @@ jobs:
         working-directory: website
         env:
           NODE_ENV: production
+          # Lets the contributor fetch use the authenticated rate limit instead
+          # of falling back to the committed snapshot on every PR (pages.yml
+          # passes the same token for the deploy build).
+          GH_TOKEN: ${{ github.token }}
         run: npm run build
 
       - name: Verify build output
