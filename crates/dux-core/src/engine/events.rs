@@ -274,6 +274,7 @@ pub enum AgentLaunchReadyView {
 /// sessions Detached. The App only formats the status message.
 pub enum AgentLaunchFailedOutcome {
     Create {
+        project_id: String,
         message: String,
     },
     /// Reconnect-family failure. `session_id` is the pre-existing session that
@@ -992,7 +993,10 @@ impl Engine {
         match request.kind {
             AgentLaunchKind::Create { .. } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
-                AgentLaunchFailedOutcome::Create { message }
+                AgentLaunchFailedOutcome::Create {
+                    project_id: session.project_id.clone(),
+                    message,
+                }
             }
             AgentLaunchKind::Reconnect { .. } => AgentLaunchFailedOutcome::Reconnect {
                 session_id: session.id,
@@ -1164,9 +1168,9 @@ impl Engine {
             WorkerEvent::CreateAgentProgress(message) => {
                 EventReaction::Status(StatusUpdate::busy(message))
             }
-            WorkerEvent::CreateAgentFailed(message) => {
+            WorkerEvent::CreateAgentFailed { key, message } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
-                EventReaction::Status(StatusUpdate::error(message))
+                EventReaction::Status(StatusUpdate::error(message).with_key(key))
             }
             WorkerEvent::AgentLaunchReady(boxed) => {
                 let outcome = self.process_agent_launch_ready(*boxed);
@@ -1214,13 +1218,16 @@ impl Engine {
             WorkerEvent::CommitMessageFailed { session_id, error } => {
                 EventReaction::CommitMessageFailed { session_id, error }
             }
-            WorkerEvent::PushCompleted(result) => match result {
-                Ok(()) => EventReaction::Status(StatusUpdate::info(
-                    "Pushed to remote successfully. Your changes are now available to collaborators.",
-                )),
-                Err(e) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Push to remote failed: {e}"
-                ))),
+            WorkerEvent::PushCompleted { key, result } => match result {
+                Ok(()) => EventReaction::Status(
+                    StatusUpdate::info(
+                        "Pushed to remote successfully. Your changes are now available to collaborators.",
+                    )
+                    .with_key(key),
+                ),
+                Err(e) => EventReaction::Status(
+                    StatusUpdate::error(format!("Push to remote failed: {e}")).with_key(key),
+                ),
             },
             WorkerEvent::PullCompleted {
                 repo_path,
@@ -2178,13 +2185,18 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.mark_in_flight(InFlightKey::CreateAgent);
 
-        let reaction =
-            engine.process_worker_event(WorkerEvent::CreateAgentFailed("nope".to_string()));
+        let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
+            key: "create:p1".to_string(),
+            message: "nope".to_string(),
+        });
 
         assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
         assert_eq!(status.message, "nope");
+        // The failure must carry the same create key as the busy so the web
+        // clears the "Creating a new agent…" loading toast on completion.
+        assert_eq!(status.key.as_deref(), Some("create:p1"));
     }
 
     // Sanity: the unused-import linter won't catch AgentLaunchFailedData
@@ -2241,7 +2253,7 @@ mod tests {
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
         assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         assert!(
-            matches!(outcome, AgentLaunchFailedOutcome::Create { message } if message == "boom")
+            matches!(outcome, AgentLaunchFailedOutcome::Create { message, .. } if message == "boom")
         );
     }
 
@@ -3202,8 +3214,9 @@ mod tests {
                 in_flight_key: Some(InFlightKey::CreateAgent),
                 busy_status: None,
                 already_running_status: None,
-                panic_event: Some(Box::new(|reason| {
-                    WorkerEvent::CreateAgentFailed(format!("panic: {reason}"))
+                panic_event: Some(Box::new(|reason| WorkerEvent::CreateAgentFailed {
+                    key: "create:test".to_string(),
+                    message: format!("panic: {reason}"),
                 })),
             },
             |_tx| panic!("boom"),
@@ -3216,8 +3229,7 @@ mod tests {
 
         let event = try_recv_worker_event(&engine)
             .expect("synthesised CreateAgentFailed event must arrive after the panic");
-        let message_contains_panic =
-            matches!(&event, WorkerEvent::CreateAgentFailed(m) if m.contains("boom"));
+        let message_contains_panic = matches!(&event, WorkerEvent::CreateAgentFailed { message: m, .. } if m.contains("boom"));
         assert!(
             message_contains_panic,
             "expected the synthesised failure event to carry the panic message",
