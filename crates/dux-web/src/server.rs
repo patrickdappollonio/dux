@@ -624,18 +624,18 @@ async fn handle_socket(
     // the snapshot is a harmless duplicate (the client re-sets the same value).
     let mut status_rx = engine.subscribe_status();
 
-    // Initial status: a client connecting mid-status (e.g. an unresolved
-    // "Launching agent…" Busy) sees the active status immediately rather than a
-    // blank line until the next update. Empty means nothing is showing, so skip.
-    {
-        let snapshot = engine.status_snapshot();
-        if !snapshot.message.is_empty() {
+    // Initial statuses: a client connecting mid-operation sees ALL active status
+    // toasts immediately (keyed and anonymous) rather than a blank line until the
+    // next update. Each `KeyedWireStatus` in the snapshot maps to one `Status`
+    // frame. Empty snapshot means nothing is showing, so the loop is a no-op.
+    for entry in engine.status_snapshot() {
+        if !entry.message.is_empty() {
             let _ = send_json(
                 &sink,
                 &ServerMessage::Status {
-                    key: None,
-                    tone: snapshot.tone,
-                    message: snapshot.message,
+                    key: entry.key,
+                    tone: entry.tone,
+                    message: entry.message,
                 },
             )
             .await;
