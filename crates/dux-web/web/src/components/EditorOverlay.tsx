@@ -136,6 +136,8 @@ function EditorBody({
   // for one file doesn't disable the Save button on a file the user switched to.
   const [saving, setSaving] = useState<string | null>(null)
   const [binary, setBinary] = useState(false)
+  // True when the server flagged this file as read-only (external symlink or .git/ path).
+  const [readOnly, setReadOnly] = useState(false)
   // Diff state, loaded lazily and independently of the file buffer. The diff is
   // cached per FILE PATH (`diffLoadedPath`) and refetched fresh whenever you open
   // or switch to a file's diff — simple and always-correct-on-open. While you keep
@@ -168,6 +170,8 @@ function EditorBody({
   // independent of the changed-files watch).
   const [treeFiles, setTreeFiles] = useState<string[]>([])
   const [treeLoading, setTreeLoading] = useState(true)
+  // True when the server capped the listing before sending all paths.
+  const [treeServerTruncated, setTreeServerTruncated] = useState(false)
   const [search, setSearch] = useState("")
   const [newFileOpen, setNewFileOpen] = useState(false)
   const [newFilePath, setNewFilePath] = useState("")
@@ -180,10 +184,12 @@ function EditorBody({
   // The buffer is dirty only when it holds the open file and has unsaved edits.
   // Independent of `mode` so edits made in file mode still guard a file switch
   // even while the diff is showing. Diff mode is read-only so it never dirties.
+  // Read-only files (external symlinks, .git/ paths) can never be dirty.
   const dirty =
     openPath !== null &&
     loadedPath === openPath &&
     !binary &&
+    !readOnly &&
     draft !== loaded
   const isMarkdown = openPath !== null && isMarkdownPath(openPath)
   // Markdown preview is available only for a loaded, non-binary markdown file in
@@ -259,8 +265,11 @@ function EditorBody({
     let cancelled = false
     fileApi
       .list(sessionId)
-      .then((files) => {
-        if (!cancelled) setTreeFiles(files)
+      .then((result) => {
+        if (!cancelled) {
+          setTreeFiles(result.files)
+          setTreeServerTruncated(result.truncated ?? false)
+        }
       })
       .catch(() => {
         if (!cancelled) toast.error("could not list worktree files")
@@ -290,6 +299,7 @@ function EditorBody({
       .then((f) => {
         if (cancelled) return
         setBinary(f.binary)
+        setReadOnly(f.read_only ?? false)
         setLoaded(f.content)
         setDraft(f.content)
         setLoadedPath(path)
@@ -350,6 +360,7 @@ function EditorBody({
     // the new path immediately (the post-render effect would lag by a commit).
     openPathRef.current = path
     setOpenPath(path)
+    setReadOnly(false)
     setPreview(false)
   }
 
@@ -445,8 +456,8 @@ function EditorBody({
     fileApi
       .write(sessionId, path, "")
       .then(() => fileApi.list(sessionId))
-      .then((files) => {
-        setTreeFiles(files)
+      .then((result) => {
+        setTreeFiles(result.files)
         setNewFileOpen(false)
         setNewFilePath("")
         // A brand-new file is for editing, so land in file mode.
@@ -480,6 +491,15 @@ function EditorBody({
             </span>
             <span className="sr-only">unsaved changes</span>
           </>
+        )}
+        {/* Read-only badge — shown when the server flagged the file as
+            read-only (external symlink or .git/ path). */}
+        {readOnly && mode === "file" && (
+          <SimpleTooltip content="This file is read-only — it is a symlink to an external file or a .git path">
+            <span className="shrink-0 text-xs text-muted-foreground">
+              read-only
+            </span>
+          </SimpleTooltip>
         )}
         {/* File / Diff view toggle — a segmented control. Hidden until a file is
             open (nothing to view otherwise). */}
@@ -588,7 +608,7 @@ function EditorBody({
         {mode === "file" && (
           <Button
             size="sm"
-            disabled={!dirty || isSaving}
+            disabled={!dirty || isSaving || readOnly}
             aria-busy={isSaving}
             onClick={save}
           >
@@ -668,7 +688,7 @@ function EditorBody({
                   changed={changedMap}
                   defaultExpanded={defaultExpanded}
                   onOpen={requestSwitch}
-                  capped={treeCapped}
+                  capped={treeCapped || treeServerTruncated}
                 />
               )}
             </div>
