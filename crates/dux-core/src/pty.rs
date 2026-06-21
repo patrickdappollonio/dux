@@ -307,16 +307,13 @@ impl PtyWriter {
             // `Shutdown` message arrives first, the loop exits unconditionally
             // without waiting for that error — so a surviving sender clone (the
             // reader thread holds one) can never prevent the thread from stopping.
-            loop {
-                match rx.recv() {
-                    Ok(PtyWriteMsg::Bytes(chunk)) => {
-                        if writer.write_all(&chunk).is_err() {
-                            break;
-                        }
-                        let _ = writer.flush();
-                    }
-                    Ok(PtyWriteMsg::Shutdown) | Err(_) => break,
+            // Loop exits on `Shutdown` or a channel error (the pattern stops
+            // matching), or on a write error (explicit break below).
+            while let Ok(PtyWriteMsg::Bytes(chunk)) = rx.recv() {
+                if writer.write_all(&chunk).is_err() {
+                    break;
                 }
+                let _ = writer.flush();
             }
         });
         Self {
