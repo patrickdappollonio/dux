@@ -40,13 +40,21 @@ fn is_text(bytes: &[u8]) -> bool {
 
 /// Resolve `worktree/rel_path` for READ-only access, bypassing the literal
 /// `.git`-component rejection so `.git/*` files can be opened. Returns
-/// `(abs_path, is_git_dir)`. `is_git_dir` is true when the path is inside a
-/// `.git` directory (the caller must set `read_only = true`). Traversal attacks
-/// (absolute paths, `..`) are still rejected.
+/// `(abs_path, is_git_dir, is_outside)`.
+///
+/// - `is_git_dir`: true when the canonical real path is inside a `.git`
+///   directory (the caller must set `read_only = true`).
+/// - `is_outside`: true when the canonical real path escapes the worktree via
+///   ANY symlink — intermediate OR leaf. The caller must set `read_only = true`
+///   and skip the normal O_NOFOLLOW branch, reading from the resolved target
+///   instead. (Dangling symlinks whose parent cannot be canonicalized are
+///   surfaced as an error, same as today.)
+///
+/// Traversal attacks (absolute paths, `..`) are still rejected with an error.
 fn resolve_worktree_path_for_read(
     worktree: &Path,
     rel_path: &str,
-) -> anyhow::Result<(PathBuf, bool)> {
+) -> anyhow::Result<(PathBuf, bool, bool)> {
     use std::path::Component;
     let rp = Path::new(rel_path);
     if rp.as_os_str().is_empty()
@@ -61,15 +69,57 @@ fn resolve_worktree_path_for_read(
         anyhow::bail!("invalid worktree path: {rel_path}");
     }
     let joined = worktree.join(rel_path);
+
+    // Canonicalize the FULL path so intermediate-directory symlinks (e.g.
+    // `evil/ -> /etc`) are followed and containment is checked against the
+    // real on-disk location, not the un-resolved textual path.
+    //
+    // For a leaf that does not yet exist (new file), canonicalize its parent
+    // and re-attach the leaf component so we get a real path we can check.
+    let real = match std::fs::canonicalize(&joined) {
+        Ok(r) => r,
+        Err(_) => {
+            // Leaf may not exist. Try canonicalizing the parent.
+            let parent = joined.parent().unwrap_or(worktree);
+            let real_parent = std::fs::canonicalize(parent)
+                .map_err(|e| anyhow::anyhow!("cannot resolve path {rel_path}: {e}"))?;
+            let leaf = joined
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("invalid path: {rel_path}"))?;
+            real_parent.join(leaf)
+        }
+    };
+
+    // Containment check against the canonical worktree.
+    let real_worktree = std::fs::canonicalize(worktree)
+        .map_err(|e| anyhow::anyhow!("cannot canonicalize worktree: {e}"))?;
+    let is_outside = !real.starts_with(&real_worktree);
+
     // Check whether the literal path contains a `.git` component. We check this
-    // first because `resolves_into_git_dir` uses canonicalize, which requires the
-    // path to exist — a `.git/new-file` that doesn't yet exist would return false
-    // from the canonical check but true from the literal check.
+    // first because the canonical path check below uses `real`, which for a
+    // not-yet-existing leaf is the parent-canonicalized path — a `.git/new-file`
+    // that doesn't exist would return false from the canonical check but true
+    // from the literal check.
     let is_git_literal = rp
         .iter()
         .any(|c| c.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git")));
-    let is_git = is_git_literal || resolves_into_git_dir(worktree, &joined);
-    Ok((joined, is_git))
+
+    // Also check whether the canonical real path passes through a `.git`
+    // directory — covers symlinks that redirect INTO a `.git/` dir even when
+    // the literal path has no `.git` component.
+    let is_git_canonical = real
+        .strip_prefix(&real_worktree)
+        .map(|rel| {
+            rel.components().any(|comp| {
+                comp.as_os_str()
+                    .to_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
+            })
+        })
+        .unwrap_or(false);
+
+    let is_git = is_git_literal || is_git_canonical;
+    Ok((joined, is_git, is_outside))
 }
 
 /// Read bytes from `abs_path` using `O_NOFOLLOW | O_RDONLY`, closing the
@@ -105,7 +155,10 @@ fn read_nofollow(abs_path: &Path) -> anyhow::Result<Vec<u8>> {
 /// Dangling symlinks (target does not exist) return an error.
 pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile> {
     // Use the read-permissive resolver (allows .git/ paths).
-    let (path, is_git_dir) = resolve_worktree_path_for_read(worktree, rel_path)?;
+    // `is_outside` is true when the canonical real path escapes the worktree
+    // via ANY symlink — intermediate or leaf — so an intermediate-dir symlink
+    // (e.g. `evil/ -> /etc`) is caught here before we ever reach the leaf check.
+    let (path, is_git_dir, is_outside) = resolve_worktree_path_for_read(worktree, rel_path)?;
 
     // No-follow stat: tells us (a) the entry kind, (b) whether it is a symlink,
     // and (c) the size. For regular files the no-follow open below is identical
@@ -113,15 +166,19 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
     // to check containment.
     let meta = std::fs::symlink_metadata(&path)?;
 
-    let (bytes, read_only) = if meta.file_type().is_symlink() {
-        // Resolve the target to check whether it is inside the worktree.
-        let target = std::fs::canonicalize(&path)?; // follows the link
-        let inside = is_under(worktree, &target);
+    let (bytes, read_only) = if meta.file_type().is_symlink() || is_outside {
+        // Either the leaf itself is a symlink, OR an intermediate path component
+        // is a symlink that escapes the worktree. In both cases, resolve to the
+        // canonical real path and read from there.
+        //
+        // For an intermediate-symlink escape, `path` is not itself a symlink at
+        // the leaf but the canonical resolution already confirmed the real path
+        // is outside — we still read via the resolved path so O_NOFOLLOW on
+        // `path` would succeed (the leaf is a plain file), but reading via
+        // `canonicalize` is the consistent, safe choice in both cases.
+        let target = std::fs::canonicalize(&path)?; // follows all symlinks
 
-        // Stat the TARGET (not the symlink) for the size check.
-        // `meta` is symlink_metadata — its .len() is the byte-length of the
-        // symlink path string, not the content size. Use std::fs::metadata(&target)
-        // which follows the link and gives the real file size.
+        // Stat the TARGET for the size check.
         let target_meta = std::fs::metadata(&target)?;
         if target_meta.len() > MAX_EDITABLE_BYTES {
             anyhow::bail!(
@@ -130,12 +187,16 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
             );
         }
 
-        // Open the TARGET file (not the symlink) with O_NOFOLLOW pointing at
-        // the already-resolved target path. If the target changed to yet
-        // another symlink between canonicalize() and here, O_NOFOLLOW refuses
-        // it (the race window is millisecond-scale and the failure is safe).
+        // Open the TARGET file with O_NOFOLLOW pointing at the already-resolved
+        // target path. If the target changed to yet another symlink between
+        // canonicalize() and here, O_NOFOLLOW refuses it (the race window is
+        // millisecond-scale and the failure is safe).
         let bytes = read_nofollow(&target)?;
-        (bytes, !inside || is_git_dir)
+
+        // `read_only` is true when: the real path is outside the worktree
+        // (is_outside), OR the leaf is a symlink pointing outside (captured by
+        // is_outside from the resolver), OR the path is inside .git/.
+        (bytes, is_outside || is_git_dir)
     } else {
         if meta.len() > MAX_EDITABLE_BYTES {
             anyhow::bail!(
@@ -143,9 +204,10 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
                 meta.len()
             );
         }
-        // Regular file (or other non-symlink kind). Use O_NOFOLLOW so a
-        // time-of-check / time-of-use race that replaces the file with a
-        // symlink between our stat and open fails safely.
+        // Regular file (or other non-symlink kind) confirmed to be inside the
+        // worktree by the resolver. Use O_NOFOLLOW so a time-of-check /
+        // time-of-use race that replaces the file with a symlink between our
+        // stat and open fails safely.
         let bytes = read_nofollow(&path)?;
         (bytes, is_git_dir)
     };
@@ -529,5 +591,57 @@ mod tests {
         // Write is still refused.
         assert!(write_file(dir.path(), "gitlink/hooks/post-checkout", "#!/bin/sh").is_err());
         assert!(!dir.path().join(".git/hooks/post-checkout").exists());
+    }
+
+    /// Regression test for the intermediate-symlink containment bypass.
+    ///
+    /// Before the fix, `read_file` only checked whether the LEAF path component
+    /// was a symlink. An intermediate directory symlink (e.g. `evil/ -> /tmp/…`)
+    /// was not caught: the leaf `secret.txt` is a plain file, so the code took
+    /// the non-symlink branch and returned `read_only: false` — serving an
+    /// out-of-tree file as if it were an editable in-tree file.
+    ///
+    /// After the fix, `resolve_worktree_path_for_read` canonicalizes the FULL
+    /// joined path and checks containment against the canonical worktree. Any
+    /// path that resolves outside the worktree via ANY symlink (intermediate or
+    /// leaf) is returned with `read_only: true`.
+    #[test]
+    fn intermediate_dir_symlink_escaping_worktree_is_read_only() {
+        let worktree_dir = worktree();
+        // A separate directory OUTSIDE the worktree that we want to prevent access to.
+        let outside_dir = tempfile::tempdir().unwrap();
+        std::fs::write(outside_dir.path().join("secret.txt"), "classified\n").unwrap();
+
+        // Create a directory symlink INSIDE the worktree that points OUTSIDE it.
+        // `evil` is not itself a file — it is an intermediate directory component.
+        std::os::unix::fs::symlink(outside_dir.path(), worktree_dir.path().join("evil")).unwrap();
+
+        // rel_path = "evil/secret.txt"
+        //   - The leaf "secret.txt" is a plain file (not a symlink).
+        //   - The intermediate "evil/" is a symlink pointing outside the worktree.
+        //   - Before the fix: symlink_metadata on the leaf says "regular file",
+        //     so the code returned read_only: false — the bypass.
+        //   - After the fix: the full canonical path resolves outside the
+        //     worktree, so read_only must be true.
+        let f = read_file(worktree_dir.path(), "evil/secret.txt").unwrap();
+        assert_eq!(
+            f.content, "classified\n",
+            "content should still be readable"
+        );
+        assert!(
+            f.read_only,
+            "intermediate-dir symlink escaping the worktree must force read_only: true"
+        );
+
+        // Write must remain refused.
+        assert!(
+            write_file(worktree_dir.path(), "evil/secret.txt", "pwned").is_err(),
+            "write through an escaping intermediate symlink must be refused"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside_dir.path().join("secret.txt")).unwrap(),
+            "classified\n",
+            "outside file must be untouched"
+        );
     }
 }
