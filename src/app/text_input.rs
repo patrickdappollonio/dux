@@ -124,6 +124,7 @@ impl TextInput {
         if let Some(m) = &mut self.multiline {
             m.display_width = width;
         }
+        self.clamp_scroll_offset();
     }
 
     // ── Character-level operations ──────────────────────────────────
@@ -348,13 +349,23 @@ impl TextInput {
     /// Update the visible line count (e.g. when the render area height changes).
     pub fn set_visible_lines(&mut self, visible: usize) {
         if let Some(m) = &mut self.multiline {
-            m.visible_lines = visible;
+            m.visible_lines = visible.max(1);
         }
+        self.clamp_scroll_offset();
     }
 
     /// Get the effective wrap width. `None` means no wrapping (use usize::MAX).
     fn wrap_width(&self) -> Option<usize> {
         self.multiline.as_ref().and_then(|m| m.display_width)
+    }
+
+    fn clamp_scroll_offset(&mut self) {
+        let Some(m) = &mut self.multiline else {
+            return;
+        };
+        let total = visual_line_count(&self.text, m.display_width);
+        let max_scroll = total.saturating_sub(m.visible_lines);
+        m.scroll_offset = m.scroll_offset.min(max_scroll);
     }
 
     /// Adjust scroll offset so the cursor's visual row is within the visible window.
@@ -379,6 +390,7 @@ impl TextInput {
     /// - `Char(c)` (without Ctrl) → insert
     /// - `Backspace` → delete char backward; `Alt+Backspace` / `Ctrl+W` → delete word backward
     /// - `Delete` → delete char forward; `Alt+Delete` / `Ctrl+Delete` → delete word forward
+    /// - `Ctrl+D` → delete char forward (terminal delete-character convention)
     /// - `Left` / `Right` → move char; `Alt+Left/Right` / `Ctrl+Left/Right` → move word
     /// - `Alt+B` / `Alt+F` → terminal Meta aliases for word-left / word-right
     /// - `Home` / `End` → jump to start/end of line (multiline) or text (single-line)
@@ -461,6 +473,10 @@ impl TextInput {
             }
             KeyCode::Char('w') if has_ctrl => {
                 self.backspace_word();
+                true
+            }
+            KeyCode::Char('d') if has_ctrl => {
+                self.delete();
                 true
             }
             KeyCode::Char('b') if has_alt && !has_ctrl => {
@@ -1199,6 +1215,20 @@ mod tests {
         ti.move_down();
         ti.move_down();
         assert_eq!(ti.visible_lines(), vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    fn set_visible_lines_clamps_scroll_when_editor_grows() {
+        let mut ti = multiline_input("a", 1);
+        ti.handle_key(key(KeyCode::End));
+        assert!(ti.handle_key(key(KeyCode::Enter)));
+        assert_eq!(ti.scroll_offset(), 1);
+        assert_eq!(ti.visible_lines(), vec![""]);
+
+        ti.set_visible_lines(2);
+
+        assert_eq!(ti.scroll_offset(), 0);
+        assert_eq!(ti.visible_lines(), vec!["a", ""]);
     }
 
     #[test]

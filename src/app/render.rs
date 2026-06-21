@@ -50,6 +50,12 @@ const TIP_GAP: u16 = 2;
 /// Maximum number of wrapped lines a tip may occupy.
 const TIP_MAX_LINES: u16 = 3;
 
+struct DecoratedDiffLine {
+    line: Line<'static>,
+    source_row: usize,
+    inline_editor: bool,
+}
+
 /// Welcome-screen tips shown beneath the ASCII logo. Wrap text in backticks
 /// to highlight it in an accent color (the backticks themselves are not
 /// rendered). Each function receives `&RuntimeBindings` so keybinding labels
@@ -920,8 +926,16 @@ impl App {
         }
 
         match &self.center_mode {
+            CenterMode::Diff { .. }
+                if !matches!(self.fullscreen_overlay, FullscreenOverlay::Diff) =>
+            {
+                let title = "Diff";
+                self.themed_block(title, focused)
+                    .render(pane_area, frame.buffer_mut());
+            }
             CenterMode::Diff { .. } => {
-                self.render_diff(frame, pane_area, focused);
+                self.themed_block("Diff", focused)
+                    .render(pane_area, frame.buffer_mut());
             }
             CenterMode::Agent if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) => {
                 // Skip agent rendering here — fullscreen overlay handles it.
@@ -943,13 +957,21 @@ impl App {
     }
 
     fn render_diff(&mut self, frame: &mut Frame, area: Rect, focused: bool) {
-        let (lines, scroll, gutter_width) = match &self.center_mode {
+        let (lines, rows, selected_row, scroll, gutter_width) = match &self.center_mode {
             CenterMode::Diff {
                 lines,
+                rows,
+                selected_row,
                 scroll,
                 gutter_width,
                 ..
-            } => (Arc::clone(lines), *scroll, *gutter_width),
+            } => (
+                Arc::clone(lines),
+                Arc::clone(rows),
+                *selected_row,
+                *scroll,
+                *gutter_width,
+            ),
             _ => return,
         };
 
@@ -972,11 +994,31 @@ impl App {
 
         let w = content_area.width.max(1) as usize;
 
-        if gutter_width > 0 {
+        let decorated = self.decorated_diff_lines(&lines, &rows, selected_row, w);
+        let decorated_lines: Vec<Line<'static>> =
+            decorated.iter().map(|row| row.line.clone()).collect();
+        let effective_gutter_width = gutter_width + 2;
+
+        {
             // Gutter-aware wrapping: continuation lines are indented to align
             // with the content column past the gutter.
-            let wrapped = crate::diff::wrap_diff_lines(&lines, w, gutter_width);
+            let wrapped_with_rows = crate::diff::wrap_diff_lines_with_indices(
+                &decorated_lines,
+                w,
+                effective_gutter_width,
+            );
+            let wrapped: Vec<Line<'static>> = wrapped_with_rows
+                .iter()
+                .map(|(line, _)| line.clone())
+                .collect();
+            self.last_diff_visual_rows = wrapped_with_rows
+                .iter()
+                .map(|(_, decorated_row)| decorated[*decorated_row].source_row)
+                .collect();
             self.last_diff_visual_lines = wrapped.len() as u16;
+            let editor_visual_row = wrapped_with_rows
+                .iter()
+                .position(|(_, decorated_row)| decorated[*decorated_row].inline_editor);
 
             let max_scroll = self
                 .last_diff_visual_lines
@@ -986,66 +1028,277 @@ impl App {
             Paragraph::new(wrapped)
                 .scroll((scroll, 0))
                 .render(content_area, frame.buffer_mut());
-        } else {
-            // No gutter — fall back to ratatui's built-in wrapping.
-            self.last_diff_visual_lines = lines
-                .iter()
-                .map(|l| {
-                    let lw = l.width();
-                    if lw <= w { 1u16 } else { lw.div_ceil(w) as u16 }
-                })
-                .sum();
-
-            let max_scroll = self
-                .last_diff_visual_lines
-                .saturating_sub(content_area.height);
-            let scroll = scroll.min(max_scroll);
-
-            Paragraph::new((*lines).clone())
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0))
-                .render(content_area, frame.buffer_mut());
+            if let Some(label) =
+                scrollback_indicator_label(scroll as usize, self.last_diff_visual_lines as usize)
+            {
+                render_scroll_indicator(&self.theme, frame, content_area, &label);
+            }
+            self.render_inline_diff_comment_editor(frame, content_area, scroll, editor_visual_row);
         }
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
-            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
-            let scroll_line = self.bindings.label_for(Action::ScrollLineDown);
-            let close = self.bindings.label_for(Action::CloseOverlay);
+            let add_comment = self.bindings.label_for(Action::FocusAgent);
+            let delete_comment = self.bindings.label_for(Action::DeleteDiffComment);
+            let send_comments = self.bindings.label_for(Action::SendDiffComments);
+            let close = self.bindings.label_for(Action::ExitInteractive);
+            let pending = self.pending_diff_comment_count_for_selected_session();
+            let selected_comment = self.current_diff_selected_comment_key().is_some();
             let mut spans: Vec<Span> = Vec::new();
+            let mut send_spans: Vec<Span> = Vec::new();
 
-            if scroll > 0 {
-                spans.push(Span::styled(
-                    format!("Scrolled back {scroll} lines. "),
+            if !add_comment.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&add_comment));
+                spans.push(Span::styled(" comment. ", desc_style));
+            }
+            if !delete_comment.is_empty() && selected_comment {
+                spans.extend(self.theme.dim_key_badge_default(&delete_comment));
+                spans.push(Span::styled(" delete comment. ", desc_style));
+            }
+            if pending > 0 && !send_comments.is_empty() {
+                send_spans.push(Span::styled(
+                    format!("{} to send  ", diff_comment_count_label(pending)),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" down, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" up, ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line. ", desc_style));
-            } else {
-                spans.extend(self.theme.dim_key_badge_default(&scroll_up));
-                spans.push(Span::styled(" ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_down));
-                spans.push(Span::styled(" to scroll. ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&scroll_line));
-                spans.push(Span::styled(" one line. ", desc_style));
+                send_spans.extend(self.theme.dim_key_badge_default(&send_comments));
+                send_spans.push(Span::styled(" send", desc_style));
             }
-            spans.extend(self.theme.dim_key_badge_default(&close));
-            spans.push(Span::styled(" close diff.", desc_style));
+            if !close.is_empty() {
+                spans.extend(self.theme.dim_key_badge_default(&close));
+                spans.push(Span::styled(" close diff.", desc_style));
+            }
 
-            Paragraph::new(Line::from(spans))
-                .block(
-                    Block::default()
-                        .borders(Borders::TOP)
-                        .border_style(Style::default().fg(self.theme.border_normal)),
-                )
-                .render(hint_area, frame.buffer_mut());
+            let block = Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(self.theme.border_normal));
+            let inner = block.inner(hint_area);
+            block.render(hint_area, frame.buffer_mut());
+            if send_spans.is_empty() || inner.width < 20 {
+                Paragraph::new(Line::from(spans)).render(inner, frame.buffer_mut());
+            } else {
+                let send_width = send_spans
+                    .iter()
+                    .map(|span| span.content.chars().count())
+                    .sum::<usize>()
+                    .saturating_add(1) as u16;
+                let [left_area, right_area] = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(send_width.min(inner.width.saturating_sub(1))),
+                    ])
+                    .areas(inner);
+                Paragraph::new(Line::from(spans)).render(left_area, frame.buffer_mut());
+                Paragraph::new(Line::from(send_spans))
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .render(right_area, frame.buffer_mut());
+            }
         }
+    }
+
+    fn decorated_diff_lines(
+        &self,
+        lines: &[Line<'static>],
+        rows: &[crate::diff::DiffRow],
+        selected_row: Option<usize>,
+        width: usize,
+    ) -> Vec<DecoratedDiffLine> {
+        let mut decorated: Vec<DecoratedDiffLine> = Vec::with_capacity(lines.len());
+        for (idx, line) in lines.iter().enumerate() {
+            let anchor = rows.get(idx).and_then(|row| row.anchor.as_ref());
+            let comment = anchor.and_then(|anchor| self.diff_comment_for_anchor(anchor));
+            let editor_open = anchor
+                .and_then(|anchor| self.diff_comment_editor_for_anchor(anchor))
+                .is_some();
+            let has_comment = comment.is_some();
+            let selected = selected_row == Some(idx);
+            let marker = if has_comment { "⚑ " } else { "  " };
+            let marker_style = if has_comment {
+                Style::default().fg(self.theme.warning_fg)
+            } else if selected {
+                Style::default().fg(self.theme.hint_key_fg)
+            } else {
+                Style::default().fg(self.theme.hint_dim_desc_fg)
+            };
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(Span::styled(marker, marker_style));
+            if selected {
+                let selection = self.theme.selection_style();
+                spans.extend(line.spans.iter().map(|span| {
+                    Span::styled(span.content.to_string(), span.style.patch(selection))
+                }));
+            } else {
+                spans.extend(line.spans.iter().cloned());
+            }
+            decorated.push(DecoratedDiffLine {
+                line: Line::from(spans),
+                source_row: idx,
+                inline_editor: false,
+            });
+
+            if let Some(comment) = comment
+                && !editor_open
+            {
+                decorated.extend(Self::visible_diff_comment_lines(
+                    comment,
+                    &self.theme,
+                    idx,
+                    width,
+                ));
+            }
+
+            if editor_open {
+                for _ in 0..3 {
+                    decorated.push(DecoratedDiffLine {
+                        line: Line::from(""),
+                        source_row: idx,
+                        inline_editor: true,
+                    });
+                }
+            }
+        }
+
+        decorated
+    }
+
+    fn render_inline_diff_comment_editor(
+        &mut self,
+        frame: &mut Frame,
+        content_area: Rect,
+        scroll: u16,
+        visual_row: Option<usize>,
+    ) {
+        if self.diff_comment_editor.is_none() {
+            return;
+        }
+        let Some(visual_row) = visual_row else {
+            return;
+        };
+        let visual_row = visual_row as u16;
+        if visual_row < scroll || visual_row >= scroll.saturating_add(content_area.height) {
+            return;
+        }
+        let y = content_area.y + visual_row.saturating_sub(scroll);
+        let remaining = content_area
+            .y
+            .saturating_add(content_area.height)
+            .saturating_sub(y);
+        if remaining < 3 || content_area.width < 12 {
+            return;
+        }
+        let width = content_area.width.saturating_sub(4).max(8);
+        let text_width = width.saturating_sub(2).saturating_sub(1) as usize;
+        let configured_max_lines = self.config.ui.diff_comment_editor_max_lines.max(1);
+        let max_text_lines = remaining.saturating_sub(2).clamp(1, configured_max_lines);
+        let text_lines = if let Some(editor) = &mut self.diff_comment_editor {
+            editor
+                .input
+                .set_display_width((text_width > 0).then_some(text_width));
+            let lines = (editor.input.total_lines() as u16)
+                .max(1)
+                .min(max_text_lines);
+            editor.input.set_visible_lines(lines as usize);
+            editor.input.ensure_cursor_visible();
+            lines
+        } else {
+            1
+        };
+        let area = Rect::new(
+            content_area.x.saturating_add(2),
+            y,
+            width,
+            text_lines.saturating_add(2),
+        );
+        self.clear_overlay_area(frame, area);
+
+        let mut bottom_spans = vec![Span::raw(" ")];
+        for (key, desc) in [
+            ("Enter".to_string(), "newline"),
+            (self.bindings.label_for(Action::CloseOverlay), "close"),
+        ] {
+            if key.is_empty() {
+                continue;
+            }
+            bottom_spans.extend(
+                self.theme
+                    .key_badge_default(&key)
+                    .into_iter()
+                    .map(|span| Span::styled(span.content.to_string(), span.style)),
+            );
+            bottom_spans.push(Span::styled(
+                format!(" {desc}  "),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+        }
+
+        let block = self
+            .themed_overlay_block("Comment")
+            .title_bottom(Line::from(bottom_spans));
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+        if let Some(editor) = &self.diff_comment_editor {
+            self.render_multiline_input(&editor.input, inner, frame);
+        }
+    }
+
+    fn visible_diff_comment_lines(
+        comment: &crate::app::DiffComment,
+        theme: &Theme,
+        source_row: usize,
+        available_width: usize,
+    ) -> Vec<DecoratedDiffLine> {
+        let box_width = available_width.saturating_sub(2).max(10);
+        let content_width = box_width.saturating_sub(4).max(1);
+        let title = " ⚑ Comment ";
+        let title_width = title.chars().count();
+        let top_border = if title_width < box_width.saturating_sub(2) {
+            format!(
+                "  ╭{title}{}╮",
+                "─".repeat(box_width.saturating_sub(2 + title_width))
+            )
+        } else {
+            format!("  ╭{}╮", "─".repeat(box_width.saturating_sub(2)))
+        };
+        let mut input = TextInput::with_text(comment.text.clone()).with_multiline(1);
+        input.set_display_width(Some(content_width));
+        input.set_visible_lines(input.total_lines().max(1));
+        let mut lines = vec![DecoratedDiffLine {
+            line: Line::from(Span::styled(
+                top_border,
+                Style::default().fg(theme.overlay_border),
+            )),
+            source_row,
+            inline_editor: false,
+        }];
+
+        for text in input.visible_lines() {
+            let text_width = text.chars().count().min(content_width);
+            let padding = " ".repeat(content_width.saturating_sub(text_width));
+            lines.push(DecoratedDiffLine {
+                line: Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(theme.overlay_border)),
+                    Span::styled(text, Style::default().fg(theme.text_fg)),
+                    Span::styled(
+                        format!("{padding} │"),
+                        Style::default().fg(theme.overlay_border),
+                    ),
+                ]),
+                source_row,
+                inline_editor: false,
+            });
+        }
+
+        lines.push(DecoratedDiffLine {
+            line: Line::from(Span::styled(
+                format!("  ╰{}╯", "─".repeat(box_width.saturating_sub(2))),
+                Style::default().fg(theme.overlay_border),
+            )),
+            source_row,
+            inline_editor: false,
+        });
+
+        lines
     }
 
     /// Render the ASCII "dux" logo centered in the given area, with an
@@ -1423,24 +1676,7 @@ impl App {
                         self.snapshot_buf.scrollback_total,
                     )
                 {
-                    let badge_width = label.len() as u16;
-                    if term_area.height > 0 && badge_width <= term_area.width {
-                        Paragraph::new(label)
-                            .style(
-                                Style::default()
-                                    .fg(self.theme.scroll_indicator_fg)
-                                    .bg(self.theme.scroll_indicator_bg),
-                            )
-                            .render(
-                                Rect::new(
-                                    term_area.x + term_area.width - badge_width,
-                                    term_area.y,
-                                    badge_width,
-                                    1,
-                                ),
-                                frame.buffer_mut(),
-                            );
-                    }
+                    render_scroll_indicator(&self.theme, frame, term_area, &label);
                 }
             }
         }
@@ -1479,6 +1715,8 @@ impl App {
             let reconnect = self.bindings.labels_for(Action::ReconnectAgent);
 
             let macro_key = self.bindings.label_for(Action::OpenMacroBar);
+            let send_comments = self.bindings.label_for(Action::SendDiffComments);
+            let pending_comments = self.pending_diff_comment_count_for_selected_session();
             let hint_line = if is_input {
                 let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                 let mut spans: Vec<Span> = Vec::new();
@@ -1498,6 +1736,11 @@ impl App {
                     spans.push(Span::styled(" ", desc_style));
                     spans.extend(self.theme.dim_key_badge_default(&macro_key));
                     spans.push(Span::styled(" macros.", desc_style));
+                }
+                if pending_comments > 0 && !send_comments.is_empty() {
+                    spans.push(Span::styled(" ", desc_style));
+                    spans.extend(self.theme.dim_key_badge_default(&send_comments));
+                    spans.push(Span::styled(" send comments.", desc_style));
                 }
                 Line::from(spans)
             } else if scrollback_offset > 0 {
@@ -1738,14 +1981,17 @@ impl App {
                 // Build the right-aligned stats string, e.g. "+12 -3".
                 let stats =
                     format_line_stats(file.additions, file.deletions, file.binary, &self.theme);
-                let stats_width = stats.iter().map(|s| s.width()).sum::<usize>();
+                let comment_count = self.diff_comment_count_for_path(&file.path);
+                let comment_spans = format_diff_comment_count(comment_count, &self.theme);
+                let meta_spans = join_file_row_meta_spans(comment_spans, stats);
+                let meta_width = meta_spans.iter().map(|s| s.width()).sum::<usize>();
 
                 // Status prefix takes 3 chars ("M  ").
                 let prefix_width = 3;
-                // Leave 1 char gap between path and stats.
+                // Leave 1 char gap between path and right-aligned metadata.
                 let path_budget = inner_width
                     .saturating_sub(prefix_width)
-                    .saturating_sub(stats_width)
+                    .saturating_sub(meta_width)
                     .saturating_sub(1);
 
                 let path = if is_selected {
@@ -1758,7 +2004,7 @@ impl App {
                 let padding = inner_width
                     .saturating_sub(prefix_width)
                     .saturating_sub(path_display_width)
-                    .saturating_sub(stats_width);
+                    .saturating_sub(meta_width);
 
                 let base_style = if is_selected {
                     sel_style
@@ -1774,17 +2020,17 @@ impl App {
                     Span::styled(path, base_style),
                     Span::styled(" ".repeat(padding), base_style),
                 ];
-                // For stats spans, keep their green/red fg but apply selection bg when selected.
-                let stats_base = if is_selected {
+                // For metadata spans, keep their fg but apply selection bg when selected.
+                let meta_base = if is_selected {
                     Style::default()
                         .bg(self.theme.selection_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
-                spans.extend(stats.into_iter().map(|s| {
+                spans.extend(meta_spans.into_iter().map(|s| {
                     let fg = s.style.fg.unwrap_or(Color::Reset);
-                    Span::styled(s.content, stats_base.fg(fg))
+                    Span::styled(s.content, meta_base.fg(fg))
                 }));
                 ListItem::new(Line::from(spans))
             })
@@ -6204,6 +6450,10 @@ impl App {
                 self.render_fullscreen_startup_log(frame);
                 return;
             }
+            FullscreenOverlay::Diff => {
+                self.render_fullscreen_diff(frame);
+                return;
+            }
             FullscreenOverlay::None => {}
         }
         if !matches!(self.prompt, PromptState::None) {
@@ -6425,6 +6675,16 @@ impl App {
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
             frame.set_cursor_position((cx, cy));
         }
+    }
+
+    fn render_fullscreen_diff(&mut self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
+        let area = centered_rect(96, 94, frame.area());
+        Clear.render(area, frame.buffer_mut());
+        frame
+            .buffer_mut()
+            .set_style(area, Style::default().bg(self.theme.app_bg));
+        self.render_diff(frame, area, true);
     }
 
     fn render_macro_bar(&mut self, frame: &mut Frame, area: Rect) {
@@ -6991,6 +7251,32 @@ pub(crate) fn format_line_stats(
     spans
 }
 
+fn format_diff_comment_count(count: usize, theme: &crate::theme::Theme) -> Vec<Span<'static>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    vec![Span::styled(
+        format!("⚑{count}"),
+        Style::default().fg(theme.warning_fg),
+    )]
+}
+
+fn join_file_row_meta_spans(
+    comment_spans: Vec<Span<'static>>,
+    stats: Vec<Span<'static>>,
+) -> Vec<Span<'static>> {
+    if comment_spans.is_empty() {
+        return stats;
+    }
+    if stats.is_empty() {
+        return comment_spans;
+    }
+    let mut spans = comment_spans;
+    spans.push(Span::raw(" "));
+    spans.extend(stats);
+    spans
+}
+
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -7091,6 +7377,23 @@ fn scrollback_indicator_label(scrolled: usize, total: usize) -> Option<String> {
     let total = total.max(scrolled);
     let noun = if total == 1 { "line" } else { "lines" };
     Some(format!(" {scrolled}/{total} {noun} "))
+}
+
+fn render_scroll_indicator(theme: &Theme, frame: &mut Frame, area: Rect, label: &str) {
+    let badge_width = label.len() as u16;
+    if area.height == 0 || badge_width > area.width {
+        return;
+    }
+    Paragraph::new(label.to_string())
+        .style(
+            Style::default()
+                .fg(theme.scroll_indicator_fg)
+                .bg(theme.scroll_indicator_bg),
+        )
+        .render(
+            Rect::new(area.x + area.width - badge_width, area.y, badge_width, 1),
+            frame.buffer_mut(),
+        );
 }
 
 fn path_completion_display_label(completion: &str) -> String {
@@ -7310,6 +7613,19 @@ mod tests {
     #[test]
     fn scrollback_indicator_hides_at_live_bottom() {
         assert_eq!(scrollback_indicator_label(0, 800), None);
+    }
+
+    #[test]
+    fn file_row_metadata_joins_comment_count_and_stats() {
+        let theme = crate::theme::Theme::default_dark();
+        let comments = format_diff_comment_count(2, &theme);
+        let stats = format_line_stats(3, 1, false, &theme);
+        let text = join_file_row_meta_spans(comments, stats)
+            .into_iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>();
+
+        assert_eq!(text, "⚑2 +3 -1");
     }
 
     #[test]
