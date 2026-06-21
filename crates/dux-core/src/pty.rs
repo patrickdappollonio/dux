@@ -243,14 +243,32 @@ fn clamp_replay_top(full_top: i32, bottom: i32) -> i32 {
 /// caller — a child that is not reading would discard the input anyway.
 const PTY_WRITE_QUEUE_CAP: usize = 1024;
 
+/// How long `PtyWriter::drop` will wait for the writer thread to acknowledge its
+/// shutdown signal before abandoning the join. A well-behaved teardown (child
+/// group killed, PTY slave released) finishes in microseconds; this generous
+/// ceiling only fires when a write is genuinely wedged (slave still open despite
+/// the group kill — e.g. a double-forked daemon that left the group). On timeout
+/// the thread is abandoned rather than hanging the dropping thread indefinitely.
+const PTY_WRITER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Messages sent to the PTY writer thread.
+enum PtyWriteMsg {
+    /// Forward these bytes to the underlying PTY master writer.
+    Bytes(Vec<u8>),
+    /// Exit the writer thread unconditionally. Sent by [`PtyWriter::drop`] so
+    /// teardown is independent of how many sender clones are still alive (the
+    /// reader thread holds one), and independent of whether a write is blocked.
+    Shutdown,
+}
+
 /// Push a chunk onto a PTY write queue without ever blocking. A full queue (the
 /// child is not draining its terminal) logs and drops the chunk rather than
 /// blocking the caller — a child that is not reading would discard the bytes
 /// anyway. A disconnected channel (the writer thread is gone) is a no-op. Shared
 /// by [`PtyWriter::send`] (user input) and the reader thread (terminal parser
 /// replies) so both log drops identically.
-fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<Vec<u8>>, bytes: Vec<u8>) {
-    if let Err(std::sync::mpsc::TrySendError::Full(_)) = tx.try_send(bytes) {
+fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<PtyWriteMsg>, bytes: Vec<u8>) {
+    if let Err(std::sync::mpsc::TrySendError::Full(_)) = tx.try_send(PtyWriteMsg::Bytes(bytes)) {
         logger::debug(
             "PTY write queue full; dropping bytes for a child that is not draining its terminal",
         );
@@ -270,25 +288,35 @@ fn pty_queue_send(tx: &std::sync::mpsc::SyncSender<Vec<u8>>, bytes: Vec<u8>) {
 /// server. A single writer thread also serializes input and parser replies in
 /// submission order.
 struct PtyWriter {
-    /// `None` only transiently during `Drop`, once the sender is released so the
-    /// writer thread's `recv` disconnects and the join can complete.
-    tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    /// The sender half of the write queue. Used to push [`PtyWriteMsg::Bytes`]
+    /// chunks to the writer thread, and to send [`PtyWriteMsg::Shutdown`] on
+    /// drop. `None` only transiently during `Drop` after the shutdown signal has
+    /// been sent and before the join completes.
+    tx: Option<std::sync::mpsc::SyncSender<PtyWriteMsg>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl PtyWriter {
     /// Spawn the writer thread around the PTY master `writer`.
     fn spawn(mut writer: Box<dyn Write + Send>) -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_WRITE_QUEUE_CAP);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<PtyWriteMsg>(PTY_WRITE_QUEUE_CAP);
         let thread = thread::spawn(move || {
             // A blocking write here only ever stalls THIS thread. On teardown the
             // child's process group is killed first, which closes the PTY and makes
-            // the write return an error, so the loop exits promptly.
-            while let Ok(chunk) = rx.recv() {
-                if writer.write_all(&chunk).is_err() {
-                    break;
+            // the write return an error, so the loop exits promptly. If a
+            // `Shutdown` message arrives first, the loop exits unconditionally
+            // without waiting for that error — so a surviving sender clone (the
+            // reader thread holds one) can never prevent the thread from stopping.
+            loop {
+                match rx.recv() {
+                    Ok(PtyWriteMsg::Bytes(chunk)) => {
+                        if writer.write_all(&chunk).is_err() {
+                            break;
+                        }
+                        let _ = writer.flush();
+                    }
+                    Ok(PtyWriteMsg::Shutdown) | Err(_) => break,
                 }
-                let _ = writer.flush();
             }
         });
         Self {
@@ -299,7 +327,7 @@ impl PtyWriter {
 
     /// A clonable handle for the reader thread to push the terminal parser's query
     /// replies through the same single writer (preserving submission order).
-    fn sender(&self) -> std::sync::mpsc::SyncSender<Vec<u8>> {
+    fn sender(&self) -> std::sync::mpsc::SyncSender<PtyWriteMsg> {
         self.tx
             .as_ref()
             .expect("PtyWriter sender taken before Drop")
@@ -318,15 +346,41 @@ impl PtyWriter {
 
 impl Drop for PtyWriter {
     fn drop(&mut self) {
-        // Release our sender so the writer thread's `recv` disconnects, then join
-        // it so the thread never outlives the client. A PtyClient drops this only
-        // after it has killed the child group and joined the reader thread, so any
-        // stalled write has already errored out (PTY closed) and the reader's
-        // cloned sender is gone — leaving this the last sender, so the disconnect
-        // fires and the join returns at once.
-        self.tx.take();
+        // Send an explicit Shutdown rather than relying on channel disconnect.
+        // The reader thread holds a clone of `tx`, so merely dropping our copy
+        // does not disconnect the channel — the writer thread's `recv` would
+        // keep blocking, and the join below would hang. `Shutdown` is obeyed
+        // unconditionally regardless of how many sender clones remain alive.
+        if let Some(tx) = self.tx.take() {
+            // `try_send` never blocks: if the queue is full (writer is wedged on
+            // a stalled write and the queue has been flooded), the Shutdown is
+            // dropped here. That is acceptable because the bounded join below will
+            // time out and abandon the thread rather than hanging indefinitely.
+            // On disconnect (`Err(Disconnected)`) the writer has already exited,
+            // so the join completes immediately.
+            let _ = tx.try_send(PtyWriteMsg::Shutdown);
+        }
+
         if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
+            // Bounded join: in the normal path (child group killed, PTY slave
+            // released) the writer thread exits in microseconds. On timeout the
+            // thread is abandoned rather than blocking the dropping thread. A
+            // well-behaved teardown — `PtyClient::drop` kills the child group
+            // and joins the reader before this runs — means the write has already
+            // errored out, so the timeout is never reached in practice; it is a
+            // last-resort safety net for a wedged write on a misbehaving child.
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
+            thread::spawn(move || {
+                let _ = handle.join();
+                let _ = done_tx.send(());
+            });
+            if done_rx.recv_timeout(PTY_WRITER_SHUTDOWN_TIMEOUT).is_err() {
+                logger::debug(
+                    "PTY writer thread did not exit within timeout on shutdown; \
+                     abandoning the thread (a write may have been wedged on a \
+                     misbehaving child that holds the PTY slave open)",
+                );
+            }
         }
     }
 }
@@ -493,7 +547,7 @@ impl PtyClient {
     fn reader_loop(
         mut reader: Box<dyn std::io::Read + Send>,
         terminal: Arc<Mutex<TerminalState>>,
-        writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        writer_tx: std::sync::mpsc::SyncSender<PtyWriteMsg>,
         exited: Arc<AtomicBool>,
         has_output: Arc<AtomicBool>,
         dirty: Arc<AtomicBool>,
@@ -2742,5 +2796,46 @@ mod tests {
             "unexpected alt-screen enter: {text:?}"
         );
         assert!(text.contains('x'));
+    }
+
+    /// Regression guard for the sender-clone shutdown hazard: a clone of the
+    /// writer's `SyncSender` (just as the reader thread holds) must NOT prevent
+    /// `PtyWriter::drop` from stopping the writer thread promptly. Before the fix
+    /// the `Drop` relied on channel disconnect; with a live clone, no disconnect
+    /// ever fired and the join blocked indefinitely. Now `Drop` sends an explicit
+    /// `Shutdown` so the thread exits regardless of surviving clones.
+    #[test]
+    fn pty_writer_drop_exits_promptly_with_a_surviving_sender_clone() {
+        // A no-op writer — we are only testing shutdown timing, not data delivery.
+        struct NullWriter;
+        impl Write for NullWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let writer = PtyWriter::spawn(Box::new(NullWriter));
+        // Clone the sender, simulating the reader thread's hold on it. Keep
+        // this clone alive across the drop so it cannot cause a disconnect.
+        let _clone = writer.sender();
+
+        let start = std::time::Instant::now();
+        drop(writer);
+        let elapsed = start.elapsed();
+
+        // The explicit Shutdown makes teardown near-instantaneous. A 2s ceiling
+        // is generous for a loaded CI host while still catching a genuine hang.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "PtyWriter::drop took {elapsed:?} with a surviving sender clone; \
+             the Shutdown signal must make the writer thread exit regardless of \
+             remaining sender clones (no channel-disconnect deadlock)"
+        );
+        // Verify the clone is still alive (i.e. this was a real test of the hazard,
+        // not one where Rust happened to drop `_clone` before `writer`).
+        drop(_clone);
     }
 }
