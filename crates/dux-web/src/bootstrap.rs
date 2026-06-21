@@ -93,6 +93,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         reloading: false,
         deferred_commands: Vec::new(),
         reload_guard: None,
+        pending_auth_users: None,
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),
