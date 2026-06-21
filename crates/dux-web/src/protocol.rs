@@ -107,10 +107,20 @@ pub enum ServerMessage {
     },
     /// An error not tied to a specific command.
     Error { message: String },
-    /// An asynchronous status/lifecycle event not tied to a specific command:
-    /// a background push/pull completing, an agent launch failing, or a PTY
-    /// exiting. Same tone+message shape as a command result's status.
-    Status { tone: String, message: String },
+    /// An asynchronous status/lifecycle event. `key` correlates a busy with its
+    /// final state across reconnects; absent for unkeyed transients.
+    Status {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        tone: String,
+        message: String,
+    },
+    /// Dismiss the toast/line for `key` (a keyed op resolved or was cleared). A
+    /// `None` key clears the anonymous slot (the TUI's most-recent line).
+    StatusCleared {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
     /// An AI-generated commit message produced by a one-shot provider run,
     /// pushed asynchronously after a `generate_commit_message` command. The
     /// `session_id` scopes the result to the dialog that requested it so the
@@ -158,6 +168,45 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_with_key_serializes() {
+        let msg = ServerMessage::Status {
+            key: Some("pull".into()),
+            tone: "busy".into(),
+            message: "Pulling\u{2026}".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"status","key":"pull","tone":"busy","message":"Pulling…"}"#
+        );
+    }
+
+    #[test]
+    fn status_without_key_omits_key() {
+        let msg = ServerMessage::Status {
+            key: None,
+            tone: "info".into(),
+            message: "Saved.".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"status","tone":"info","message":"Saved."}"#
+        );
+    }
+
+    #[test]
+    fn status_cleared_serializes() {
+        let msg = ServerMessage::StatusCleared {
+            key: Some("pull".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"type":"status_cleared","key":"pull"}"#
+        );
+    }
 
     #[test]
     fn subscribe_message_round_trips() {

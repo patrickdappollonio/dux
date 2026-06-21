@@ -5,6 +5,43 @@
 //! wire-safe `WireCommandOutcome` (the full `EventReaction` is engine-internal
 //! and view-coupled; web clients re-fetch `view_model()` for fresh state).
 
+/// Stable string keys for correlated status pairs (busy → final). The TUI and
+/// the web actor MUST use the SAME string so a final status replaces the busy
+/// on the same key slot rather than opening a second slot.
+///
+/// Keys are per-OPERATION-TYPE where the operation is globally unique (e.g.
+/// config reload), and per-OPERATION-INSTANCE (including the entity id) where
+/// multiple operations of the same type can be in flight concurrently (e.g.
+/// per-session launch or delete).
+pub mod status_keys {
+    /// Config-reload failure key. Singleton: only one reload can run at a time.
+    pub const CONFIG_RELOAD: &str = "config-reload";
+    /// Worktree-list failure key. Parameterised by project id at call sites:
+    /// `format!("{WORKTREE_LIST_PREFIX}:{project_id}")`.
+    pub const WORKTREE_LIST_PREFIX: &str = "worktree-list";
+    /// Agent-launch key prefix. Parameterised by session id at call sites:
+    /// `format!("{LAUNCH_PREFIX}:{session_id}")`.
+    pub const LAUNCH_PREFIX: &str = "launch";
+    /// Session-delete key prefix. Parameterised by session id at call sites:
+    /// `format!("{DELETE_PREFIX}:{session_id}")`.
+    pub const DELETE_PREFIX: &str = "delete";
+    /// Checkout-project-default-branch key prefix. Parameterised by project id
+    /// at call sites: `format!("{CHECKOUT_DEFAULT_PREFIX}:{project_id}")`.
+    pub const CHECKOUT_DEFAULT_PREFIX: &str = "checkout-default";
+    /// Add-project-checkout-default key prefix. Parameterised by path at call
+    /// sites: `format!("{ADD_PROJECT_CHECKOUT_PREFIX}:{path}")`.
+    pub const ADD_PROJECT_CHECKOUT_PREFIX: &str = "add-project-checkout";
+    /// PR-lookup key prefix. Parameterised by project id at call sites:
+    /// `format!("{PR_LOOKUP_PREFIX}:{project_id}")`.
+    pub const PR_LOOKUP_PREFIX: &str = "pr-lookup";
+    /// Push key prefix. Parameterised by worktree path at call sites:
+    /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
+    pub const PUSH_PREFIX: &str = "push";
+    /// Create-agent key prefix. Parameterised by project id at call sites:
+    /// `format!("{CREATE_PREFIX}:{project_id}")`.
+    pub const CREATE_PREFIX: &str = "create";
+}
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -332,6 +369,10 @@ pub struct WireStatus {
     /// "info" | "busy" | "warning" | "error"
     pub tone: String,
     pub message: String,
+    /// `None` = an unkeyed transient (anonymous slot). `Some` = a keyed op whose
+    /// later success/error/clear carries the same key so the surfaces correlate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl WireStatus {
@@ -340,13 +381,34 @@ impl WireStatus {
         Self {
             tone: tone.into(),
             message: message.into(),
+            key: None,
         }
+    }
+
+    /// Construct a keyed wire status so producers can correlate updates.
+    pub fn keyed(
+        key: impl Into<String>,
+        tone: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            tone: tone.into(),
+            message: message.into(),
+            key: Some(key.into()),
+        }
+    }
+
+    /// Builder that attaches a correlation key to an existing status.
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
     }
 
     fn from_update(update: &StatusUpdate) -> Self {
         Self {
             tone: update.tone.as_wire().to_string(),
             message: update.message.clone(),
+            key: update.key.clone(),
         }
     }
 }
@@ -380,27 +442,44 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         EventReaction::Status(update) => vec![WireStatus::from_update(update)],
         EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
         EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
-            AgentLaunchFailedOutcome::Create { message } => {
-                vec![WireStatus::new("error", message.clone())]
+            // Create-kind failure is keyed so it replaces the "Creating…" busy
+            // toast that shares the same create:{project_id} key.
+            AgentLaunchFailedOutcome::Create {
+                project_id,
+                message,
+            } => {
+                vec![WireStatus::keyed(
+                    format!("{}:{project_id}", status_keys::CREATE_PREFIX),
+                    "error",
+                    message.clone(),
+                )]
             }
+            // Reconnect-family variants carry session_id (added in Task 4) so the
+            // failure replaces the "launching…" busy that shares the same key.
             AgentLaunchFailedOutcome::Reconnect {
+                session_id,
                 branch_name,
                 message,
-            } => vec![WireStatus::new(
+            } => vec![WireStatus::keyed(
+                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
                 "error",
                 format!("Reconnect failed for agent \"{branch_name}\": {message}"),
             )],
             AgentLaunchFailedOutcome::ForceReconnect {
+                session_id,
                 branch_name,
                 message,
-            } => vec![WireStatus::new(
+            } => vec![WireStatus::keyed(
+                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
                 "error",
                 format!("Fresh restart failed for agent \"{branch_name}\": {message}"),
             )],
             AgentLaunchFailedOutcome::StartupAutoReopen {
+                session_id,
                 branch_name,
                 message,
-            } => vec![WireStatus::new(
+            } => vec![WireStatus::keyed(
+                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
                 "warning",
                 format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
             )],
@@ -410,41 +489,78 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         // dispatch set, or it lingers forever on the web. Mirror the TUI's
         // `apply_agent_launch_ready_view`: the create/reconnect status on success,
         // an error if persistence or the startup command failed.
-        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
-            AgentLaunchReadyView::CreatePersistFailed { error } => {
-                vec![WireStatus::new(
-                    "error",
-                    format!("Failed to persist session: {error}"),
-                )]
+        EventReaction::AgentLaunchReadyView(outcome) => {
+            let session_id = &outcome.session.id;
+            let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
+            // Create-kind outcomes use create:{project_id} so the success/failure
+            // replaces the "Creating…" busy that was keyed the same way.
+            let create_key = format!(
+                "{}:{}",
+                status_keys::CREATE_PREFIX,
+                outcome.session.project_id
+            );
+            match &outcome.view {
+                AgentLaunchReadyView::CreatePersistFailed { error } => {
+                    vec![WireStatus::keyed(
+                        create_key,
+                        "error",
+                        format!("Failed to persist session: {error}"),
+                    )]
+                }
+                AgentLaunchReadyView::CreateCommitted {
+                    status_message,
+                    startup_result_error,
+                } => match startup_result_error {
+                    Some(err) => vec![WireStatus::keyed(
+                        create_key,
+                        "error",
+                        format!(
+                            "Startup command failed for agent \"{}\": {err}. Run \
+                             read-startup-command-logs for details.",
+                            outcome.session.branch_name
+                        ),
+                    )],
+                    None => vec![WireStatus::keyed(
+                        create_key,
+                        "info",
+                        status_message.clone(),
+                    )],
+                },
+                AgentLaunchReadyView::Reconnect { status_message }
+                | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
+                    vec![WireStatus::keyed(
+                        launch_key,
+                        "info",
+                        status_message.clone(),
+                    )]
+                }
+                AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
+                    vec![]
+                }
             }
-            AgentLaunchReadyView::CreateCommitted {
-                status_message,
-                startup_result_error,
-            } => match startup_result_error {
-                Some(err) => vec![WireStatus::new(
-                    "error",
-                    format!(
-                        "Startup command failed for agent \"{}\": {err}. Run \
-                         read-startup-command-logs for details.",
-                        outcome.session.branch_name
-                    ),
-                )],
-                None => vec![WireStatus::new("info", status_message.clone())],
-            },
-            AgentLaunchReadyView::Reconnect { status_message }
-            | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
-                vec![WireStatus::new("info", status_message.clone())]
-            }
-            AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
-                vec![]
-            }
-        },
+        }
+        // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
+        // unkeyed (anonymous slot).
         EventReaction::DeleteTerminalView(view) => view
             .label
             .as_ref()
             .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\".")))
             .into_iter()
             .collect(),
+        EventReaction::OpenConfigReloadFailedModal(message) => {
+            vec![
+                WireStatus::new("error", format!("Config reload failed: {message}"))
+                    .with_key(status_keys::CONFIG_RELOAD),
+            ]
+        }
+        EventReaction::ProjectWorktreesArrived {
+            project_id,
+            result: Err(message),
+        } => vec![
+            WireStatus::new("error", format!("Failed to list worktrees: {message}")).with_key(
+                format!("{}:{project_id}", status_keys::WORKTREE_LIST_PREFIX),
+            ),
+        ],
         _ => vec![],
     }
 }
@@ -869,10 +985,11 @@ impl Engine {
         } else {
             format!("Launching agent \"{branch_name}\"...")
         };
+        let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
         match reaction {
             EventReaction::DispatchAgentLaunchView(view) => {
                 if view.launched {
-                    Ok(Some(WireStatus::new("busy", busy)))
+                    Ok(Some(WireStatus::new("busy", busy).with_key(launch_key)))
                 } else {
                     Ok(view.status.as_ref().map(WireStatus::from_update))
                 }
@@ -924,13 +1041,14 @@ impl Engine {
             "Checking the default branch for project \"{}\"...",
             project.name
         );
+        let checkout_key = format!("{}:{project_id}", status_keys::CHECKOUT_DEFAULT_PREFIX);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_checkout_project_default_branch_inspection_job(
                 project, worker_tx,
             );
         });
-        Ok(WireStatus::new("busy", busy))
+        Ok(WireStatus::new("busy", busy).with_key(checkout_key))
     }
 
     /// Check out the repo's default branch first, then add it as a project,
@@ -974,11 +1092,12 @@ impl Engine {
         // (reason "before adding the project").
         let busy =
             format!("Checking out \"{default_branch}\" in {path_str} before adding the project...");
+        let checkout_add_key = format!("{}:{path_str}", status_keys::ADD_PROJECT_CHECKOUT_PREFIX);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_add_project_checkout_job(action, default_branch, worker_tx);
         });
-        Ok(WireStatus::new("busy", busy))
+        Ok(WireStatus::new("busy", busy).with_key(checkout_add_key))
     }
 
     /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
@@ -1057,12 +1176,13 @@ impl Engine {
         // does the same with `None` for the name). Busy copy mirrors the TUI's
         // `set_busy` in `dispatch_pull_request_lookup`.
         let busy = format!("Resolving PR for project \"{}\"...", project.name);
+        let pr_key = format!("{}:{project_id}", status_keys::PR_LOOKUP_PREFIX);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::gh::run_pull_request_lookup_job(project, raw_input, custom_name, worker_tx);
         });
-        Ok(WireStatus::new("busy", busy))
+        Ok(WireStatus::new("busy", busy).with_key(pr_key))
     }
 
     /// Drive a PR-lookup follow-up to completion, returning user-facing statuses.
@@ -1249,20 +1369,23 @@ impl Engine {
     /// deletions finish without a view layer. Non-delete reactions return `[]`.
     pub fn drive_delete_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
         match reaction {
-            EventReaction::BeginDeleteSessionView(view) => match &view.outcome {
-                BeginDeleteSessionOutcome::AlreadyInFlight => vec![WireStatus::new(
-                    "error",
-                    "Deletion already in progress for this agent. Wait for it to finish.",
-                )],
-                BeginDeleteSessionOutcome::NotFound => vec![],
-                BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                    vec![WireStatus::new("busy", busy_message.clone())]
+            EventReaction::BeginDeleteSessionView(view) => {
+                let delete_key = format!("{}:{}", status_keys::DELETE_PREFIX, view.session_id);
+                match &view.outcome {
+                    BeginDeleteSessionOutcome::AlreadyInFlight => vec![WireStatus::new(
+                        "error",
+                        "Deletion already in progress for this agent. Wait for it to finish.",
+                    )],
+                    BeginDeleteSessionOutcome::NotFound => vec![],
+                    BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
+                        vec![WireStatus::new("busy", busy_message.clone()).with_key(delete_key)]
+                    }
+                    BeginDeleteSessionOutcome::Inline { removal } => {
+                        let removal = *removal;
+                        self.finish_delete_and_status(&view.session_id, removal)
+                    }
                 }
-                BeginDeleteSessionOutcome::Inline { removal } => {
-                    let removal = *removal;
-                    self.finish_delete_and_status(&view.session_id, removal)
-                }
-            },
+            }
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branch_already_deleted,
@@ -1279,11 +1402,14 @@ impl Engine {
                     vec![]
                 }
             }
-            EventReaction::WorktreeRemoveFailed { message, .. } => {
-                vec![WireStatus::new(
-                    "error",
-                    format!("Worktree delete failed: {message}"),
-                )]
+            EventReaction::WorktreeRemoveFailed {
+                session_id,
+                message,
+            } => {
+                vec![
+                    WireStatus::new("error", format!("Worktree delete failed: {message}"))
+                        .with_key(format!("{}:{session_id}", status_keys::DELETE_PREFIX)),
+                ]
             }
             _ => vec![],
         }
@@ -1294,20 +1420,24 @@ impl Engine {
         session_id: &str,
         removal: WorktreeRemoval,
     ) -> Vec<WireStatus> {
+        let delete_key = format!("{}:{session_id}", status_keys::DELETE_PREFIX);
         match self.apply(Command::FinishDeleteSession {
             session_id: session_id.to_string(),
             removal,
             update_status: true,
         }) {
-            Ok(EventReaction::FinishDeleteSessionView(view)) => vec![WireStatus::new(
-                "info",
-                delete_session_status_message(&view.outcome, &view.removal),
-            )],
+            Ok(EventReaction::FinishDeleteSessionView(view)) => vec![
+                WireStatus::new(
+                    "info",
+                    delete_session_status_message(&view.outcome, &view.removal),
+                )
+                .with_key(delete_key),
+            ],
             Ok(_) => vec![],
-            Err(e) => vec![WireStatus::new(
-                "error",
-                format!("Session cleanup failed: {e:#}"),
-            )],
+            Err(e) => vec![
+                WireStatus::new("error", format!("Session cleanup failed: {e:#}"))
+                    .with_key(delete_key),
+            ],
         }
     }
 
@@ -2624,6 +2754,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checkout_default_branch_busy_is_keyed() {
+        // `sample_project` has path_missing=false, so the busy is returned
+        // synchronously (the inspection worker is spawned in the background and
+        // its result is irrelevant to this test).
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let outcome = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".into(),
+            })
+            .expect("apply");
+        let s = outcome.status.expect("busy status");
+        assert_eq!(s.tone, "busy");
+        assert_eq!(
+            s.key.as_deref(),
+            Some("checkout-default:p1"),
+            "checkout busy must carry the keyed project id"
+        );
+    }
+
+    #[test]
+    fn create_agent_from_pr_busy_is_keyed() {
+        // When gh is available and the project exists, the synchronous busy
+        // returned by `CreateAgentFromPr` must carry `pr-lookup:{project_id}`.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: "my-agent".to_string(),
+            })
+            .expect("dispatch lookup");
+        let status = outcome.status.expect("synchronous busy status");
+        assert_eq!(status.tone, "busy");
+        assert_eq!(
+            status.key.as_deref(),
+            Some("pr-lookup:p1"),
+            "PR busy must carry the pr-lookup key"
+        );
+    }
+
     // Clone `origin` (init'd on `default_branch`) into a fresh working tree and
     // check out `feature/x`, so HEAD sits off the KNOWN default — `git clone`
     // sets refs/remotes/origin/HEAD, so `branch_warning_kind` resolves Known.
@@ -2827,6 +3005,31 @@ mod tests {
     }
 
     #[test]
+    fn add_project_checkout_default_busy_is_keyed() {
+        // Known default ("main") differs from HEAD ("feature/x"): the wire
+        // returns a keyed busy with `add-project-checkout:{path}` so the web
+        // can replace it when the switch worker completes.
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        let path_str = work.to_string_lossy().to_string();
+        let (mut engine, _tmp) = test_engine();
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: path_str.clone(),
+                name: "Demo".to_string(),
+            })
+            .expect("add-checkout");
+        let status = outcome.status.expect("busy status");
+        assert_eq!(status.tone, "busy");
+        let expected_key = format!("add-project-checkout:{path_str}");
+        assert_eq!(
+            status.key.as_deref(),
+            Some(expected_key.as_str()),
+            "add-project-checkout busy must carry the keyed path"
+        );
+    }
+
+    #[test]
     fn wire_to_command_reload_config_maps_to_command() {
         let (engine, _tmp) = test_engine();
         let cmd = engine
@@ -2928,6 +3131,7 @@ mod tests {
     fn wire_statuses_formats_launch_failure() {
         let r =
             EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+                session_id: "s1".to_string(),
                 branch_name: "feat".to_string(),
                 message: "nope".to_string(),
             }));
@@ -4158,6 +4362,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconnect_session_busy_is_keyed_with_launch_session_id() {
+        // The busy emitted by a successful reconnect dispatch must carry
+        // `launch:{session_id}` so the web can replace it in place when the
+        // launch later completes or fails.
+        let (mut engine, tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat");
+        let wt = tmp.path().join("wt-s1-keyed");
+        std::fs::create_dir_all(&wt).unwrap();
+        session.worktree_path = wt.to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        let outcome = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: false,
+            })
+            .expect("apply_wire");
+        let status = outcome.status.expect("busy status");
+        assert_eq!(status.tone, "busy");
+        assert_eq!(
+            status.key.as_deref(),
+            Some("launch:s1"),
+            "reconnect busy must carry launch key"
+        );
+    }
+
     // ---- L3: change agent provider -----------------------------------------
 
     #[test]
@@ -5020,5 +5252,270 @@ mod tests {
         let entry = reloaded.macros.entries.get("greet").expect("greet entry");
         assert_eq!(entry.text, "hello\nworld");
         assert_eq!(entry.surface, crate::config::MacroSurface::Agent);
+    }
+
+    #[test]
+    fn wire_statuses_surface_config_reload_failure() {
+        let msg = "bad key 'foo' in [keys]".to_string();
+        let bare = EventReaction::OpenConfigReloadFailedModal(msg.clone());
+        let s = wire_statuses_from_reaction(&bare);
+        assert_eq!(s.len(), 1, "bare reload failure must produce one status");
+        assert_eq!(s[0].tone, "error");
+        assert!(s[0].message.contains("Config reload failed"));
+        assert!(s[0].message.contains("bad key 'foo'"));
+
+        // The deferred-reload path wraps it in Multi; the Multi arm recurses.
+        let wrapped = EventReaction::Multi(vec![EventReaction::OpenConfigReloadFailedModal(msg)]);
+        let s = wire_statuses_from_reaction(&wrapped);
+        assert_eq!(
+            s.len(),
+            1,
+            "Multi-wrapped reload failure must still be one status"
+        );
+        assert_eq!(s[0].tone, "error");
+    }
+
+    #[test]
+    fn wire_statuses_surface_worktree_list_failure() {
+        let bare = EventReaction::ProjectWorktreesArrived {
+            project_id: "p1".to_string(),
+            result: Err("git worktree list failed".to_string()),
+        };
+        let s = wire_statuses_from_reaction(&bare);
+        assert_eq!(
+            s.len(),
+            1,
+            "a failed worktree listing must produce one status"
+        );
+        assert_eq!(s[0].tone, "error");
+        assert!(s[0].message.contains("Failed to list worktrees"));
+
+        // A SUCCESSFUL listing must stay silent on the status stream (it has its
+        // own ProjectWorktrees reply path); only the Err arm surfaces.
+        let ok = EventReaction::ProjectWorktreesArrived {
+            project_id: "p1".to_string(),
+            result: Ok(Vec::new()),
+        };
+        assert!(
+            wire_statuses_from_reaction(&ok).is_empty(),
+            "a successful worktree listing must not emit a status"
+        );
+    }
+
+    #[test]
+    fn wire_status_keyed_constructor_sets_key() {
+        let s = WireStatus::keyed("pull", "busy", "Pulling\u{2026}");
+        assert_eq!(s.key.as_deref(), Some("pull"));
+        assert_eq!(s.tone, "busy");
+        assert_eq!(s.message, "Pulling\u{2026}");
+
+        let plain = WireStatus::new("info", "Saved.");
+        assert_eq!(plain.key, None);
+        // Unkeyed status omits the key field from JSON (skip_serializing_if).
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(
+            !json.contains("\"key\""),
+            "unkeyed status must omit key: {json}"
+        );
+
+        // with_key builder should set the key on an existing status.
+        let built = WireStatus::new("info", "Done.").with_key("op-123");
+        assert_eq!(built.key.as_deref(), Some("op-123"));
+        // Keyed status must include the key field in JSON.
+        let keyed_json = serde_json::to_string(&s).unwrap();
+        assert!(
+            keyed_json.contains("\"key\""),
+            "keyed status must include key: {keyed_json}"
+        );
+        assert!(
+            keyed_json.contains("\"pull\""),
+            "key value must appear in JSON: {keyed_json}"
+        );
+    }
+
+    #[test]
+    fn wire_statuses_key_config_reload_and_worktree_failures() {
+        let r = EventReaction::OpenConfigReloadFailedModal("x".into());
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("config-reload")
+        );
+
+        let r = EventReaction::ProjectWorktreesArrived {
+            project_id: "p1".into(),
+            result: Err("boom".into()),
+        };
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("worktree-list:p1")
+        );
+    }
+
+    #[test]
+    fn wire_statuses_key_launch_ready_replaces_busy() {
+        // CreateCommitted and CreatePersistFailed use create:{project_id} so
+        // the final replaces the "Creating…" busy (keyed the same way).
+        // Reconnect-family arms keep launch:{session_id}.
+        let session = sample_session("s1", "p1", "feat");
+
+        let outcome = crate::engine::AgentLaunchReadyOutcome {
+            session: session.clone(),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Launched.".to_string(),
+                startup_result_error: None,
+            },
+        };
+        let s =
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
+        assert_eq!(s[0].key.as_deref(), Some("create:p1"));
+
+        let outcome_fail = crate::engine::AgentLaunchReadyOutcome {
+            session: session.clone(),
+            pty_size: (24, 80),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreatePersistFailed {
+                error: "db error".to_string(),
+            },
+        };
+        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
+            outcome_fail,
+        )));
+        assert_eq!(s[0].key.as_deref(), Some("create:p1"));
+    }
+
+    #[test]
+    fn wire_statuses_key_launch_failed_reconnect_variants() {
+        // Reconnect-family failures carry the session_id so they replace the busy.
+        let r =
+            EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+                session_id: "s1".to_string(),
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            }));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("launch:s1")
+        );
+
+        let r = EventReaction::AgentLaunchFailedView(Box::new(
+            AgentLaunchFailedOutcome::ForceReconnect {
+                session_id: "s2".to_string(),
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            },
+        ));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("launch:s2")
+        );
+
+        let r = EventReaction::AgentLaunchFailedView(Box::new(
+            AgentLaunchFailedOutcome::StartupAutoReopen {
+                session_id: "s3".to_string(),
+                branch_name: "feat".to_string(),
+                message: "nope".to_string(),
+            },
+        ));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("launch:s3")
+        );
+
+        // Create-kind is now keyed with create:{project_id} so the failure
+        // replaces the "Creating…" busy that shares the same key.
+        let r = EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Create {
+            project_id: "p1".to_string(),
+            message: "boom".to_string(),
+        }));
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("create:p1")
+        );
+    }
+
+    #[test]
+    fn push_busy_and_completion_carry_the_same_key() {
+        // The PushCompleted success and failure must carry the same key that the
+        // push busy was emitted with, so the web loading toast is cleared on
+        // completion rather than stacking a new toast beside it.
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let worktree = std::path::PathBuf::from("/tmp/s1-worktree");
+        let expected_key = format!("push:{}", worktree.to_string_lossy());
+
+        // Success path must carry the push key.
+        let reaction = engine.process_worker_event(WorkerEvent::PushCompleted {
+            key: expected_key.clone(),
+            result: Ok(()),
+        });
+        match &reaction {
+            EventReaction::Status(s) => {
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(expected_key.as_str()),
+                    "push success must carry the push key"
+                );
+                assert_eq!(s.tone, StatusTone::Info);
+            }
+            _ => panic!("expected EventReaction::Status (push success)"),
+        }
+
+        // Failure path must also be keyed.
+        let reaction = engine.process_worker_event(WorkerEvent::PushCompleted {
+            key: expected_key.clone(),
+            result: Err("network error".to_string()),
+        });
+        match &reaction {
+            EventReaction::Status(s) => {
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(expected_key.as_str()),
+                    "push failure must carry the push key"
+                );
+                assert_eq!(s.tone, StatusTone::Error);
+            }
+            _ => panic!("expected EventReaction::Status (push failure)"),
+        }
+    }
+
+    #[test]
+    fn create_agent_failed_event_carries_the_create_key() {
+        // CreateAgentFailed must carry a key matching the create busy so the
+        // web can dismiss the immortal spinner on failure.
+        let (mut engine, _tmp) = test_engine();
+        let expected_key = "create:p1";
+
+        let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
+            key: expected_key.to_string(),
+            message: "worker panicked".to_string(),
+        });
+        match &reaction {
+            EventReaction::Status(s) => {
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(expected_key),
+                    "CreateAgentFailed must carry the create key"
+                );
+                assert_eq!(s.tone, StatusTone::Error);
+            }
+            _ => panic!("expected EventReaction::Status (CreateAgentFailed)"),
+        }
+    }
+
+    #[test]
+    fn create_agent_launch_failed_outcome_carries_project_id() {
+        // AgentLaunchFailedOutcome::Create must carry project_id so wire.rs
+        // can key the error to dismiss the create busy toast.
+        let outcome = AgentLaunchFailedOutcome::Create {
+            project_id: "p1".to_string(),
+            message: "failed".to_string(),
+        };
+        let statuses =
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchFailedView(Box::new(outcome)));
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].key.as_deref(), Some("create:p1"));
+        assert_eq!(statuses[0].tone, "error");
     }
 }

@@ -13,7 +13,6 @@ import {
   unreachableRetryDelay,
 } from "./auth"
 import { ordersMatch } from "./reorder"
-import type { StatusLineState } from "./statusLine"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { DuxSocket } from "./ws"
 import type {
@@ -68,8 +67,7 @@ export interface PendingSessionOrder {
 
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
 // `DuxSocket` instance feeds it: ViewModel updates, connection state, and
-// command/error results (surfaced as `statusLine`, carrying the engine tone so
-// the StatusBar renders 1:1 with the TUI's status line). The PTY byte stream is
+// command/error results (surfaced as sonner toasts). The PTY byte stream is
 // NOT kept in React state — the terminal attaches to `socket.onPtyBytes`
 // directly.
 
@@ -97,12 +95,6 @@ export interface DuxState {
   // already-focused pane (same target id) must re-issue `subscribe` to attach to
   // the new provider. Folded into the pane's React key alongside the target id.
   terminalEpoch: number
-  // The persistent statusline shown at the bottom of the shell, mirroring the
-  // TUI 1:1. Both the synchronous command-result path and the async status
-  // stream write here, keeping the engine's tone so the bar can color and
-  // icon-tag the message (toasts are a separate, transient surface). An empty
-  // message renders nothing.
-  statusLine: StatusLineState
   commitTarget: string | null
   commitDraft: string
   deleteTarget: string | null
@@ -256,7 +248,6 @@ let state: DuxState = {
   selectedTarget: null,
   selectedSessionId: null,
   terminalEpoch: 0,
-  statusLine: { tone: "info", message: "" },
   commitTarget: null,
   commitDraft: "",
   deleteTarget: null,
@@ -494,29 +485,25 @@ async function recheckAuthAfterFailure(): Promise<void> {
   }
 }
 
-// Engine status/command events go to the status LINE only, 1:1 with the TUI —
-// the TUI shows these in its status line and never as a separate transient
-// notice. (Earlier these also fired a toast, so a single event surfaced twice;
-// the status line is the single source of truth for engine-driven status.)
+// Engine command results (direct command/reorder responses) route to sonner
+// toasts via showStatusToast. Toasts are the sole web surface for engine-driven
+// status; keyed toasts use the status key as the sonner id so a later
+// success/clear dismisses exactly the right entry. A `status_cleared` event
+// on the WS channel calls toast.dismiss(key) for the same reason.
 socket.onCommandResult = (status, error) => {
   if (error) {
     // A rejected reorder (stale/partial id set) comes back as an error here;
-    // drop any optimistic overlay so the UI reverts to the server's order. The
-    // error string IS the message and the tone is "error".
-    setState({
-      statusLine: { tone: "error", message: error },
-      ...clearPendingClientIntent(),
-    })
+    // drop any optimistic overlay so the UI reverts to the server's order.
+    toast.error(error, { duration: Infinity })
+    setState({ ...clearPendingClientIntent() })
   } else if (status) {
-    setState({ statusLine: { tone: status.tone, message: status.message } })
+    showStatusToast(undefined, status.tone, status.message)
   }
 }
 
 socket.onError = (message) => {
-  setState({
-    statusLine: { tone: "error", message },
-    ...clearPendingClientIntent(),
-  })
+  toast.error(message, { duration: Infinity })
+  setState({ ...clearPendingClientIntent() })
 }
 
 // Reset both optimistic order overlays. Returned as a patch so callers can fold
@@ -543,14 +530,46 @@ function clearPendingClientIntent(): Partial<DuxState> {
   }
 }
 
+// Stable sonner id for the anonymous (no-key) status slot. Sonner otherwise
+// assigns a random id on each call, making anonymous clears a no-op and every
+// anonymous update a new transient toast instead of an in-place update.
+const ANON_TOAST_ID = "dux-anon-status"
+
+// Route a keyed (or anonymous) engine status to both the status bar and a
+// sonner toast. The key acts as the sonner id so updates re-render in place
+// (busy → success swaps the spinner without a new toast) and clears can dismiss
+// by id. Busy must not auto-dismiss before its final state arrives, so its
+// duration is Infinity.
+function showStatusToast(
+  key: string | null | undefined,
+  tone: string,
+  message: string,
+): void {
+  if (!message) return
+  const id = key ?? ANON_TOAST_ID // no key → stable anonymous-slot id
+  const duration = tone === "info" ? 6000 : Infinity
+  const opts = { id, duration }
+  if (tone === "error") toast.error(message, opts)
+  else if (tone === "warning") toast.warning(message, opts)
+  else if (tone === "busy") toast.loading(message, opts)
+  else toast.success(message, opts) // info/success
+}
+
 // Asynchronous status/lifecycle events (background push/pull completing, an
-// agent launch finishing or failing, a PTY exiting). These mirror the TUI's
-// status line 1:1 — keep the latest in the status bar, no separate toast.
-socket.onStatus = (tone, message) => {
+// agent launch finishing or failing, a PTY exiting). Route to a sonner toast
+// keyed by the engine key. The status line was removed in T14; toasts are the
+// sole web surface.
+socket.onStatus = (key, tone, message) => {
   // An error-toned async status also voids any in-flight create-focus (the
   // create likely just failed) and unwinds any optimistic reorder overlay.
-  const patch = tone === "error" ? clearPendingClientIntent() : {}
-  setState({ statusLine: { tone, message }, ...patch })
+  if (tone === "error") setState({ ...clearPendingClientIntent() })
+  showStatusToast(key, tone, message)
+}
+
+// Dismiss the toast whose id matches the cleared key. A null/undefined key
+// means the anonymous slot — dismiss via the stable ANON_TOAST_ID.
+socket.onStatusCleared = (key) => {
+  toast.dismiss(key ?? ANON_TOAST_ID)
 }
 
 // A freshly created terminal auto-focuses so the user lands on it immediately.
@@ -768,7 +787,6 @@ function clearSessionScopedState(): Partial<DuxState> {
     editorTarget: null,
     commitTarget: null,
     commitDraft: "",
-    statusLine: { tone: "info", message: "" },
     // Every dialog/modal target, reset to closed.
     deleteTarget: null,
     deleteTerminalTarget: null,

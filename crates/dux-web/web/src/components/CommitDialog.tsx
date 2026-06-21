@@ -37,9 +37,6 @@ export function CommitDialog() {
     setCommitting(true)
     try {
       await git.commit(commitTarget, commitDraft.trim())
-      // Commit produces no changed-files row movement to confirm it, so unlike
-      // stage/unstage this gets an explicit success toast.
-      toast.success("Changes committed.")
       closeCommit()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "commit failed")

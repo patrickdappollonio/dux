@@ -208,12 +208,15 @@ impl App {
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
         match reaction {
             EventReaction::Nothing => {}
-            EventReaction::Status(StatusUpdate { tone, message }) => match tone {
-                StatusTone::Info => self.set_info(message),
-                StatusTone::Busy => self.set_busy(message),
-                StatusTone::Warning => self.set_warning(message),
-                StatusTone::Error => self.set_error(message),
-            },
+            EventReaction::Status(StatusUpdate { tone, message, key }) => {
+                // When a `StatusUpdate` carries a key (keyed operation), write it
+                // into the named slot so `most_recent_tui` can pick it up.
+                // Unkeyed updates (`key == None`) write the anonymous slot.
+                // Info entries auto-clear after `clear_after`; Busy persists until
+                // replaced; Warning/Error persist until the next status.
+                self.status.set(Instant::now(), key, tone, message);
+            }
+
             EventReaction::Multi(reactions) => {
                 for r in reactions {
                     self.apply_reaction(r);
@@ -343,10 +346,9 @@ impl App {
                 // overwritten it, we should not clobber their message — the
                 // session will visually disappear from the list, which is
                 // sufficient feedback.
-                let our_busy_still_showing = our_busy_message.as_ref().is_some_and(|msg| {
-                    self.status.tone() == crate::statusline::StatusTone::Busy
-                        && self.status.message() == msg.as_str()
-                });
+                let our_busy_still_showing = our_busy_message
+                    .as_ref()
+                    .is_some_and(|msg| self.status.anon_busy_matches(msg.as_str()));
 
                 if self.engine.sessions.iter().any(|s| s.id == session_id) {
                     if let Err(e) = self.finish_delete_session(
@@ -890,10 +892,11 @@ impl App {
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
         match outcome {
-            AgentLaunchFailedOutcome::Create { message } => self.set_error(message),
+            AgentLaunchFailedOutcome::Create { message, .. } => self.set_error(message),
             AgentLaunchFailedOutcome::Reconnect {
                 branch_name,
                 message,
+                ..
             } => {
                 self.set_error(format!(
                     "Reconnect failed for agent \"{branch_name}\": {message}"
@@ -902,6 +905,7 @@ impl App {
             AgentLaunchFailedOutcome::ForceReconnect {
                 branch_name,
                 message,
+                ..
             } => {
                 self.set_error(format!(
                     "Fresh restart failed for agent \"{branch_name}\": {message}"
@@ -913,6 +917,7 @@ impl App {
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 branch_name,
                 message,
+                ..
             } => {
                 self.set_warning(format!(
                     "Couldn't auto-reopen agent \"{branch_name}\": {message}"
@@ -1226,7 +1231,7 @@ mod tests {
         );
 
         match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentFailed(message) => {
+            WorkerEvent::CreateAgentFailed { message, .. } => {
                 assert_eq!(message, "Forking an agent requires choosing a name first.");
             }
             _ => panic!("expected missing-name failure"),
@@ -1284,7 +1289,7 @@ mod tests {
             _ => panic!("expected pre-create pull progress"),
         }
         match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentFailed(message) => {
+            WorkerEvent::CreateAgentFailed { message, .. } => {
                 assert!(message.contains(
                     "Failed to pull latest changes for project \"demo\" before creating the agent"
                 ));

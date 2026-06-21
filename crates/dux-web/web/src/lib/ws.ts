@@ -33,7 +33,8 @@ export class DuxSocket {
   onConn: (state: ConnState) => void = () => {}
   onPtyBytes: (bytes: Uint8Array) => void = () => {}
   onTerminalCreated: (sessionId: string, terminalId: string) => void = () => {}
-  onStatus: (tone: string, message: string) => void = () => {}
+  onStatus: (key: string | null | undefined, tone: string, message: string) => void = () => {}
+  onStatusCleared: (key: string | null | undefined) => void = () => {}
   onCommitMessage: (sessionId: string, message: string) => void = () => {}
   onCommitMessageSnapshot: (sessionId: string, message: string) => void =
     () => {}
@@ -127,7 +128,10 @@ export class DuxSocket {
         this.onError(message.message)
         break
       case "status":
-        this.onStatus(message.tone, message.message)
+        this.onStatus(message.key, message.tone, message.message)
+        break
+      case "status_cleared":
+        this.onStatusCleared(message.key)
         break
       case "commit_message":
         this.onCommitMessage(message.session_id, message.message)
