@@ -1,10 +1,5 @@
-import { CircleX, TriangleAlert } from "lucide-react"
-
-import { BrailleSpinner } from "@/components/BrailleSpinner"
-import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { reconnect, useDux } from "@/lib/store"
-import { statusPresentation } from "@/lib/statusLine"
 import type { ConnState } from "@/lib/types"
 
 // The ONE connection indicator, bottom-left of the statusline bar. A small
@@ -37,53 +32,10 @@ function ConnectionIndicator() {
   )
 }
 
-// The persistent statusline, rendered 1:1 with the TUI: tone drives both the
-// text color and the leading iconography (so the meaning survives in monochrome
-// too).
-//
-// This is now the SINGLE surface for engine status (the duplicate toast was
-// removed), so it must be a live region — otherwise a screen-reader user would
-// no longer hear "Resumed agent…", "Push failed", etc. (sonner toasts announced
-// those for free). The container stays mounted even when empty so the FIRST
-// message is announced, and aria-atomic re-reads the whole message on each
-// change. role="status" is polite; we don't force assertive so a stream of
-// routine info/busy updates never interrupts the user mid-sentence.
-function StatusLine() {
-  const { statusLine } = useDux()
-  const { icon, className } = statusLine.message
-    ? statusPresentation(statusLine.tone)
-    : { icon: "none" as const, className: "" }
-
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      className={`flex min-w-0 items-center gap-1.5 ${className}`}
-    >
-      {statusLine.message ? (
-        <>
-          {icon === "spinner" ? <BrailleSpinner /> : null}
-          {icon === "warning" ? (
-            <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-          ) : null}
-          {icon === "error" ? (
-            <CircleX className="size-3.5 shrink-0" aria-hidden />
-          ) : null}
-          <SimpleTooltip content={statusLine.message}>
-            <span className="truncate">{statusLine.message}</span>
-          </SimpleTooltip>
-        </>
-      ) : null}
-    </div>
-  )
-}
-
 export function StatusBar() {
   return (
     <footer className="flex h-7 shrink-0 items-center gap-3 border-t px-3 text-xs text-muted-foreground">
       <ConnectionIndicator />
-      <StatusLine />
     </footer>
   )
 }

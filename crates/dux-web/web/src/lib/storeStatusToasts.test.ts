@@ -138,14 +138,12 @@ describe("engine status → sonner toast routing", () => {
     expect(toast.loading).not.toHaveBeenCalled()
   })
 
-  it("status also updates the status bar (status line still present)", async () => {
+  it("status does NOT update a statusLine field — toasts are the sole web surface", async () => {
     const mod = await loadStore()
 
     mod.socket.onStatus("sl-key", "info", "Status bar message.")
-    expect(mod.getSnapshot().statusLine).toEqual({
-      tone: "info",
-      message: "Status bar message.",
-    })
+    // The statusLine field was removed in T14; the store no longer carries it.
+    expect(mod.getSnapshot()).not.toHaveProperty("statusLine")
   })
 
   it("commit-success status routes through engine (not a local CommitDialog toast)", async () => {

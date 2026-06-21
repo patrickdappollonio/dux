@@ -248,7 +248,6 @@ describe("store logout()", () => {
     expect(snap.selectedSessionId).toBeNull()
     expect(snap.commitTarget).toBeNull()
     expect(snap.commitDraft).toBe("")
-    expect(snap.statusLine).toEqual({ tone: "info", message: "" })
     expect(snap.mobileScreen).toBe("home")
     expect(snap.paletteOpen).toBe(false)
     expect(snap.pendingSessionOrder).toBeNull()
