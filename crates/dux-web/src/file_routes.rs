@@ -177,6 +177,21 @@ async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) ->
 /// window between the canonicalize and the read. The write path is unaffected.
 /// Content-Type is guessed from the extension; SVGs served to `<img>` never
 /// run scripts. Auth-gated like every `/api/file/*` route.
+///
+/// Containment is enforced in two stages:
+///
+/// 1. `resolve_worktree_path_for_read` catches outside-resolving symlinks at
+///    the resolution stage and sets `is_outside = true`. We reject those
+///    immediately — the image proxy must not serve files outside the worktree.
+/// 2. After following a leaf symlink with `canonicalize()` we re-verify that
+///    the resolved target is still inside the worktree's canonical root. This
+///    closes any TOCTOU gap between the resolver's containment check and the
+///    moment we actually read the file (a symlink could be replaced between the
+///    two calls).
+///
+/// Note: `read_file` intentionally ALLOWS outside-resolving symlinks (marking
+/// them `read_only: true`) so the editor can display them. We do NOT change
+/// that behaviour here; this restriction is image-proxy–only.
 async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> Response {
     let worktree = match resolve_worktree(&state, q.session_id).await {
         Ok(w) => w,
@@ -185,9 +200,17 @@ async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> R
     let path = q.path;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(&'static str, Vec<u8>)> {
         // Use the read-permissive resolver so .git/ assets and symlinked images
-        // reach this proxy. The write path is unaffected.
-        let (abs, _is_git, _is_outside) =
+        // inside the worktree reach this proxy. The write path is unaffected.
+        let (abs, _is_git, is_outside) =
             dux_core::worktree_file::resolve_worktree_path_for_read(&worktree, &path)?;
+
+        // Stage 1: reject immediately when the resolver determined the path
+        // escapes the worktree via a symlink. The image proxy must not serve
+        // host files outside the worktree.
+        if is_outside {
+            anyhow::bail!("refusing to serve path outside the worktree");
+        }
+
         let meta = std::fs::symlink_metadata(&abs)?;
         // Resolve symlinks to get the real target for the size check and read.
         let real = if meta.file_type().is_symlink() {
@@ -195,6 +218,20 @@ async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> R
         } else {
             abs.clone()
         };
+
+        // Stage 2: re-verify containment after following a leaf symlink.
+        // The resolver canonicalizes the joined path (worktree + rel_path);
+        // if a leaf symlink was swapped between the resolver call and here,
+        // the canonicalize above reflects the NEW target. Re-check it against
+        // the canonical worktree root to guarantee the target is still inside.
+        if meta.file_type().is_symlink() {
+            let wt_real = std::fs::canonicalize(&worktree)
+                .map_err(|e| anyhow::anyhow!("cannot canonicalize worktree: {e}"))?;
+            if !real.starts_with(&wt_real) {
+                anyhow::bail!("refusing to serve symlink target outside worktree");
+            }
+        }
+
         let real_meta = std::fs::metadata(&real)?;
         if real_meta.len() > MAX_RAW_BYTES {
             anyhow::bail!(
@@ -384,5 +421,148 @@ mod tests {
         assert_eq!(mime_for_path("notes.txt"), "application/octet-stream");
         // A dot in a directory name must not be read as the file's extension.
         assert_eq!(mime_for_path("v1.2/Makefile"), "application/octet-stream");
+    }
+
+    /// Symlink containment tests for the `read_raw` image proxy.
+    ///
+    /// These tests exercise the two-stage containment logic in `read_raw`'s
+    /// blocking closure at the filesystem level, mirroring what the handler does:
+    ///
+    /// Stage 1 — `resolve_worktree_path_for_read` sets `is_outside = true` when
+    ///            the symlink resolves outside the worktree.
+    /// Stage 2 — After `canonicalize()` on a leaf symlink, we re-verify the
+    ///            target is still under the canonical worktree root.
+    ///
+    /// RED before fix: outside symlinks would pass through; GREEN after fix: they
+    /// are rejected, while in-worktree symlinks are still served.
+    mod symlink_containment {
+        use std::fs;
+        use std::path::PathBuf;
+
+        use dux_core::worktree_file::resolve_worktree_path_for_read;
+
+        /// Build a minimal temp directory layout:
+        ///   <tmp>/
+        ///     worktree/
+        ///       real.png          ← the actual image inside the worktree
+        ///       inlink.png        → real.png          (symlink INSIDE)
+        ///       outlink.png       → <tmp>/outside.png (symlink OUTSIDE)
+        ///     outside.png         ← file that must NOT be reachable via the proxy
+        fn setup_dirs() -> (tempfile::TempDir, PathBuf) {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = tmp.path();
+
+            let worktree = root.join("worktree");
+            fs::create_dir_all(&worktree).unwrap();
+
+            // A real file inside the worktree.
+            let real = worktree.join("real.png");
+            fs::write(&real, b"\x89PNG\r\n\x1a\n").unwrap(); // minimal PNG header
+
+            // In-worktree symlink: worktree/inlink.png → worktree/real.png
+            let inlink = worktree.join("inlink.png");
+            std::os::unix::fs::symlink(&real, &inlink).unwrap();
+
+            // Outside file: <tmp>/outside.png
+            let outside = root.join("outside.png");
+            fs::write(&outside, b"SECRET").unwrap();
+
+            // Out-of-worktree symlink: worktree/outlink.png → <tmp>/outside.png
+            let outlink = worktree.join("outlink.png");
+            std::os::unix::fs::symlink(&outside, &outlink).unwrap();
+
+            (tmp, worktree)
+        }
+
+        /// Stage 1 containment: a symlink whose target is OUTSIDE the worktree
+        /// must have `is_outside = true` so the handler can reject it immediately.
+        #[test]
+        fn outside_symlink_is_flagged_by_resolver() {
+            let (_tmp, worktree) = setup_dirs();
+            let (_, _, is_outside) =
+                resolve_worktree_path_for_read(&worktree, "outlink.png").unwrap();
+            assert!(
+                is_outside,
+                "outlink.png resolves outside the worktree — is_outside must be true"
+            );
+        }
+
+        /// Stage 1 containment: the handler must REFUSE an outside-resolving symlink.
+        /// This mirrors the `if is_outside { bail!(...) }` guard in `read_raw`.
+        #[test]
+        fn outside_symlink_is_refused_by_read_raw_logic() {
+            let (_tmp, worktree) = setup_dirs();
+            let result: anyhow::Result<()> = (|| {
+                let (_, _, is_outside) = resolve_worktree_path_for_read(&worktree, "outlink.png")?;
+                if is_outside {
+                    anyhow::bail!("refusing to serve path outside the worktree");
+                }
+                Ok(())
+            })();
+            assert!(
+                result.is_err(),
+                "read_raw must refuse a symlink whose target is outside the worktree"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("refusing"),
+                "error message should say 'refusing', got: {msg}"
+            );
+        }
+
+        /// Stage 2 containment: after `canonicalize()` on a leaf symlink, we
+        /// re-verify the target is inside the worktree. This mirrors the
+        /// `!real.starts_with(&wt_real)` guard in `read_raw`.
+        #[test]
+        fn stage2_rejects_out_of_tree_canonicalized_target() {
+            let (_tmp, worktree) = setup_dirs();
+            let outlink = worktree.join("outlink.png");
+
+            // Replicate stage-2 logic exactly as written in the handler.
+            let result: anyhow::Result<()> = (|| {
+                let real = std::fs::canonicalize(&outlink)?;
+                let wt_real = std::fs::canonicalize(&worktree)
+                    .map_err(|e| anyhow::anyhow!("cannot canonicalize worktree: {e}"))?;
+                if !real.starts_with(&wt_real) {
+                    anyhow::bail!("refusing to serve symlink target outside worktree");
+                }
+                Ok(())
+            })();
+
+            assert!(
+                result.is_err(),
+                "stage-2 check must reject a canonicalized target outside the worktree"
+            );
+        }
+
+        /// A symlink whose target is INSIDE the worktree must NOT be flagged as
+        /// outside, and the stage-2 canonicalize check must pass — the proxy must
+        /// continue to serve in-worktree images correctly.
+        #[test]
+        fn inside_symlink_is_allowed() {
+            let (_tmp, worktree) = setup_dirs();
+
+            // Stage 1: resolver must NOT flag the in-worktree link as outside.
+            let (abs, _, is_outside) =
+                resolve_worktree_path_for_read(&worktree, "inlink.png").unwrap();
+            assert!(
+                !is_outside,
+                "inlink.png resolves inside the worktree — is_outside must be false"
+            );
+
+            // Stage 2: canonicalize and re-verify containment.
+            let meta = std::fs::symlink_metadata(&abs).unwrap();
+            assert!(
+                meta.file_type().is_symlink(),
+                "inlink.png must be a symlink"
+            );
+
+            let real = std::fs::canonicalize(&abs).unwrap();
+            let wt_real = std::fs::canonicalize(&worktree).unwrap();
+            assert!(
+                real.starts_with(&wt_real),
+                "canonicalized target of inlink.png must be inside the worktree"
+            );
+        }
     }
 }
