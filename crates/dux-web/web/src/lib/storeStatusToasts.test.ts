@@ -110,23 +110,31 @@ describe("engine status → sonner toast routing", () => {
     })
   })
 
-  it("unkeyed (anonymous) status has no sonner id (transient)", async () => {
+  it("unkeyed (anonymous) status uses the stable anonymous-slot id", async () => {
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
     mod.socket.onStatus(null, "info", "All good.")
     expect(toast.success).toHaveBeenCalledWith("All good.", {
-      id: undefined,
+      id: "dux-anon-status",
       duration: 6000,
     })
   })
 
-  it("null key clear is a no-op for toasts", async () => {
+  it("anonymous clear dismisses the anonymous slot toast", async () => {
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
+    // Set an anonymous busy first.
+    mod.socket.onStatus(null, "busy", "Uploading…")
+    expect(toast.loading).toHaveBeenCalledWith("Uploading…", {
+      id: "dux-anon-status",
+      duration: Infinity,
+    })
+
+    // Clear dismisses the anonymous slot.
     mod.socket.onStatusCleared(null)
-    expect(toast.dismiss).not.toHaveBeenCalled()
+    expect(toast.dismiss).toHaveBeenCalledWith("dux-anon-status")
   })
 
   it("empty message is dropped — no toast fired", async () => {
@@ -146,17 +154,19 @@ describe("engine status → sonner toast routing", () => {
     expect(mod.getSnapshot()).not.toHaveProperty("statusLine")
   })
 
-  it("commit-success status routes through engine (not a local CommitDialog toast)", async () => {
-    // The engine emits a keyed "commit" status on success; that reaches the
-    // client as an onStatus event and surfaces as a toast.success here.
-    // CommitDialog.tsx must NOT fire its own toast.success — this test confirms
-    // the engine path works so there is nothing for the component to duplicate.
+  it("commit-success status routes through onCommandResult with the anonymous slot id", async () => {
+    // The engine's CommitChanges emits an anonymous Info status (no key), which
+    // the wire layer surfaces as a commandResult. onCommandResult calls
+    // showStatusToast(undefined, ...) → the stable anonymous-slot id.
     const mod = await loadStore()
     const { toast } = await import("sonner")
 
-    mod.socket.onStatus("commit", "info", "Changes committed successfully.")
+    mod.socket.onCommandResult(
+      { tone: "info", message: "Changes committed successfully." },
+      null,
+    )
     expect(toast.success).toHaveBeenCalledWith("Changes committed successfully.", {
-      id: "commit",
+      id: "dux-anon-status",
       duration: 6000,
     })
   })

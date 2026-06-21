@@ -530,6 +530,11 @@ function clearPendingClientIntent(): Partial<DuxState> {
   }
 }
 
+// Stable sonner id for the anonymous (no-key) status slot. Sonner otherwise
+// assigns a random id on each call, making anonymous clears a no-op and every
+// anonymous update a new transient toast instead of an in-place update.
+const ANON_TOAST_ID = "dux-anon-status"
+
 // Route a keyed (or anonymous) engine status to both the status bar and a
 // sonner toast. The key acts as the sonner id so updates re-render in place
 // (busy → success swaps the spinner without a new toast) and clears can dismiss
@@ -541,7 +546,7 @@ function showStatusToast(
   message: string,
 ): void {
   if (!message) return
-  const id = key ?? undefined // unkeyed → sonner auto-id (transient)
+  const id = key ?? ANON_TOAST_ID // no key → stable anonymous-slot id
   const duration = tone === "info" ? 6000 : Infinity
   const opts = { id, duration }
   if (tone === "error") toast.error(message, opts)
@@ -561,10 +566,10 @@ socket.onStatus = (key, tone, message) => {
   showStatusToast(key, tone, message)
 }
 
-// Dismiss the toast whose id matches the cleared key. A null key means the
-// anonymous transient — sonner auto-ids those, so there is nothing to dismiss.
+// Dismiss the toast whose id matches the cleared key. A null/undefined key
+// means the anonymous slot — dismiss via the stable ANON_TOAST_ID.
 socket.onStatusCleared = (key) => {
-  if (key) toast.dismiss(key)
+  toast.dismiss(key ?? ANON_TOAST_ID)
 }
 
 // A freshly created terminal auto-focuses so the user lands on it immediately.

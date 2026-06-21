@@ -34,6 +34,12 @@ pub mod status_keys {
     /// PR-lookup key prefix. Parameterised by project id at call sites:
     /// `format!("{PR_LOOKUP_PREFIX}:{project_id}")`.
     pub const PR_LOOKUP_PREFIX: &str = "pr-lookup";
+    /// Push key prefix. Parameterised by worktree path at call sites:
+    /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
+    pub const PUSH_PREFIX: &str = "push";
+    /// Create-agent key prefix. Parameterised by project id at call sites:
+    /// `format!("{CREATE_PREFIX}:{project_id}")`.
+    pub const CREATE_PREFIX: &str = "create";
 }
 
 use std::collections::BTreeMap;
@@ -436,10 +442,17 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         EventReaction::Status(update) => vec![WireStatus::from_update(update)],
         EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
         EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
-            // Create-kind: failed before a session existed, so there is no busy
-            // to replace. The error stays unkeyed (an anonymous persistent toast).
-            AgentLaunchFailedOutcome::Create { message } => {
-                vec![WireStatus::new("error", message.clone())]
+            // Create-kind failure is keyed so it replaces the "Creating…" busy
+            // toast that shares the same create:{project_id} key.
+            AgentLaunchFailedOutcome::Create {
+                project_id,
+                message,
+            } => {
+                vec![WireStatus::keyed(
+                    format!("{}:{project_id}", status_keys::CREATE_PREFIX),
+                    "error",
+                    message.clone(),
+                )]
             }
             // Reconnect-family variants carry session_id (added in Task 4) so the
             // failure replaces the "launching…" busy that shares the same key.
@@ -479,10 +492,17 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         EventReaction::AgentLaunchReadyView(outcome) => {
             let session_id = &outcome.session.id;
             let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
+            // Create-kind outcomes use create:{project_id} so the success/failure
+            // replaces the "Creating…" busy that was keyed the same way.
+            let create_key = format!(
+                "{}:{}",
+                status_keys::CREATE_PREFIX,
+                outcome.session.project_id
+            );
             match &outcome.view {
                 AgentLaunchReadyView::CreatePersistFailed { error } => {
                     vec![WireStatus::keyed(
-                        launch_key,
+                        create_key,
                         "error",
                         format!("Failed to persist session: {error}"),
                     )]
@@ -492,7 +512,7 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
                     startup_result_error,
                 } => match startup_result_error {
                     Some(err) => vec![WireStatus::keyed(
-                        launch_key,
+                        create_key,
                         "error",
                         format!(
                             "Startup command failed for agent \"{}\": {err}. Run \
@@ -501,7 +521,7 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
                         ),
                     )],
                     None => vec![WireStatus::keyed(
-                        launch_key,
+                        create_key,
                         "info",
                         status_message.clone(),
                     )],
@@ -5333,8 +5353,9 @@ mod tests {
 
     #[test]
     fn wire_statuses_key_launch_ready_replaces_busy() {
-        // All AgentLaunchReadyView arms that emit a status must carry the
-        // `launch:{session_id}` key so the final replaces the busy on the web.
+        // CreateCommitted and CreatePersistFailed use create:{project_id} so
+        // the final replaces the "Creating…" busy (keyed the same way).
+        // Reconnect-family arms keep launch:{session_id}.
         let session = sample_session("s1", "p1", "feat");
 
         let outcome = crate::engine::AgentLaunchReadyOutcome {
@@ -5348,7 +5369,7 @@ mod tests {
         };
         let s =
             wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
-        assert_eq!(s[0].key.as_deref(), Some("launch:s1"));
+        assert_eq!(s[0].key.as_deref(), Some("create:p1"));
 
         let outcome_fail = crate::engine::AgentLaunchReadyOutcome {
             session: session.clone(),
@@ -5361,7 +5382,7 @@ mod tests {
         let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
             outcome_fail,
         )));
-        assert_eq!(s[0].key.as_deref(), Some("launch:s1"));
+        assert_eq!(s[0].key.as_deref(), Some("create:p1"));
     }
 
     #[test]
@@ -5402,10 +5423,99 @@ mod tests {
             Some("launch:s3")
         );
 
-        // Create-kind must remain UNKEYED (no busy was set for it).
+        // Create-kind is now keyed with create:{project_id} so the failure
+        // replaces the "Creating…" busy that shares the same key.
         let r = EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Create {
+            project_id: "p1".to_string(),
             message: "boom".to_string(),
         }));
-        assert_eq!(wire_statuses_from_reaction(&r)[0].key, None);
+        assert_eq!(
+            wire_statuses_from_reaction(&r)[0].key.as_deref(),
+            Some("create:p1")
+        );
+    }
+
+    #[test]
+    fn push_busy_and_completion_carry_the_same_key() {
+        // The PushCompleted success and failure must carry the same key that the
+        // push busy was emitted with, so the web loading toast is cleared on
+        // completion rather than stacking a new toast beside it.
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let worktree = std::path::PathBuf::from("/tmp/s1-worktree");
+        let expected_key = format!("push:{}", worktree.to_string_lossy());
+
+        // Success path must carry the push key.
+        let reaction = engine.process_worker_event(WorkerEvent::PushCompleted {
+            key: expected_key.clone(),
+            result: Ok(()),
+        });
+        match &reaction {
+            EventReaction::Status(s) => {
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(expected_key.as_str()),
+                    "push success must carry the push key"
+                );
+                assert_eq!(s.tone, StatusTone::Info);
+            }
+            _ => panic!("expected EventReaction::Status (push success)"),
+        }
+
+        // Failure path must also be keyed.
+        let reaction = engine.process_worker_event(WorkerEvent::PushCompleted {
+            key: expected_key.clone(),
+            result: Err("network error".to_string()),
+        });
+        match &reaction {
+            EventReaction::Status(s) => {
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(expected_key.as_str()),
+                    "push failure must carry the push key"
+                );
+                assert_eq!(s.tone, StatusTone::Error);
+            }
+            _ => panic!("expected EventReaction::Status (push failure)"),
+        }
+    }
+
+    #[test]
+    fn create_agent_failed_event_carries_the_create_key() {
+        // CreateAgentFailed must carry a key matching the create busy so the
+        // web can dismiss the immortal spinner on failure.
+        let (mut engine, _tmp) = test_engine();
+        let expected_key = "create:p1";
+
+        let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
+            key: expected_key.to_string(),
+            message: "worker panicked".to_string(),
+        });
+        match &reaction {
+            EventReaction::Status(s) => {
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(expected_key),
+                    "CreateAgentFailed must carry the create key"
+                );
+                assert_eq!(s.tone, StatusTone::Error);
+            }
+            _ => panic!("expected EventReaction::Status (CreateAgentFailed)"),
+        }
+    }
+
+    #[test]
+    fn create_agent_launch_failed_outcome_carries_project_id() {
+        // AgentLaunchFailedOutcome::Create must carry project_id so wire.rs
+        // can key the error to dismiss the create busy toast.
+        let outcome = AgentLaunchFailedOutcome::Create {
+            project_id: "p1".to_string(),
+            message: "failed".to_string(),
+        };
+        let statuses =
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchFailedView(Box::new(outcome)));
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].key.as_deref(), Some("create:p1"));
+        assert_eq!(statuses[0].tone, "error");
     }
 }

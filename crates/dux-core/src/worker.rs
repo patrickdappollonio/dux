@@ -206,6 +206,20 @@ pub enum CreateAgentRequest {
     },
 }
 
+impl CreateAgentRequest {
+    /// The project id this request belongs to. Used to key the create-agent
+    /// busy→final status pair so the web can dismiss the spinner on completion.
+    pub fn project_id(&self) -> &str {
+        match self {
+            Self::NewProject { project, .. } => &project.id,
+            Self::PullRequest { project, .. } => &project.id,
+            Self::ForkSession { project, .. } => &project.id,
+            Self::ExistingManagedWorktree { project, .. } => &project.id,
+            Self::ForkExternalWorktree { project, .. } => &project.id,
+        }
+    }
+}
+
 pub enum WorkerEvent {
     /// Status update delivered via the worker channel so it stays FIFO with
     /// the completion event of the operation it announces. Posted by
@@ -214,7 +228,10 @@ pub enum WorkerEvent {
     /// any event the worker can produce.
     CommandWorkerStarted(StatusUpdate),
     CreateAgentProgress(String),
-    CreateAgentFailed(String),
+    CreateAgentFailed {
+        key: String,
+        message: String,
+    },
     AgentLaunchReady(Box<AgentLaunchReadyData>),
     AgentLaunchFailed(Box<AgentLaunchFailedData>),
     ChangedFilesReady {
@@ -241,7 +258,10 @@ pub enum WorkerEvent {
         session_id: String,
         error: String,
     },
-    PushCompleted(Result<(), String>),
+    PushCompleted {
+        key: String,
+        result: Result<(), String>,
+    },
     PullCompleted {
         repo_path: String,
         target: PullTarget,

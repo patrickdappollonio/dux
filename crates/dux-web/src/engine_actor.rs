@@ -15,7 +15,7 @@ use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
 use dux_core::pty::PtyClient;
-use dux_core::statusline::{KeyedStatusController, KeyedWireStatus, StatusTone};
+use dux_core::statusline::{Generation, KeyedStatusController, KeyedWireStatus, StatusTone};
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -990,6 +990,10 @@ struct StatusEmitter {
     clear_tx: broadcast::Sender<Option<String>>,
     snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
     controller: KeyedStatusController,
+    /// Most recent generation for each keyed status so `clear` can guard
+    /// against dismissing a newer status placed on the same key by a
+    /// concurrent operation (e.g. a rapid retry during commit-msg generation).
+    generations: std::collections::HashMap<String, Generation>,
 }
 
 impl StatusEmitter {
@@ -1004,6 +1008,7 @@ impl StatusEmitter {
             clear_tx,
             snapshot_tx,
             controller: KeyedStatusController::with_clear_after(clear_after),
+            generations: std::collections::HashMap::new(),
         }
     }
 
@@ -1015,25 +1020,30 @@ impl StatusEmitter {
         status: WireStatus,
     ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
         let tone = StatusTone::from_wire(&status.tone);
-        self.controller.set(
+        let generation = self.controller.set(
             Instant::now(),
             status.key.clone(),
             tone,
             status.message.as_str(),
         );
+        if let Some(ref k) = status.key {
+            self.generations.insert(k.clone(), generation);
+        }
         let _ = self.snapshot_tx.send(self.controller.snapshot());
         self.tx.send(status)
     }
 
     /// Explicitly clear a keyed entry (remove from the controller, push the
     /// key onto `clear_tx` so the WS forwarder sends a `StatusCleared` frame,
-    /// refresh the snapshot). Used when a success path does NOT emit a
-    /// replacing status — e.g. commit-message generation, which routes success
-    /// through the commit-message lane rather than the status stream.
+    /// refresh the snapshot). Guards with the generation stored when the busy
+    /// was emitted so a concurrent in-flight cannot be prematurely dismissed.
     fn clear(&mut self, key: String) {
-        self.controller.clear(&key, None);
-        let _ = self.snapshot_tx.send(self.controller.snapshot());
-        let _ = self.clear_tx.send(Some(key));
+        let generation = self.generations.get(&key).copied();
+        if self.controller.clear(&key, generation) {
+            self.generations.remove(&key);
+            let _ = self.snapshot_tx.send(self.controller.snapshot());
+            let _ = self.clear_tx.send(Some(key));
+        }
     }
 
     /// Expire timed-out entries (auto-clear Info, upgrade stale Busy→Warning).
@@ -1511,6 +1521,7 @@ mod tests {
             clear_tx,
             snapshot_tx: snap_tx,
             controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
         };
         (emitter, snap_rx)
     }
@@ -1548,6 +1559,7 @@ mod tests {
             clear_tx,
             snapshot_tx: snap_tx,
             controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
         };
         // One keyed Info that will expire and one anonymous Info that will too.
         let _ = e.send(WireStatus::keyed("commit", "info", "Committed."));
@@ -1579,6 +1591,43 @@ mod tests {
     }
 
     #[test]
+    fn emitter_clear_is_a_no_op_when_a_newer_status_replaced_the_key() {
+        // LOW 5: a commit-msg clear must not dismiss a concurrent same-key
+        // generate's busy. The emitter stores the generation from the busy it
+        // emitted and guards the clear with it; once a newer status (a fresh
+        // generate) replaces the key, the stale clear becomes a no-op.
+        let (mut e, snap_rx) = make_emitter();
+        let key = "commit-msg:s1";
+
+        // First generate sets the busy and remembers its generation.
+        let _ = e.send(WireStatus::keyed(key, "busy", "Generating\u{2026}"));
+        let stale_generation = *e.generations.get(key).expect("busy stored a generation");
+
+        // A concurrent second generate replaces the key with a newer generation.
+        let _ = e.send(WireStatus::keyed(key, "busy", "Generating again\u{2026}"));
+        assert_ne!(
+            *e.generations.get(key).unwrap(),
+            stale_generation,
+            "the replacement must bump the generation"
+        );
+
+        // Simulate the FIRST generate's clear arriving late by restoring the
+        // stale generation it captured, then clearing.
+        e.generations.insert(key.to_string(), stale_generation);
+        e.clear(key.to_string());
+
+        // The newer busy must still be present — the stale clear was a no-op.
+        let snap = snap_rx.borrow().clone();
+        assert_eq!(
+            snap.len(),
+            1,
+            "the concurrent generate's busy must survive a stale clear"
+        );
+        assert_eq!(snap[0].key.as_deref(), Some(key));
+        assert_eq!(snap[0].tone, "busy");
+    }
+
+    #[test]
     fn emitter_tick_upgrades_stale_busy_and_broadcasts_upgraded_wire_status() {
         // A Busy that outlives LAUNCH_TIMEOUT must be upgraded to Warning
         // in-place and broadcast as a live WireStatus update so the client sees
@@ -1591,6 +1640,7 @@ mod tests {
             clear_tx,
             snapshot_tx: snap_tx,
             controller: KeyedStatusController::with_clear_after(Duration::from_secs(6)),
+            generations: std::collections::HashMap::new(),
         };
         // Drain the initial send so `rx` only sees the upgrade.
         let _ = e.send(WireStatus::keyed("launch", "busy", "Launching\u{2026}"));

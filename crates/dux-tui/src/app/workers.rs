@@ -892,7 +892,7 @@ impl App {
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
         match outcome {
-            AgentLaunchFailedOutcome::Create { message } => self.set_error(message),
+            AgentLaunchFailedOutcome::Create { message, .. } => self.set_error(message),
             AgentLaunchFailedOutcome::Reconnect {
                 branch_name,
                 message,
@@ -1231,7 +1231,7 @@ mod tests {
         );
 
         match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentFailed(message) => {
+            WorkerEvent::CreateAgentFailed { message, .. } => {
                 assert_eq!(message, "Forking an agent requires choosing a name first.");
             }
             _ => panic!("expected missing-name failure"),
@@ -1289,7 +1289,7 @@ mod tests {
             _ => panic!("expected pre-create pull progress"),
         }
         match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentFailed(message) => {
+            WorkerEvent::CreateAgentFailed { message, .. } => {
                 assert!(message.contains(
                     "Failed to pull latest changes for project \"demo\" before creating the agent"
                 ));
