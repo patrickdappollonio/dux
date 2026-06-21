@@ -332,6 +332,10 @@ pub struct WireStatus {
     /// "info" | "busy" | "warning" | "error"
     pub tone: String,
     pub message: String,
+    /// `None` = an unkeyed transient (anonymous slot). `Some` = a keyed op whose
+    /// later success/error/clear carries the same key so the surfaces correlate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl WireStatus {
@@ -340,13 +344,34 @@ impl WireStatus {
         Self {
             tone: tone.into(),
             message: message.into(),
+            key: None,
         }
+    }
+
+    /// Construct a keyed wire status so producers can correlate updates.
+    pub fn keyed(
+        key: impl Into<String>,
+        tone: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            tone: tone.into(),
+            message: message.into(),
+            key: Some(key.into()),
+        }
+    }
+
+    /// Builder that attaches a correlation key to an existing status.
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
     }
 
     fn from_update(update: &StatusUpdate) -> Self {
         Self {
             tone: update.tone.as_wire().to_string(),
             message: update.message.clone(),
+            key: None,
         }
     }
 }
@@ -5080,6 +5105,37 @@ mod tests {
         assert!(
             wire_statuses_from_reaction(&ok).is_empty(),
             "a successful worktree listing must not emit a status"
+        );
+    }
+
+    #[test]
+    fn wire_status_keyed_constructor_sets_key() {
+        let s = WireStatus::keyed("pull", "busy", "Pulling\u{2026}");
+        assert_eq!(s.key.as_deref(), Some("pull"));
+        assert_eq!(s.tone, "busy");
+        assert_eq!(s.message, "Pulling\u{2026}");
+
+        let plain = WireStatus::new("info", "Saved.");
+        assert_eq!(plain.key, None);
+        // Unkeyed status omits the key field from JSON (skip_serializing_if).
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(
+            !json.contains("\"key\""),
+            "unkeyed status must omit key: {json}"
+        );
+
+        // with_key builder should set the key on an existing status.
+        let built = WireStatus::new("info", "Done.").with_key("op-123");
+        assert_eq!(built.key.as_deref(), Some("op-123"));
+        // Keyed status must include the key field in JSON.
+        let keyed_json = serde_json::to_string(&s).unwrap();
+        assert!(
+            keyed_json.contains("\"key\""),
+            "keyed status must include key: {keyed_json}"
+        );
+        assert!(
+            keyed_json.contains("\"pull\""),
+            "key value must appear in JSON: {keyed_json}"
         );
     }
 }
