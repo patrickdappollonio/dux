@@ -35,6 +35,8 @@ use tower_sessions::cookie::SameSite;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::{Expiry, Session, SessionManagerLayer};
 
+use dux_core::statusline::KeyedWireStatus;
+
 use crate::auth::{self, RateLimiter, SharedAuth};
 use crate::console::Console;
 use crate::engine_actor::EngineHandle;
@@ -623,22 +625,18 @@ async fn handle_socket(
     // first means the gap status is buffered for this receiver; any overlap with
     // the snapshot is a harmless duplicate (the client re-sets the same value).
     let mut status_rx = engine.subscribe_status();
+    // Subscribe to clears BEFORE reading the snapshot for the same reason: a
+    // clear emitted between the snapshot read and the clear subscribe would be
+    // silently dropped, leaving a stale toast on screen.
+    let mut status_clear_rx = engine.subscribe_status_clears();
 
     // Initial statuses: a client connecting mid-operation sees ALL active status
     // toasts immediately (keyed and anonymous) rather than a blank line until the
     // next update. Each `KeyedWireStatus` in the snapshot maps to one `Status`
     // frame. Empty snapshot means nothing is showing, so the loop is a no-op.
-    for entry in engine.status_snapshot() {
-        if !entry.message.is_empty() {
-            let _ = send_json(
-                &sink,
-                &ServerMessage::Status {
-                    key: entry.key,
-                    tone: entry.tone,
-                    message: entry.message,
-                },
-            )
-            .await;
+    for msg in status_frames(&engine.status_snapshot()) {
+        if send_json(&sink, &msg).await.is_err() {
+            break;
         }
     }
 
@@ -653,7 +651,7 @@ async fn handle_socket(
                 match status_rx.recv().await {
                     Ok(status) => {
                         let msg = ServerMessage::Status {
-                            key: None,
+                            key: status.key,
                             tone: status.tone,
                             message: status.message,
                         };
@@ -665,6 +663,33 @@ async fn handle_socket(
                         dux_core::logger::warn(&format!(
                             "WebSocket client {peer_ip} lagged behind the status broadcast; \
                              dropped {n} update(s)"
+                        ));
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    // Forward keyed-status clears: when a keyed op resolves or expires, the
+    // engine broadcasts the cleared key so each client can dismiss the matching
+    // toast immediately — without waiting for the next `Status` frame.
+    {
+        let sink = Arc::clone(&sink);
+        tokio::spawn(async move {
+            loop {
+                match status_clear_rx.recv().await {
+                    Ok(key) => {
+                        let msg = ServerMessage::StatusCleared { key };
+                        if send_json(&sink, &msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        dux_core::logger::warn(&format!(
+                            "WebSocket client {peer_ip} lagged behind the status-clear broadcast; \
+                             dropped {n} clear(s)"
                         ));
                         continue;
                     }
@@ -1045,6 +1070,23 @@ fn spawn_pty_forwarder(
             }
         }
     })
+}
+
+/// Build the `Status` frames to replay on connect from a status snapshot.
+///
+/// Each open `KeyedWireStatus` in `snapshot` (non-empty message) maps to one
+/// `ServerMessage::Status` frame. Pure and side-effect-free so it can be unit-
+/// tested without a WebSocket. An empty snapshot produces an empty `Vec`.
+fn status_frames(snapshot: &[KeyedWireStatus]) -> Vec<ServerMessage> {
+    snapshot
+        .iter()
+        .filter(|e| !e.message.is_empty())
+        .map(|e| ServerMessage::Status {
+            key: e.key.clone(),
+            tone: e.tone.clone(),
+            message: e.message.clone(),
+        })
+        .collect()
 }
 
 async fn send_view_model(sink: &SharedSink, json: &str) -> Result<(), ()> {
@@ -1702,6 +1744,95 @@ mod tests {
                 assert_eq!(warning, None);
             }
             other => panic!("expected ProjectPathInspection, got {other:?}"),
+        }
+    }
+
+    // --- status_frames unit tests ---
+
+    /// An empty snapshot produces no frames.
+    #[test]
+    fn status_frames_empty_snapshot_is_empty() {
+        assert!(status_frames(&[]).is_empty());
+    }
+
+    /// A snapshot with one open entry produces one `Status` frame with the
+    /// correct key, tone, and message.
+    #[test]
+    fn status_frames_single_entry_maps_to_one_frame() {
+        let snapshot = vec![KeyedWireStatus {
+            key: Some("pull".into()),
+            tone: "busy".into(),
+            message: "Pulling\u{2026}".into(),
+        }];
+        let frames = status_frames(&snapshot);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            ServerMessage::Status { key, tone, message } => {
+                assert_eq!(key.as_deref(), Some("pull"));
+                assert_eq!(tone, "busy");
+                assert_eq!(message, "Pulling\u{2026}");
+            }
+            other => panic!("expected Status frame, got {other:?}"),
+        }
+    }
+
+    /// A multi-entry snapshot produces one frame per entry, in order.
+    #[test]
+    fn status_frames_multi_entry_produces_n_frames() {
+        let snapshot = vec![
+            KeyedWireStatus {
+                key: Some("pull".into()),
+                tone: "busy".into(),
+                message: "Pulling\u{2026}".into(),
+            },
+            KeyedWireStatus {
+                key: Some("acme".into()),
+                tone: "info".into(),
+                message: "Certificate renewed.".into(),
+            },
+            KeyedWireStatus {
+                key: None,
+                tone: "warning".into(),
+                message: "Worktree dirty.".into(),
+            },
+        ];
+        let frames = status_frames(&snapshot);
+        assert_eq!(frames.len(), 3, "one frame per open status entry");
+        // Verify keys are threaded through in order.
+        let keys: Vec<Option<&str>> = frames
+            .iter()
+            .map(|f| match f {
+                ServerMessage::Status { key, .. } => key.as_deref(),
+                other => panic!("expected Status, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(keys, vec![Some("pull"), Some("acme"), None]);
+    }
+
+    /// An entry with an empty message is filtered out (nothing to show).
+    #[test]
+    fn status_frames_empty_message_is_filtered() {
+        let snapshot = vec![
+            KeyedWireStatus {
+                key: Some("op".into()),
+                tone: "info".into(),
+                message: String::new(),
+            },
+            KeyedWireStatus {
+                key: Some("other".into()),
+                tone: "busy".into(),
+                message: "Working\u{2026}".into(),
+            },
+        ];
+        let frames = status_frames(&snapshot);
+        assert_eq!(
+            frames.len(),
+            1,
+            "empty-message entries must be filtered out"
+        );
+        match &frames[0] {
+            ServerMessage::Status { key, .. } => assert_eq!(key.as_deref(), Some("other")),
+            other => panic!("expected Status, got {other:?}"),
         }
     }
 }

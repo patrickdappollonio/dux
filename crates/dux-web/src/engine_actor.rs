@@ -410,6 +410,15 @@ impl EngineHandle {
         self.status_snapshot_rx.borrow().clone()
     }
 
+    /// Like [`emit_status`] but attaches a correlation key so a later success,
+    /// error, or clear on the same key replaces or dismisses the same toast.
+    /// Prefer this over `emit_status` for any operation that has a keyed lifecycle
+    /// (e.g. ACME certificate renewal, where a "Renewing…" busy should be
+    /// replaced by a "Renewed." info on success and dismissed by `StatusCleared`).
+    pub fn emit_keyed_status(&self, key: impl Into<String>, status: WireStatus) {
+        self.emit_status(status.with_key(key));
+    }
+
     /// Publish a status from a non-engine producer (the ACME certificate-lifecycle
     /// task) THROUGH the shared status controller — not directly onto the broadcast
     /// — so it auto-clears on the same tone-aware policy as every other status and
