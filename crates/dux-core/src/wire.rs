@@ -48,6 +48,55 @@ pub mod status_keys {
     pub fn create(project_id: &str) -> String {
         format!("{CREATE_PREFIX}:{project_id}")
     }
+
+    /// Checkout-project-default-branch operation key (web). One constructor for
+    /// the busy and the clear so they cannot drift.
+    pub fn checkout_default(project_id: &str) -> String {
+        format!("{CHECKOUT_DEFAULT_PREFIX}:{project_id}")
+    }
+
+    /// Add-project-checkout operation key (web), parameterised by repo path.
+    pub fn add_project_checkout(path: &str) -> String {
+        format!("{ADD_PROJECT_CHECKOUT_PREFIX}:{path}")
+    }
+
+    /// PR-lookup operation key (web), parameterised by project id.
+    pub fn pr_lookup(project_id: &str) -> String {
+        format!("{PR_LOOKUP_PREFIX}:{project_id}")
+    }
+}
+
+/// For a completed background operation, return the web status key whose Busy
+/// toast must be cleared, if any.
+///
+/// The web keys these operations' busies, but their completion reactions emit
+/// finals that are UNKEYED or lose the operation identity (a bare `Status`) —
+/// shared with the TUI, which pairs them through the anonymous slot. So the web
+/// actor clears the keyed busy here from the raw `WorkerEvent`, which still
+/// carries full identity for both the success and failure outcomes of the same
+/// variant. Returns `None` for events whose final is already keyed (delete,
+/// push, pull, create) or that own no web busy.
+///
+/// Known gap: a PR-lookup *failure* (`PullRequestResolved { result: Err(..) }`)
+/// carries no project id, so its `pr-lookup:{id}` busy is not cleared here and
+/// instead self-heals to the timed-out warning. Fixing it requires threading
+/// the project id through the failure event.
+pub fn web_completed_busy_key_to_clear(event: &crate::worker::WorkerEvent) -> Option<String> {
+    use crate::worker::{NonDefaultBranchAction, WorkerEvent};
+    match event {
+        WorkerEvent::NonDefaultBranchCheckoutCompleted { action, .. } => match action {
+            NonDefaultBranchAction::CheckoutProjectDefault { project } => {
+                Some(status_keys::checkout_default(&project.id))
+            }
+            NonDefaultBranchAction::AddProject { path, .. } => {
+                Some(status_keys::add_project_checkout(path))
+            }
+        },
+        WorkerEvent::PullRequestResolved { result: Ok(pr) } => {
+            Some(status_keys::pr_lookup(&pr.project.id))
+        }
+        _ => None,
+    }
 }
 
 use std::collections::BTreeMap;
@@ -1049,7 +1098,7 @@ impl Engine {
             "Checking the default branch for project \"{}\"...",
             project.name
         );
-        let checkout_key = format!("{}:{project_id}", status_keys::CHECKOUT_DEFAULT_PREFIX);
+        let checkout_key = status_keys::checkout_default(project_id);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_checkout_project_default_branch_inspection_job(
@@ -1100,7 +1149,7 @@ impl Engine {
         // (reason "before adding the project").
         let busy =
             format!("Checking out \"{default_branch}\" in {path_str} before adding the project...");
-        let checkout_add_key = format!("{}:{path_str}", status_keys::ADD_PROJECT_CHECKOUT_PREFIX);
+        let checkout_add_key = status_keys::add_project_checkout(&path_str);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_add_project_checkout_job(action, default_branch, worker_tx);
@@ -1184,7 +1233,7 @@ impl Engine {
         // does the same with `None` for the name). Busy copy mirrors the TUI's
         // `set_busy` in `dispatch_pull_request_lookup`.
         let busy = format!("Resolving PR for project \"{}\"...", project.name);
-        let pr_key = format!("{}:{project_id}", status_keys::PR_LOOKUP_PREFIX);
+        let pr_key = status_keys::pr_lookup(project_id);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
@@ -4025,6 +4074,70 @@ mod tests {
             "unexpected status: {}",
             statuses[0].message
         );
+    }
+
+    #[test]
+    fn web_completed_busy_key_to_clear_maps_each_keyed_op() {
+        use crate::worker::{NonDefaultBranchAction, ResolvedPullRequest, WorkerEvent};
+
+        // checkout-default: keyed by project id.
+        let ev = WorkerEvent::NonDefaultBranchCheckoutCompleted {
+            action: NonDefaultBranchAction::CheckoutProjectDefault {
+                project: sample_project("p1", "/repo"),
+            },
+            target_branch: "main".into(),
+            result: Ok(()),
+        };
+        assert_eq!(
+            web_completed_busy_key_to_clear(&ev).as_deref(),
+            Some("checkout-default:p1")
+        );
+
+        // add-project-checkout: keyed by path. Identity survives on failure too.
+        let ev = WorkerEvent::NonDefaultBranchCheckoutCompleted {
+            action: NonDefaultBranchAction::AddProject {
+                path: "/some/repo".into(),
+                name: "Repo".into(),
+                leading_branch: "main".into(),
+            },
+            target_branch: "main".into(),
+            result: Err("boom".into()),
+        };
+        assert_eq!(
+            web_completed_busy_key_to_clear(&ev).as_deref(),
+            Some("add-project-checkout:/some/repo")
+        );
+
+        // pr-lookup success: keyed by project id.
+        let ev = WorkerEvent::PullRequestResolved {
+            result: Ok(ResolvedPullRequest {
+                project: sample_project("p9", "/repo"),
+                host: "github.com".into(),
+                owner_repo: "o/r".into(),
+                number: 7,
+                title: "t".into(),
+                state: "open".into(),
+                head_ref_name: "feat".into(),
+                custom_name: None,
+            }),
+        };
+        assert_eq!(
+            web_completed_busy_key_to_clear(&ev).as_deref(),
+            Some("pr-lookup:p9")
+        );
+
+        // pr-lookup failure carries no project id → no clear (documented gap).
+        let ev = WorkerEvent::PullRequestResolved {
+            result: Err("gh failed".into()),
+        };
+        assert_eq!(web_completed_busy_key_to_clear(&ev), None);
+
+        // An event whose final is already keyed (delete) owns no extra clear.
+        let ev = WorkerEvent::WorktreeRemoveCompleted {
+            session_id: "s1".into(),
+            result: Ok(false),
+        };
+        assert_eq!(web_completed_busy_key_to_clear(&ev), None);
     }
 
     #[test]
