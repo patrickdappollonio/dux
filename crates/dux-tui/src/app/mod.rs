@@ -62,6 +62,12 @@ pub(crate) use dux_core::worker::{
 #[cfg(test)]
 pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 
+/// How long the TUI waits for SIGTERMed agent/terminal PTYs to exit on quit
+/// before their `PtyClient::drop` hard-kills any stragglers with SIGKILL. Mirrors
+/// the web server's `QUIT_PTY_GRACE` so both surfaces give children the same
+/// window to save state for a later resume.
+const QUIT_PTY_GRACE: Duration = Duration::from_millis(1500);
+
 pub struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
@@ -138,6 +144,16 @@ pub struct App {
     /// orphaned signal-hook registrations. `None` only in tests that build the
     /// App directly without registering a real handler.
     pub(crate) sigwinch_sig_id: Option<signal_hook::SigId>,
+    /// Set by the SIGTERM/SIGINT/SIGHUP handlers so the run loop can break with
+    /// [`RunExit::Quit`] and wind the agents down gracefully (SIGTERM + grace)
+    /// instead of letting the process die straight to the hard SIGKILL in
+    /// `PtyClient::drop`. Mirrors the server's signal-triggered `shutdown_ptys`.
+    pub(crate) shutdown_flag: Arc<AtomicBool>,
+    /// Registration ids for the shutdown-signal handlers, unregistered in
+    /// `into_engine` so the TUI→server flip doesn't leave the TUI's handlers
+    /// firing alongside the server's own. Empty only in tests that build the App
+    /// directly without registering real handlers.
+    pub(crate) shutdown_sig_ids: Vec<signal_hook::SigId>,
     pub(crate) force_redraw: bool,
     pub(crate) welcome_tip_index: usize,
     /// Whether the ASCII logo was rendered in the previous frame.
@@ -193,13 +209,56 @@ enum SessionRestore {
     Skip,
 }
 
-/// SIGWINCH wiring handed to `App::assemble`: the flag the run loop polls plus
-/// the signal-hook registration id, unregistered in `into_engine` so flip
-/// cycles don't accumulate handlers. `sig_id` is `None` only in tests that
-/// build the App directly without registering a real handler.
-struct SigwinchHandle {
-    flag: Arc<AtomicBool>,
-    sig_id: Option<signal_hook::SigId>,
+/// Signal wiring handed to `App::assemble`: the flags the run loop polls plus
+/// the signal-hook registration ids, all unregistered in `into_engine` so flip
+/// cycles don't accumulate handlers. `sigwinch_sig_id` is `None` (and
+/// `shutdown_sig_ids` empty) only in tests that build the App directly without
+/// registering real handlers.
+struct SignalHandles {
+    sigwinch_flag: Arc<AtomicBool>,
+    sigwinch_sig_id: Option<signal_hook::SigId>,
+    shutdown_flag: Arc<AtomicBool>,
+    shutdown_sig_ids: Vec<signal_hook::SigId>,
+}
+
+/// Register the SIGWINCH handler (terminal resize) plus the shutdown handlers
+/// (SIGTERM/SIGINT/SIGHUP) that let the TUI wind agents down gracefully before
+/// exit. SIGINT is included for an external `kill -INT`; an interactive Ctrl-C
+/// is delivered as a key event in raw mode, not as SIGINT. Each handler only
+/// sets its atomic flag (async-signal-safe); the run loop polls both flags.
+///
+/// Caveat across a TUI→server→TUI flip: the server resets SIGINT/SIGTERM to
+/// `SIG_DFL` on `ReturnToTui` (so a stale tokio handler can't trap the operator,
+/// see `serve_with_engine`). Because `signal-hook-registry` keeps its master
+/// handler installed for the process lifetime, this fresh registration may not
+/// re-arm the OS disposition, so a *post-flip* external SIGTERM can fall back to
+/// the default terminate (agents then hard-killed on drop, the pre-feature
+/// behavior). The in-app quit path and a first-session signal both wind down
+/// gracefully regardless; only this narrow post-flip signal case degrades.
+fn register_signal_handles() -> Result<SignalHandles> {
+    let sigwinch_flag = Arc::new(AtomicBool::new(false));
+    let sigwinch_sig_id =
+        signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let mut shutdown_sig_ids = Vec::new();
+    for signal in [
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ] {
+        shutdown_sig_ids.push(signal_hook::flag::register(
+            signal,
+            Arc::clone(&shutdown_flag),
+        )?);
+    }
+
+    Ok(SignalHandles {
+        sigwinch_flag,
+        sigwinch_sig_id: Some(sigwinch_sig_id),
+        shutdown_flag,
+        shutdown_sig_ids,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1223,11 +1282,11 @@ impl App {
         let bindings = RuntimeBindings::from_keys_config(&config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
 
-        // Register SIGWINCH handler so we can detect terminal resizes even when
-        // bypassing crossterm's event reader during interactive mode.
-        let sigwinch_flag = Arc::new(AtomicBool::new(false));
-        let sigwinch_sig_id =
-            signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+        // Register the SIGWINCH handler (so resizes are seen even when bypassing
+        // crossterm's event reader during interactive mode) and the shutdown
+        // handlers (SIGTERM/SIGINT/SIGHUP) so the run loop can wind agents down
+        // gracefully instead of letting them die to the hard SIGKILL on drop.
+        let signals = register_signal_handles()?;
 
         let session_store = SessionStore::open(&paths.sessions_db_path)?;
         sync_config_projects_with_store(&mut config, &paths, &bindings, &session_store)?;
@@ -1317,10 +1376,7 @@ impl App {
             engine,
             bindings,
             interactive_patterns,
-            SigwinchHandle {
-                flag: sigwinch_flag,
-                sig_id: Some(sigwinch_sig_id),
-            },
+            signals,
             status,
             theme,
             SessionRestore::Restore,
@@ -1339,7 +1395,7 @@ impl App {
         engine: Engine,
         bindings: RuntimeBindings,
         interactive_patterns: InteractiveBytePatterns,
-        sigwinch: SigwinchHandle,
+        signals: SignalHandles,
         status: KeyedStatusController,
         theme: Theme,
         restore: SessionRestore,
@@ -1412,8 +1468,10 @@ impl App {
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
             macro_bar: None,
-            sigwinch_flag: sigwinch.flag,
-            sigwinch_sig_id: sigwinch.sig_id,
+            sigwinch_flag: signals.sigwinch_flag,
+            sigwinch_sig_id: signals.sigwinch_sig_id,
+            shutdown_flag: signals.shutdown_flag,
+            shutdown_sig_ids: signals.shutdown_sig_ids,
             force_redraw: false,
             welcome_tip_index: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1455,9 +1513,9 @@ impl App {
         logger::info("resuming dux TUI after the web server stopped");
         let bindings = RuntimeBindings::from_keys_config(&engine.config.keys);
         let interactive_patterns = bindings.interactive_byte_patterns();
-        let sigwinch_flag = Arc::new(AtomicBool::new(false));
-        let sigwinch_sig_id =
-            signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+        // A fresh App means fresh handler registrations; the previous App's were
+        // removed in `into_engine`, so flip cycles don't accumulate handlers.
+        let signals = register_signal_handles()?;
         let (theme, theme_warning) =
             crate::theme::load_or_fallback(&engine.config.ui.theme, &engine.paths);
         let mut status = KeyedStatusController::with_clear_after(Duration::from_secs(
@@ -1479,10 +1537,7 @@ impl App {
             engine,
             bindings,
             interactive_patterns,
-            SigwinchHandle {
-                flag: sigwinch_flag,
-                sig_id: Some(sigwinch_sig_id),
-            },
+            signals,
             status,
             theme,
             SessionRestore::Skip,
@@ -1496,10 +1551,15 @@ impl App {
     /// PTY-activity tracking now lives on the engine (`pty_activity`), so the
     /// streaming/"working" state carries across the flip automatically with it.
     pub fn into_engine(self) -> Engine {
-        // Unregister this App's SIGWINCH handler so repeated flip cycles don't
-        // pile up orphaned registrations (each resume registers a fresh flag;
-        // without this, every SIGWINCH would fire one stale setter per cycle).
+        // Unregister this App's signal handlers so repeated flip cycles don't
+        // pile up orphaned registrations (each resume registers fresh flags;
+        // without this, every signal would fire one stale setter per cycle) and
+        // so the TUI's shutdown handlers don't fire alongside the server's own
+        // once the engine is handed over.
         if let Some(sig_id) = self.sigwinch_sig_id {
+            signal_hook::low_level::unregister(sig_id);
+        }
+        for sig_id in self.shutdown_sig_ids {
             signal_hook::low_level::unregister(sig_id);
         }
         self.engine
@@ -1515,6 +1575,14 @@ impl App {
 
         let result: RunExit = {
             'main: loop {
+                // A SIGTERM/SIGINT/SIGHUP arrived (e.g. the terminal closed, a
+                // system shutdown, or `kill`): quit cleanly so the teardown below
+                // SIGTERMs the agents and gives them a grace window, instead of
+                // letting the process die straight to the hard SIGKILL on drop.
+                if self.shutdown_flag.load(Ordering::Relaxed) {
+                    break 'main RunExit::Quit;
+                }
+
                 self.drain_events();
                 self.engine.poll_pty_activity();
                 self.tick_count = self.tick_count.wrapping_add(1);
@@ -1659,7 +1727,30 @@ impl App {
 
         let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
+
+        // On a real quit, wind the agents and companion terminals down
+        // gracefully: SIGTERM each child and wait briefly so it can save state
+        // for a later resume before `PtyClient::drop` hard-kills any straggler.
+        // On a flip the engine (and its live PTYs) is handed to the server, so
+        // it must NOT be touched here; `into_engine` moves it out intact.
+        if matches!(result, RunExit::Quit) {
+            self.shutdown_agents_gracefully();
+        }
         Ok(result)
+    }
+
+    /// SIGTERM every running agent/terminal PTY and wait up to [`QUIT_PTY_GRACE`]
+    /// for them to exit, the TUI analogue of the server's shutdown path. Runs
+    /// after the terminal is restored, so the user is back at their shell while
+    /// the (typically sub-second) wind-down happens. Prints a short note only
+    /// when there is something to wait for, so an agent-less quit stays silent.
+    fn shutdown_agents_gracefully(&mut self) {
+        let live = self.engine.providers.len() + self.engine.companion_terminals.len();
+        if live == 0 {
+            return;
+        }
+        eprintln!("Stopping {live} running session(s) gracefully, please wait...");
+        self.engine.shutdown_ptys(QUIT_PTY_GRACE);
     }
 
     fn should_poll_raw_input(&self) -> bool {
@@ -3904,5 +3995,36 @@ leading_branch = "main"
         assert!(sel.contains(4, 5));
         assert!(!sel.contains(2, 9));
         assert!(!sel.contains(4, 6));
+    }
+
+    /// Quitting the TUI must SIGTERM the running agents (the analogue of the
+    /// server's shutdown path) so they get a grace window to save state, rather
+    /// than being hard-killed by `PtyClient::drop`. We drive the wind-down step
+    /// directly because the full run loop needs a TTY.
+    #[test]
+    fn shutdown_agents_gracefully_terminates_running_provider() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+
+        // `cat` ignores EOF-less stdin and runs until signalled, so it can only
+        // be gone if the graceful SIGTERM actually reached it.
+        let client =
+            crate::pty::PtyClient::spawn("cat", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
+                .expect("spawn cat for test");
+        app.engine.providers.insert("session-1".to_string(), client);
+
+        app.shutdown_agents_gracefully();
+
+        let client = app.engine.providers.get_mut("session-1").unwrap();
+        assert!(
+            client.is_exited() || client.try_wait().is_some(),
+            "cat should have exited after the graceful SIGTERM on quit"
+        );
+        let session = app
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == "session-1")
+            .unwrap();
+        assert_eq!(session.status, SessionStatus::Detached);
     }
 }

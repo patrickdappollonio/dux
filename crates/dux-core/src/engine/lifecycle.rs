@@ -400,4 +400,35 @@ mod tests {
         let session = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
         assert_eq!(session.status, SessionStatus::Detached);
     }
+
+    #[test]
+    fn shutdown_ptys_terminates_companion_terminal() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        // A `cat`-backed companion terminal that won't exit on its own; it must
+        // be SIGTERMed by shutdown_ptys, just like an agent provider.
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (terminal_id, _label) = engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+        assert!(engine.companion_terminals.contains_key(&terminal_id));
+
+        engine.shutdown_ptys(Duration::from_secs(2));
+
+        let terminal = engine.companion_terminals.get_mut(&terminal_id).unwrap();
+        assert!(
+            terminal.client.is_exited() || terminal.client.try_wait().is_some(),
+            "the companion terminal's cat should have exited after SIGTERM"
+        );
+    }
 }
