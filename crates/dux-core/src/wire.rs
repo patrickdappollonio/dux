@@ -64,6 +64,12 @@ pub mod status_keys {
     pub fn pr_lookup(project_id: &str) -> String {
         format!("{PR_LOOKUP_PREFIX}:{project_id}")
     }
+
+    /// Agent-launch operation key, parameterised by session id. Used by the
+    /// reconnect/launch busy and its finals.
+    pub fn launch(session_id: &str) -> String {
+        format!("{LAUNCH_PREFIX}:{session_id}")
+    }
 }
 
 /// For a completed background operation, return the web status key whose Busy
@@ -96,6 +102,30 @@ pub fn web_completed_busy_key_to_clear(event: &crate::worker::WorkerEvent) -> Op
             Some(status_keys::pr_lookup(&pr.project.id))
         }
         _ => None,
+    }
+}
+
+/// Keys to clear after an agent-launch reaction whose ready-view emits no status
+/// (`SessionMissing`/`StartupAutoReopen`) yet may have left a keyed busy open.
+///
+/// A launch dispatch keys its busy `create:{project_id}` (create-kind) or
+/// `launch:{session_id}` (reconnect-kind); when the launch resolves to a
+/// vanished session or a startup auto-reopen the wire layer returns no final, so
+/// the web actor clears BOTH candidate keys here. Clearing a key with no open
+/// toast is a harmless no-op, so emitting both avoids needing to know the launch
+/// kind. Returns empty for every other reaction.
+pub fn web_launch_ready_keys_to_clear(reaction: &EventReaction) -> Vec<String> {
+    match reaction {
+        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
+            AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
+                vec![
+                    status_keys::create(&outcome.session.project_id),
+                    status_keys::launch(&outcome.session.id),
+                ]
+            }
+            _ => vec![],
+        },
+        _ => vec![],
     }
 }
 
@@ -4138,6 +4168,36 @@ mod tests {
             result: Ok(false),
         };
         assert_eq!(web_completed_busy_key_to_clear(&ev), None);
+    }
+
+    #[test]
+    fn web_launch_ready_keys_to_clear_covers_no_final_views() {
+        use crate::engine::AgentLaunchReadyOutcome;
+        let mut session = sample_session("s1", "p1", "feat");
+        session.project_id = "p1".into();
+
+        // SessionMissing emits no final → clear both candidate busy keys.
+        let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::SessionMissing,
+        }));
+        assert_eq!(
+            web_launch_ready_keys_to_clear(&reaction),
+            vec!["create:p1".to_string(), "launch:s1".to_string()],
+        );
+
+        // A normal committed launch emits its own keyed final → nothing to clear.
+        let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
+            session,
+            pty_size: (80, 24),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "ok".into(),
+            },
+        }));
+        assert!(web_launch_ready_keys_to_clear(&reaction).is_empty());
     }
 
     #[test]

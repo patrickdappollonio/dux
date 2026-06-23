@@ -726,6 +726,12 @@ pub(crate) fn run_engine_loop(
             if let Some(key) = busy_key_to_clear {
                 thread_status_tx.clear(key);
             }
+            // A launch that resolved to a vanished session or a startup
+            // auto-reopen emits no final but may have left a keyed create/launch
+            // busy open. Clear both candidate keys (a no-op when not open).
+            for key in dux_core::wire::web_launch_ready_keys_to_clear(&reaction) {
+                thread_status_tx.clear(key);
+            }
 
             // A project mutation just updated SQLite + in-memory projects; mirror
             // it into the portable config.toml so a later TUI start doesn't clobber it.
