@@ -1223,8 +1223,8 @@ impl Engine {
     pub fn process_worker_event(&mut self, event: WorkerEvent) -> EventReaction {
         match event {
             WorkerEvent::CommandWorkerStarted(status) => EventReaction::Status(status),
-            WorkerEvent::CreateAgentProgress(message) => {
-                EventReaction::Status(StatusUpdate::busy(message))
+            WorkerEvent::CreateAgentProgress { key, message } => {
+                EventReaction::Status(StatusUpdate::busy(message).with_key(key))
             }
             WorkerEvent::CreateAgentFailed { key, message } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
@@ -2265,6 +2265,71 @@ mod tests {
         // The failure must carry the same create key as the busy so the web
         // clears the "Creating a new agent…" loading toast on completion.
         assert_eq!(status.key.as_deref(), Some("create:p1"));
+    }
+
+    #[test]
+    fn create_agent_progress_is_keyed_with_the_create_key() {
+        // Regression: progress updates used to be emitted unkeyed, landing in the
+        // anonymous status slot. That slot is never expired by the busy timeout,
+        // and the keyed success/failure (create:{project_id}) could not dismiss
+        // it, so a "Launching … in a fresh session…" toast lingered forever on
+        // the web. The progress MUST carry the same create key as its final.
+        let (mut engine, _tmp) = test_engine();
+
+        let reaction = engine.process_worker_event(WorkerEvent::CreateAgentProgress {
+            key: "create:p1".to_string(),
+            message: "Launching codex in a fresh session...".to_string(),
+        });
+
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Busy);
+        assert_eq!(status.key.as_deref(), Some("create:p1"));
+    }
+
+    #[test]
+    fn create_progress_busy_is_dismissed_by_the_keyed_failure() {
+        // End-to-end on the keyed controller: a busy progress on create:p1
+        // followed by a keyed error on the same key replaces it in place, so the
+        // controller never strands a busy entry (and the web toast is reused,
+        // not duplicated).
+        use crate::statusline::{KeyedStatusController, StatusTone as Tone};
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let mut controller = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+
+        // Simulate the wire projection: progress busy then failure, same key.
+        let progress = engine_progress_status();
+        controller.set(
+            now,
+            progress.key.clone(),
+            Tone::Busy,
+            progress.message.clone(),
+        );
+        assert_eq!(controller.snapshot().len(), 1);
+        assert_eq!(controller.snapshot()[0].tone, "busy");
+
+        controller.set(
+            now,
+            Some("create:p1".to_string()),
+            Tone::Error,
+            "Failed to create a new worktree.",
+        );
+        // Still one entry on the same key — the busy was replaced, not stacked.
+        let snap = controller.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].key.as_deref(), Some("create:p1"));
+        assert_eq!(snap[0].tone, "error");
+    }
+
+    fn engine_progress_status() -> StatusUpdate {
+        let (mut engine, _tmp) = test_engine();
+        unwrap_status(
+            engine.process_worker_event(WorkerEvent::CreateAgentProgress {
+                key: "create:p1".to_string(),
+                message: "Attaching to existing branch \"x\" for project \"y\"...".to_string(),
+            }),
+        )
     }
 
     // Sanity: the unused-import linter won't catch AgentLaunchFailedData

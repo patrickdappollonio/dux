@@ -46,10 +46,13 @@ pub fn run_create_agent_job(
             let repo_path = PathBuf::from(&project.path);
 
             if pull_before_create {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                    "Pulling latest changes for project \"{}\" before creating the agent...",
-                    project.name
-                )));
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                    key: create_key.clone(),
+                    message: format!(
+                        "Pulling latest changes for project \"{}\" before creating the agent...",
+                        project.name
+                    ),
+                });
                 let leading_branch = project
                     .leading_branch
                     .clone()
@@ -108,7 +111,10 @@ pub fn run_create_agent_job(
                     project.name
                 )
             };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(progress));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: progress,
+            });
 
             let (branch_name, worktree_path) = if attach_existing {
                 match git::create_worktree_existing_branch(
@@ -204,15 +210,21 @@ pub fn run_create_agent_job(
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
 
             if attach_existing {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                    "Attaching to existing branch \"{}\" for PR #{} in project \"{}\"...",
-                    resolved_name, number, project.name
-                )));
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                    key: create_key.clone(),
+                    message: format!(
+                        "Attaching to existing branch \"{}\" for PR #{} in project \"{}\"...",
+                        resolved_name, number, project.name
+                    ),
+                });
             } else {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                    "Fetching PR #{} from {} into branch \"{}\"...",
-                    number, owner_repo, resolved_name
-                )));
+                let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                    key: create_key.clone(),
+                    message: format!(
+                        "Fetching PR #{} from {} into branch \"{}\"...",
+                        number, owner_repo, resolved_name
+                    ),
+                });
                 if let Err(err) = git::fetch_pull_request_head(&repo_path, number, &resolved_name) {
                     logger::error(&format!(
                         "PR worktree fetch failed for {} #{}: {err}",
@@ -291,9 +303,10 @@ pub fn run_create_agent_job(
                 return;
             };
             let source_worktree = PathBuf::from(&source_session.worktree_path);
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Creating a forked worktree from agent \"{source_label}\"...",
-            )));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: format!("Creating a forked worktree from agent \"{source_label}\"..."),
+            });
             let source_head = match git::head_commit(&source_worktree) {
                 Ok(head) => head,
                 Err(err) => {
@@ -327,9 +340,12 @@ pub fn run_create_agent_job(
                     return;
                 }
             };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Copying the current filesystem contents from agent \"{source_label}\" into the new fork...",
-            )));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: format!(
+                    "Copying the current filesystem contents from agent \"{source_label}\" into the new fork...",
+                ),
+            });
             if let Err(err) = git::mirror_worktree_contents(&source_worktree, &worktree_path) {
                 logger::error(&format!(
                     "failed to mirror worktree {} into {}: {err}",
@@ -368,11 +384,14 @@ pub fn run_create_agent_job(
             custom_name,
         } => {
             let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Launching {} in existing worktree \"{}\"...",
-                project.default_provider.as_str(),
-                worktree_path.display(),
-            )));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: format!(
+                    "Launching {} in existing worktree \"{}\"...",
+                    project.default_provider.as_str(),
+                    worktree_path.display(),
+                ),
+            });
             let status_message = format!(
                 "Imported {} agent \"{}\" from existing managed worktree for project \"{}\".",
                 project.default_provider.as_str(),
@@ -398,9 +417,12 @@ pub fn run_create_agent_job(
             source_branch,
             custom_name,
         } => {
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Creating a managed worktree from external worktree \"{source_label}\"...",
-            )));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: format!(
+                    "Creating a managed worktree from external worktree \"{source_label}\"...",
+                ),
+            });
             let source_head = match git::head_commit(&source_worktree_path) {
                 Ok(head) => head,
                 Err(err) => {
@@ -437,9 +459,12 @@ pub fn run_create_agent_job(
                     return;
                 }
             };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Copying dirty and untracked files from external worktree \"{source_label}\"...",
-            )));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: format!(
+                    "Copying dirty and untracked files from external worktree \"{source_label}\"...",
+                ),
+            });
             if let Err(err) = git::mirror_worktree_contents(&source_worktree_path, &worktree_path) {
                 logger::error(&format!(
                     "failed to mirror external worktree {} into {}: {err}",
@@ -545,10 +570,13 @@ pub fn run_create_agent_job(
         .map(str::trim)
         .filter(|command| !command.is_empty())
         .map(|command| {
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(format!(
-                "Running startup command for agent \"{}\"...",
-                session.branch_name
-            )));
+            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+                key: create_key.clone(),
+                message: format!(
+                    "Running startup command for agent \"{}\"...",
+                    session.branch_name
+                ),
+            });
             run_startup_command(
                 &paths,
                 StartupCommandRun {
@@ -585,7 +613,10 @@ pub fn run_create_agent_job(
             session.provider.as_str()
         )
     };
-    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress(launch_message));
+    let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+        key: create_key.clone(),
+        message: launch_message,
+    });
     // crossterm::terminal::size() returns (cols, rows).
     let (cols, rows) = term_size;
     let request = AgentLaunchRequest {
