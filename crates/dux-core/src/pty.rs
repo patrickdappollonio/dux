@@ -1,6 +1,6 @@
 //! PTY-based terminal client plus the surface-agnostic cell types for its
 //! terminal-grid snapshot. The client spawns a CLI in a pseudo-terminal and
-//! keeps a full terminal grid (via `alacritty_terminal`); the snapshot's
+//! keeps a full terminal grid (via the `vt100` crate); the snapshot's
 //! `CellColor`/`CellModifier` let each surface convert to its own medium (the
 //! TUI to `ratatui` types; the web to CSS) at its render boundary.
 
@@ -13,14 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, GridCell, Scroll};
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{self, Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{
-    Color as TermColor, CursorShape, NamedColor, Processor, Rgb, StdSyncHandler,
-};
 use anyhow::{Context, Result};
 use compact_str::CompactString;
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
@@ -383,7 +375,7 @@ impl Drop for PtyWriter {
 }
 
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
-/// full terminal grid with scrollback using `alacritty_terminal`.
+/// full terminal grid with scrollback using the `vt100` crate.
 pub struct PtyClient {
     #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
@@ -646,7 +638,7 @@ impl PtyClient {
     /// Get an owned snapshot of the currently visible terminal viewport.
     #[allow(dead_code)]
     pub fn snapshot(&self) -> TerminalSnapshot {
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.snapshot()
     }
 
@@ -669,7 +661,7 @@ impl PtyClient {
     /// and self-correcting for redraw-heavy TUIs.
     pub fn subscribe_with_repaint(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
         let rx = self.subscribe();
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let repaint = terminal.reconnect_repaint();
         drop(terminal);
         (repaint, rx)
@@ -683,7 +675,7 @@ impl PtyClient {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return false;
         }
-        let terminal = self.terminal.lock().expect("terminal mutex poisoned");
+        let mut terminal = self.terminal.lock().expect("terminal mutex poisoned");
         terminal.snapshot_into(target);
         true
     }
@@ -835,7 +827,7 @@ impl PtyClient {
     pub fn has_minimal_output(&self, threshold: usize) -> bool {
         self.terminal
             .lock()
-            .map(|t| t.has_minimal_output(threshold))
+            .map(|mut t| t.has_minimal_output(threshold))
             .unwrap_or(true)
     }
 
@@ -1005,9 +997,7 @@ fn process_name(pid: u32) -> Option<String> {
 }
 
 struct TerminalState {
-    term: Term<EventProxy>,
-    parser: Processor<StdSyncHandler>,
-    event_proxy: EventProxy,
+    parser: vt100::Parser<TerminalCallbacks>,
     rows: u16,
     cols: u16,
 }
@@ -1018,73 +1008,116 @@ impl TerminalState {
     }
 
     fn with_scrollback(rows: u16, cols: u16, scrollback: usize) -> Self {
-        let event_proxy = EventProxy::new(rows, cols);
-        let dimensions = TerminalDimensions::new(rows, cols);
-        let config = Config {
-            scrolling_history: scrollback,
-            ..Config::default()
-        };
         Self {
-            term: Term::new(config, &dimensions, event_proxy.clone()),
-            parser: Processor::new(),
-            event_proxy,
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                scrollback,
+                TerminalCallbacks::default(),
+            ),
             rows,
             cols,
         }
     }
 
     fn process(&mut self, data: &[u8]) -> Vec<u8> {
-        self.parser.advance(&mut self.term, data);
-        let pending = self.event_proxy.take_pending();
-        let mut replies = pending.bytes;
+        // Device queries (DA1/DA2/DSR) are answered synchronously while we still
+        // have the parser, because the DSR-6 reply must reflect the cursor
+        // position *after* this chunk has been applied. vt100 does not generate
+        // these replies itself; the callbacks queue OSC color replies, and we
+        // scan the chunk for the small set of CSI device queries here.
+        self.parser.process(data);
 
-        for request in pending.color_requests {
-            let rgb = resolve_color_request_rgb(request.index, self.term.colors());
-            replies.extend_from_slice((request.formatter)(rgb).as_bytes());
+        // OSC color-query replies queued by the callbacks during `process`.
+        let mut replies = std::mem::take(&mut self.parser.callbacks_mut().replies);
+
+        // CSI device-query replies (DA1, DA2, DSR). vt100 routes these to
+        // `unhandled_csi`, but the DSR-6 reply needs the post-process cursor
+        // position from the screen, so we resolve them here rather than in the
+        // callback (which only sees the screen mid-parse).
+        let queries = std::mem::take(&mut self.parser.callbacks_mut().pending_queries);
+        for query in queries {
+            match query {
+                DeviceQuery::Da1 => replies.extend_from_slice(b"\x1b[?1;2c"),
+                DeviceQuery::Da2 => replies.extend_from_slice(b"\x1b[>0;0;0c"),
+                DeviceQuery::DsrStatus => replies.extend_from_slice(b"\x1b[0n"),
+                DeviceQuery::DsrCursor => {
+                    let (row, col) = self.parser.screen().cursor_position();
+                    replies.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+                }
+            }
         }
 
         replies
     }
 
+    fn screen(&self) -> &vt100::Screen {
+        self.parser.screen()
+    }
+
     fn has_visible_output(&self) -> bool {
-        self.term
-            .renderable_content()
-            .display_iter
-            .any(|indexed| !indexed.cell.c.is_whitespace())
+        let screen = self.screen();
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                if let Some(cell) = screen.cell(row, col)
+                    && cell.has_contents()
+                    && !cell.contents().chars().all(|c| c.is_whitespace())
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Count the number of distinct viewport rows that contain at least one
     /// non-whitespace character.
     fn visible_line_count(&self) -> usize {
-        let mut seen_rows = std::collections::HashSet::new();
-        for indexed in self.term.renderable_content().display_iter {
-            if !indexed.cell.c.is_whitespace() {
-                seen_rows.insert(indexed.point.line.0);
+        let screen = self.screen();
+        let mut count = 0usize;
+        for row in 0..self.rows {
+            let mut has_content = false;
+            for col in 0..self.cols {
+                if let Some(cell) = screen.cell(row, col)
+                    && cell.has_contents()
+                    && !cell.contents().chars().all(|c| c.is_whitespace())
+                {
+                    has_content = true;
+                    break;
+                }
+            }
+            if has_content {
+                count += 1;
             }
         }
-        seen_rows.len()
+        count
     }
 
     /// Returns `true` if the terminal contains only a small amount of output:
     /// no scrollback history AND at most `threshold` visible lines with content.
     /// Used to detect failed `--continue` exits that print a short error message.
-    fn has_minimal_output(&self, threshold: usize) -> bool {
-        self.term.grid().history_size() == 0 && self.visible_line_count() <= threshold
+    fn has_minimal_output(&mut self, threshold: usize) -> bool {
+        self.history_len() == 0 && self.visible_line_count() <= threshold
     }
 
     fn visible_text_excerpt(&self, max_lines: usize) -> String {
+        let screen = self.screen();
         let mut rows = vec![String::new(); usize::from(self.rows)];
-        for indexed in self.term.renderable_content().display_iter {
-            let Ok(row) = usize::try_from(indexed.point.line.0) else {
-                continue;
-            };
-            let Some(line) = rows.get_mut(row) else {
-                continue;
-            };
-            while line.chars().count() < indexed.point.column.0 {
-                line.push(' ');
+        for (row_idx, line) in rows.iter_mut().enumerate() {
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row_idx as u16, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                if cell.has_contents() {
+                    while line.chars().count() < usize::from(col) {
+                        line.push(' ');
+                    }
+                    line.push_str(cell.contents());
+                }
             }
-            line.push(indexed.cell.c);
         }
 
         rows.into_iter()
@@ -1098,17 +1131,30 @@ impl TerminalState {
     /// Whether the child process has enabled any mouse tracking mode
     /// (e.g. via DECSET 1000/1002/1003).
     fn has_mouse_mode(&self) -> bool {
-        self.term.mode().intersects(TermMode::MOUSE_MODE)
+        self.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None
     }
 
     /// Whether the child process has switched to the alternate screen buffer
     /// (e.g. via DECSET 1049). Full-screen TUI apps like opencode use the
     /// alt screen; Claude and shells use the main screen.
     fn is_alt_screen(&self) -> bool {
-        self.term.mode().contains(TermMode::ALT_SCREEN)
+        self.screen().alternate_screen()
     }
 
-    fn snapshot(&self) -> TerminalSnapshot {
+    /// Probe the length of the scrollback history. vt100 exposes no direct
+    /// accessor, so we drive `set_scrollback` to a value past any plausible
+    /// history; it clamps to the real maximum, which `scrollback()` then
+    /// reports. The previous offset is restored so this is observationally a
+    /// pure read. Requires `&mut` because the probe mutates the grid's offset.
+    fn history_len(&mut self) -> usize {
+        let current = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(usize::MAX);
+        let max = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(current);
+        max
+    }
+
+    fn snapshot(&mut self) -> TerminalSnapshot {
         let mut snap = TerminalSnapshot::empty();
         self.snapshot_into(&mut snap);
         snap
@@ -1116,57 +1162,53 @@ impl TerminalState {
 
     /// Fill `target` with the current terminal viewport, reusing its existing
     /// `cells` allocation to avoid per-frame heap churn.
-    fn snapshot_into(&self, target: &mut TerminalSnapshot) {
-        let renderable = self.term.renderable_content();
-        let display_offset = renderable.display_offset;
-        let history_size = self.term.grid().history_size();
-        let colors = renderable.colors;
-        let cursor = if renderable.cursor.shape == CursorShape::Hidden {
+    fn snapshot_into(&mut self, target: &mut TerminalSnapshot) {
+        let scrollback_offset = self.parser.screen().scrollback();
+        let history_size = self.history_len();
+        let screen = self.parser.screen();
+
+        let cursor = if screen.hide_cursor() {
             None
         } else {
-            term::point_to_viewport(display_offset, renderable.cursor.point).map(|point| {
-                SnapshotCursor {
-                    row: point.line as u16,
-                    col: point.column.0 as u16,
-                }
-            })
+            let (row, col) = screen.cursor_position();
+            Some(SnapshotCursor { row, col })
         };
 
         target.cells.clear();
-        for indexed in renderable.display_iter {
-            let cell = indexed.cell;
-            if cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-            {
-                continue;
-            }
-
-            let Some(point) = term::point_to_viewport(display_offset, indexed.point) else {
-                continue;
-            };
-
-            let mut symbol = CompactString::new("");
-            symbol.push(cell.c);
-            if let Some(zerowidth) = cell.zerowidth() {
-                for ch in zerowidth {
-                    symbol.push(*ch);
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                // The trailing half of a wide character carries no glyph; the
+                // wide char itself (at the previous column) holds the symbol.
+                if cell.is_wide_continuation() {
+                    continue;
                 }
-            }
 
-            target.cells.push(SnapshotCell {
-                row: point.line as u16,
-                col: point.column.0 as u16,
-                symbol,
-                fg: convert_terminal_color(cell.fg, colors),
-                bg: convert_terminal_color(cell.bg, colors),
-                modifier: cell_modifier(cell),
-            });
+                // Empty cells render as a single space, matching the prior
+                // grid-emulator behavior of yielding a blank for every viewport
+                // cell so the surfaces always have a full grid to paint.
+                let symbol = if cell.has_contents() {
+                    CompactString::from(cell.contents())
+                } else {
+                    CompactString::const_new(" ")
+                };
+
+                target.cells.push(SnapshotCell {
+                    row,
+                    col,
+                    symbol,
+                    fg: convert_terminal_color(cell.fgcolor()),
+                    bg: convert_terminal_color(cell.bgcolor()),
+                    modifier: cell_modifier(cell),
+                });
+            }
         }
 
         target.rows = self.rows;
         target.cols = self.cols;
-        target.scrollback_offset = display_offset;
+        target.scrollback_offset = scrollback_offset;
         target.scrollback_total = history_size;
         target.cursor = cursor;
     }
@@ -1182,31 +1224,33 @@ impl TerminalState {
     /// the history into the client's scrollback. Printing is the only way to
     /// populate a terminal's scrollback over a byte stream — absolute-positioned
     /// repaints overwrite the viewport without ever scrolling.
-    fn reconnect_repaint(&self) -> Vec<u8> {
+    fn reconnect_repaint(&mut self) -> Vec<u8> {
         if self.is_alt_screen() {
-            return synthesize_repaint(&self.snapshot(), true);
+            let snap = self.snapshot();
+            return synthesize_repaint(&snap, true);
         }
 
-        let renderable = self.term.renderable_content();
-        let colors = renderable.colors;
         // The replay always rebuilds the buffer ending at the live bottom, so the
-        // cursor must be mapped as if the grid were NOT scrolled back (display
-        // offset 0). Using the live `display_offset` here would add the scrollback
-        // distance and emit an out-of-range cursor position whenever a TUI
-        // operator is reading history at the moment a web client connects.
-        let cursor = if renderable.cursor.shape == CursorShape::Hidden {
+        // cursor must be mapped as if the grid were NOT scrolled back. We read the
+        // cursor from the live screen (it is viewport-relative already and does
+        // not move with the scrollback offset), so an operator reading history at
+        // the moment a client connects can never push it out of range.
+        let cursor = if self.parser.screen().hide_cursor() {
             None
         } else {
-            term::point_to_viewport(0, renderable.cursor.point)
+            Some(self.parser.screen().cursor_position())
         };
 
-        let grid = self.term.grid();
-        let cols = grid.columns();
-        let full_top = grid.topmost_line().0;
-        let bottom = grid.bottommost_line().0;
-        // Bound the replay so a very large configured scrollback can't make one
-        // connect build an enormous buffer under the terminal lock. The default
-        // (10_000) never trips this; when it does, the most recent lines are kept.
+        let cols = usize::from(self.cols);
+        let rows = usize::from(self.rows);
+        let history = self.history_len();
+
+        // Model the logical line space in alacritty-style coordinates so the
+        // existing `clamp_replay_top` cap (and its unit test) keep their meaning:
+        // the visible screen occupies lines `0..=rows-1`, and history sits at the
+        // negative lines `-history..=-1`.
+        let full_top = -(history as i32);
+        let bottom = rows as i32 - 1;
         let top = clamp_replay_top(full_top, bottom);
         if top != full_top {
             logger::debug(&format!(
@@ -1217,10 +1261,85 @@ impl TerminalState {
             ));
         }
 
+        // Gather every logical line (history + viewport) into a flat list of
+        // owned rows by walking the scrollback in `rows`-sized windows. Each
+        // window reads the visible viewport at a given scrollback offset; the
+        // top window may be partial, so we only take the rows that fall at or
+        // above `top`. This is bounded by the replay cap above.
+        let saved_offset = self.parser.screen().scrollback();
+        let total_lines = (bottom - top + 1).max(0) as usize;
+        let mut lines: Vec<ReplayRow> = Vec::with_capacity(total_lines);
+
+        // Walk from the topmost line down to the live bottom. `line` is the
+        // alacritty-style coordinate; the scrollback offset that brings `line`
+        // to the top viewport row is `-line` for history lines and `0` for the
+        // viewport. We page through windows so each `set_scrollback` exposes a
+        // contiguous block of `rows` lines.
+        let mut line = top;
+        while line <= bottom {
+            // Offset that places `line` at viewport row 0. History line -N needs
+            // offset N; viewport lines need offset 0.
+            let offset = (-line).max(0) as usize;
+            self.parser.screen_mut().set_scrollback(offset);
+            let screen = self.parser.screen();
+            // The window covers logical lines `line ..= line + rows - 1`, mapped
+            // to viewport rows `0 ..= rows-1`. Emit each that is still <= bottom.
+            for vr in 0..rows {
+                let logical = line + vr as i32;
+                if logical > bottom {
+                    break;
+                }
+                let wrapped = screen.row_wrapped(vr as u16);
+                let mut cells: Vec<ReplayCell> = Vec::with_capacity(cols);
+                let emit_to = if wrapped {
+                    cols
+                } else {
+                    // Right-trim trailing empty default cells.
+                    let mut last_col = 0usize;
+                    for c in 0..cols {
+                        if let Some(cell) = screen.cell(vr as u16, c as u16)
+                            && (cell.has_contents() || cell.bgcolor() != vt100::Color::Default)
+                        {
+                            last_col = c + 1;
+                        }
+                    }
+                    last_col
+                };
+                for c in 0..emit_to {
+                    let Some(cell) = screen.cell(vr as u16, c as u16) else {
+                        cells.push(ReplayCell::blank());
+                        continue;
+                    };
+                    if cell.is_wide_continuation() {
+                        continue;
+                    }
+                    let contents = cell.contents();
+                    // Map an empty cell or any C0 control (only '\t' is reachable
+                    // as a stored glyph) to a space so the client renders a blank
+                    // rather than re-interpreting a control sequence.
+                    let symbol = if contents.is_empty()
+                        || contents.chars().next().is_some_and(|c| c < ' ')
+                    {
+                        CompactString::const_new(" ")
+                    } else {
+                        CompactString::from(contents)
+                    };
+                    cells.push(ReplayCell {
+                        symbol,
+                        fg: convert_terminal_color(cell.fgcolor()),
+                        bg: convert_terminal_color(cell.bgcolor()),
+                        modifier: cell_modifier(cell),
+                    });
+                }
+                lines.push(ReplayRow { cells, wrapped });
+            }
+            line += rows as i32;
+        }
+        self.parser.screen_mut().set_scrollback(saved_offset);
+
         // Pre-size to history+screen rows so a large scrollback doesn't reallocate
         // repeatedly while we hold the terminal lock.
-        let est_rows = (bottom - top + 1).max(0) as usize;
-        let mut out = String::with_capacity(est_rows * (cols + 2) + 32);
+        let mut out = String::with_capacity(lines.len() * (cols + 2) + 32);
         // Ensure the primary buffer and autowrap-on (so soft-wrapped rows can be
         // rebuilt by the client), then clear the screen, clear the client's saved
         // scrollback (3J), and home the cursor. Clearing scrollback makes a
@@ -1229,286 +1348,260 @@ impl TerminalState {
         out.push_str("\x1b[?1049l\x1b[?7h\x1b[2J\x1b[3J\x1b[H");
 
         let mut last_style: Option<(CellColor, CellColor, CellModifier)> = None;
-        // A soft-wrapped row carries `WRAPLINE` on its last cell. We replay such a
-        // row at full width with NO line break and let the client's autowrap
-        // re-create the soft wrap when the next row's first cell overflows — that
-        // preserves copy/paste and resize-reflow semantics. A `\r\n` is emitted
-        // only for genuine (hard) line breaks.
+        // A soft-wrapped row is replayed at full width with NO line break, letting
+        // the client's autowrap re-create the soft wrap when the next row's first
+        // cell overflows — that preserves copy/paste and resize-reflow semantics.
+        // A `\r\n` is emitted only for genuine (hard) line breaks.
         let mut prev_wrapped = false;
-        for line in top..=bottom {
-            let row = &grid[Line(line)];
-            let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
-            if line != top && !prev_wrapped {
+        for (idx, row) in lines.iter().enumerate() {
+            if idx != 0 && !prev_wrapped {
                 // Reset SGR before a hard line break while a non-default
                 // background is still active. A `\r\n` at the bottom of the
                 // screen scrolls, and a scroll fills the newly-exposed row with
                 // the CURRENT background color (Background-Color-Erase). Without
                 // this reset the previous line's background bleeds onto the next
-                // line on the client — even though we re-emit SGR for the next
-                // line's first cell, the bleed has already happened during the
-                // scroll. Soft-wrapped rows intentionally skip this so a colored
-                // background continues across the wrap.
+                // line on the client. Soft-wrapped rows intentionally skip this
+                // so a colored background continues across the wrap.
                 if matches!(last_style, Some((_, bg, _)) if bg != CellColor::Reset) {
                     out.push_str("\x1b[0m");
                     last_style = None;
                 }
                 out.push_str("\r\n");
             }
-            // Right-trim trailing empty default cells so we don't emit a screen's
-            // worth of spaces per line. `Cell::is_empty` is false for colored
-            // (non-default-background) spaces, so visible trailing blocks survive.
-            // A wrapped row keeps its full width — the trailing cells are load
-            // bearing for the autowrap to fire at the right column.
-            let emit_to = if wrapped {
-                cols
-            } else {
-                let mut last_col = 0usize;
-                for c in 0..cols {
-                    if !row[Column(c)].is_empty() {
-                        last_col = c + 1;
-                    }
-                }
-                last_col
-            };
-            for c in 0..emit_to {
-                let cell = &row[Column(c)];
-                // The trailing spacer of a wide char carries no glyph; the wide
-                // char itself (at the previous column) holds the symbol.
-                if cell
-                    .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                let fg = convert_terminal_color(cell.fg, colors);
-                let bg = convert_terminal_color(cell.bg, colors);
-                let modifier = cell_modifier(cell);
-                let style = (fg, bg, modifier);
+            for cell in &row.cells {
+                let style = (cell.fg, cell.bg, cell.modifier);
                 if last_style != Some(style) {
                     out.push_str("\x1b[0m");
-                    out.push_str(&sgr_sequence(fg, bg, modifier));
+                    out.push_str(&sgr_sequence(cell.fg, cell.bg, cell.modifier));
                     last_style = Some(style);
                 }
-                // A tab cell stores a literal '\t' as a one-column anchor (the
-                // span's fill spaces follow in later cells); emitting it raw would
-                // make the client interpret a tab control and jump columns. Map
-                // any C0 control to a space — only '\t' is reachable here, but
-                // this is defensively safe for all of them.
-                out.push(if cell.c < ' ' { ' ' } else { cell.c });
-                if let Some(zerowidth) = cell.zerowidth() {
-                    for ch in zerowidth {
-                        out.push(*ch);
-                    }
-                }
+                out.push_str(cell.symbol.as_str());
             }
-            prev_wrapped = wrapped;
+            prev_wrapped = row.wrapped;
         }
 
         out.push_str("\x1b[0m");
-        if let Some(point) = cursor {
-            out.push_str(&format!("\x1b[{};{}H", point.line + 1, point.column.0 + 1));
+        if let Some((row, col)) = cursor {
+            out.push_str(&format!("\x1b[{};{}H", row + 1, col + 1));
         }
         out.into_bytes()
     }
 
     fn scrollback_offset(&self) -> usize {
-        self.term.grid().display_offset()
+        self.parser.screen().scrollback()
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
-        let delta = if up { amount as i32 } else { -(amount as i32) };
-        self.term.scroll_display(Scroll::Delta(delta));
+        // vt100's `set_scrollback` is absolute; translate the delta-based scroll
+        // into a clamped absolute offset. Scrolling up increases the offset
+        // (further into history); scrolling down decreases it toward the live
+        // bottom (offset 0). The new offset is clamped to the history length.
+        let current = self.parser.screen().scrollback();
+        let history = self.history_len();
+        let target = if up {
+            current.saturating_add(amount).min(history)
+        } else {
+            current.saturating_sub(amount)
+        };
+        self.parser.screen_mut().set_scrollback(target);
     }
 
     fn set_scrollback(&mut self, rows: usize) {
-        let current = self.term.grid().display_offset();
-        let target = rows.min(self.term.grid().history_size());
-        let delta = target as i32 - current as i32;
-        self.term.scroll_display(Scroll::Delta(delta));
+        // vt100 clamps an over-large offset to the history length internally, so
+        // the external "0 = live bottom, N = scrolled back" semantics are
+        // preserved directly.
+        self.parser.screen_mut().set_scrollback(rows);
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
         self.rows = rows;
         self.cols = cols;
-        self.event_proxy.set_size(rows, cols);
-        self.term.resize(TerminalDimensions::new(rows, cols));
+        self.parser.screen_mut().set_size(rows, cols);
     }
 }
 
-#[derive(Clone)]
-struct EventProxy {
-    pending: Arc<Mutex<PendingEvents>>,
-    size: Arc<Mutex<(u16, u16)>>,
+/// A single replayed cell, captured while paging through scrollback windows so
+/// the repaint can be emitted after the scrollback offset is restored.
+struct ReplayCell {
+    symbol: CompactString,
+    fg: CellColor,
+    bg: CellColor,
+    modifier: CellModifier,
 }
 
-impl EventProxy {
-    fn new(rows: u16, cols: u16) -> Self {
+impl ReplayCell {
+    fn blank() -> Self {
         Self {
-            pending: Arc::new(Mutex::new(PendingEvents::default())),
-            size: Arc::new(Mutex::new((rows, cols))),
-        }
-    }
-
-    fn push_bytes(&self, bytes: &[u8]) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.bytes.extend_from_slice(bytes);
-        }
-    }
-
-    fn push_color_request(&self, index: usize, formatter: ColorRequestFormatter) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending
-                .color_requests
-                .push(PendingColorRequest { index, formatter });
-        }
-    }
-
-    fn take_pending(&self) -> PendingEvents {
-        self.pending
-            .lock()
-            .map(|mut pending| std::mem::take(&mut *pending))
-            .unwrap_or_default()
-    }
-
-    fn set_size(&self, rows: u16, cols: u16) {
-        if let Ok(mut size) = self.size.lock() {
-            *size = (rows, cols);
+            symbol: CompactString::const_new(" "),
+            fg: CellColor::Reset,
+            bg: CellColor::Reset,
+            modifier: CellModifier::default(),
         }
     }
 }
 
-impl EventListener for EventProxy {
-    fn send_event(&self, event: Event) {
-        match event {
-            Event::PtyWrite(text) => self.push_bytes(text.as_bytes()),
-            Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
-            Event::TextAreaSizeRequest(formatter) => {
-                let (rows, cols) = self.size.lock().map(|size| *size).unwrap_or((24, 80));
-                let response = formatter(WindowSize {
-                    num_lines: rows,
-                    num_cols: cols,
-                    cell_width: 0,
-                    cell_height: 0,
-                });
-                self.push_bytes(response.as_bytes());
+/// A replayed logical row plus whether it soft-wraps into the next one.
+struct ReplayRow {
+    cells: Vec<ReplayCell>,
+    wrapped: bool,
+}
+
+/// A CSI device query the child issued, queued during parsing and answered by
+/// [`TerminalState::process`] after the chunk has been applied (so the DSR-6
+/// cursor reply reflects the post-process cursor position). vt100 does not
+/// generate these replies itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeviceQuery {
+    /// Primary Device Attributes (`ESC [ c` / `ESC [ 0 c`).
+    Da1,
+    /// Secondary Device Attributes (`ESC [ > c`).
+    Da2,
+    /// Device Status Report — operating status (`ESC [ 5 n`).
+    DsrStatus,
+    /// Device Status Report — cursor position (`ESC [ 6 n`).
+    DsrCursor,
+}
+
+/// vt100 callback sink. The parser routes escape sequences it does not act on
+/// here; we resolve OSC color queries into reply bytes and queue CSI device
+/// queries for [`TerminalState::process`] to answer. Replies are written back
+/// to the PTY by the caller. (alacritty answered these via its `EventListener`;
+/// vt100 has no built-in responder, so we reproduce the small responder here.)
+#[derive(Default)]
+struct TerminalCallbacks {
+    /// OSC color-query replies resolved during parsing, drained by `process`.
+    replies: Vec<u8>,
+    /// CSI device queries seen during parsing, answered by `process` so the
+    /// DSR-6 reply reflects the post-chunk cursor position.
+    pending_queries: Vec<DeviceQuery>,
+}
+
+impl vt100::Callbacks for TerminalCallbacks {
+    fn unhandled_csi(
+        &mut self,
+        _screen: &mut vt100::Screen,
+        intermediate1: Option<u8>,
+        _intermediate2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        let first = params.first().and_then(|p| p.first().copied());
+        match c {
+            // Primary/secondary Device Attributes.
+            'c' => match intermediate1 {
+                Some(b'>') => self.pending_queries.push(DeviceQuery::Da2),
+                None => {
+                    // `ESC [ c` or `ESC [ 0 c`.
+                    if matches!(first, None | Some(0)) {
+                        self.pending_queries.push(DeviceQuery::Da1);
+                    }
+                }
+                _ => {}
+            },
+            // Device Status Report.
+            'n' if intermediate1.is_none() => match first {
+                Some(5) => self.pending_queries.push(DeviceQuery::DsrStatus),
+                Some(6) => self.pending_queries.push(DeviceQuery::DsrCursor),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn unhandled_osc(&mut self, _screen: &mut vt100::Screen, params: &[&[u8]]) {
+        // OSC color queries: `OSC 4 ; <idx> ; ? BEL`, `OSC 10 ; ? BEL`
+        // (foreground), `OSC 11 ; ? BEL` (background). The reply echoes the same
+        // selector with the resolved color as `rgb:RRRR/GGGG/BBBB`. Only the
+        // query form (trailing `?`) is answered; set requests are ignored (vt100
+        // does not track a mutable palette, so there is nothing to change).
+        match params {
+            // OSC 4 ; <index> ; ?  — palette color query.
+            [b"4", idx, last] if is_query(last) => {
+                if let Some(index) = parse_osc_index(idx) {
+                    let color = default_palette_rgb(index).unwrap_or((0, 0, 0));
+                    self.replies.extend_from_slice(
+                        osc_color_reply(&format!("4;{index}"), color).as_bytes(),
+                    );
+                }
+            }
+            // OSC 10 ; ?  — foreground color query (default: white).
+            [b"10", last] if is_query(last) => {
+                self.replies
+                    .extend_from_slice(osc_color_reply("10", (0xff, 0xff, 0xff)).as_bytes());
+            }
+            // OSC 11 ; ?  — background color query (default: black).
+            [b"11", last] if is_query(last) => {
+                self.replies
+                    .extend_from_slice(osc_color_reply("11", (0x00, 0x00, 0x00)).as_bytes());
             }
             _ => {}
         }
     }
 }
 
-type ColorRequestFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
-
-#[derive(Default)]
-struct PendingEvents {
-    bytes: Vec<u8>,
-    color_requests: Vec<PendingColorRequest>,
+/// Whether an OSC parameter is the query form (`?`).
+fn is_query(param: &[u8]) -> bool {
+    param == b"?"
 }
 
-struct PendingColorRequest {
-    index: usize,
-    formatter: ColorRequestFormatter,
+/// Parse an OSC numeric index parameter (used by `OSC 4 ; <index> ; ?`).
+fn parse_osc_index(param: &[u8]) -> Option<usize> {
+    std::str::from_utf8(param).ok()?.trim().parse().ok()
 }
 
-struct TerminalDimensions {
-    rows: usize,
-    cols: usize,
+/// Format an OSC color reply: `ESC ] <selector> ; rgb:RRRR/GGGG/BBBB BEL`. Each
+/// 8-bit channel is doubled to the 16-bit `rgb:` form xterm uses.
+fn osc_color_reply(selector: &str, (r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b]{selector};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x07")
 }
 
-impl TerminalDimensions {
-    fn new(rows: u16, cols: u16) -> Self {
-        Self {
-            rows: usize::from(rows),
-            cols: usize::from(cols),
-        }
-    }
-}
-
-impl Dimensions for TerminalDimensions {
-    fn total_lines(&self) -> usize {
-        self.rows
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.rows
-    }
-
-    fn columns(&self) -> usize {
-        self.cols
+/// Translate a vt100 cell's style flags into our serializable `CellModifier`.
+/// Shared by the per-frame snapshot and the reconnect repaint.
+///
+/// Fidelity note: vt100 (0.16) does not model strikethrough or blink, so
+/// `crossed_out` is always false and there is no blink mapping. The other
+/// attributes (bold, dim, italic, underline, inverse) are preserved.
+fn cell_modifier(cell: &vt100::Cell) -> CellModifier {
+    CellModifier {
+        bold: cell.bold(),
+        dim: cell.dim(),
+        italic: cell.italic(),
+        underlined: cell.underline(),
+        reversed: cell.inverse(),
+        // vt100 has no strikethrough/blink attribute; this fidelity loss is
+        // documented above. Kept false so downstream surfaces are consistent.
+        crossed_out: false,
     }
 }
 
-/// Translate an alacritty cell's style flags into our serializable
-/// `CellModifier`. Shared by the per-frame snapshot and the reconnect repaint.
-fn cell_modifier(cell: &Cell) -> CellModifier {
-    let mut modifier = CellModifier::default();
-    if cell.flags.contains(Flags::BOLD) {
-        modifier.bold = true;
-    }
-    if cell.flags.contains(Flags::ITALIC) {
-        modifier.italic = true;
-    }
-    if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-        modifier.underlined = true;
-    }
-    if cell.flags.contains(Flags::INVERSE) {
-        modifier.reversed = true;
-    }
-    if cell.flags.contains(Flags::DIM) {
-        modifier.dim = true;
-    }
-    if cell.flags.contains(Flags::STRIKEOUT) {
-        modifier.crossed_out = true;
-    }
-    modifier
-}
-
-fn convert_terminal_color(
-    color: TermColor,
-    palette: &alacritty_terminal::term::color::Colors,
-) -> CellColor {
+/// Map a vt100 color to the surface-agnostic `CellColor`.
+///
+/// `Default` becomes `Reset`. Palette indices 0..=15 map to the matching named
+/// `CellColor` variant (so `tui_color.rs` renders the terminal's own named
+/// colors); 16..=255 become `Indexed`. RGB passes through.
+fn convert_terminal_color(color: vt100::Color) -> CellColor {
     match color {
-        TermColor::Spec(Rgb { r, g, b }) => CellColor::Rgb(r, g, b),
-        TermColor::Indexed(index) => palette[index as usize]
-            .map(|rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b))
-            .unwrap_or(CellColor::Indexed(index)),
-        TermColor::Named(named) => palette[named]
-            .map(|rgb| CellColor::Rgb(rgb.r, rgb.g, rgb.b))
-            .unwrap_or_else(|| named_color_to_tui(named)),
-    }
-}
-
-fn named_color_to_tui(color: NamedColor) -> CellColor {
-    match color {
-        NamedColor::Black => CellColor::Indexed(0),
-        NamedColor::Red => CellColor::Indexed(1),
-        NamedColor::Green => CellColor::Indexed(2),
-        NamedColor::Yellow => CellColor::Indexed(3),
-        NamedColor::Blue => CellColor::Indexed(4),
-        NamedColor::Magenta => CellColor::Indexed(5),
-        NamedColor::Cyan => CellColor::Indexed(6),
-        NamedColor::White => CellColor::Indexed(7),
-        NamedColor::BrightBlack => CellColor::Indexed(8),
-        NamedColor::BrightRed => CellColor::Indexed(9),
-        NamedColor::BrightGreen => CellColor::Indexed(10),
-        NamedColor::BrightYellow => CellColor::Indexed(11),
-        NamedColor::BrightBlue => CellColor::Indexed(12),
-        NamedColor::BrightMagenta => CellColor::Indexed(13),
-        NamedColor::BrightCyan => CellColor::Indexed(14),
-        NamedColor::BrightWhite => CellColor::Indexed(15),
-        NamedColor::DimBlack => CellColor::Indexed(0),
-        NamedColor::DimRed => CellColor::Indexed(1),
-        NamedColor::DimGreen => CellColor::Indexed(2),
-        NamedColor::DimYellow => CellColor::Indexed(3),
-        NamedColor::DimBlue => CellColor::Indexed(4),
-        NamedColor::DimMagenta => CellColor::Indexed(5),
-        NamedColor::DimCyan => CellColor::Indexed(6),
-        NamedColor::DimWhite => CellColor::Indexed(7),
-        NamedColor::Foreground
-        | NamedColor::Background
-        | NamedColor::Cursor
-        | NamedColor::BrightForeground
-        | NamedColor::DimForeground => CellColor::Reset,
+        vt100::Color::Default => CellColor::Reset,
+        vt100::Color::Rgb(r, g, b) => CellColor::Rgb(r, g, b),
+        vt100::Color::Idx(i) => match i {
+            0 => CellColor::Black,
+            1 => CellColor::Red,
+            2 => CellColor::Green,
+            3 => CellColor::Yellow,
+            4 => CellColor::Blue,
+            5 => CellColor::Magenta,
+            6 => CellColor::Cyan,
+            7 => CellColor::Gray,
+            8 => CellColor::DarkGray,
+            9 => CellColor::LightRed,
+            10 => CellColor::LightGreen,
+            11 => CellColor::LightYellow,
+            12 => CellColor::LightBlue,
+            13 => CellColor::LightMagenta,
+            14 => CellColor::LightCyan,
+            15 => CellColor::White,
+            n => CellColor::Indexed(n),
+        },
     }
 }
 
@@ -1566,75 +1659,47 @@ fn term_supports_extended_color(term: &str) -> bool {
         || term.contains("screen")
 }
 
-fn resolve_color_request_rgb(
-    index: usize,
-    palette: &alacritty_terminal::term::color::Colors,
-) -> Rgb {
-    (index < alacritty_terminal::term::color::COUNT)
-        .then(|| palette[index])
-        .flatten()
-        .or_else(|| default_palette_rgb(index))
-        .unwrap_or(Rgb {
-            r: 0x00,
-            g: 0x00,
-            b: 0x00,
-        })
-}
-
-fn default_palette_rgb(index: usize) -> Option<Rgb> {
+/// Resolve a default RGB for an 8-bit color index, used to answer OSC palette
+/// queries (`OSC 4 ; n ; ?`). vt100 does not expose a mutable palette, so this
+/// returns the standard xterm default for the requested slot. Indices outside
+/// 0..=255 return `None`.
+fn default_palette_rgb(index: usize) -> Option<(u8, u8, u8)> {
     match index {
-        0 => Some(rgb(0x00, 0x00, 0x00)),
-        1 => Some(rgb(0xcd, 0x00, 0x00)),
-        2 => Some(rgb(0x00, 0xcd, 0x00)),
-        3 => Some(rgb(0xcd, 0xcd, 0x00)),
-        4 => Some(rgb(0x00, 0x00, 0xee)),
-        5 => Some(rgb(0xcd, 0x00, 0xcd)),
-        6 => Some(rgb(0x00, 0xcd, 0xcd)),
-        7 => Some(rgb(0xe5, 0xe5, 0xe5)),
-        8 => Some(rgb(0x7f, 0x7f, 0x7f)),
-        9 => Some(rgb(0xff, 0x00, 0x00)),
-        10 => Some(rgb(0x00, 0xff, 0x00)),
-        11 => Some(rgb(0xff, 0xff, 0x00)),
-        12 => Some(rgb(0x5c, 0x5c, 0xff)),
-        13 => Some(rgb(0xff, 0x00, 0xff)),
-        14 => Some(rgb(0x00, 0xff, 0xff)),
-        15 => Some(rgb(0xff, 0xff, 0xff)),
+        0 => Some((0x00, 0x00, 0x00)),
+        1 => Some((0xcd, 0x00, 0x00)),
+        2 => Some((0x00, 0xcd, 0x00)),
+        3 => Some((0xcd, 0xcd, 0x00)),
+        4 => Some((0x00, 0x00, 0xee)),
+        5 => Some((0xcd, 0x00, 0xcd)),
+        6 => Some((0x00, 0xcd, 0xcd)),
+        7 => Some((0xe5, 0xe5, 0xe5)),
+        8 => Some((0x7f, 0x7f, 0x7f)),
+        9 => Some((0xff, 0x00, 0x00)),
+        10 => Some((0x00, 0xff, 0x00)),
+        11 => Some((0xff, 0xff, 0x00)),
+        12 => Some((0x5c, 0x5c, 0xff)),
+        13 => Some((0xff, 0x00, 0xff)),
+        14 => Some((0x00, 0xff, 0xff)),
+        15 => Some((0xff, 0xff, 0xff)),
         16..=231 => Some(xterm_color_cube(index)),
         232..=255 => Some(xterm_grayscale(index)),
-        x if x == NamedColor::Foreground as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::Background as usize => Some(rgb(0x00, 0x00, 0x00)),
-        x if x == NamedColor::Cursor as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::DimBlack as usize => Some(rgb(0x00, 0x00, 0x00)),
-        x if x == NamedColor::DimRed as usize => Some(rgb(0x80, 0x00, 0x00)),
-        x if x == NamedColor::DimGreen as usize => Some(rgb(0x00, 0x80, 0x00)),
-        x if x == NamedColor::DimYellow as usize => Some(rgb(0x80, 0x80, 0x00)),
-        x if x == NamedColor::DimBlue as usize => Some(rgb(0x00, 0x00, 0x80)),
-        x if x == NamedColor::DimMagenta as usize => Some(rgb(0x80, 0x00, 0x80)),
-        x if x == NamedColor::DimCyan as usize => Some(rgb(0x00, 0x80, 0x80)),
-        x if x == NamedColor::DimWhite as usize => Some(rgb(0x80, 0x80, 0x80)),
-        x if x == NamedColor::BrightForeground as usize => Some(rgb(0xff, 0xff, 0xff)),
-        x if x == NamedColor::DimForeground as usize => Some(rgb(0x80, 0x80, 0x80)),
         _ => None,
     }
 }
 
-fn xterm_color_cube(index: usize) -> Rgb {
+fn xterm_color_cube(index: usize) -> (u8, u8, u8) {
     const STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 
     let idx = index - 16;
     let r = STEPS[idx / 36];
     let g = STEPS[(idx / 6) % 6];
     let b = STEPS[idx % 6];
-    rgb(r, g, b)
+    (r, g, b)
 }
 
-fn xterm_grayscale(index: usize) -> Rgb {
+fn xterm_grayscale(index: usize) -> (u8, u8, u8) {
     let level = 8 + ((index - 232) as u8 * 10);
-    rgb(level, level, level)
-}
-
-const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
-    Rgb { r, g, b }
+    (level, level, level)
 }
 
 /// Append `data` to `pending.buf`, respecting `cap`. On overflow, drop the
@@ -1686,9 +1751,10 @@ mod tests {
         let mut terminal = TerminalState::with_scrollback(3, 12, 100);
         terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
 
-        assert_eq!(terminal.term.grid().history_size(), 3);
+        assert_eq!(terminal.history_len(), 3);
 
-        terminal.set_scrollback(terminal.term.grid().history_size());
+        let history = terminal.history_len();
+        terminal.set_scrollback(history);
         let top = terminal.snapshot();
         let lines = viewport_lines(&top);
 
@@ -1701,17 +1767,15 @@ mod tests {
     fn scrolling_while_output_arrives_keeps_valid_offset() {
         let mut terminal = TerminalState::with_scrollback(3, 16, 100);
         terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
-        terminal.set_scrollback(terminal.term.grid().history_size());
+        let history = terminal.history_len();
+        terminal.set_scrollback(history);
 
         terminal.process(b"six\r\nseven\r\n");
         let snapshot = terminal.snapshot();
 
-        assert!(snapshot.scrollback_offset <= terminal.term.grid().history_size());
-        assert_eq!(
-            snapshot.scrollback_total,
-            terminal.term.grid().history_size()
-        );
-        assert!(terminal.term.grid().history_size() >= 5);
+        assert!(snapshot.scrollback_offset <= terminal.history_len());
+        assert_eq!(snapshot.scrollback_total, terminal.history_len());
+        assert!(terminal.history_len() >= 5);
     }
 
     #[test]
@@ -1721,7 +1785,7 @@ mod tests {
             terminal.process(format!("line{i}\r\n").as_bytes());
         }
         assert!(
-            terminal.term.grid().history_size() > 0,
+            terminal.history_len() > 0,
             "precondition: terminal has scrollback history"
         );
 
@@ -1789,7 +1853,7 @@ mod tests {
         dst.process(&replay);
 
         assert!(
-            dst.term.grid().history_size() > 0,
+            dst.history_len() > 0,
             "replay must rebuild scrollback in a fresh terminal"
         );
         assert_eq!(
@@ -1807,7 +1871,8 @@ mod tests {
         }
         // The operator scrolls into history; a web client connecting now must
         // still place the cursor within the live screen, not at an offset row.
-        terminal.set_scrollback(terminal.term.grid().history_size());
+        let history = terminal.history_len();
+        terminal.set_scrollback(history);
         let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
 
         // Inspect the trailing cursor-restore CUP (\x1b[<row>;<col>H), if present.
@@ -1827,13 +1892,7 @@ mod tests {
         let mut src = TerminalState::with_scrollback(4, 8, 1000);
         // 12 chars into an 8-col terminal soft-wraps across two grid rows.
         src.process(b"ABCDEFGHIJKL");
-        let has_wrap = |t: &TerminalState| {
-            (t.term.grid().topmost_line().0..=t.term.grid().bottommost_line().0).any(|l| {
-                t.term.grid()[Line(l)][Column(7)]
-                    .flags
-                    .contains(Flags::WRAPLINE)
-            })
-        };
+        let has_wrap = |t: &TerminalState| (0..t.rows).any(|row| t.screen().row_wrapped(row));
         assert!(
             has_wrap(&src),
             "precondition: source has a soft-wrapped row"
@@ -1927,6 +1986,33 @@ mod tests {
             response.contains("\x1b]11;rgb:0000/0000/0000"),
             "expected background color response, got: {response:?}"
         );
+    }
+
+    #[test]
+    fn dsr_cursor_position_query_produces_reply() {
+        // vt100 does not answer device-status queries itself; the migrated
+        // responder must emit a DSR-6 (cursor position report) reflecting the
+        // cursor *after* the chunk is applied. Move the cursor to row 3, col 5
+        // (1-based) then query — the reply must report that position.
+        let mut terminal = TerminalState::with_scrollback(10, 40, 100);
+        let reply = terminal.process(b"\x1b[3;5H\x1b[6n");
+        let reply = String::from_utf8(reply).expect("DSR reply should be utf-8");
+        assert_eq!(
+            reply, "\x1b[3;5R",
+            "expected a DSR-6 cursor-position report at row 3, col 5, got: {reply:?}"
+        );
+    }
+
+    #[test]
+    fn da1_and_dsr_status_queries_produce_replies() {
+        // DA1 (`ESC [ c`) must answer with a VT100-with-AVO identity, and
+        // DSR-5 (`ESC [ 5 n`) with an "OK" operating-status report.
+        let mut terminal = TerminalState::with_scrollback(5, 20, 100);
+        let da1 = String::from_utf8(terminal.process(b"\x1b[c")).unwrap();
+        assert_eq!(da1, "\x1b[?1;2c", "unexpected DA1 reply: {da1:?}");
+
+        let dsr5 = String::from_utf8(terminal.process(b"\x1b[5n")).unwrap();
+        assert_eq!(dsr5, "\x1b[0n", "unexpected DSR-5 reply: {dsr5:?}");
     }
 
     #[test]
@@ -2500,7 +2586,7 @@ mod tests {
         let before_lines = viewport_lines(&before);
 
         // Scroll all the way to the top of history.
-        let history = terminal.term.grid().history_size();
+        let history = terminal.history_len();
         terminal.scroll(true, history);
 
         // Then scroll all the way back to bottom.
@@ -2728,8 +2814,8 @@ mod tests {
             "paused+drained stream should match the unpaused baseline"
         );
         assert_eq!(
-            baseline.term.grid().history_size(),
-            paused.term.grid().history_size(),
+            baseline.history_len(),
+            paused.history_len(),
             "scrollback history size should match"
         );
     }
