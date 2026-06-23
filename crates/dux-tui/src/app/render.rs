@@ -1280,19 +1280,28 @@ impl App {
                     let cx = term_area.x + cursor.col;
                     let cy = term_area.y + cursor.row;
                     if cx < term_area.x + term_area.width && cy < term_area.y + term_area.height {
-                        let cursor_cell = &mut buf[(cx, cy)];
-                        cursor_cell.set_style(
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.prompt_cursor),
-                        );
+                        // Do NOT pre-paint the cursor cell into a block here.
+                        // We move the real hardware cursor onto this cell below
+                        // (`set_cursor_position`), and that hardware cursor IS
+                        // the visible block on every host terminal. Painting the
+                        // cell to *look* like a cursor as well caused it to
+                        // vanish under Alacritty: Alacritty draws its block
+                        // cursor by INVERTING the cell's colors, and inverting a
+                        // cell we had already styled as a cursor (input_cursor_fg
+                        // on prompt_cursor) cancelled back to an invisible caret.
+                        // Terminals that draw a fixed-color cursor block stayed
+                        // visible, which is why this only reproduced in Alacritty
+                        // (issue: invisible caret in Alacritty host). Leaving the
+                        // underlying glyph/colors untouched gives every terminal
+                        // a normal cell to invert, so the hardware block shows.
+                        //
                         // Move the real terminal cursor onto the embedded PTY
                         // cursor cell. IME composition popups (e.g. a Korean
                         // IME) are drawn by the terminal/OS at the hardware
                         // cursor; without this the composing character appears
                         // at the terminal origin instead of the agent prompt
-                        // (issue #258). The styled cell above keeps the block
-                        // cursor look; this aligns the hardware cursor with it.
+                        // (issue #258). `set_cursor_position` preserves that
+                        // alignment — it still lands exactly on the cursor cell.
                         //
                         // This must stay the last use of `buf` in this block:
                         // `set_cursor_position` reborrows `frame`, which is only
@@ -7618,6 +7627,99 @@ mod tests {
         assert_eq!((cursor.row, cursor.col), (4, 9));
         let expected = (term_area.x + 9, term_area.y + 4);
         terminal.backend_mut().assert_cursor_position(expected);
+    }
+
+    /// Regression test for the invisible-caret-in-Alacritty bug.
+    ///
+    /// The renderer used to pre-paint the cursor cell into a block
+    /// (`fg(input_cursor_fg).bg(prompt_cursor)`) *and* move the real hardware
+    /// cursor onto the same cell. Alacritty draws its block cursor by INVERTING
+    /// the cell's colors, so inverting a cell that was already styled to look
+    /// like a cursor cancelled it back to invisibility — the caret vanished
+    /// only under Alacritty. The fix stops pre-painting the cell and relies on
+    /// the hardware cursor (set via `set_cursor_position`) for the visible
+    /// block, leaving Alacritty a normal cell to invert.
+    ///
+    /// This asserts both halves of the fix:
+    ///   1. the cursor cell is no longer pre-painted into the invisible block
+    ///      style (so Alacritty's inversion produces a visible cursor), and
+    ///   2. the hardware cursor is still placed exactly on the cursor cell, so
+    ///      IME composition alignment (issue #258) is preserved.
+    #[test]
+    fn interactive_agent_does_not_prepaint_cursor_cell_block() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // Park the PTY cursor at row 4, col 9 (0-based), same as the #258 tests.
+        let args = vec![
+            "-c".to_string(),
+            "printf '\\033[5;9HX'; sleep 30".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+
+        app.input_target = InputTarget::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        wait_for_agent_cursor(&mut app, 4, 9);
+
+        let backend = TestBackend::new(100, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let term_area = app
+            .mouse_layout
+            .agent_term
+            .expect("agent terminal area should be recorded after render");
+        assert!(
+            term_area.x > 0 || term_area.y > 0,
+            "test setup: agent terminal should be offset from the origin"
+        );
+        let cursor = app
+            .snapshot_buf
+            .cursor
+            .expect("interactive agent snapshot should expose a PTY cursor");
+        assert_eq!((cursor.row, cursor.col), (4, 9));
+
+        let cx = term_area.x + 9;
+        let cy = term_area.y + 4;
+
+        // (1) The cursor cell must NOT carry the pre-painted block style that
+        // Alacritty's inversion cancels to invisibility. In the test theme the
+        // old style was `fg(Color::Black).bg(Color::Cyan)` (input_cursor_fg /
+        // prompt_cursor); the cell must not be both at once.
+        assert_eq!(
+            app.theme.input_cursor_fg,
+            ratatui::style::Color::Black,
+            "test theme assumption: input_cursor_fg is Black"
+        );
+        assert_eq!(
+            app.theme.prompt_cursor,
+            ratatui::style::Color::Cyan,
+            "test theme assumption: prompt_cursor is Cyan"
+        );
+        let cell = terminal
+            .backend()
+            .buffer()
+            .cell((cx, cy))
+            .expect("cursor cell should be within the rendered buffer");
+        assert!(
+            !(cell.fg == app.theme.input_cursor_fg && cell.bg == app.theme.prompt_cursor),
+            "cursor cell must not be pre-painted into the invisible block style \
+             (fg={:?}, bg={:?}); the hardware cursor provides the visible block",
+            cell.fg,
+            cell.bg,
+        );
+
+        // (2) The hardware cursor must still land exactly on the cursor cell so
+        // IME composition popups align with the prompt (issue #258).
+        terminal.backend_mut().assert_cursor_position((cx, cy));
     }
 
     #[test]
