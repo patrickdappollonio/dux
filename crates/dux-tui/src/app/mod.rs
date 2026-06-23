@@ -1921,6 +1921,23 @@ impl App {
             .set(Instant::now(), None, StatusTone::Busy, message);
     }
 
+    /// Set a keyed Info/success final. Used by a keyed operation's completion
+    /// path so the success replaces the operation's keyed Busy entry (the
+    /// anonymous `set_info` would leave the keyed entry to time out). The key
+    /// MUST match the one its Busy was emitted with.
+    pub(crate) fn set_info_keyed(&mut self, key: impl Into<String>, message: impl Into<String>) {
+        self.status
+            .set(Instant::now(), Some(key.into()), StatusTone::Info, message);
+    }
+
+    /// Set a keyed Error final. Same correlation contract as
+    /// [`Self::set_info_keyed`]: the key must match the operation's Busy key so
+    /// the error replaces the spinner rather than stranding it.
+    pub(crate) fn set_error_keyed(&mut self, key: impl Into<String>, message: impl Into<String>) {
+        self.status
+            .set(Instant::now(), Some(key.into()), StatusTone::Error, message);
+    }
+
     pub(crate) fn set_warning(&mut self, message: impl Into<String>) {
         self.status
             .set(Instant::now(), None, StatusTone::Warning, message);

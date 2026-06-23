@@ -40,6 +40,14 @@ pub mod status_keys {
     /// Create-agent key prefix. Parameterised by project id at call sites:
     /// `format!("{CREATE_PREFIX}:{project_id}")`.
     pub const CREATE_PREFIX: &str = "create";
+
+    /// Create-agent operation key. Used by BOTH the busy emission and its
+    /// success/failure finals so the two cannot drift onto different keys — the
+    /// single-constructor discipline from the tri-state status design. Prefer
+    /// this over hand-formatting the prefix at call sites.
+    pub fn create(project_id: &str) -> String {
+        format!("{CREATE_PREFIX}:{project_id}")
+    }
 }
 
 use std::collections::BTreeMap;

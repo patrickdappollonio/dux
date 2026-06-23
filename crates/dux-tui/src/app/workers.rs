@@ -841,7 +841,10 @@ impl App {
         }
         match outcome.view {
             AgentLaunchReadyView::CreatePersistFailed { error } => {
-                self.set_error(format!("Failed to persist session: {error}"));
+                // Keyed final so it replaces the engine's `create:{id}` busy
+                // rather than leaving the spinner to time out.
+                let key = dux_core::wire::status_keys::create(&outcome.session.project_id);
+                self.set_error_keyed(key, format!("Failed to persist session: {error}"));
             }
             AgentLaunchReadyView::CreateCommitted {
                 status_message,
@@ -857,13 +860,16 @@ impl App {
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
+                // Keyed finals so the create success/startup-error replaces the
+                // engine's `create:{id}` busy entry instead of stranding it.
+                let key = dux_core::wire::status_keys::create(&outcome.session.project_id);
                 if let Some(err) = startup_result_error {
-                    self.set_error(format!(
+                    self.set_error_keyed(key, format!(
                         "Startup command failed for agent \"{}\": {err}. Run read-startup-command-logs for details.",
                         outcome.session.branch_name
                     ));
                 } else {
-                    self.set_info(status_message);
+                    self.set_info_keyed(key, status_message);
                 }
             }
             AgentLaunchReadyView::SessionMissing => {}
@@ -892,7 +898,14 @@ impl App {
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
         match outcome {
-            AgentLaunchFailedOutcome::Create { message, .. } => self.set_error(message),
+            AgentLaunchFailedOutcome::Create {
+                project_id,
+                message,
+            } => {
+                // Keyed to the create op so a launch failure after the worktree
+                // was created still replaces the `create:{id}` busy spinner.
+                self.set_error_keyed(dux_core::wire::status_keys::create(&project_id), message)
+            }
             AgentLaunchFailedOutcome::Reconnect {
                 branch_name,
                 message,
@@ -1115,6 +1128,57 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    /// A successful create launch must replace the engine's keyed `create:{id}`
+    /// Busy with a same-key Info final, not an anonymous one — otherwise the
+    /// keyed Busy entry lingers and times out to a spurious Warning.
+    #[test]
+    fn create_committed_replaces_the_keyed_create_busy() {
+        use crate::statusline::StatusTone;
+
+        let mut app = crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+        let project_id = session.project_id.clone();
+        let create_key = dux_core::wire::status_keys::create(&project_id);
+
+        // Simulate the engine's keyed create Busy.
+        app.status.set(
+            std::time::Instant::now(),
+            Some(create_key.clone()),
+            StatusTone::Busy,
+            "Creating worktree…",
+        );
+        assert_eq!(
+            app.status
+                .snapshot()
+                .iter()
+                .find(|s| s.key.as_deref() == Some(create_key.as_str()))
+                .map(|s| s.tone.as_str()),
+            Some("busy"),
+        );
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            session,
+            pty_size: (80, 24),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Created agent.".to_string(),
+                startup_result_error: None,
+            },
+        });
+
+        let entry_tone = app
+            .status
+            .snapshot()
+            .into_iter()
+            .find(|s| s.key.as_deref() == Some(create_key.as_str()))
+            .map(|s| s.tone);
+        assert_eq!(
+            entry_tone.as_deref(),
+            Some("info"),
+            "the create Busy must be replaced in place by a same-key Info final",
+        );
     }
 
     #[test]
