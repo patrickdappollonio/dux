@@ -1964,6 +1964,58 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_repaint_round_trips_tall_buffer_with_bottom_cursor() {
+        // Reproduces the web re-attach symptom: an agent with lots of scrollback
+        // and a bottom-anchored input prompt. The replay must reproduce the
+        // prompt on the bottom row with the cursor inside it, not shifted up into
+        // the conversation history. A non-multiple-of-rows history (29 lines into
+        // a 6-row screen) also stresses the scrollback window-walk boundary.
+        let mut src = TerminalState::with_scrollback(6, 20, 100);
+        for i in 0..29 {
+            src.process(format!("hist{i}\r\n").as_bytes());
+        }
+        // Draw a bottom-row prompt and leave the cursor just after it.
+        src.process(b"\x1b[6;1H\x1b[2K> ");
+
+        let src_snap = src.snapshot();
+        assert_eq!(
+            src_snap.cursor,
+            Some(SnapshotCursor { row: 5, col: 2 }),
+            "precondition: cursor sits just after the bottom-row prompt"
+        );
+
+        let replay = src.reconnect_repaint();
+        let mut dst = TerminalState::with_scrollback(6, 20, 100);
+        dst.process(&replay);
+        let dst_snap = dst.snapshot();
+
+        assert_eq!(
+            dst_snap.cursor, src_snap.cursor,
+            "cursor must round-trip to the same viewport row/col"
+        );
+
+        // Every visible row must round-trip identically (the symptom is the
+        // bottom-anchored prompt shifting up into the conversation history).
+        let row_text = |snap: &TerminalSnapshot, row: u16| -> String {
+            let mut cells: Vec<_> = snap.cells.iter().filter(|c| c.row == row).collect();
+            cells.sort_by_key(|c| c.col);
+            cells
+                .iter()
+                .map(|c| c.symbol.as_str())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        for row in 0..src_snap.rows {
+            assert_eq!(
+                row_text(&dst_snap, row),
+                row_text(&src_snap, row),
+                "visible row {row} must round-trip identically"
+            );
+        }
+    }
+
+    #[test]
     fn scrollback_offset_accessor_matches_grid_state() {
         let mut terminal = TerminalState::with_scrollback(3, 16, 100);
         terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\n");
