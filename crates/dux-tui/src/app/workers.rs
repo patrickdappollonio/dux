@@ -514,7 +514,7 @@ impl App {
                 self.prompt = PromptState::None;
                 self.fullscreen_overlay = FullscreenOverlay::StartupLog;
                 self.startup_log_viewer = Some(StartupLogViewer {
-                    scope_label,
+                    scope_label: scope_label.clone(),
                     path: log.path,
                     display_name: log.display_name,
                     content: log.content,
@@ -522,6 +522,10 @@ impl App {
                     search: TextInput::new(),
                     searching: false,
                 });
+                // Resolve the "Opening startup command logs…" busy: the overlay
+                // is now up, so replace the spinner with a transient confirmation
+                // rather than leaving it to time out.
+                self.set_info(format!("Opened startup command logs for {scope_label}."));
             }
 
             EventReaction::FinishDeleteSessionView(view) => {
