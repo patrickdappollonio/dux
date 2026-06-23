@@ -1239,6 +1239,19 @@ impl TerminalState {
             let row = &grid[Line(line)];
             let wrapped = cols > 0 && row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
             if line != top && !prev_wrapped {
+                // Reset SGR before a hard line break while a non-default
+                // background is still active. A `\r\n` at the bottom of the
+                // screen scrolls, and a scroll fills the newly-exposed row with
+                // the CURRENT background color (Background-Color-Erase). Without
+                // this reset the previous line's background bleeds onto the next
+                // line on the client — even though we re-emit SGR for the next
+                // line's first cell, the bleed has already happened during the
+                // scroll. Soft-wrapped rows intentionally skip this so a colored
+                // background continues across the wrap.
+                if matches!(last_style, Some((_, bg, _)) if bg != CellColor::Reset) {
+                    out.push_str("\x1b[0m");
+                    last_style = None;
+                }
                 out.push_str("\r\n");
             }
             // Right-trim trailing empty default cells so we don't emit a screen's
@@ -1726,6 +1739,22 @@ mod tests {
         assert!(
             !viewport_only.contains("line0"),
             "sanity: viewport-only repaint omits scrolled-off history"
+        );
+    }
+
+    #[test]
+    fn reconnect_repaint_resets_background_before_hard_newline() {
+        // A line painted with a non-default background, followed by a plain
+        // line. The replay must emit a reset BEFORE the `\r\n` so a scroll on
+        // the client fills the next row with the default background instead of
+        // bleeding the colored background downward (Background-Color-Erase).
+        // See the comment in `reconnect_repaint`.
+        let mut terminal = TerminalState::with_scrollback(4, 20, 100);
+        terminal.process(b"\x1b[41mRED\x1b[0m\r\nplain\r\n");
+        let replay = String::from_utf8(terminal.reconnect_repaint()).unwrap();
+        assert!(
+            replay.contains("\x1b[0m\r\n"),
+            "a reset must precede the newline after a colored line, got:\n{replay:?}"
         );
     }
 
