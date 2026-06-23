@@ -30,9 +30,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
-use crate::app::{ASCII_LOGO, ASCII_LOGO_WIDTH};
+use crate::app::ASCII_LOGO;
 use crate::theme::Theme;
 use dux_core::config::DuxPaths;
 
@@ -66,8 +66,9 @@ enum Role {
     /// The quieter "authenticated mode" informational line shown when the login
     /// gate is on — muted, not alarming.
     AuthInfo,
-    /// An exit hint's key portion (e.g. "q or Esc").
-    HintKey,
+    /// An exit hint's key, rendered as a `<…>` keycap badge matching the TUI
+    /// footer (e.g. `<q>`, `<Esc>`, `<Ctrl-C>`).
+    Key,
     /// An exit hint's description portion.
     HintDesc,
     /// Vertical spacer (empty line).
@@ -196,9 +197,17 @@ impl ServerStatusScreen {
             let bg = Block::default().style(Style::default().bg(theme.app_bg));
             frame.render_widget(bg, area);
 
-            let block_width = block_for_width(area.width);
-            // Inner content width = box width minus the two border columns.
-            let inner_width = block_width.saturating_sub(2).max(1);
+            // Padding between the rounded border and the content, matching the
+            // breathing room of the TUI's overlays so nothing is glued to the edge.
+            const H_PAD: u16 = 2;
+            const V_PAD: u16 = 1;
+
+            // Size the box to the widest line that must NOT wrap (logo, heading,
+            // URLs, uptime, hints); the long security warning wraps within it.
+            let content_width = content_width_for(&lines).max(1);
+            let block_width = (content_width + 2 * H_PAD + 2).min(area.width.max(1));
+            // Inner content width = box width minus borders and horizontal padding.
+            let inner_width = block_width.saturating_sub(2 + 2 * H_PAD).max(1);
 
             let text: Vec<Line> = lines
                 .iter()
@@ -206,24 +215,26 @@ impl ServerStatusScreen {
                 .collect();
 
             // Estimate the wrapped height so the long warning line (which wraps)
-            // doesn't get clipped: sum each line's wrapped row count, then add
-            // the two border rows. Center that block vertically.
+            // isn't clipped: sum each line's wrapped row count, then add the two
+            // border rows and the vertical padding. Center that block vertically.
             let wrapped_rows: u16 = lines
                 .iter()
                 .map(|segments| wrapped_row_count(segments, inner_width))
                 .sum();
-            let block_height = (wrapped_rows + 2).min(area.height);
+            let block_height = (wrapped_rows + 2 + 2 * V_PAD).min(area.height);
             let x = area.x + area.width.saturating_sub(block_width) / 2;
             let y = area.y + area.height.saturating_sub(block_height) / 2;
             let block_area = Rect::new(x, y, block_width, block_height);
 
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.overlay_border))
-                .style(Style::default().bg(theme.app_bg));
+                .style(Style::default().bg(theme.app_bg))
+                .padding(Padding::symmetric(H_PAD, V_PAD));
             let paragraph = Paragraph::new(text)
                 .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true })
+                .wrap(Wrap { trim: false })
                 .block(block);
             frame.render_widget(paragraph, block_area);
         })?;
@@ -263,20 +274,48 @@ fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     }
 }
 
-/// Width of the centered content box: wide enough for the wordmark plus padding,
-/// clamped to the terminal width.
-fn block_for_width(area_width: u16) -> u16 {
-    // Wordmark + a column of padding on each side, plus the two border columns.
-    (ASCII_LOGO_WIDTH + 6).min(area_width.max(1))
+/// Rendered display width of a content line in columns. Key segments render as
+/// `<…>` badges (their text plus the two bracket columns), and adjacent badges
+/// are separated by a space, so the width is more than a raw character sum.
+/// Uses character count (not bytes) so multi-byte text measures correctly.
+fn line_render_width(segments: &ScreenLine) -> usize {
+    let mut width = 0usize;
+    let mut prev_was_key = false;
+    for (text, role) in segments {
+        let chars = text.chars().count();
+        if *role == Role::Key {
+            if prev_was_key {
+                width += 1; // separating space between adjacent badges
+            }
+            width += chars + 2; // the surrounding `<` and `>`
+            prev_was_key = true;
+        } else {
+            width += chars;
+            prev_was_key = false;
+        }
+    }
+    width
+}
+
+/// Width of the centered content box's CONTENT (inside borders + padding): the
+/// widest line that must not wrap. The long security warning is excluded so it
+/// wraps within the box instead of stretching it across the whole terminal.
+fn content_width_for(lines: &[ScreenLine]) -> u16 {
+    lines
+        .iter()
+        .filter(|segments| !segments.iter().any(|(_, role)| *role == Role::Warning))
+        .map(|segments| line_render_width(segments).min(u16::MAX as usize) as u16)
+        .max()
+        .unwrap_or(1)
 }
 
 /// Estimate how many rows a content line occupies once wrapped to `inner_width`,
 /// so the box height accounts for the long warning line instead of clipping it.
-/// Uses character count (not bytes) so multi-byte text wraps correctly, and
-/// counts at least one row even for the empty spacer lines.
+/// Uses rendered width (badges included) so multi-byte text and keycaps wrap
+/// correctly, and counts at least one row even for the empty spacer lines.
 fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
     let width = inner_width.max(1) as usize;
-    let chars: usize = segments.iter().map(|(text, _)| text.chars().count()).sum();
+    let chars = line_render_width(segments);
     if chars == 0 {
         return 1;
     }
@@ -355,14 +394,14 @@ fn screen_lines(
         let noun = if user_count == 1 { "user" } else { "users" };
         lines.push(vec![(String::new(), Role::Spacer)]);
         lines.push(vec![(
-            format!("Login required — {user_count} {noun} configured."),
+            format!("Login required. {user_count} {noun} configured."),
             Role::AuthInfo,
         )]);
     } else if !loopback {
         lines.push(vec![(String::new(), Role::Spacer)]);
         lines.push(vec![(
-            "Listening beyond this machine with NO authentication — \
-             anyone on the network can control your agents."
+            "Listening beyond this machine with NO authentication. \
+             Anyone on the network can control your agents."
                 .to_string(),
             Role::Warning,
         )]);
@@ -370,15 +409,16 @@ fn screen_lines(
 
     lines.push(vec![(String::new(), Role::Spacer)]);
     lines.push(vec![
-        ("q or Esc".to_string(), Role::HintKey),
+        ("q".to_string(), Role::Key),
+        ("Esc".to_string(), Role::Key),
         (
-            " — stop the server and return to dux".to_string(),
+            " stop the server and return to dux".to_string(),
             Role::HintDesc,
         ),
     ]);
     lines.push(vec![
-        ("Ctrl-C".to_string(), Role::HintKey),
-        (" — quit dux entirely".to_string(), Role::HintDesc),
+        ("Ctrl-C".to_string(), Role::Key),
+        (" quit dux entirely".to_string(), Role::HintDesc),
     ]);
 
     lines
@@ -388,42 +428,49 @@ fn screen_lines(
 /// This is the only place that touches the [`Theme`]; the content builder above
 /// stays theme-free for testing.
 fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
-    let spans: Vec<Span<'a>> = segments
-        .iter()
-        .map(|(text, role)| {
-            let style = match role {
-                // Wordmark: accent (the focused-title color), bold.
-                Role::Logo => Style::default()
-                    .fg(theme.title_focused)
-                    .add_modifier(Modifier::BOLD),
-                // Heading: primary body text, bold.
-                Role::Heading => Style::default()
-                    .fg(theme.text_fg)
-                    .add_modifier(Modifier::BOLD),
-                // URL: accent emphasis, bold.
-                Role::Url => Style::default()
-                    .fg(theme.title_focused)
-                    .add_modifier(Modifier::BOLD),
-                // Uptime: muted secondary text.
-                Role::Muted => Style::default().fg(theme.provider_label_fg),
-                // Security warning: the dedicated warning color, bold.
-                Role::Warning => Style::default()
-                    .fg(theme.warning_fg)
-                    .add_modifier(Modifier::BOLD),
-                // Auth-on info line: muted secondary text — informational, not
-                // alarming, since the login gate is protecting the bind.
-                Role::AuthInfo => Style::default().fg(theme.provider_label_fg),
-                // Exit-hint key: accent key color, bold.
-                Role::HintKey => Style::default()
-                    .fg(theme.hint_key_fg)
-                    .add_modifier(Modifier::BOLD),
-                // Exit-hint description: muted hint text.
-                Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
-                Role::Spacer => Style::default(),
-            };
-            Span::styled(text.as_str(), style)
-        })
-        .collect();
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut prev_was_key = false;
+    for (text, role) in segments {
+        // Exit-hint keys render as `<…>` keycap badges via the shared TUI helper,
+        // so `<q> <Esc>` matches the footer exactly. Adjacent badges are spaced.
+        if *role == Role::Key {
+            if prev_was_key {
+                spans.push(Span::styled(" ", Style::default().bg(theme.app_bg)));
+            }
+            spans.extend(theme.key_badge(text.as_str(), theme.app_bg));
+            prev_was_key = true;
+            continue;
+        }
+        prev_was_key = false;
+        let style = match role {
+            // Wordmark: accent (the focused-title color), bold.
+            Role::Logo => Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+            // Heading: primary body text, bold.
+            Role::Heading => Style::default()
+                .fg(theme.text_fg)
+                .add_modifier(Modifier::BOLD),
+            // URL: accent emphasis, bold.
+            Role::Url => Style::default()
+                .fg(theme.title_focused)
+                .add_modifier(Modifier::BOLD),
+            // Uptime: muted secondary text.
+            Role::Muted => Style::default().fg(theme.provider_label_fg),
+            // Security warning: the dedicated warning color, bold.
+            Role::Warning => Style::default()
+                .fg(theme.warning_fg)
+                .add_modifier(Modifier::BOLD),
+            // Auth-on info line: muted secondary text, informational (not
+            // alarming), since the login gate is protecting the bind.
+            Role::AuthInfo => Style::default().fg(theme.provider_label_fg),
+            // Exit-hint description: muted hint text.
+            Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
+            // `Key` is handled above; `Spacer` is empty.
+            Role::Key | Role::Spacer => Style::default(),
+        };
+        spans.push(Span::styled(text.as_str(), style));
+    }
     Line::from(spans)
 }
 
@@ -532,17 +579,43 @@ mod tests {
             wrapped_row_count(&vec![("01234567890".to_string(), Role::Muted)], 10),
             2
         );
-        // Multiple segments sum their character counts.
+        // A keycap segment renders as `<key>`, so its width includes the two
+        // bracket columns: `<aaaaa>` (7) + `bbbbbb` (6) = 13 → two rows at width 10.
         assert_eq!(
             wrapped_row_count(
                 &vec![
-                    ("aaaaa".to_string(), Role::HintKey),
+                    ("aaaaa".to_string(), Role::Key),
                     ("bbbbbb".to_string(), Role::HintDesc),
                 ],
                 10
             ),
             2
         );
+    }
+
+    #[test]
+    fn line_render_width_counts_keycap_badges_and_separators() {
+        // `<q>` (3) + separating space (1) + `<Esc>` (5) + ` hi` (3) = 12.
+        let line = vec![
+            ("q".to_string(), Role::Key),
+            ("Esc".to_string(), Role::Key),
+            (" hi".to_string(), Role::HintDesc),
+        ];
+        assert_eq!(line_render_width(&line), 12);
+    }
+
+    #[test]
+    fn content_width_excludes_the_wrapping_warning() {
+        // The security warning is far longer than any other line; it must be
+        // excluded from the box width so it wraps inside instead of stretching
+        // the box across the whole terminal.
+        let lines = screen_lines(&one("http://0.0.0.0:8080"), false, false, 0, 0);
+        let warning_w = lines
+            .iter()
+            .find(|s| s.iter().any(|(_, r)| *r == Role::Warning))
+            .map(line_render_width)
+            .expect("non-loopback auth-off screen has a warning line");
+        assert!((content_width_for(&lines) as usize) < warning_w);
     }
 
     /// Wrap one URL in the `&[String]` shape `screen_lines` now expects.
@@ -668,10 +741,19 @@ mod tests {
     fn content_includes_both_exit_hints() {
         let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
         let text = plain_text(&lines);
-        assert!(text.contains("q or Esc"));
         assert!(text.contains("return to dux"));
-        assert!(text.contains("Ctrl-C"));
         assert!(text.contains("quit dux entirely"));
+        // The exit keys are rendered as `<…>` keycap badges, so they live in
+        // their own `Role::Key` segments rather than as inline "q or Esc" text.
+        let keys: Vec<&str> = lines
+            .iter()
+            .flatten()
+            .filter(|(_, role)| *role == Role::Key)
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert!(keys.contains(&"q"));
+        assert!(keys.contains(&"Esc"));
+        assert!(keys.contains(&"Ctrl-C"));
     }
 
     #[test]
