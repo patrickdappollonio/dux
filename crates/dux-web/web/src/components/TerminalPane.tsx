@@ -209,8 +209,8 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     fit.fit()
     termRef.current = term
 
-    // Feed live PTY bytes into the terminal.
-    socket.onPtyBytes = (bytes) => term.write(bytes)
+    // The PTY byte feed is wired further down (after the sizing state exists), so
+    // the first-frame handler can resize once the reconnect repaint has rendered.
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
     // the accessory bar transform a single typed char (Ctrl-chord, Alt/Meta
@@ -230,8 +230,8 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     })
 
     // Subscribe to the selected target's PTY. The server tracks the currently
-    // subscribed id (agent session OR terminal) and routes input/resize to it,
-    // so the rest of the wiring is identical for both kinds.
+    // subscribed id (agent session OR terminal) and routes input to it, so the
+    // rest of the wiring is identical for both kinds.
     if (kind === "terminal") {
       socket.subscribeTerminal(id)
     } else {
@@ -353,24 +353,60 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
         socket.resize(id, term.rows, term.cols)
       }
     }
-    // Attach: fit and report immediately so the launch/repaint uses real dims.
+    // Local fit so the canvas matches this viewport right away, and seed
+    // lastRows/lastCols so the ResizeObserver's initial observe callback does NOT
+    // send a (racing) resize before the first paint. The initial PTY resize is
+    // deferred to the first-frame handler below.
     fit.fit()
-    sendSize()
+    lastRows = term.rows
+    lastCols = term.cols
 
-    // First-load redraw. The immediate fit above can read a STALE size when the
-    // pane isn't at its final dimensions synchronously on mount — e.g. after a
-    // mobile→desktop layout switch, opening an agent rendered it at the old
-    // (mobile) width until the user nudged a divider. The ResizeObserver only
-    // re-sends on an actual size CHANGE, so it doesn't self-correct here. Re-fit
-    // once the layout has settled and report unconditionally, so the child gets a
-    // SIGWINCH and redraws at the true size on its own. A same-size resize is a
-    // kernel no-op (no SIGWINCH), so this never triggers a spurious redraw.
-    const redrawTimer = setTimeout(() => {
+    // Defer the initial PTY resize until the FIRST PTY frame after (re)subscribe
+    // has fully rendered. That frame is the server's reconnect repaint: a STATIC
+    // snapshot taken at the PTY's current size, which can differ from this
+    // viewport. Resizing too early (before the repaint has even arrived over the
+    // wire, or mid-render) races a half-painted buffer and leaves the cursor and
+    // the bottom-anchored agent prompt in the wrong rows; only a later real
+    // resize fixed it. xterm's write callback fires once that frame is parsed, so
+    // we fit + resize right after it lands and the agent's SIGWINCH redraw then
+    // cleanly replaces the snapshot at our true size. The repaint is sent as a
+    // single binary frame, so the first chunk is the whole paint. A fallback
+    // timer covers a session that emits no first frame (e.g. an idle freshly
+    // launched agent) so its PTY still gets sized.
+    let initialResizeDone = false
+    let jiggleTimer: ReturnType<typeof setTimeout> | undefined
+    const sendInitialResize = () => {
+      if (initialResizeDone) return
+      initialResizeDone = true
       fit.fit()
       lastRows = term.rows
       lastCols = term.cols
-      socket.resize(id, term.rows, term.cols)
-    }, 50)
+      // Force the agent to FULLY redraw at our size now that the first paint has
+      // landed. A same-size resize is a kernel no-op (no SIGWINCH), so when the
+      // PTY already matches this viewport the agent never repaints and the
+      // reconnect snapshot (which is imperfect for a tall buffer with a
+      // bottom-anchored prompt) stays on screen with the cursor and input box
+      // misplaced. Nudge the width down one column and back: each step is a real
+      // winsize change, so the kernel raises SIGWINCH and the agent redraws its
+      // true UI, ending at the correct size. This automates the manual
+      // divider-nudge that reliably fixed it.
+      socket.resize(id, term.rows, Math.max(1, term.cols - 1))
+      jiggleTimer = setTimeout(() => {
+        socket.resize(id, term.rows, term.cols)
+      }, 60)
+    }
+    socket.onPtyBytes = (bytes) => {
+      if (!initialResizeDone) {
+        // Resize only once xterm has parsed this first frame (the repaint).
+        term.write(bytes, sendInitialResize)
+      } else {
+        term.write(bytes)
+      }
+    }
+    // Fallback for a session that emits no first frame (e.g. an idle freshly
+    // launched agent): size its PTY anyway. If the first frame arrives first,
+    // the `initialResizeDone` guard makes this a no-op.
+    const initialResizeFallback = setTimeout(sendInitialResize, 250)
 
     // (A background tab throttles rAF but not timers, so a resize received
     // while hidden refits late or not at all and its debounced send dedupes to
@@ -383,36 +419,59 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     })
     ro.observe(container)
 
-    // Re-sync the size when the tab returns to the foreground. While a tab is
-    // hidden its rAF is throttled, so the ResizeObserver's deferred fit() never
-    // runs; if the window is resized in the meantime, coming back leaves both
-    // the canvas AND the PTY pinned to the stale pre-switch size, with no
-    // further ResizeObserver callback to self-correct (the size already changed
-    // once, while hidden). Re-fit and report once visible again so the child
-    // gets a SIGWINCH and redraws at the true size. The fit runs on the next
-    // now-unthrottled frame so layout has settled; sendSize() dedupes, so an
-    // unchanged size is a kernel no-op and never forces a spurious redraw.
-    const onVisible = () => {
+    // Re-assert THIS client's size whenever the tab or window returns to the
+    // foreground. Two things can leave it stale on return:
+    //  1. While hidden, rAF is throttled so the ResizeObserver's deferred fit()
+    //     never ran, pinning the canvas and PTY to the pre-switch size.
+    //  2. The PTY is SHARED across clients. Another client (typically a phone)
+    //     may have resized it to its own dimensions while this tab was
+    //     backgrounded or merely unfocused, so the PTY is now sized for that
+    //     other viewport, not this one.
+    // visibilitychange covers tab hide/show, but moving between a desktop and a
+    // phone usually leaves the desktop tab "visible" the whole time, so we also
+    // listen for window focus to catch the never-hidden case. The resize send is
+    // FORCED (not routed through the deduped sendSize) because the PTY's current
+    // size was set by the OTHER client, so our cached lastRows/lastCols would
+    // wrongly suppress the re-assert. A same-size resize is a kernel no-op (no
+    // SIGWINCH), so re-asserting an unchanged size never causes a spurious
+    // redraw; a changed one makes the child redraw at this viewport's true size.
+    //
+    // The send is debounced (coalescing rapid focus/visibility flaps) and, like
+    // the re-attach redraw above, gated on xterm draining its write queue: a
+    // foreground return can coincide with the server's scrollback replay still
+    // streaming in, and resizing mid-replay corrupts the scroll position. The
+    // empty-write callback fires only once the queued writes have drained, so we
+    // fit + resize against a settled buffer.
+    let resyncTimer: ReturnType<typeof setTimeout> | undefined
+    const resyncToForeground = () => {
       if (document.visibilityState !== "visible") return
-      cancelAnimationFrame(fitFrame)
-      fitFrame = requestAnimationFrame(() => {
-        fit.fit()
-        sendSize()
-      })
+      clearTimeout(resyncTimer)
+      resyncTimer = setTimeout(() => {
+        term.write("", () => {
+          fit.fit()
+          lastRows = term.rows
+          lastCols = term.cols
+          socket.resize(id, term.rows, term.cols)
+        })
+      }, 150)
     }
-    document.addEventListener("visibilitychange", onVisible)
+    document.addEventListener("visibilitychange", resyncToForeground)
+    window.addEventListener("focus", resyncToForeground)
 
     return () => {
       cancelAnimationFrame(fitFrame)
       clearTimeout(sendTimer)
-      clearTimeout(redrawTimer)
+      clearTimeout(initialResizeFallback)
+      clearTimeout(jiggleTimer)
+      clearTimeout(resyncTimer)
       clearTimeout(longPressTimer)
       container.removeEventListener("touchstart", onTouchStart)
       container.removeEventListener("touchmove", onTouchMove)
       container.removeEventListener("touchend", endTouch)
       container.removeEventListener("touchcancel", endTouch)
       ro.disconnect()
-      document.removeEventListener("visibilitychange", onVisible)
+      document.removeEventListener("visibilitychange", resyncToForeground)
+      window.removeEventListener("focus", resyncToForeground)
       dataSub.dispose()
       socket.onPtyBytes = () => {}
       termRef.current = null
