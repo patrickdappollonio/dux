@@ -244,6 +244,41 @@ serializes `WireStatus.key`, so no server change is needed for this piece.
    the `StatusOp` contract (the summary doc currently describes the *prior* keyed
    convention, which this supersedes).
 
+## Implementation status (2026-06-23)
+
+**Landed (all confirmed leaks fixed, each with a test; full workspace clippy +
+test suite green):**
+
+- C1 — web client honors the `command_result` key (the reported worktree-delete
+  spinner). `1473dab`
+- B1 — delete resolves its busy when the session was already removed. `6f8e0e3`
+- Guardrail — the controller logs the offending key when a busy times out. `d4c40aa`
+- A1 — create-agent success/failure finals are keyed so they replace the busy. `fd5c1c2`
+- A3/A4 — startup-log success and reentrant-reload no longer strand a busy. `98ba44a`
+- B2/B3/B4 — web clears the keyed busy for checkout-default, add-project-checkout,
+  and PR-lookup completions (key derived from the raw `WorkerEvent`). `25102f3`
+- B5/B6 — web clears the create/launch busy when a launch resolves to a vanished
+  session or startup auto-reopen. (latest)
+- A5/A6 — TUI clears the worktree-list and session-missing race busies. (latest)
+- Partial §3.4 — typed `status_keys::{create,checkout_default,add_project_checkout,
+  pr_lookup,launch}` constructors so a busy and its final share one key source.
+
+**False positive:** A2 (commit-message) — the TUI runs its own `input.rs` worker
+with an anonymous busy that its anon finals pair; the keyed `commit-msg:{id}` busy
+only exists on the web, where it is already cleared. No leak.
+
+**Known residual edges (rare; now self-heal to a logged timeout warning, no
+immortal spinner):** A7 (thread-spawn failure — fixing it safely would move the
+busy emission onto the worker thread and disturb the FIFO busy-before-completion
+ordering), B7 (begin-delete `AlreadyInFlight` unkeyed error — cosmetic, not a
+busy), and PR-lookup *failure* (the failure event carries no project id).
+
+**Not yet done — the structural prevention (§3.1–3.3):** the `StatusOp` closure
+object and the sealing of the raw busy emitters (`set_busy`, `StatusUpdate::busy`,
+the free busy `WireStatus` constructors), plus the §3.6.2 pairing test harness.
+This is the large, invasive piece that makes a dangling busy *inexpressible*; it
+is pending an explicit go-ahead because it removes public API across three crates.
+
 ## Appendix A — Confirmed leak inventory (implementation checklist)
 
 Verified by three parallel audits of the TUI, the web `WireStatus` stream, and the web
