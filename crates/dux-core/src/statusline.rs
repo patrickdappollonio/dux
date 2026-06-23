@@ -258,6 +258,16 @@ impl KeyedStatusController {
 
         for key in to_upgrade {
             if let Some(entry) = self.entries.get_mut(&key) {
+                // A keyed Busy that reaches the timeout is a leak: its producer
+                // emitted a pending status but never the paired final. Log the
+                // key and the original message so the unpaired operation is
+                // diagnosable in dux.log instead of vanishing into a generic
+                // "timed out" warning. (See the StatusOp design: every Busy must
+                // be followed by a success/error/clear on the same key.)
+                crate::logger::warn(&format!(
+                    "status key \"{key}\" left Busy with no final (\"{}\"); upgrading to a timed-out warning",
+                    entry.message
+                ));
                 let generation = Generation(self.next_gen);
                 let seq = self.next_seq;
                 self.next_gen += 1;
