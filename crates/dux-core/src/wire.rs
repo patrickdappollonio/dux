@@ -1399,7 +1399,16 @@ impl Engine {
                         },
                     )
                 } else {
-                    vec![]
+                    // The session was already removed by another path (e.g. its
+                    // project was deleted, taking its sessions with it) before
+                    // this worker reported back. The worktree removal still
+                    // completed, so resolve the keyed `delete:{id}` busy with a
+                    // same-key final rather than stranding the toast until the
+                    // busy-timeout Warning.
+                    vec![
+                        WireStatus::new("info", "Agent and worktree removed.")
+                            .with_key(format!("{}:{session_id}", status_keys::DELETE_PREFIX)),
+                    ]
                 }
             }
             EventReaction::WorktreeRemoveFailed {
@@ -4008,6 +4017,35 @@ mod tests {
             "unexpected status: {}",
             statuses[0].message
         );
+    }
+
+    #[test]
+    fn drive_delete_followup_clears_busy_when_session_already_gone() {
+        // Edge: another path (e.g. the session's project was removed, taking its
+        // sessions with it) dropped the session before the async git-removal
+        // worker reported back. The worktree removal still completed, so the
+        // keyed `delete:{id}` busy toast MUST be resolved with a same-key final
+        // rather than stranded forever (it would otherwise time out to a
+        // spurious Warning). Mirrors the TUI's `our_busy_message` clear.
+        let (mut engine, _tmp) = test_engine();
+        // No session present in `engine.sessions`.
+        let reaction = EventReaction::WorktreeRemoveSucceeded {
+            session_id: "s1".to_string(),
+            branch_already_deleted: false,
+            our_busy_message: None,
+        };
+        let statuses = engine.drive_delete_followup(&reaction);
+        assert_eq!(
+            statuses.len(),
+            1,
+            "session-gone success path must still emit a final: {statuses:?}"
+        );
+        assert_eq!(
+            statuses[0].key.as_deref(),
+            Some("delete:s1"),
+            "the final must carry the same key as the busy"
+        );
+        assert_ne!(statuses[0].tone, "busy", "must resolve, not re-show a busy");
     }
 
     // ---- G2: fork ----------------------------------------------------------
