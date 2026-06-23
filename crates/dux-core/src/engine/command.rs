@@ -447,7 +447,7 @@ impl Engine {
                 busy_message,
                 term_size,
             } => {
-                let create_key = format!("create:{}", request.project_id());
+                let create_key = crate::wire::status_keys::create(request.project_id());
                 let create_key_panic = create_key.clone();
                 let paths = self.paths.clone();
                 let config = self.config.clone();
