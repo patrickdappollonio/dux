@@ -227,14 +227,13 @@ struct SignalHandles {
 /// is delivered as a key event in raw mode, not as SIGINT. Each handler only
 /// sets its atomic flag (async-signal-safe); the run loop polls both flags.
 ///
-/// Caveat across a TUI→server→TUI flip: the server resets SIGINT/SIGTERM to
-/// `SIG_DFL` on `ReturnToTui` (so a stale tokio handler can't trap the operator,
-/// see `serve_with_engine`). Because `signal-hook-registry` keeps its master
-/// handler installed for the process lifetime, this fresh registration may not
-/// re-arm the OS disposition, so a *post-flip* external SIGTERM can fall back to
-/// the default terminate (agents then hard-killed on drop, the pre-feature
-/// behavior). The in-app quit path and a first-session signal both wind down
-/// gracefully regardless; only this narrow post-flip signal case degrades.
+/// This is also called from `App::resume` after a TUI→server→TUI flip. Both the
+/// TUI and the server's `tokio::signal` register through the same process-global
+/// `signal-hook-registry`, whose master OS handler is installed once (here, on
+/// the TUI's first boot) and routes each signal to whatever actions are live. So
+/// re-registering on resume re-arms graceful shutdown, provided the server does
+/// not reset the disposition to `SIG_DFL` on hand-back, which it deliberately no
+/// longer does (see the `ReturnToTui` branch of `serve_with_engine`).
 fn register_signal_handles() -> Result<SignalHandles> {
     let sigwinch_flag = Arc::new(AtomicBool::new(false));
     let sigwinch_sig_id =
@@ -4026,5 +4025,59 @@ leading_branch = "main"
             .find(|s| s.id == "session-1")
             .unwrap();
         assert_eq!(session.status, SessionStatus::Detached);
+    }
+
+    /// Proves the mechanism behind the TUI↔server graceful-shutdown handoff and
+    /// why `serve_with_engine` must NOT reset SIGINT/SIGTERM to `SIG_DFL` on a
+    /// flip-back. Both surfaces register through the same process-global
+    /// `signal-hook-registry`, which installs its master OS handler exactly once
+    /// per signal and routes a delivered signal to whatever actions are live.
+    ///
+    /// We use `SIGURG` (default action: ignore) so a *dormant* handler plus a
+    /// `raise` cannot terminate the test process; a missed signal shows up as an
+    /// unset flag, not a killed test. `raise` delivers synchronously to the
+    /// calling thread, so the handler has run by the time it returns.
+    #[test]
+    fn signal_hook_master_handler_survives_reregistration_but_not_sig_dfl_reset() {
+        // Phase 1, the flip we rely on: register, unregister (flip to server),
+        // then register again (resume the TUI). The signal still reaches the
+        // freshly registered flag, because the master handler stays installed.
+        let first = Arc::new(AtomicBool::new(false));
+        let first_id =
+            signal_hook::flag::register(libc::SIGURG, Arc::clone(&first)).expect("register SIGURG");
+        signal_hook::low_level::unregister(first_id);
+
+        let after_resume = Arc::new(AtomicBool::new(false));
+        let resume_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&after_resume))
+            .expect("re-register SIGURG after a flip");
+        unsafe { libc::raise(libc::SIGURG) };
+        assert!(
+            after_resume.load(Ordering::SeqCst),
+            "a re-registered handler must still fire: this is what lets a resumed \
+             TUI catch SIGTERM and wind agents down gracefully"
+        );
+        signal_hook::low_level::unregister(resume_id);
+
+        // Phase 2, the regression guard: if the web server forced the OS
+        // disposition back to SIG_DFL (as it used to via `libc::signal`), the
+        // registry will NOT re-arm on the resume's register (the slot already
+        // exists, so no fresh `sigaction`), leaving the TUI handler dormant.
+        let pre_reset = Arc::new(AtomicBool::new(false));
+        let pre_reset_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&pre_reset))
+            .expect("register SIGURG before reset");
+        signal_hook::low_level::unregister(pre_reset_id);
+        unsafe { libc::signal(libc::SIGURG, libc::SIG_DFL) };
+
+        let dormant = Arc::new(AtomicBool::new(false));
+        let dormant_id = signal_hook::flag::register(libc::SIGURG, Arc::clone(&dormant))
+            .expect("re-register SIGURG after a SIG_DFL reset");
+        unsafe { libc::raise(libc::SIGURG) };
+        assert!(
+            !dormant.load(Ordering::SeqCst),
+            "after a SIG_DFL reset the re-registration cannot re-arm the OS \
+             disposition, so the handler is dormant: exactly why serve_with_engine \
+             must not perform that reset"
+        );
+        signal_hook::low_level::unregister(dormant_id);
     }
 }

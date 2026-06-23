@@ -32,3 +32,6 @@ opaline = { version = "0.4", features = ["ratatui", "builtin-themes"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Used only by the signal-disposition regression tests to raise a signal and to
+# reproduce the `SIG_DFL` reset the web server deliberately no longer performs.
+libc.workspace = true

@@ -1173,23 +1173,22 @@ pub fn serve_with_engine(
     }
     // ReturnToTui intentionally leaves PTYs untouched so the resumed TUI finds
     // the same live agents.
-
-    if matches!(exit, ServerExit::ReturnToTui) {
-        // Restore default SIGINT/SIGTERM dispositions before handing control back
-        // to the TUI. tokio's unix signal support registers process-global
-        // handlers via signal-hook-registry that are NOT removed when the runtime
-        // is torn down: after one flip the dispositions stay non-default, so the
-        // resumed TUI would no longer die to an external `kill`/`kill -INT`.
-        // Resetting to SIG_DFL restores normal terminate-on-signal behavior.
-        // QuitProcess doesn't need this — the caller exits the process anyway.
-        //
-        // Unix-only by project policy (CLAUDE.md targets macOS + Linux), so no
-        // cfg gating is needed.
-        unsafe {
-            libc::signal(libc::SIGINT, libc::SIG_DFL);
-            libc::signal(libc::SIGTERM, libc::SIG_DFL);
-        }
-    }
+    //
+    // We deliberately do NOT reset SIGINT/SIGTERM to SIG_DFL here. tokio's unix
+    // signal support and the TUI both register through the same process-global
+    // `signal-hook-registry`, which installs its master OS handler exactly once
+    // per signal (at the TUI's first registration) and never re-arms it on later
+    // register/unregister. The resumed TUI re-registers its own SIGINT/SIGTERM
+    // handlers (`App::register_signal_handles`, always called from `App::resume`)
+    // so the still-installed master handler routes the next signal to the TUI's
+    // graceful-shutdown flag. Forcing the disposition back to SIG_DFL with raw
+    // `libc::signal` would point the OS away from the master handler, and because
+    // registry won't re-`sigaction`, the TUI's re-registration could not re-arm
+    // it: an external `kill` post-flip would then terminate hard instead of
+    // winding the agents down. The earlier "unkillable resumed TUI" this reset
+    // once guarded against can no longer occur: the TUI now always installs a
+    // terminating handler on resume. (tokio's stale per-runtime action lingers in
+    // the registry across flips but is a harmless no-op once its runtime drops.)
 
     // If a listener's accept loop died (F5), surface the captured error rather
     // than reporting a clean exit. The engine has already been wound down above,
