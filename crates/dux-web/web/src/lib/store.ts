@@ -497,7 +497,10 @@ socket.onCommandResult = (status, error) => {
     toast.error(error, { duration: Infinity })
     setState({ ...clearPendingClientIntent() })
   } else if (status) {
-    showStatusToast(undefined, status.tone, status.message)
+    // Honor the status key so a keyed command-reply busy (e.g. the async
+    // worktree-removal delete) adopts its key as the toast id and is dismissed
+    // by the matching-key async final. An unkeyed status keeps the anon slot.
+    showStatusToast(status.key, status.tone, status.message)
   }
 }
 
