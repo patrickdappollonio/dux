@@ -305,11 +305,21 @@ impl App {
                         }
                     }
                 }
-                if let Some(status) = status_after_update {
-                    match status {
-                        Ok(message) => self.set_info(message),
-                        Err(message) => self.set_error(message),
+                match status_after_update {
+                    Some(Ok(message)) => self.set_info(message),
+                    Some(Err(message)) => self.set_error(message),
+                    // The picker was dismissed or switched before its worktrees
+                    // loaded, so nothing consumed the result. Clear the lingering
+                    // "Loading…" busy — but only if a Busy is still showing, so a
+                    // newer message from another action is never clobbered.
+                    None if matches!(
+                        self.status.most_recent_tui(),
+                        Some((StatusTone::Busy, _))
+                    ) =>
+                    {
+                        self.set_info(String::new());
                     }
+                    None => {}
                 }
             }
 
@@ -876,7 +886,18 @@ impl App {
                     self.set_info_keyed(key, status_message);
                 }
             }
-            AgentLaunchReadyView::SessionMissing => {}
+            AgentLaunchReadyView::SessionMissing => {
+                // The session vanished between dispatch and launch. Resolve any
+                // open launch/create busy so its spinner doesn't linger: drop the
+                // keyed create entry, and clear a still-showing anon launch busy.
+                self.status.clear(
+                    &dux_core::wire::status_keys::create(&outcome.session.project_id),
+                    None,
+                );
+                if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
+                    self.set_info(String::new());
+                }
+            }
             AgentLaunchReadyView::Reconnect { status_message } => {
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
@@ -1141,7 +1162,8 @@ mod tests {
     fn create_committed_replaces_the_keyed_create_busy() {
         use crate::statusline::StatusTone;
 
-        let mut app = crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
         let project_id = session.project_id.clone();
         let create_key = dux_core::wire::status_keys::create(&project_id);
