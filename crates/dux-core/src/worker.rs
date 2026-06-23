@@ -227,7 +227,16 @@ pub enum WorkerEvent {
     /// busy status is guaranteed to reach `process_worker_event` ahead of
     /// any event the worker can produce.
     CommandWorkerStarted(StatusUpdate),
-    CreateAgentProgress(String),
+    /// A progress update emitted while an agent is being created/forked/attached.
+    /// `key` is the per-operation `create:{project_id}` correlation key shared by
+    /// the dispatch's busy status and the eventual success/failure, so the web
+    /// renders all of them as one in-place toast that the final state dismisses.
+    /// Without the key the busy would land in the anonymous status slot, which is
+    /// never expired by the busy timeout and so would linger forever.
+    CreateAgentProgress {
+        key: String,
+        message: String,
+    },
     CreateAgentFailed {
         key: String,
         message: String,

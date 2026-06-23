@@ -1280,7 +1280,8 @@ mod tests {
         );
 
         match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentProgress(message) => {
+            WorkerEvent::CreateAgentProgress { key, message } => {
+                assert_eq!(key, "create:project-1");
                 assert_eq!(
                     message,
                     "Pulling latest changes for project \"demo\" before creating the agent..."

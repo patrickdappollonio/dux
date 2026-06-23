@@ -8,6 +8,11 @@ const Toaster = ({ ...props }: ToasterProps) => {
       className="toaster group"
       position="bottom-center"
       offset={{ bottom: "calc(env(safe-area-inset-bottom) + 2.5rem)" }}
+      // Persistent toasts (busy/loading, warning, error) live at Infinity
+      // duration and only auto-dismiss when their keyed final arrives. Show a
+      // close button so the user can always dismiss any toast by hand —
+      // including a long-running busy spinner — without waiting for completion.
+      closeButton
       icons={{
         success: (
           <CircleCheckIcon className="size-4" />
