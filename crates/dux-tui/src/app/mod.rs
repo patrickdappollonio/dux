@@ -2281,8 +2281,16 @@ impl App {
 
     pub(crate) fn reload_config_from_disk(&mut self) -> Result<()> {
         let reaction = self.engine.apply(Command::ReloadConfig)?;
+        // Only show the "Reloading…" busy when a reload worker was actually
+        // spawned (the engine returns `Nothing` on that path). The early-return
+        // cases — a reentrant reload or a busy config writer — return a `Status`
+        // that already explains the situation; setting the busy here would both
+        // clobber that message and strand a spinner that no worker will clear.
+        let spawned = matches!(reaction, dux_core::engine::EventReaction::Nothing);
         self.apply_reaction(reaction);
-        self.set_busy("Reloading config.toml.");
+        if spawned {
+            self.set_busy("Reloading config.toml.");
+        }
         Ok(())
     }
 
@@ -4011,6 +4019,30 @@ leading_branch = "main"
         assert!(sel.contains(4, 5));
         assert!(!sel.contains(2, 9));
         assert!(!sel.contains(4, 6));
+    }
+
+    /// A reentrant config reload (one already in flight) returns an Info status
+    /// and spawns no worker, so `reload_config_from_disk` must NOT set the
+    /// "Reloading…" busy — doing so would clobber the Info and strand a spinner
+    /// that nothing would ever clear.
+    #[test]
+    fn reentrant_reload_does_not_strand_a_busy() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.engine.reloading = true; // pretend a reload is already in flight
+
+        app.reload_config_from_disk().expect("reload returns Ok");
+
+        assert_ne!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Busy,
+            "a rejected reload must not show a busy spinner, got: {}",
+            app.status.text(),
+        );
+        assert!(
+            app.status.message().contains("already in progress"),
+            "the engine's Info must survive, got: {}",
+            app.status.message(),
+        );
     }
 
     /// Quitting the TUI must SIGTERM the running agents (the analogue of the
