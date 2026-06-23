@@ -4,7 +4,6 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-alacritty_terminal = "0.26.0"
 notify.workspace = true
 anyhow.workspace = true
 bcrypt.workspace = true
@@ -25,5 +24,6 @@ sysinfo.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
 walkdir = "2"
+vt100 = "0.16"
 
 [dev-dependencies]
