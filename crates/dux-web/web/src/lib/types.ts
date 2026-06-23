@@ -201,6 +201,11 @@ export interface PaletteCommandView {
 }
 
 export interface CommandStatus {
+  // Correlation key, when the engine emitted a keyed status. A keyed busy from a
+  // command reply MUST adopt this as its sonner id so the matching-key async
+  // final (or status_cleared) dismisses exactly this toast. `null`/absent = the
+  // anonymous slot. The server serializes `WireStatus.key` (skipped when None).
+  key?: string | null
   tone: string
   message: string
 }

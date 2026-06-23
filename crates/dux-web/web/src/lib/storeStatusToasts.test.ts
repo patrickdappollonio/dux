@@ -170,4 +170,31 @@ describe("engine status → sonner toast routing", () => {
       duration: 6000,
     })
   })
+
+  it("keyed command-result busy is dismissed by its matching-key async final", async () => {
+    // A synchronous command reply can carry a KEYED busy — e.g. the async
+    // worktree-removal delete returns `delete:{id}` busy as a command_result.
+    // Its final arrives later on the async status channel keyed identically.
+    // The command-result busy MUST adopt the key as its sonner id so the async
+    // final replaces it in place; otherwise the loading spinner lands on the
+    // anonymous slot and strands forever (the reported worktree-delete bug).
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+
+    mod.socket.onCommandResult(
+      { key: "delete:s1", tone: "busy", message: 'Removing worktree for agent "x"…' },
+      null,
+    )
+    expect(toast.loading).toHaveBeenCalledWith('Removing worktree for agent "x"…', {
+      id: "delete:s1",
+      duration: Infinity,
+    })
+
+    // The async success final reuses the same id, swapping spinner → check.
+    mod.socket.onStatus("delete:s1", "info", "Agent and worktree removed.")
+    expect(toast.success).toHaveBeenCalledWith("Agent and worktree removed.", {
+      id: "delete:s1",
+      duration: 6000,
+    })
+  })
 })
