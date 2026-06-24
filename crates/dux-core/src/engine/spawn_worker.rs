@@ -149,6 +149,63 @@ impl Engine {
             }
         }
     }
+
+    /// Dispatch a keyed tri-state operation: emit its pending Busy, run `work`
+    /// off-thread, resolve the success/failure closure where the typed result
+    /// is in scope, and ship the keyed final back via `StatusOpCompleted`. The
+    /// returned reaction is the pending Busy to apply now.
+    ///
+    /// This is the sanctioned way to show a pending status: a `StatusOp` cannot
+    /// be constructed without both outcome closures, so a launched spinner
+    /// always has a resolution.
+    pub fn spawn_status_op<T, E, F>(
+        &mut self,
+        op: crate::engine::StatusOp<T, E>,
+        work: F,
+    ) -> EventReaction
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        let pending = op.pending_status();
+        let key_for_spawn_fail = op.key().to_string();
+        let key_for_panic = key_for_spawn_fail.clone();
+        let tx = self.worker_tx.clone();
+
+        let spawn_result = thread::Builder::new()
+            .name("dux-status-op".into())
+            .spawn(move || {
+                let resolved = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    let result = work();
+                    op.resolve(&result)
+                })) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let reason = format_panic_payload(payload);
+                        crate::logger::error(&format!("status-op worker panicked: {reason}"));
+                        crate::engine::ResolvedFinal::error(
+                            key_for_panic,
+                            format!("Worker panicked: {reason}"),
+                        )
+                    }
+                };
+                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+            });
+
+        match spawn_result {
+            // Apply the pending Busy now; the worker will follow with its final.
+            Ok(_) => EventReaction::Status(pending),
+            Err(err) => {
+                // Spawn itself failed: the Busy was never emitted (it rides the
+                // returned reaction we are now replacing), so surface a keyed
+                // error instead so nothing strands.
+                let msg = format!("Could not start background worker: {err}");
+                crate::logger::error(&msg);
+                EventReaction::Status(StatusUpdate::error(msg).with_key(key_for_spawn_fail))
+            }
+        }
+    }
 }
 
 /// Specification for a single one-shot background-worker spawn. Used by

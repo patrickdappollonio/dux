@@ -234,6 +234,32 @@ mod tests {
     }
 
     #[test]
+    fn spawn_status_op_emits_pending_then_resolves_via_worker() {
+        use crate::engine::EventReaction;
+        let (mut engine, _tmp) = crate::engine::test_support::test_engine();
+        let op = status_op("op:1", "Working\u{2026}")
+            .on_success(|n: &u32| Final::info(format!("Did {n}.")))
+            .on_failure(|e: &String| Final::error(e.clone()));
+        let pending = engine.spawn_status_op(op, || Ok::<u32, String>(2));
+        match pending {
+            EventReaction::Status(s) => {
+                assert_eq!(s.tone, StatusTone::Busy);
+                assert_eq!(s.key.as_deref(), Some("op:1"));
+            }
+            _ => panic!("expected a pending Busy Status"),
+        }
+        // The worker runs on a thread; block briefly for its completion event.
+        let ev = engine.worker_rx.recv().expect("completion event");
+        match engine.process_worker_event(ev) {
+            EventReaction::Status(s) => {
+                assert_eq!(s.key.as_deref(), Some("op:1"));
+                assert_eq!(s.message, "Did 2.");
+            }
+            _ => panic!("expected a resolved keyed Status"),
+        }
+    }
+
+    #[test]
     fn resolved_final_into_reaction_maps_message_and_clear() {
         use crate::engine::EventReaction;
         match ResolvedFinal::new("k", Final::info("done")).into_reaction() {
