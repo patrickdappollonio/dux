@@ -5660,10 +5660,11 @@ mod tests {
     }
 
     #[test]
-    fn pull_project_routes_through_status_op_with_matching_key() {
+    fn pull_project_routes_through_status_op_correlating_busy_and_final() {
         // The domain-ful pull op declares its messages at dispatch via a
-        // StatusOp; the worker resolves the failure closure and carries the
-        // keyed final back on PullCompleted.
+        // StatusOp; the busy and the worker-resolved final share the op's own
+        // opaque id (no author-written key), so the web toast is replaced in
+        // place rather than stranded.
         let (mut engine, _tmp) = test_engine();
         let repo = std::path::PathBuf::from("/tmp/does-not-exist-pull-wt");
         // spawn_command_worker delivers the busy via a CommandWorkerStarted
@@ -5682,17 +5683,21 @@ mod tests {
             .expect("pull dispatch");
         assert!(matches!(dispatched, EventReaction::Nothing));
         let busy_ev = engine.worker_rx.recv().expect("busy event");
-        match engine.process_worker_event(busy_ev) {
+        let busy_id = match engine.process_worker_event(busy_ev) {
             EventReaction::Status(s) => {
                 assert_eq!(s.tone, StatusTone::Busy);
-                assert_eq!(s.key.as_deref(), Some("pull-project:p1"));
+                s.key.expect("busy carries an opaque id")
             }
             _ => panic!("expected a pending Busy Status"),
-        }
+        };
         let ev = engine.worker_rx.recv().expect("completion event");
         match engine.process_worker_event(ev) {
             EventReaction::Status(s) => {
-                assert_eq!(s.key.as_deref(), Some("pull-project:p1"));
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(busy_id.as_str()),
+                    "the final must carry the same opaque id as the busy"
+                );
                 assert_eq!(s.tone, StatusTone::Error);
                 assert!(
                     s.message
@@ -5701,37 +5706,40 @@ mod tests {
                     s.message
                 );
             }
-            _ => panic!("expected a keyed error final"),
+            _ => panic!("expected a correlated error final"),
         }
     }
 
     #[test]
-    fn push_routes_through_status_op_with_matching_key() {
-        // Push now dispatches through a StatusOp: the pending Busy and the
-        // worker-resolved final must share the push key so the web toast is
+    fn push_routes_through_status_op_correlating_busy_and_final() {
+        // Push dispatches through a StatusOp: the pending Busy and the
+        // worker-resolved final share the op's own opaque id so the web toast is
         // replaced in place rather than stranded.
         let (mut engine, _tmp) = test_engine();
         let worktree = std::path::PathBuf::from("/tmp/does-not-exist-push-wt");
-        let expected_key = format!("push:{}", worktree.to_string_lossy());
 
         let pending = engine
             .apply(Command::Push {
                 worktree_path: worktree,
             })
             .expect("push dispatch");
-        match pending {
+        let busy_id = match pending {
             EventReaction::Status(s) => {
                 assert_eq!(s.tone, StatusTone::Busy);
-                assert_eq!(s.key.as_deref(), Some(expected_key.as_str()));
+                s.key.expect("busy carries an opaque id")
             }
             _ => panic!("expected a pending Busy Status"),
-        }
+        };
 
-        // The worker fails (bogus path); its resolved final must carry the key.
+        // The worker fails (bogus path); its resolved final must carry the id.
         let ev = engine.worker_rx.recv().expect("completion event");
         match engine.process_worker_event(ev) {
             EventReaction::Status(s) => {
-                assert_eq!(s.key.as_deref(), Some(expected_key.as_str()));
+                assert_eq!(
+                    s.key.as_deref(),
+                    Some(busy_id.as_str()),
+                    "the final must carry the same opaque id as the busy"
+                );
                 assert_eq!(s.tone, StatusTone::Error);
                 assert!(
                     s.message.starts_with("Push to remote failed:"),
@@ -5739,7 +5747,7 @@ mod tests {
                     s.message
                 );
             }
-            _ => panic!("expected a keyed error final"),
+            _ => panic!("expected a correlated error final"),
         }
     }
 

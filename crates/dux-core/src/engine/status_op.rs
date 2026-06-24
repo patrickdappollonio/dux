@@ -12,9 +12,21 @@
 //! replaced.
 
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::StatusUpdate;
 use crate::statusline::StatusTone;
+
+/// Process-global source of opaque status ids. Monotonic only so each op gets a
+/// distinct correlation handle; the value carries no meaning and consumers never
+/// read or construct it.
+static NEXT_STATUS_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Mint a fresh opaque correlation id for one status operation. Used internally
+/// by [`status_op`]; not part of the consumer-facing API.
+fn next_status_id() -> String {
+    format!("op-{}", NEXT_STATUS_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 /// What replaces a pending status when its operation finishes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,12 +103,14 @@ impl ResolvedFinal {
     }
 }
 
-/// Entry point: a key + pending message, awaiting its success closure. You
+/// Entry point: a pending message, awaiting its success closure. An opaque
+/// correlation id is minted internally, so the caller never authors or sees a
+/// key — the busy and its final correlate purely by sharing this object. You
 /// cannot obtain a [`StatusOp`] without passing through `on_success` then
 /// `on_failure`, so both outcomes are always declared.
-pub fn status_op(key: impl Into<String>, pending: impl Into<String>) -> NeedsSuccess {
+pub fn status_op(pending: impl Into<String>) -> NeedsSuccess {
     NeedsSuccess {
-        key: key.into(),
+        key: next_status_id(),
         pending: pending.into(),
     }
 }
@@ -208,28 +222,32 @@ mod tests {
     }
 
     #[test]
-    fn status_op_resolves_success_and_failure_with_its_key() {
-        let op = status_op("push:/a", "Pushing\u{2026}")
+    fn status_op_resolves_success_and_failure_with_its_own_id() {
+        let op = status_op("Pushing\u{2026}")
             .on_success(|n: &u32| Final::info(format!("Pushed {n} commits.")))
             .on_failure(|e: &String| Final::error(format!("Push failed: {e}")));
-        assert_eq!(op.key(), "push:/a");
+        // The id is opaque and minted internally; the pending and the resolved
+        // final must share it without the caller ever naming it.
+        let id = op.key().to_string();
         let pending = op.pending_status();
         assert_eq!(pending.tone, StatusTone::Busy);
-        assert_eq!(pending.key.as_deref(), Some("push:/a"));
+        assert_eq!(pending.key.as_deref(), Some(id.as_str()));
         let resolved = op.resolve(&Ok::<u32, String>(3));
         assert_eq!(
             resolved,
-            ResolvedFinal::new("push:/a", Final::info("Pushed 3 commits."))
+            ResolvedFinal::new(&id, Final::info("Pushed 3 commits."))
         );
 
-        // Fresh op (resolve consumes self) for the failure branch.
-        let op = status_op("push:/a", "Pushing\u{2026}")
+        // Distinct op gets a distinct id; failure branch resolves on its own id.
+        let op = status_op("Pushing\u{2026}")
             .on_success(|n: &u32| Final::info(format!("Pushed {n} commits.")))
             .on_failure(|e: &String| Final::error(format!("Push failed: {e}")));
+        let id2 = op.key().to_string();
+        assert_ne!(id, id2, "each op mints a fresh id");
         let resolved = op.resolve(&Err::<u32, String>("nope".into()));
         assert_eq!(
             resolved,
-            ResolvedFinal::new("push:/a", Final::error("Push failed: nope"))
+            ResolvedFinal::new(&id2, Final::error("Push failed: nope"))
         );
     }
 
@@ -237,14 +255,15 @@ mod tests {
     fn spawn_status_op_emits_pending_then_resolves_via_worker() {
         use crate::engine::EventReaction;
         let (mut engine, _tmp) = crate::engine::test_support::test_engine();
-        let op = status_op("op:1", "Working\u{2026}")
+        let op = status_op("Working\u{2026}")
             .on_success(|n: &u32| Final::info(format!("Did {n}.")))
             .on_failure(|e: &String| Final::error(e.clone()));
+        let id = op.key().to_string();
         let pending = engine.spawn_status_op(op, || Ok::<u32, String>(2));
         match pending {
             EventReaction::Status(s) => {
                 assert_eq!(s.tone, StatusTone::Busy);
-                assert_eq!(s.key.as_deref(), Some("op:1"));
+                assert_eq!(s.key.as_deref(), Some(id.as_str()));
             }
             _ => panic!("expected a pending Busy Status"),
         }
@@ -252,7 +271,7 @@ mod tests {
         let ev = engine.worker_rx.recv().expect("completion event");
         match engine.process_worker_event(ev) {
             EventReaction::Status(s) => {
-                assert_eq!(s.key.as_deref(), Some("op:1"));
+                assert_eq!(s.key.as_deref(), Some(id.as_str()));
                 assert_eq!(s.message, "Did 2.");
             }
             _ => panic!("expected a resolved keyed Status"),
