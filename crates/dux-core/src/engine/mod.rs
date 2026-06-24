@@ -308,7 +308,7 @@ impl Engine {
             cmd,
             Command::PersistGlobalEnv { .. }
                 | Command::UpdateMacros { .. }
-                | Command::PersistProject(_)
+                | Command::PersistProject { .. }
                 | Command::RemoveProject { .. }
         )
     }
@@ -386,9 +386,14 @@ impl Engine {
         self.in_flight.contains(key)
     }
 
-    pub fn spawn_project_persistence(&mut self, action: ProjectPersistenceAction) {
+    pub fn spawn_project_persistence(
+        &mut self,
+        action: ProjectPersistenceAction,
+        status_op_id: Option<String>,
+    ) {
         let db_path = self.paths.sessions_db_path.clone();
         let action_for_panic = action.clone();
+        let status_op_id_for_panic = status_op_id.clone();
         self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "project-persistence".into(),
@@ -397,6 +402,7 @@ impl Engine {
                     WorkerEvent::ProjectPersistenceCompleted {
                         action: action_for_panic,
                         result: Err(format!("Project-persistence worker panicked: {reason}")),
+                        status_op_id: status_op_id_for_panic,
                     }
                 })),
             },
@@ -459,7 +465,11 @@ impl Engine {
                     Ok(())
                 })()
                 .map_err(|err| format!("{err:#}"));
-                let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted { action, result });
+                let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted {
+                    action,
+                    result,
+                    status_op_id,
+                });
             },
         );
     }
@@ -1691,12 +1701,13 @@ mod tests {
             crate::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
         let before = engine.session_store.load_projects().unwrap().len();
         let project = test_support::sample_project("p1", "/tmp/p1");
-        let _ = engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::Add {
+        let _ = engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::Add {
                 project,
                 status_message: "added".into(),
-            },
-        )));
+            }),
+            status_op_id: None,
+        });
         assert_eq!(
             engine.session_store.load_projects().unwrap().len(),
             before,
@@ -1717,12 +1728,13 @@ mod tests {
         engine.config_writer =
             crate::config_queue::ConfigWriteQueue::new("/nonexistent/dir/cfg.toml".into());
         let project = test_support::sample_project("ghost", "/tmp/ghost");
-        let _ = engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::Add {
+        let _ = engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::Add {
                 project,
                 status_message: "added".into(),
-            },
-        )));
+            }),
+            status_op_id: None,
+        });
 
         // Both self.projects and self.config.projects must not contain "ghost".
         assert!(

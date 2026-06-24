@@ -346,6 +346,10 @@ pub enum WorkerEvent {
     ProjectPersistenceCompleted {
         action: ProjectPersistenceAction,
         result: Result<(), String>,
+        /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
+        /// the completion handler (after the fallible post-worker config write).
+        /// `None` for callers that don't drive a handler-resolved status (web).
+        status_op_id: Option<String>,
     },
     /// A web UI `[auth]` user add/update/remove was hashed (for adds) and
     /// persisted to config.toml on a background thread. On success the worker

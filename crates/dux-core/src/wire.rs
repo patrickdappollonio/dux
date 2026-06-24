@@ -1395,12 +1395,13 @@ impl Engine {
                 // (still a Rust `Ok`, but the add was rolled back). Inspect the
                 // reaction so a rolled-back add is reported as the failure it was,
                 // not the optimistic "added project" success.
-                match self.apply(Command::PersistProject(Box::new(
-                    ProjectPersistenceAction::Add {
+                match self.apply(Command::PersistProject {
+                    action: Box::new(ProjectPersistenceAction::Add {
                         project,
                         status_message: status_message.clone(),
-                    },
-                ))) {
+                    }),
+                    status_op_id: None,
+                }) {
                     Ok(EventReaction::ProjectPersistenceOutcome(outcome))
                         if matches!(outcome.view, ProjectPersistenceView::Added { .. }) =>
                     {
@@ -1646,46 +1647,54 @@ impl Engine {
                 provider,
             } => {
                 let project_name = self.project_name(&project_id)?;
-                Command::PersistProject(Box::new(
-                    ProjectPersistenceAction::UpdateDefaultProvider {
+                Command::PersistProject {
+                    action: Box::new(ProjectPersistenceAction::UpdateDefaultProvider {
                         project_id,
                         project_name,
                         provider: provider.map(ProviderKind::new),
                         global_default: self.config.default_provider(),
-                    },
-                ))
+                    }),
+                    status_op_id: None,
+                }
             }
             WireCommand::UpdateProjectAutoReopen {
                 project_id,
                 auto_reopen_agents,
             } => {
                 let project_name = self.project_name(&project_id)?;
-                Command::PersistProject(Box::new(ProjectPersistenceAction::UpdateAutoReopen {
-                    project_id,
-                    project_name,
-                    auto_reopen_agents,
-                }))
+                Command::PersistProject {
+                    action: Box::new(ProjectPersistenceAction::UpdateAutoReopen {
+                        project_id,
+                        project_name,
+                        auto_reopen_agents,
+                    }),
+                    status_op_id: None,
+                }
             }
             WireCommand::UpdateProjectStartupCommand {
                 project_id,
                 startup_command,
             } => {
                 let project_name = self.project_name(&project_id)?;
-                Command::PersistProject(Box::new(
-                    ProjectPersistenceAction::UpdateStartupCommand {
+                Command::PersistProject {
+                    action: Box::new(ProjectPersistenceAction::UpdateStartupCommand {
                         project_id,
                         project_name,
                         startup_command,
-                    },
-                ))
+                    }),
+                    status_op_id: None,
+                }
             }
             WireCommand::UpdateProjectEnv { project_id, env } => {
                 let project_name = self.project_name(&project_id)?;
-                Command::PersistProject(Box::new(ProjectPersistenceAction::UpdateEnv {
-                    project_id,
-                    project_name,
-                    env,
-                }))
+                Command::PersistProject {
+                    action: Box::new(ProjectPersistenceAction::UpdateEnv {
+                        project_id,
+                        project_name,
+                        env,
+                    }),
+                    status_op_id: None,
+                }
             }
             WireCommand::ReloadConfig {} => Command::ReloadConfig,
             WireCommand::RecoverConfig {} => Command::RecoverConfig,
@@ -1723,10 +1732,13 @@ impl Engine {
                 };
                 let status_message =
                     format!("Added project \"{display_name}\" to the workspace.");
-                Command::PersistProject(Box::new(ProjectPersistenceAction::Add {
-                    project,
-                    status_message,
-                }))
+                Command::PersistProject {
+                    action: Box::new(ProjectPersistenceAction::Add {
+                        project,
+                        status_message,
+                    }),
+                    status_op_id: None,
+                }
             }
             WireCommand::RemoveProject { project_id } => {
                 // Resolve a display name, falling back to a short id slice for a
@@ -3159,7 +3171,7 @@ mod tests {
             })
             .expect("reconstruct");
         match cmd {
-            Command::PersistProject(action) => match *action {
+            Command::PersistProject { action, .. } => match *action {
                 ProjectPersistenceAction::UpdateStartupCommand {
                     project_id,
                     project_name,
@@ -3693,7 +3705,7 @@ mod tests {
             .unwrap()
             .to_string();
         match cmd {
-            Command::PersistProject(action) => match *action {
+            Command::PersistProject { action, .. } => match *action {
                 ProjectPersistenceAction::Add { project, .. } => {
                     assert_eq!(PathBuf::from(&project.path), expected_path);
                     assert_eq!(project.name, expected_name);

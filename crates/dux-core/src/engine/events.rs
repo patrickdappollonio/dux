@@ -318,6 +318,11 @@ pub enum AgentLaunchFailedOutcome {
 pub struct ProjectPersistenceOutcome {
     pub action: ProjectPersistenceAction,
     pub view: ProjectPersistenceView,
+    /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in the
+    /// completion handler (the post-worker config write is fallible, producing a
+    /// third outcome the worker never sees). `None` for callers that don't drive
+    /// a handler-resolved status (web/wire, engine internals).
+    pub status_op_id: Option<String>,
 }
 
 pub enum ProjectPersistenceView {
@@ -650,11 +655,13 @@ impl Engine {
         &mut self,
         action: ProjectPersistenceAction,
         result: Result<(), String>,
+        status_op_id: Option<String>,
     ) -> ProjectPersistenceOutcome {
         if let Err(error) = result {
             return ProjectPersistenceOutcome {
                 action,
                 view: ProjectPersistenceView::PersistenceFailed { error },
+                status_op_id,
             };
         }
 
@@ -746,7 +753,11 @@ impl Engine {
             }
         };
 
-        ProjectPersistenceOutcome { action, view }
+        ProjectPersistenceOutcome {
+            action,
+            view,
+            status_op_id,
+        }
     }
 
     /// Engine half of the session-deletion cascade. Removes the session from
@@ -1623,8 +1634,13 @@ impl Engine {
                 }
             }
             WorkerEvent::ConfigReloadReady(result) => self.process_config_reload_ready(*result),
-            WorkerEvent::ProjectPersistenceCompleted { action, result } => {
-                let outcome = self.process_project_persistence_completed(action, result);
+            WorkerEvent::ProjectPersistenceCompleted {
+                action,
+                result,
+                status_op_id,
+            } => {
+                let outcome =
+                    self.process_project_persistence_completed(action, result, status_op_id);
                 EventReaction::ProjectPersistenceOutcome(Box::new(outcome))
             }
             WorkerEvent::AuthUsersPersisted {
@@ -2428,7 +2444,7 @@ mod tests {
             project: project.clone(),
             status_message: "Added project \"p1\" to workspace.".to_string(),
         };
-        let outcome = engine.process_project_persistence_completed(action, Ok(()));
+        let outcome = engine.process_project_persistence_completed(action, Ok(()), None);
         assert_eq!(engine.projects.len(), 1);
         assert_eq!(engine.projects[0].id, "p1");
         assert!(matches!(
@@ -2446,7 +2462,7 @@ mod tests {
             project_id: "p1".to_string(),
             project_name: "Pee One".to_string(),
         };
-        let outcome = engine.process_project_persistence_completed(action, Ok(()));
+        let outcome = engine.process_project_persistence_completed(action, Ok(()), None);
         assert!(engine.projects.is_empty());
         assert!(matches!(
             outcome.view,
@@ -2464,7 +2480,7 @@ mod tests {
             provider: Some(ProviderKind::from_str("claude")),
             global_default: ProviderKind::from_str("codex"),
         };
-        let outcome = engine.process_project_persistence_completed(action, Ok(()));
+        let outcome = engine.process_project_persistence_completed(action, Ok(()), None);
         assert_eq!(
             engine.projects[0]
                 .explicit_default_provider
@@ -2488,7 +2504,7 @@ mod tests {
             project_name: "Pee One".to_string(),
         };
         let outcome =
-            engine.process_project_persistence_completed(action, Err("disk full".to_string()));
+            engine.process_project_persistence_completed(action, Err("disk full".to_string()), None);
         // Engine did NOT mutate state on error.
         assert_eq!(engine.projects.len(), 1);
         assert!(matches!(
@@ -2852,7 +2868,10 @@ mod tests {
             status_message: "added".to_string(),
         };
         let reaction = engine
-            .apply(crate::engine::Command::PersistProject(Box::new(action)))
+            .apply(crate::engine::Command::PersistProject {
+                action: Box::new(action),
+                status_op_id: None,
+            })
             .expect("apply succeeds");
         // Add is now inline: returns ProjectPersistenceOutcome directly, not Nothing.
         assert!(
