@@ -234,6 +234,34 @@ impl KeyedStatusController {
             changes.cleared_keys.push(None);
         }
 
+        // A stale anonymous Busy is a leak too: an unkeyed pending status whose
+        // producer never posted a final. Unlike a keyed entry it would otherwise
+        // never expire (most-recent-wins keeps it until the next `set`), so
+        // upgrade it to a timed-out Warning and log it, mirroring the keyed path.
+        let anon_busy_timed_out = self.anon.as_ref().is_some_and(|a| {
+            !self.anon_pinned
+                && a.tone == StatusTone::Busy
+                && now.duration_since(a.since) >= busy_timeout
+        });
+        if anon_busy_timed_out && let Some(anon) = self.anon.as_mut() {
+            crate::logger::warn(&format!(
+                "anonymous status left Busy with no final (\"{}\"); upgrading to a timed-out warning",
+                anon.message
+            ));
+            anon.tone = StatusTone::Warning;
+            anon.message = "timed out — check dux.log".to_string();
+            anon.since = now;
+            anon.generation = Generation(self.next_gen);
+            anon.seq = self.next_seq;
+            self.next_gen += 1;
+            self.next_seq += 1;
+            changes.upgraded.push(KeyedWireStatus {
+                key: None,
+                tone: StatusTone::Warning.as_wire().to_string(),
+                message: "timed out — check dux.log".to_string(),
+            });
+        }
+
         // Collect keys to operate on; two passes to avoid borrow issues.
         let mut to_clear: Vec<String> = Vec::new();
         let mut to_upgrade: Vec<String> = Vec::new();
@@ -488,6 +516,26 @@ mod tests {
         let changes = c.tick(t0 + Duration::from_secs(20), busy_timeout);
         assert_eq!(changes.upgraded.len(), 1);
         assert_eq!(changes.upgraded[0].key.as_deref(), Some("launch"));
+        assert_eq!(changes.upgraded[0].tone, "warning");
+        let mr = c.most_recent().unwrap();
+        assert_eq!(mr.tone, "warning");
+        assert!(mr.message.to_lowercase().contains("timed out"));
+    }
+
+    #[test]
+    fn anonymous_busy_expires_to_warning_after_timeout() {
+        let t0 = Instant::now();
+        let busy_timeout = Duration::from_secs(20);
+        let mut c = KeyedStatusController::with_clear_after(Duration::from_secs(6));
+        c.set(t0, None, StatusTone::Busy, "Loading…");
+        // Before the bound: still Busy (anonymous slot never auto-expires Busy).
+        let changes = c.tick(t0 + Duration::from_secs(19), busy_timeout);
+        assert!(changes.upgraded.is_empty());
+        assert_eq!(c.most_recent().unwrap().tone, "busy");
+        // After the bound: upgraded in place to a timed-out Warning, broadcast.
+        let changes = c.tick(t0 + Duration::from_secs(20), busy_timeout);
+        assert_eq!(changes.upgraded.len(), 1);
+        assert_eq!(changes.upgraded[0].key, None);
         assert_eq!(changes.upgraded[0].tone, "warning");
         let mr = c.most_recent().unwrap();
         assert_eq!(mr.tone, "warning");
