@@ -726,17 +726,29 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-## Status (2026-06-23)
+## Status (2026-06-24)
 
-**Foundation complete and proven.** Tasks 1–6 are done and committed; both
-migration patterns now have a working, tested reference implementation:
+**Foundation complete and proven; opaque ids landed; 3 ops migrated.**
 
-- Pure-status: `push` via `spawn_status_op` (`b1f6390`).
-- Domain-ful: `pull` via carry-`ResolvedFinal`-alongside-`PullCompleted` (`b6d6e6d`).
+- `Final`/`ResolvedFinal`/`StatusOp` + `spawn_status_op` round-trip + `EventReaction::ClearStatus` (`3962efe`, `f8cd44e`).
+- **Opaque ids:** `status_op(pending)` mints its own monotonic id; consumers never author or see a key. Killed the `status_keys` discipline at the source (a developer cannot mismatch a key they never touch).
+- Migrated and committed: **push** (pure-status), **pull** (domain-ful carry-`ResolvedFinal`), **open-path** (pure-status). Both patterns have a working reference.
+- Whole workspace clippy-clean; 705 core + 780 tui + 173 web + 289 client tests pass.
 
-The `Final`/`ResolvedFinal`/`StatusOp` types, the `spawn_status_op` round-trip,
-and `EventReaction::ClearStatus` are in place (`3962efe`, `f8cd44e`). Whole
-workspace clippy-clean; 704 core + 780 tui + 173 web tests pass.
+**Remaining busy emitters (all the hard/bulk ones now):**
+- Engine rich-view ops: `create` (command.rs:459, + progress re-emit events.rs:1231), `commit-message` (command.rs:942) — completion is surface-specific view logic, use carry-`ResolvedFinal`.
+- Web sync ops (wire.rs): launch (1084), checkout-default (1143), add-project-checkout (1192), pr-lookup (1277), delete (1473) — emitted synchronously through `apply_wire`; the op's pending rides the command-result, the final the status stream.
+- TUI `set_busy` (~25 sites in sessions.rs/mod.rs/input.rs/auth_users.rs): each is dispatched TUI-side and resolved in a worker-completion handler; migrate to a `StatusOp` whose resolution runs in that handler (clipboard, rename-branch, reconnect, server-flip, project-persistence, auth-users, load-worktrees, etc.).
+
+**Final step (only after every site above is migrated):** delete `App::set_busy`,
+`StatusUpdate::busy`, and the free busy `WireStatus` constructors; make
+`KeyedStatusController::set(.., Busy, ..)` crate-private; add the §3.6.2 pairing
+harness. This is the step that makes a dangling busy *inexpressible*.
+
+Note: the universal busy-timeout guardrail (`d4c40aa` + the anonymous-slot
+coverage) already makes a dangling busy *impossible at runtime* — any unpaired
+busy self-heals to a logged warning in 20s — so the remaining migration is about
+the stronger compile-time guarantee, not about live leaks.
 
 **Remaining for full sealing (each a mechanical application of the patterns
 above):** migrate commit-message (engine/web), create, the launch/reconnect
