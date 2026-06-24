@@ -249,6 +249,70 @@ pub struct App {
     /// git succeeds) and reproduces the surface's exact wording.
     pub(crate) pending_delete_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiDeleteOutcome>>,
+    /// In-flight reconnect / fresh-restart status ops (the "Launching agent …" /
+    /// "Starting fresh agent …" busy). When `reconnect_selected_session` or
+    /// `restart_selected_session_fresh` dispatches a launch the TUI mints a
+    /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its pending
+    /// busy, and stashes it here keyed by the **session id** — the natural
+    /// correlation handle because the shared `AgentLaunchReadyView` /
+    /// `AgentLaunchFailedOutcome` reactions that produce the final all carry the
+    /// session id. The matching ready (Reconnect / ResumeFallback / SessionMissing)
+    /// or failed (Reconnect / ForceReconnect) view pops the op and resolves it
+    /// against the handler-computed [`TuiReconnectOutcome`], reproducing the exact
+    /// final wording. Create-kind launches are NOT routed through this map: their
+    /// busy/final correlate by the content-addressable `create:{project_id}` key.
+    pub(crate) pending_reconnect_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<TuiReconnectOutcome>>,
+}
+
+/// Handler-computed outcome for a reconnect / fresh-restart status op (see
+/// [`App::pending_reconnect_ops`]). The terminal message is fully carried by the
+/// async launch reaction (the engine computes the success `status_message`; the
+/// failure arms carry `branch_name` + `message`), so the resolver reads it from
+/// this outcome rather than capturing dispatch-time state.
+pub enum TuiReconnectOutcome {
+    /// The launch is ready (Reconnect / ResumeFallback). `status_message` is the
+    /// engine-computed success line, shown verbatim.
+    Ready { status_message: String },
+    /// A plain reconnect launch failed; produces the "Reconnect failed …" line.
+    ReconnectFailed {
+        branch_name: String,
+        message: String,
+    },
+    /// A fresh-restart (force-reconnect) launch failed; produces the "Fresh
+    /// restart failed …" line.
+    ForceReconnectFailed {
+        branch_name: String,
+        message: String,
+    },
+    /// The session vanished between dispatch and launch (SessionMissing). Dismiss
+    /// the busy with no replacement message, mirroring the legacy clear.
+    Missing,
+}
+
+/// Map a [`TuiReconnectOutcome`] to its final user message. Shared by the keyed
+/// op resolver (`build_reconnect_status_op`) and the anonymous fallback path
+/// (`resolve_reconnect_op_or`, used when no op was stashed) so the wording cannot
+/// drift between the two.
+pub(crate) fn reconnect_final(o: &TuiReconnectOutcome) -> dux_core::engine::Final {
+    match o {
+        TuiReconnectOutcome::Ready { status_message } => {
+            dux_core::engine::Final::info(status_message.clone())
+        }
+        TuiReconnectOutcome::ReconnectFailed {
+            branch_name,
+            message,
+        } => dux_core::engine::Final::error(format!(
+            "Reconnect failed for agent \"{branch_name}\": {message}"
+        )),
+        TuiReconnectOutcome::ForceReconnectFailed {
+            branch_name,
+            message,
+        } => dux_core::engine::Final::error(format!(
+            "Fresh restart failed for agent \"{branch_name}\": {message}"
+        )),
+        TuiReconnectOutcome::Missing => dux_core::engine::Final::clear(),
+    }
 }
 
 /// Handler-computed outcome for an async worktree-deletion op (see
@@ -1622,6 +1686,7 @@ impl App {
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
             pending_delete_ops: HashMap::new(),
+            pending_reconnect_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and

@@ -550,6 +550,19 @@ impl App {
             .build_agent_launch_request(session, resume, self.pty_size_for_launch(), kind)
     }
 
+    /// Build the keyed status op for a reconnect / fresh-restart launch. The
+    /// resolver reads the terminal message straight off the launch reaction's
+    /// [`TuiReconnectOutcome`] (the engine computes the success line; the failure
+    /// arms carry branch + message), so it captures no dispatch-time state and
+    /// reproduces the TUI's exact wording for every outcome.
+    pub(super) fn build_reconnect_status_op(
+        &self,
+        busy_message: String,
+    ) -> dux_core::engine::HandlerStatusOp<TuiReconnectOutcome> {
+        dux_core::engine::status_op(busy_message)
+            .resolve_in_handler(|o: &TuiReconnectOutcome| reconnect_final(o))
+    }
+
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
         let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
@@ -2266,6 +2279,7 @@ impl App {
             ));
         }
         let branch_name = session.branch_name.clone();
+        let session_id = session.id.clone();
         let request = self.agent_launch_request(
             session,
             false,
@@ -2274,7 +2288,13 @@ impl App {
             },
         );
         if self.dispatch_agent_launch(request) {
-            self.set_busy(format!("Starting fresh agent \"{}\"...", branch_name));
+            // Route the busy through a keyed reconnect op so its final (resolved
+            // in the shared launch-ready/failed view handlers) replaces exactly
+            // this spinner instead of relying on most-recent-wins.
+            let op = self
+                .build_reconnect_status_op(format!("Starting fresh agent \"{branch_name}\"..."));
+            self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            self.pending_reconnect_ops.insert(session_id, op);
         }
         Ok(())
     }
@@ -2334,6 +2354,7 @@ impl App {
             ));
         }
         let branch_name = session.branch_name.clone();
+        let session_id = session.id.clone();
         let request = self.agent_launch_request(
             session,
             use_resume,
@@ -2342,7 +2363,13 @@ impl App {
             },
         );
         if self.dispatch_agent_launch(request) {
-            self.set_busy(format!("Launching agent \"{}\"...", branch_name));
+            // Route the busy through a keyed reconnect op so its final (resolved
+            // in the shared launch-ready/failed view handlers) replaces exactly
+            // this spinner instead of relying on most-recent-wins.
+            let op =
+                self.build_reconnect_status_op(format!("Launching agent \"{branch_name}\"..."));
+            self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            self.pending_reconnect_ops.insert(session_id, op);
         }
         Ok(())
     }
@@ -3099,6 +3126,7 @@ mod tests {
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
             pending_delete_ops: std::collections::HashMap::new(),
+            pending_reconnect_ops: std::collections::HashMap::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
