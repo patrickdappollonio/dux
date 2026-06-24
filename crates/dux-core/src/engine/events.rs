@@ -1285,71 +1285,37 @@ impl Engine {
                 repo_path,
                 target,
                 result,
+                status,
             } => {
                 self.clear_in_flight(&InFlightKey::Pull(repo_path.clone()));
-                match target {
-                    PullTarget::Project {
-                        project_id,
-                        project_name,
-                        ..
-                    } => {
-                        let status_key = format!("pull-project:{project_id}");
-                        match result {
-                            Ok(branch_name) => {
-                                if let Some(existing) =
-                                    self.projects.iter_mut().find(|c| c.id == project_id)
-                                    && let Some(branch_name) = branch_name
-                                {
-                                    existing.current_branch = branch_name;
-                                    existing.branch_status = if existing.leading_branch.as_deref()
-                                        == Some(&existing.current_branch)
-                                    {
-                                        ProjectBranchStatus::Leading
-                                    } else if existing.leading_branch.is_some() {
-                                        ProjectBranchStatus::NotLeading
-                                    } else {
-                                        let warning = crate::git::branch_warning_kind(
-                                            Path::new(&existing.path),
-                                            &existing.current_branch,
-                                        );
-                                        crate::git::branch_status_from_warning(warning.as_ref())
-                                    };
-                                }
-                                EventReaction::Status(
-                                    StatusUpdate::info(format!(
-                                        "Refreshed project \"{}\". Local branch is up to date with remote.",
-                                        project_name,
-                                    ))
-                                    .with_key(status_key),
-                                )
-                            }
-                            Err(e) => EventReaction::Status(
-                                StatusUpdate::error(format!(
-                                    "Project refresh failed for \"{}\": {e}",
-                                    project_name
-                                ))
-                                .with_key(status_key),
-                            ),
-                        }
-                    }
-                    PullTarget::Session => {
-                        let status_key = format!("pull-session:{repo_path}");
-                        match result {
-                            Ok(_) => EventReaction::Multi(vec![
-                                EventReaction::Status(
-                                    StatusUpdate::info(
-                                        "Pulled latest changes from remote successfully. Local branch is up to date.",
-                                    )
-                                    .with_key(status_key),
-                                ),
-                                EventReaction::ReloadChangedFiles,
-                            ]),
-                            Err(e) => EventReaction::Status(
-                                StatusUpdate::error(format!("Pull from remote failed: {e}"))
-                                    .with_key(status_key),
-                            ),
-                        }
-                    }
+                // Domain mutation: a successful project refresh updates the
+                // project's current branch and re-derives its leading status.
+                // The user-facing message was resolved at dispatch by the
+                // StatusOp and rides in `status`.
+                if let PullTarget::Project { project_id, .. } = &target
+                    && let Ok(Some(branch_name)) = &result
+                    && let Some(existing) = self.projects.iter_mut().find(|c| c.id == *project_id)
+                {
+                    existing.current_branch = branch_name.clone();
+                    existing.branch_status =
+                        if existing.leading_branch.as_deref() == Some(&existing.current_branch) {
+                            ProjectBranchStatus::Leading
+                        } else if existing.leading_branch.is_some() {
+                            ProjectBranchStatus::NotLeading
+                        } else {
+                            let warning = crate::git::branch_warning_kind(
+                                Path::new(&existing.path),
+                                &existing.current_branch,
+                            );
+                            crate::git::branch_status_from_warning(warning.as_ref())
+                        };
+                }
+                let final_reaction = status.into_reaction();
+                // A successful session pull also reloads the changed-files view.
+                if matches!(target, PullTarget::Session) && result.is_ok() {
+                    EventReaction::Multi(vec![final_reaction, EventReaction::ReloadChangedFiles])
+                } else {
+                    final_reaction
                 }
             }
             WorkerEvent::ClipboardCopyCompleted { label, result } => match result {
@@ -1917,6 +1883,12 @@ mod tests {
                 leading_branch: Some("main".to_string()),
             },
             result: Ok(Some("feature-x".to_string())),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-project:p1",
+                crate::engine::Final::info(
+                    "Refreshed project \"p1-name\". Local branch is up to date with remote.",
+                ),
+            ),
         });
 
         // In-flight entry is cleared regardless of result.
@@ -1950,6 +1922,10 @@ mod tests {
                 leading_branch: None,
             },
             result: Err("network down".to_string()),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-project:p1",
+                crate::engine::Final::error("Project refresh failed for \"p1-name\": network down"),
+            ),
         });
 
         assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
@@ -3453,6 +3429,12 @@ mod tests {
                 leading_branch: None,
             },
             result: Ok(None),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-project:p1",
+                crate::engine::Final::info(
+                    "Refreshed project \"p1-name\". Local branch is up to date with remote.",
+                ),
+            ),
         });
 
         let status = unwrap_status(reaction);
@@ -3478,6 +3460,12 @@ mod tests {
                 leading_branch: None,
             },
             result: Err("network error".to_string()),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-project:p1",
+                crate::engine::Final::error(
+                    "Project refresh failed for \"p1-name\": network error",
+                ),
+            ),
         });
 
         let status = unwrap_status(reaction);
@@ -3499,6 +3487,12 @@ mod tests {
             repo_path: repo_path.clone(),
             target: PullTarget::Session,
             result: Ok(None),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-session:/tmp/wt-session",
+                crate::engine::Final::info(
+                    "Pulled latest changes from remote successfully. Local branch is up to date.",
+                ),
+            ),
         });
 
         // Session pull success returns Multi([Status, ReloadChangedFiles]).
@@ -3533,6 +3527,10 @@ mod tests {
             repo_path: repo_path.clone(),
             target: PullTarget::Session,
             result: Err("no remote".to_string()),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-session:/tmp/wt-session",
+                crate::engine::Final::error("Pull from remote failed: no remote"),
+            ),
         });
 
         let status = unwrap_status(reaction);

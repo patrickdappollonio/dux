@@ -615,13 +615,45 @@ impl Engine {
                         format!("pull-project:{project_id}")
                     }
                 };
+                // Build the tri-state op: the success/failure messages are
+                // declared here alongside the pending. The worker resolves the
+                // matching closure and carries the result back on PullCompleted;
+                // the completion handler keeps the domain mutations.
+                let op = match &target {
+                    PullTarget::Project { project_name, .. } => {
+                        let pn_ok = project_name.clone();
+                        let pn_err = project_name.clone();
+                        crate::engine::status_op(pull_status_key.clone(), busy_message)
+                            .on_success(move |_: &Option<String>| {
+                                crate::engine::Final::info(format!(
+                                    "Refreshed project \"{pn_ok}\". Local branch is up to date with remote."
+                                ))
+                            })
+                            .on_failure(move |e: &String| {
+                                crate::engine::Final::error(format!(
+                                    "Project refresh failed for \"{pn_err}\": {e}"
+                                ))
+                            })
+                    }
+                    PullTarget::Session => {
+                        crate::engine::status_op(pull_status_key.clone(), busy_message)
+                            .on_success(|_: &Option<String>| {
+                                crate::engine::Final::info(
+                                    "Pulled latest changes from remote successfully. Local branch is up to date.",
+                                )
+                            })
+                            .on_failure(|e: &String| {
+                                crate::engine::Final::error(format!("Pull from remote failed: {e}"))
+                            })
+                    }
+                };
+                let pending = op.pending_status();
+                let panic_key = pull_status_key.clone();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: format!("pull:{repo_key}"),
                         in_flight_key: Some(InFlightKey::Pull(repo_key.clone())),
-                        busy_status: Some(
-                            StatusUpdate::busy(busy_message).with_key(pull_status_key),
-                        ),
+                        busy_status: Some(pending),
                         already_running_status: Some(StatusUpdate::warning(
                             already_running_message,
                         )),
@@ -629,6 +661,10 @@ impl Engine {
                             repo_path: repo_key_for_panic,
                             target: target_for_panic,
                             result: Err(format!("Pull worker panicked: {reason}")),
+                            status: crate::engine::ResolvedFinal::error(
+                                panic_key,
+                                format!("Pull worker panicked: {reason}"),
+                            ),
                         })),
                     },
                     move |tx| {
@@ -659,10 +695,14 @@ impl Engine {
                                 .map(|_| None)
                                 .map_err(|e| e.to_string()),
                         };
+                        // Resolve the tri-state op where the typed result is in
+                        // scope; the message rides back with the domain result.
+                        let status = op.resolve(&result);
                         let _ = tx.send(WorkerEvent::PullCompleted {
                             repo_path: repo_key,
                             target,
                             result,
+                            status,
                         });
                     },
                 ))
