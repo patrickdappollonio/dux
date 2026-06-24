@@ -12,8 +12,32 @@ use super::*;
 impl App {
     pub(crate) fn drain_events(&mut self) {
         while let Ok(event) = self.engine.worker_rx.try_recv() {
+            // A PR-lookup completion carries back the opaque id of the keyed busy
+            // its dispatch opened. Capture it (and whether the lookup succeeded)
+            // before `process_worker_event` consumes the event, so we can DISMISS
+            // that busy once the downstream final is in place: success opens the
+            // name prompt (its `set_info` is the visible final), failure produced
+            // the engine's error `Status` — in both cases the keyed busy only
+            // needs clearing so it never strands to the busy timeout.
+            let pr_lookup_completion = match &event {
+                WorkerEvent::PullRequestResolved {
+                    status_op_id: Some(id),
+                    result,
+                } => Some((id.clone(), result.is_ok())),
+                _ => None,
+            };
             let reaction = self.engine.process_worker_event(event);
             self.apply_reaction(reaction);
+            if let Some((id, succeeded)) = pr_lookup_completion
+                && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
+            {
+                let outcome = if succeeded {
+                    PrLookupFinalOutcome::HandedOff
+                } else {
+                    PrLookupFinalOutcome::Failed
+                };
+                self.apply_reaction(op.resolve(&outcome).into_reaction());
+            }
         }
         self.retry_hung_resume_sessions();
         // Detect PTY exits.

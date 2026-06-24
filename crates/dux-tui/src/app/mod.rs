@@ -222,6 +222,32 @@ pub struct App {
     /// the picker is still open and matching, which the worker can't see).
     pub(crate) pending_worktree_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<WorktreesFinalOutcome>>,
+    /// In-flight PR-lookup status ops (the "Resolving PR for project…" busy).
+    /// The lookup dispatch mints a [`dux_core::engine::HandlerStatusOp`] (its own
+    /// opaque id), shows its pending busy, stashes it here keyed by that id, and
+    /// threads the id through the lookup worker. Both terminal outcomes resolve
+    /// the op to a [`dux_core::engine::Final::Clear`] in `drain_events` when the
+    /// `PullRequestResolved` event returns (keyed off the id it carries back):
+    /// the SUCCESS path then opens the name prompt and shows its own `set_info`,
+    /// and the FAILURE path lets the engine's error `Status` show — so the op
+    /// only needs to DISMISS its keyed busy, never author a message. The opaque
+    /// correlation guarantees the spinner is replaced instead of stranding to the
+    /// busy timeout, even though the visible final comes from elsewhere.
+    pub(crate) pending_pr_lookup_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<PrLookupFinalOutcome>>,
+}
+
+/// Handler-resolved outcome for a PR-lookup op (see [`App::pending_pr_lookup_ops`]).
+/// Both variants resolve to a clear: the user-visible message is produced by the
+/// downstream path (the name prompt's `set_info` on success, the engine's error
+/// `Status` on failure), so the op's only job is to dismiss its keyed busy.
+pub enum PrLookupFinalOutcome {
+    /// The lookup resolved; the TUI opens the name prompt (whose `set_info` is the
+    /// visible final), so this op's busy is dismissed with no replacement message.
+    HandedOff,
+    /// The lookup failed; the engine already emitted the error `Status`, so this
+    /// op's busy is dismissed with no replacement message.
+    Failed,
 }
 
 /// Handler-computed outcome for a worktree-picker load op (see
@@ -1556,6 +1582,7 @@ impl App {
             pending_persist_ops: HashMap::new(),
             pending_auth_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
+            pending_pr_lookup_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and

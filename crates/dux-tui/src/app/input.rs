@@ -9928,6 +9928,107 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// Mint and register a PR-lookup op exactly as `dispatch_pull_request_lookup`
+    /// does (without spawning the real `gh` worker), returning its opaque id and
+    /// leaving its keyed busy on the status line.
+    fn register_pr_lookup_op(app: &mut App, project_name: &str) -> String {
+        let op =
+            dux_core::engine::status_op(format!("Resolving PR for project \"{project_name}\"..."))
+                .resolve_in_handler(|o: &super::PrLookupFinalOutcome| match o {
+                    super::PrLookupFinalOutcome::HandedOff
+                    | super::PrLookupFinalOutcome::Failed => dux_core::engine::Final::clear(),
+                });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        app.pending_pr_lookup_ops.insert(op_id.clone(), op);
+        app.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        op_id
+    }
+
+    #[test]
+    fn pr_lookup_success_clears_its_keyed_busy_and_opens_prompt() {
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        let op_id = register_pr_lookup_op(&mut app, &project.name);
+
+        // The keyed busy is on the line until the lookup completes.
+        let snap = app.status.snapshot();
+        assert!(
+            snap.iter()
+                .any(|s| s.key.as_deref() == Some(op_id.as_str()) && s.tone == "busy"),
+            "the PR-lookup busy must be keyed by the op id while pending: {snap:?}"
+        );
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::PullRequestResolved {
+                result: Ok(ResolvedPullRequest {
+                    project,
+                    host: "github.com".to_string(),
+                    owner_repo: "octocat/Hello-World".to_string(),
+                    number: 42,
+                    title: "Fix issue".to_string(),
+                    state: "OPEN".to_string(),
+                    head_ref_name: "feature/pr-42".to_string(),
+                    custom_name: None,
+                }),
+                status_op_id: Some(op_id.clone()),
+            })
+            .expect("send PR resolution");
+        app.drain_events();
+
+        // The name prompt opened (the handoff), the op was consumed, and its
+        // keyed busy was dismissed so it can never strand to the busy timeout.
+        assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
+        assert!(!app.pending_pr_lookup_ops.contains_key(&op_id));
+        let snap = app.status.snapshot();
+        assert!(
+            !snap
+                .iter()
+                .any(|s| s.key.as_deref() == Some(op_id.as_str())),
+            "the PR-lookup keyed busy must be cleared on success: {snap:?}"
+        );
+        // The visible final is the name-prompt confirmation (an anonymous info).
+        assert_eq!(
+            app.status.most_recent_tui().map(|(_, m)| m),
+            Some("Resolved PR #42: Fix issue. Confirm or edit the branch name.".to_string())
+        );
+    }
+
+    #[test]
+    fn pr_lookup_failure_clears_its_keyed_busy_and_shows_error() {
+        let mut app = test_app(default_bindings());
+        let project_name = app.engine.projects[0].name.clone();
+        let op_id = register_pr_lookup_op(&mut app, &project_name);
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::PullRequestResolved {
+                result: Err("gh pr view failed".to_string()),
+                status_op_id: Some(op_id.clone()),
+            })
+            .expect("send PR failure");
+        app.drain_events();
+
+        // The op was consumed and its keyed busy dismissed; the engine's error
+        // (anonymous) is the visible final.
+        assert!(!app.pending_pr_lookup_ops.contains_key(&op_id));
+        let snap = app.status.snapshot();
+        assert!(
+            !snap
+                .iter()
+                .any(|s| s.key.as_deref() == Some(op_id.as_str())),
+            "the PR-lookup keyed busy must be cleared on failure: {snap:?}"
+        );
+        assert_eq!(
+            app.status.most_recent_tui(),
+            Some((
+                crate::statusline::StatusTone::Error,
+                "gh pr view failed".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn mouse_click_command_palette_row_selects_then_double_click_executes() {
         let mut app = test_app(default_bindings());
