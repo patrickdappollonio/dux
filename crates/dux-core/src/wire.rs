@@ -3814,6 +3814,21 @@ mod tests {
         }
 
         // The empty-diff check now happens on the spawned worker; wait for it.
+        // Each terminal path emits a StatusOpCompleted (resolving the busy)
+        // ALONGSIDE the domain event, so the StatusOpCompleted arrives first.
+        let status_event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("status-op completion event");
+        match status_event {
+            WorkerEvent::StatusOpCompleted { resolved } => {
+                assert!(
+                    matches!(resolved.outcome, crate::engine::Final::Message { .. }),
+                    "empty-diff resolves to an error message, not a clear"
+                );
+            }
+            _ => panic!("expected WorkerEvent::StatusOpCompleted first"),
+        }
         let event = engine
             .worker_rx
             .recv_timeout(std::time::Duration::from_secs(8))
@@ -3878,7 +3893,24 @@ mod tests {
             .expect("apply");
         assert!(matches!(reaction, EventReaction::Status(_)));
 
-        // The one-shot runs on a spawned thread; wait for its WorkerEvent.
+        // The one-shot runs on a spawned thread; wait for its WorkerEvents. The
+        // success path emits a StatusOpCompleted (a Final::Clear — the draft is
+        // the real output) ALONGSIDE the CommitMessageGenerated domain event,
+        // and the StatusOpCompleted arrives first.
+        let status_event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("status-op completion event");
+        match status_event {
+            WorkerEvent::StatusOpCompleted { resolved } => {
+                assert_eq!(
+                    resolved.outcome,
+                    crate::engine::Final::Clear,
+                    "success clears the busy with no replacement message"
+                );
+            }
+            _ => panic!("expected WorkerEvent::StatusOpCompleted first"),
+        }
         let event = engine
             .worker_rx
             .recv_timeout(std::time::Duration::from_secs(8))

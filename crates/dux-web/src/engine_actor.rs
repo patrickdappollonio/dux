@@ -748,40 +748,28 @@ pub(crate) fn run_engine_loop(
             }
 
             // A one-shot commit-message worker completed: push the generated
-            // message to subscribed web clients, or surface a failure on the
-            // status stream. Handled via `&reaction` so it coexists with the
-            // borrows above and stays before the by-value consume below.
-            match &reaction {
-                EventReaction::CommitMessageGenerated {
-                    session_id,
-                    message,
-                } => {
-                    let event = CommitMessageEvent {
-                        session_id: session_id.clone(),
-                        message: message.clone(),
-                    };
-                    // Update the connect snapshot BEFORE the live broadcast so a
-                    // client subscribing in the gap sees a consistent watch value.
-                    // The Instant stamps generation time for the snapshot TTL.
-                    let _ = commit_snapshot_tx.send(Some((event.clone(), Instant::now())));
-                    let _ = thread_commit_tx.send(event);
-                    // The busy toast for commit-message generation carries
-                    // `commit-msg:{session_id}`. Success routes the draft through
-                    // the commit-message lane (not the status stream), so the
-                    // busy toast never gets replaced by a succeeding status. Clear
-                    // it explicitly so it does not linger.
-                    thread_status_tx.clear(format!("commit-msg:{session_id}"));
-                }
-                EventReaction::CommitMessageFailed { session_id, error } => {
-                    // Failures ride the generic status toast, keyed so they
-                    // replace the matching busy rather than stacking beside it.
-                    let _ = thread_status_tx.send(WireStatus::keyed(
-                        format!("commit-msg:{session_id}"),
-                        "error",
-                        format!("Couldn't generate a commit message: {error}"),
-                    ));
-                }
-                _ => {}
+            // message to subscribed web clients. The user-facing status (a
+            // success-clear or a keyed error) now rides the worker's separate
+            // StatusOpCompleted event, surfaced generically by the
+            // `wire_statuses_from_reaction` drain (errors) and the `ClearStatus`
+            // handler (success-clear) above — so this match keeps only the
+            // domain work (broadcasting the draft). Handled via `&reaction` so it
+            // coexists with the borrows above and stays before the by-value
+            // consume below.
+            if let EventReaction::CommitMessageGenerated {
+                session_id,
+                message,
+            } = &reaction
+            {
+                let event = CommitMessageEvent {
+                    session_id: session_id.clone(),
+                    message: message.clone(),
+                };
+                // Update the connect snapshot BEFORE the live broadcast so a
+                // client subscribing in the gap sees a consistent watch value.
+                // The Instant stamps generation time for the snapshot TTL.
+                let _ = commit_snapshot_tx.send(Some((event.clone(), Instant::now())));
+                let _ = thread_commit_tx.send(event);
             }
 
             // A reload worker re-read config.toml; apply the new config to the

@@ -871,12 +871,29 @@ impl Engine {
                 let prov = crate::provider::create_provider(session.provider.as_str(), cfg);
                 let tx = self.worker_tx.clone();
                 // Clone the id before the thread consumes it; the original is
-                // needed below to build the correlation key for the busy status.
-                let session_id_for_busy = session_id.clone();
-                // A second clone kept outside the spawn for the busy-status
-                // return value at the bottom of this arm (session_id_for_busy
-                // is moved into the spawn closure for the panic handler).
-                let session_id_for_status = session_id_for_busy.clone();
+                // needed below for the panic-handler log/event.
+                let session_id_for_panic = session_id.clone();
+                // The user-facing status rides a StatusOp: its busy shows now and
+                // its final (a success-clear or a keyed error) arrives via the
+                // worker's separate StatusOpCompleted event. The draft itself
+                // still routes through CommitMessageGenerated, so success clears
+                // the spinner with no replacement line; failures carry the same
+                // "Couldn't generate a commit message: {e}" text the web showed
+                // before. The op mints its own opaque id.
+                let op = crate::engine::status_op(
+                    "Generating an AI commit message from the staged diff\u{2026}",
+                )
+                .on_success(|_: &()| crate::engine::Final::clear())
+                .on_failure(|e: &String| {
+                    crate::engine::Final::error(format!(
+                        "Couldn't generate a commit message: {e}"
+                    ))
+                });
+                // Capture the opaque id BEFORE moving `op` into the worker; the
+                // panic path can't reach `op` (it's consumed/lost on a panic) so
+                // it synthesises a keyed error from this id instead.
+                let op_id = op.key().to_string();
+                let pending = op.pending_status();
                 // A second sender clone reserved for the panic handler. `tx`
                 // is moved into `run`, which is wrapped in `catch_unwind`; if
                 // `run` panics, `tx` is unwound with it and is no longer
@@ -892,20 +909,39 @@ impl Engine {
                 std::thread::spawn(move || {
                     use std::panic::AssertUnwindSafe;
                     let run = move || {
+                        // Each terminal path resolves the StatusOp exactly once
+                        // (the failure closure wraps the raw error with the
+                        // "Couldn't generate…" prefix; success clears) and ships
+                        // a StatusOpCompleted ALONGSIDE the unchanged domain event.
+                        // These arms are mutually exclusive, so the conditional
+                        // move-of-`op`-then-return is accepted by the compiler.
                         let diff_text = match crate::git::staged_diff_text(&worktree) {
                             Ok(d) if d.trim().is_empty() => {
+                                let error =
+                                    "No staged changes to summarize. Stage files first."
+                                        .to_string();
+                                let resolved =
+                                    op.resolve(&Err::<(), String>(error.clone()));
+                                let _ = tx.send(
+                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
+                                );
                                 let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
                                     session_id,
-                                    error: "No staged changes to summarize. Stage files first."
-                                        .to_string(),
+                                    error,
                                 });
                                 return;
                             }
                             Ok(d) => d,
                             Err(e) => {
+                                let error = format!("Failed to read the staged diff: {e}");
+                                let resolved =
+                                    op.resolve(&Err::<(), String>(error.clone()));
+                                let _ = tx.send(
+                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
+                                );
                                 let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
                                     session_id,
-                                    error: format!("Failed to read the staged diff: {e}"),
+                                    error,
                                 });
                                 return;
                             }
@@ -913,6 +949,10 @@ impl Engine {
                         let prompt = format!("{prompt_prefix}\n\n{diff_text}");
                         match prov.run_oneshot(&prompt, &worktree) {
                             Ok(message) => {
+                                let resolved = op.resolve(&Ok::<(), String>(()));
+                                let _ = tx.send(
+                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
+                                );
                                 let _ =
                                     tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
                                         session_id,
@@ -920,9 +960,15 @@ impl Engine {
                                     });
                             }
                             Err(e) => {
+                                let error = e.to_string();
+                                let resolved =
+                                    op.resolve(&Err::<(), String>(error.clone()));
+                                let _ = tx.send(
+                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
+                                );
                                 let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
                                     session_id,
-                                    error: e.to_string(),
+                                    error,
                                 });
                             }
                         }
@@ -931,20 +977,25 @@ impl Engine {
                         let reason = crate::engine::spawn_worker::format_panic_payload(payload);
                         crate::logger::error(&format!(
                             "commit-message worker panicked for session \
-                             {session_id_for_busy}: {reason}"
+                             {session_id_for_panic}: {reason}"
                         ));
+                        // The closures owning `op` are lost with the panic, so
+                        // synthesise the keyed error from the captured op id. The
+                        // text matches the failure closure's "Couldn't generate…"
+                        // shape so the web final stays byte-identical to before.
+                        let resolved = crate::engine::ResolvedFinal::error(
+                            op_id,
+                            format!("Couldn't generate a commit message: Worker panicked: {reason}"),
+                        );
+                        let _ = tx_panic
+                            .send(crate::worker::WorkerEvent::StatusOpCompleted { resolved });
                         let _ = tx_panic.send(crate::worker::WorkerEvent::CommitMessageFailed {
-                            session_id: session_id_for_busy,
+                            session_id: session_id_for_panic,
                             error: format!("Worker panicked: {reason}"),
                         });
                     }
                 });
-                Ok(EventReaction::Status(
-                    StatusUpdate::busy(
-                        "Generating an AI commit message from the staged diff\u{2026}",
-                    )
-                    .with_key(format!("commit-msg:{session_id_for_status}")),
-                ))
+                Ok(EventReaction::Status(pending))
             }
 
             Command::ReorderSessions {
