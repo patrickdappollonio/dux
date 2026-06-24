@@ -362,10 +362,6 @@ pub enum WorkerEvent {
         scope_label: String,
         result: Result<crate::startup::StartupCommandLatestLog, String>,
     },
-    OpenPathCompleted {
-        target: String,
-        result: Result<(), String>,
-    },
     /// The in-process web-server flip pre-flight finished on a worker thread.
     /// LOCAL MODE resolution (loopback:port + optional Tailscale:port) plus the
     /// actual `TcpListener::bind` of each address runs off the UI thread because

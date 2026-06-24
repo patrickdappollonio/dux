@@ -1696,12 +1696,6 @@ impl Engine {
                     "Could not read startup command logs for {scope_label}: {err}"
                 ))),
             },
-            WorkerEvent::OpenPathCompleted { target, result } => match result {
-                Ok(()) => EventReaction::Status(StatusUpdate::info(format!("Opened {target}."))),
-                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Could not open {target}: {err}"
-                ))),
-            },
             WorkerEvent::ServerFlipPreflightReady { result, warning } => {
                 // No engine domain state to mutate — the listeners and the flip
                 // are TUI concerns. Hand them straight to the App.

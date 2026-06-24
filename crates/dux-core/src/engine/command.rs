@@ -704,26 +704,16 @@ impl Engine {
 
             Command::OpenPath { path, target } => {
                 let display = path.display().to_string();
-                let busy_message = format!("Opening {target}: {display}");
-                let label = format!("open-path:{target}");
-                let target_for_panic = target.clone();
-                Ok(self.spawn_command_worker(
-                    CommandWorkerSpec {
-                        label,
-                        in_flight_key: None,
-                        busy_status: Some(StatusUpdate::busy(busy_message)),
-                        already_running_status: None,
-                        panic_event: Some(Box::new(move |reason| WorkerEvent::OpenPathCompleted {
-                            target: target_for_panic,
-                            result: Err(format!("OpenPath worker panicked: {reason}")),
-                        })),
-                    },
-                    move |tx| {
-                        let result =
-                            crate::startup::open_path(&path).map_err(|err| format!("{err:#}"));
-                        let _ = tx.send(WorkerEvent::OpenPathCompleted { target, result });
-                    },
-                ))
+                let t_ok = target.clone();
+                let t_err = target.clone();
+                let op = crate::engine::status_op(format!("Opening {target}: {display}"))
+                    .on_success(move |_: &()| crate::engine::Final::info(format!("Opened {t_ok}.")))
+                    .on_failure(move |e: &String| {
+                        crate::engine::Final::error(format!("Could not open {t_err}: {e}"))
+                    });
+                Ok(self.spawn_status_op(op, move || {
+                    crate::startup::open_path(&path).map_err(|err| format!("{err:#}"))
+                }))
             }
 
             Command::ToggleAgentAutoReopen {
