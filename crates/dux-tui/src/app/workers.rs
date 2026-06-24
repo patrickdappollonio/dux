@@ -272,8 +272,19 @@ impl App {
                     *selected = 0;
                 }
             }
-            EventReaction::ProjectWorktreesArrived { project_id, result } => {
-                let mut status_after_update: Option<Result<&'static str, String>> = None;
+            EventReaction::ProjectWorktreesArrived {
+                project_id,
+                result,
+                status_op_id,
+            } => {
+                // The final depends on whether the picker is still open and
+                // matching when the worktrees arrive, a fact the worker can't
+                // see; resolve the HandlerStatusOp against that handler-computed
+                // outcome. The op (when present) encapsulates each final message
+                // declared at dispatch; the keyed `Dismissed` clear removes only
+                // this op's busy, so a newer message from another action is never
+                // clobbered.
+                let mut outcome: Option<WorktreesFinalOutcome> = None;
                 if let PromptState::PickProjectWorktree(prompt) = &mut self.prompt
                     && prompt.project.id == project_id
                 {
@@ -285,36 +296,24 @@ impl App {
                                 .next();
                             prompt.entries = entries;
                             prompt.error = None;
-                            status_after_update =
-                                Some(Ok("Choose an available worktree to launch a new agent."));
+                            outcome = Some(WorktreesFinalOutcome::Loaded);
                         }
                         Err(error) => {
-                            let project_name = prompt.project.name.clone();
                             prompt.entries.clear();
                             prompt.selected = None;
                             prompt.error = Some(error.clone());
-                            status_after_update = Some(Err(format!(
-                                "Failed to load worktrees for project \"{}\": {error}",
-                                project_name
-                            )));
+                            outcome = Some(WorktreesFinalOutcome::Failed(error));
                         }
                     }
                 }
-                match status_after_update {
-                    Some(Ok(message)) => self.set_info(message),
-                    Some(Err(message)) => self.set_error(message),
-                    // The picker was dismissed or switched before its worktrees
-                    // loaded, so nothing consumed the result. Clear the lingering
-                    // "Loading…" busy — but only if a Busy is still showing, so a
-                    // newer message from another action is never clobbered.
-                    None if matches!(
-                        self.status.most_recent_tui(),
-                        Some((StatusTone::Busy, _))
-                    ) =>
-                    {
-                        self.set_info(String::new());
-                    }
-                    None => {}
+                // The picker was dismissed or switched before its worktrees
+                // loaded, so nothing consumed the result.
+                let outcome = outcome.unwrap_or(WorktreesFinalOutcome::Dismissed);
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_worktree_ops.remove(&id)
+                {
+                    let resolved = op.resolve(&outcome);
+                    self.apply_reaction(resolved.into_reaction());
                 }
             }
 
@@ -513,20 +512,13 @@ impl App {
                 self.apply_auth_users_outcome(outcome, status_op_id);
             }
 
-            EventReaction::StartupCommandSucceeded { project_name } => {
-                let palette_key = self.bindings.label_for(Action::OpenPalette);
-                self.set_info(format!(
-                    "Startup command completed for project \"{}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
-                    project_name
-                ));
-            }
             EventReaction::StartupLogArrived { scope_label, log } => {
                 self.input_target = InputTarget::None;
                 self.terminal_selection = None;
                 self.prompt = PromptState::None;
                 self.fullscreen_overlay = FullscreenOverlay::StartupLog;
                 self.startup_log_viewer = Some(StartupLogViewer {
-                    scope_label: scope_label.clone(),
+                    scope_label,
                     path: log.path,
                     display_name: log.display_name,
                     content: log.content,
@@ -534,10 +526,9 @@ impl App {
                     search: TextInput::new(),
                     searching: false,
                 });
-                // Resolve the "Opening startup command logs…" busy: the overlay
-                // is now up, so replace the spinner with a transient confirmation
-                // rather than leaving it to time out.
-                self.set_info(format!("Opened startup command logs for {scope_label}."));
+                // Domain only: the overlay is now up. The "Opened startup command
+                // logs…" confirmation (resolving the busy) rides the StatusOp's
+                // separate StatusOpCompleted event.
             }
 
             EventReaction::FinishDeleteSessionView(view) => {

@@ -288,11 +288,20 @@ pub enum WorkerEvent {
     ProjectWorktreesReady {
         project_id: String,
         result: Result<Vec<ProjectWorktreeEntry>, String>,
+        /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
+        /// the completion handler (the final depends on whether the picker is
+        /// still open, which the worker can't see). `None` for callers that
+        /// don't drive a handler-resolved status.
+        status_op_id: Option<String>,
     },
     ClipboardCopyCompleted {
         /// Human-readable success message shown in the status bar.
         label: String,
         result: Result<(), String>,
+        /// Status final resolved at the call site by the clipboard StatusOp:
+        /// the success (`label`) or failure message, already keyed. The handler
+        /// emits this for the user-facing status.
+        status: crate::engine::ResolvedFinal,
     },
     BranchSyncReady(Vec<(String, String)>),
     BranchRenameCompleted {
@@ -372,7 +381,6 @@ pub enum WorkerEvent {
         /// that don't drive a handler-resolved status.
         status_op_id: Option<String>,
     },
-    StartupCommandRerunCompleted(crate::startup::StartupCommandResult),
     StartupCommandLogsLoaded {
         scope_label: String,
         result: Result<crate::startup::StartupCommandLatestLog, String>,

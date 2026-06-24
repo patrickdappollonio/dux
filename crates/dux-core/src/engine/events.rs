@@ -138,6 +138,9 @@ pub enum EventReaction {
     ProjectWorktreesArrived {
         project_id: String,
         result: Result<Vec<ProjectWorktreeEntry>, String>,
+        /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in
+        /// the completion handler. `None` for the web/wire path.
+        status_op_id: Option<String>,
     },
 
     // -- PR / refs follow-ups. --
@@ -201,9 +204,6 @@ pub enum EventReaction {
     },
 
     // -- Startup command / log viewer (App formats key + opens overlay). --
-    StartupCommandSucceeded {
-        project_name: String,
-    },
     StartupLogArrived {
         scope_label: String,
         log: StartupCommandLatestLog,
@@ -1394,12 +1394,15 @@ impl Engine {
                     final_reaction
                 }
             }
-            WorkerEvent::ClipboardCopyCompleted { label, result } => match result {
-                Ok(()) => EventReaction::Status(StatusUpdate::info(label)),
-                Err(e) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Clipboard copy failed: {e}"
-                ))),
-            },
+            WorkerEvent::ClipboardCopyCompleted {
+                label: _,
+                result: _,
+                status,
+            } => {
+                // The user-facing message was resolved at the call site by the
+                // clipboard StatusOp and rides in `status`.
+                status.into_reaction()
+            }
             WorkerEvent::BranchRenameCompleted {
                 session_id,
                 new_branch,
@@ -1553,9 +1556,15 @@ impl Engine {
             WorkerEvent::BrowserEntriesReady { dir, entries } => {
                 EventReaction::BrowserEntriesArrived { dir, entries }
             }
-            WorkerEvent::ProjectWorktreesReady { project_id, result } => {
-                EventReaction::ProjectWorktreesArrived { project_id, result }
-            }
+            WorkerEvent::ProjectWorktreesReady {
+                project_id,
+                result,
+                status_op_id,
+            } => EventReaction::ProjectWorktreesArrived {
+                project_id,
+                result,
+                status_op_id,
+            },
             WorkerEvent::WorktreeRemoveCompleted { session_id, result } => {
                 // Always clear the in-flight guard so the session is
                 // interactive again — whether we're about to remove it
@@ -1758,15 +1767,6 @@ impl Engine {
                     },
                 }
             }
-            WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
-                Ok(()) => EventReaction::StartupCommandSucceeded {
-                    project_name: result.project_name,
-                },
-                Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                    "Startup command failed for project \"{}\": {err}. Run read-startup-command-logs for details.",
-                    result.project_name
-                ))),
-            },
             WorkerEvent::StartupCommandLogsLoaded {
                 scope_label,
                 result,
@@ -1929,7 +1929,6 @@ mod tests {
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
             EventReaction::AuthUsersOutcome { .. } => "AuthUsersOutcome",
-            EventReaction::StartupCommandSucceeded { .. } => "StartupCommandSucceeded",
             EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
             EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
             EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
