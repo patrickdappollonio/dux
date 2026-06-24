@@ -240,6 +240,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         startup_log_selection: None,
         pending_server_flip: None,
         server_flip_preflight_pending: false,
+        pending_persist_ops: std::collections::HashMap::new(),
     };
     app.interactive_patterns = app.bindings.interactive_byte_patterns();
     app.rebuild_left_items();

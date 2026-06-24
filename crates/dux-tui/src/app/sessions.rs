@@ -143,12 +143,14 @@ impl App {
             created_at: Some(chrono::Utc::now()),
         };
         logger::info(&format!("registered project {}", path_buf.display()));
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::Add {
+        let reaction = self.engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::Add {
                 project,
                 status_message,
-            },
-        )))?;
+            }),
+            // Add is inline (returns its final immediately); no handler-resolved op.
+            status_op_id: None,
+        })?;
         // The add is INLINE now: the reaction already carries the FINAL status
         // (the success info from the `Added` arm, or the rollback error). A
         // trailing `set_busy` here would run last and never resolve, leaving a
@@ -1265,19 +1267,53 @@ impl App {
             return Ok(());
         }
 
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::UpdateDefaultProvider {
+        // The final is decided in `apply_project_persistence_outcome` (the
+        // post-worker config write is fallible). Declare all three outcomes here
+        // on a HandlerStatusOp; the success text matches the handler's branch on
+        // `provider`/`global_default` computed at dispatch.
+        let project_name = prompt.project_name.clone();
+        let global_default = prompt.global_default.clone();
+        let provider = selected.provider.clone();
+        let success_message = match &provider {
+            Some(provider) => format!(
+                "Project provider for \"{}\" changed to {}. Future agents in this project will use it; existing agents keep their current provider.",
+                project_name,
+                provider.as_str(),
+            ),
+            None => format!(
+                "\"{}\" now inherits the global default provider ({}). Future agents in this project will use it; existing agents keep their current provider.",
+                project_name,
+                global_default.as_str(),
+            ),
+        };
+        let db_fail_name = project_name.clone();
+        let config_fail_name = project_name.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Saving provider preference for project \"{project_name}\"..."
+        ))
+        .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
+            PersistFinalOutcome::Saved => dux_core::engine::Final::info(success_message.clone()),
+            PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
+                "Could not save the provider change for project \"{db_fail_name}\": {error}"
+            )),
+            PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
+                "Provider preference saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
+            )),
+        });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_persist_ops.insert(op_id.clone(), op);
+        let reaction = self.engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::UpdateDefaultProvider {
                 project_id: prompt.project_id,
                 project_name: prompt.project_name.clone(),
                 provider: selected.provider,
                 global_default: prompt.global_default,
-            },
-        )))?;
+            }),
+            status_op_id: Some(op_id),
+        })?;
         self.apply_reaction(reaction);
-        self.set_busy(format!(
-            "Saving provider preference for project \"{}\"...",
-            prompt.project_name
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -1287,18 +1323,43 @@ impl App {
             return Ok(());
         };
         let enabled = self.engine.project_allows_auto_reopen(&project.id);
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::UpdateAutoReopen {
+        let auto_reopen_agents = if enabled { Some(false) } else { None };
+        let project_name = project.name.clone();
+        // Mirror the handler's success branch: it derives enabled/disabled from
+        // `auto_reopen_agents.unwrap_or(true)`.
+        let new_enabled = auto_reopen_agents.unwrap_or(true);
+        let success_name = project_name.clone();
+        let db_fail_name = project_name.clone();
+        let config_fail_name = project_name.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Saving auto-reopen preference for project \"{project_name}\"..."
+        ))
+        .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
+            PersistFinalOutcome::Saved => dux_core::engine::Final::info(format!(
+                "Startup auto-reopen {} for project \"{}\".",
+                if new_enabled { "enabled" } else { "disabled" },
+                success_name,
+            )),
+            PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
+                "Could not save the auto-reopen change for project \"{db_fail_name}\": {error}"
+            )),
+            PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
+                "Auto-reopen preference saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
+            )),
+        });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_persist_ops.insert(op_id.clone(), op);
+        let reaction = self.engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::UpdateAutoReopen {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
-                auto_reopen_agents: if enabled { Some(false) } else { None },
-            },
-        )))?;
+                auto_reopen_agents,
+            }),
+            status_op_id: Some(op_id),
+        })?;
         self.apply_reaction(reaction);
-        self.set_busy(format!(
-            "Saving auto-reopen preference for project \"{}\"...",
-            project.name
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -1360,17 +1421,43 @@ impl App {
             self.set_error(format!("Could not find project \"{project_name}\"."));
             return Ok(());
         }
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::UpdateStartupCommand {
+        let startup_command = (!command.is_empty()).then_some(command);
+        let success_command = startup_command.clone();
+        let success_name = project_name.clone();
+        let db_fail_name = project_name.clone();
+        let config_fail_name = project_name.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Saving startup command for project \"{project_name}\"..."
+        ))
+        .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
+            PersistFinalOutcome::Saved => match &success_command {
+                Some(command) => dux_core::engine::Final::info(format!(
+                    "Startup command for project \"{success_name}\" set to: {command}"
+                )),
+                None => dux_core::engine::Final::info(format!(
+                    "Startup command cleared for project \"{success_name}\"."
+                )),
+            },
+            PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
+                "Could not save the startup command for project \"{db_fail_name}\": {error}"
+            )),
+            PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
+                "Startup command saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
+            )),
+        });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_persist_ops.insert(op_id.clone(), op);
+        let reaction = self.engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::UpdateStartupCommand {
                 project_id,
                 project_name: project_name.clone(),
-                startup_command: (!command.is_empty()).then_some(command),
-            },
-        )))?;
+                startup_command,
+            }),
+            status_op_id: Some(op_id),
+        })?;
         self.apply_reaction(reaction);
-        self.set_busy(format!(
-            "Saving startup command for project \"{project_name}\"..."
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -1463,17 +1550,45 @@ impl App {
             self.set_error(format!("Could not find project \"{project_name}\"."));
             return Ok(());
         }
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::UpdateEnv {
+        let env_count = env.len();
+        let success_name = project_name.clone();
+        let db_fail_name = project_name.clone();
+        let config_fail_name = project_name.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Saving environment variables for project \"{project_name}\"..."
+        ))
+        .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
+            PersistFinalOutcome::Saved => {
+                if env_count == 0 {
+                    dux_core::engine::Final::info(format!(
+                        "Environment variables cleared for project \"{success_name}\"."
+                    ))
+                } else {
+                    dux_core::engine::Final::info(format!(
+                        "Saved {env_count} environment variable(s) for project \"{success_name}\". New agents and terminals will receive them.",
+                    ))
+                }
+            }
+            PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
+                "Could not save environment variables for project \"{db_fail_name}\": {error}"
+            )),
+            PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
+                "Environment variables saved to the database for \"{config_fail_name}\", but config.toml could not be updated: {err}"
+            )),
+        });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_persist_ops.insert(op_id.clone(), op);
+        let reaction = self.engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::UpdateEnv {
                 project_id,
                 project_name: project_name.clone(),
                 env,
-            },
-        )))?;
+            }),
+            status_op_id: Some(op_id),
+        })?;
         self.apply_reaction(reaction);
-        self.set_busy(format!(
-            "Saving environment variables for project \"{project_name}\"..."
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -1798,17 +1913,35 @@ impl App {
                 self.set_error("Delete all agents in this project first.");
                 return Ok(());
             }
-            let reaction = self.engine.apply(Command::PersistProject(Box::new(
-                ProjectPersistenceAction::Remove {
+            let project_name = project.name.clone();
+            let success_name = project_name.clone();
+            let db_fail_name = project_name.clone();
+            let op = dux_core::engine::status_op(format!(
+                "Removing project \"{project_name}\" from workspace..."
+            ))
+            .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
+                PersistFinalOutcome::Saved => dux_core::engine::Final::info(format!(
+                    "Removed project \"{success_name}\" from app"
+                )),
+                PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
+                    "Could not remove project \"{db_fail_name}\" from the database: {error}"
+                )),
+                PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
+                    "Project was removed from the database, but config.toml could not be updated: {err}"
+                )),
+            });
+            let pending = op.pending_status();
+            let op_id = op.id().to_string();
+            self.pending_persist_ops.insert(op_id.clone(), op);
+            let reaction = self.engine.apply(Command::PersistProject {
+                action: Box::new(ProjectPersistenceAction::Remove {
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
-                },
-            )))?;
+                }),
+                status_op_id: Some(op_id),
+            })?;
             self.apply_reaction(reaction);
-            self.set_busy(format!(
-                "Removing project \"{}\" from workspace...",
-                project.name
-            ));
+            self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
             return Ok(());
         }
         // No real project is selected. If an ORPHANED session is selected (its
@@ -1882,17 +2015,35 @@ impl App {
                 self.do_delete_session(&session_id, true)?;
             }
         }
-        let reaction = self.engine.apply(Command::PersistProject(Box::new(
-            ProjectPersistenceAction::Delete {
+        let project_name = project.name.clone();
+        let success_name = project_name.clone();
+        let db_fail_name = project_name.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Finishing deletion for project \"{project_name}\" after removing its agents..."
+        ))
+        .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
+            PersistFinalOutcome::Saved => dux_core::engine::Final::info(format!(
+                "Deleted project \"{success_name}\" and all its agents"
+            )),
+            PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
+                "Could not finish deleting project \"{db_fail_name}\" from the database: {error}"
+            )),
+            PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
+                "Project was deleted from the database, but config.toml could not be updated: {err}"
+            )),
+        });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_persist_ops.insert(op_id.clone(), op);
+        let reaction = self.engine.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::Delete {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
-            },
-        )))?;
+            }),
+            status_op_id: Some(op_id),
+        })?;
         self.apply_reaction(reaction);
-        self.set_busy(format!(
-            "Finishing deletion for project \"{}\" after removing its agents...",
-            project.name
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -2775,6 +2926,7 @@ mod tests {
             startup_log_selection: None,
             pending_server_flip: None,
             server_flip_preflight_pending: false,
+            pending_persist_ops: std::collections::HashMap::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -3265,6 +3417,7 @@ mod tests {
                 project_id: "project-2".to_string(),
                 status_message: "Added project".to_string(),
             },
+            status_op_id: None,
         });
 
         assert!(
@@ -3306,6 +3459,7 @@ mod tests {
             view: ProjectPersistenceView::Removed {
                 project_name: "second".to_string(),
             },
+            status_op_id: None,
         });
 
         assert!(

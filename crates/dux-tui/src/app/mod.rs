@@ -189,6 +189,32 @@ pub struct App {
     /// invocation is refused with an actionable status instead of spawning a
     /// second worker.
     pub(crate) server_flip_preflight_pending: bool,
+    /// In-flight project-persistence status ops whose final is decided in the
+    /// completion handler. Each non-`Add` persistence dispatch mints a
+    /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
+    /// pending busy, and stashes it here keyed by that id. The matching
+    /// `ProjectPersistenceOutcome` carries the id back; the handler removes the
+    /// op, builds a [`PersistFinalOutcome`] (Saved / DbFailed / ConfigWriteFailed)
+    /// and resolves it into the keyed final. The op encapsulates the per-action
+    /// success and db-failure message text declared at dispatch, so the handler
+    /// only supplies which branch fired and any error string.
+    pub(crate) pending_persist_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<PersistFinalOutcome>>,
+}
+
+/// Handler-computed outcome for a project-persistence op (see
+/// [`App::pending_persist_ops`]). The worker writes only SQLite; the TUI handler
+/// then runs the fallible config write, producing one of three results the
+/// worker never sees. The op's resolver (declared at dispatch) maps this to the
+/// final user message.
+pub enum PersistFinalOutcome {
+    /// SQLite write succeeded and the post-worker config.toml write succeeded.
+    Saved,
+    /// The SQLite write itself failed; carries the formatted error.
+    DbFailed(String),
+    /// SQLite succeeded but the post-worker config.toml write failed; carries
+    /// the formatted error.
+    ConfigWriteFailed(String),
 }
 
 /// How [`App::run`] returned: a plain quit, or a request to flip the current
@@ -1487,6 +1513,7 @@ impl App {
             startup_log_selection: None,
             pending_server_flip: None,
             server_flip_preflight_pending: false,
+            pending_persist_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and

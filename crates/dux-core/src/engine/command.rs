@@ -52,7 +52,18 @@ pub enum Command {
     ///
     /// Boxed to keep the enum size within the clippy `large_enum_variant`
     /// threshold (`ProjectPersistenceAction` is 248 bytes unboxed).
-    PersistProject(Box<ProjectPersistenceAction>),
+    ///
+    /// `status_op_id` correlates a TUI [`crate::engine::HandlerStatusOp`] whose
+    /// final is decided in the completion handler (the post-worker config write
+    /// is fallible, producing a third outcome the worker never sees). It rides
+    /// from the dispatch site through the worker and back on
+    /// `ProjectPersistenceOutcome` so the handler can resolve the right op.
+    /// `None` for the non-TUI callers (web/wire, engine internals) that do not
+    /// drive a handler-resolved status.
+    PersistProject {
+        action: Box<ProjectPersistenceAction>,
+        status_op_id: Option<String>,
+    },
 
     /// Remove a project AND cascade-delete its agents' records + runtime,
     /// KEEPING their worktrees on disk. Tolerates a "ghost" project id that
@@ -316,7 +327,10 @@ impl Engine {
                     },
                 )))
             }
-            Command::PersistProject(action) => {
+            Command::PersistProject {
+                action,
+                status_op_id,
+            } => {
                 if let ProjectPersistenceAction::Add {
                     project,
                     status_message,
@@ -356,6 +370,9 @@ impl Engine {
                                     project_id: id,
                                     status_message,
                                 },
+                                // Add is inline with its own final at dispatch; it
+                                // never drives a handler-resolved status op.
+                                status_op_id: None,
                             },
                         ))),
                         Err(e) => {
@@ -379,7 +396,7 @@ impl Engine {
                         }
                     }
                 } else {
-                    self.spawn_project_persistence(*action);
+                    self.spawn_project_persistence(*action, status_op_id);
                     Ok(EventReaction::Nothing)
                 }
             }

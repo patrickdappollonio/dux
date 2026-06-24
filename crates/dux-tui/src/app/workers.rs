@@ -636,11 +636,46 @@ impl App {
         }
     }
 
+    /// Resolve a project-persistence [`HandlerStatusOp`] (stashed at dispatch by
+    /// its opaque id) against the handler-computed [`PersistFinalOutcome`] and
+    /// apply the resulting keyed final. Returns `true` when an op was found and
+    /// resolved; `false` when there was no id or no matching op (the Add inline
+    /// path and the web path don't drive a handler-resolved op), so the caller
+    /// can fall back to its legacy `set_info`/`set_error`.
+    fn resolve_persist_op(
+        &mut self,
+        status_op_id: &Option<String>,
+        outcome: PersistFinalOutcome,
+    ) -> bool {
+        let Some(id) = status_op_id else {
+            return false;
+        };
+        let Some(op) = self.pending_persist_ops.remove(id) else {
+            return false;
+        };
+        let resolved = op.resolve(&outcome);
+        self.apply_reaction(resolved.into_reaction());
+        true
+    }
+
     pub(crate) fn apply_project_persistence_outcome(&mut self, outcome: ProjectPersistenceOutcome) {
-        let ProjectPersistenceOutcome { action, view } = outcome;
+        let ProjectPersistenceOutcome {
+            action,
+            view,
+            status_op_id,
+        } = outcome;
 
         match view {
             ProjectPersistenceView::PersistenceFailed { error } => {
+                // The op (when present) encapsulates the per-action db-failure
+                // message; resolve it so the keyed busy is replaced. Fall back to
+                // the legacy direct set for the Add inline / web paths.
+                if self.resolve_persist_op(
+                    &status_op_id,
+                    PersistFinalOutcome::DbFailed(error.clone()),
+                ) {
+                    return;
+                }
                 let msg = match action {
                     ProjectPersistenceAction::Add { project, .. } => format!(
                         "Could not save project \"{}\" to the database: {error}",
@@ -706,9 +741,19 @@ impl App {
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
+                    let err = err.to_string();
+                    if self.resolve_persist_op(
+                        &status_op_id,
+                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
+                    ) {
+                        return;
+                    }
                     self.set_error(format!(
                         "Project was removed from the database, but config.toml could not be updated: {err}"
                     ));
+                    return;
+                }
+                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
                     return;
                 }
                 self.set_info(format!("Removed project \"{project_name}\" from app"));
@@ -724,9 +769,19 @@ impl App {
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
+                    let err = err.to_string();
+                    if self.resolve_persist_op(
+                        &status_op_id,
+                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
+                    ) {
+                        return;
+                    }
                     self.set_error(format!(
                         "Project was deleted from the database, but config.toml could not be updated: {err}"
                     ));
+                    return;
+                }
+                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
                     return;
                 }
                 self.set_info(format!(
@@ -746,9 +801,19 @@ impl App {
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
+                    let err = err.to_string();
+                    if self.resolve_persist_op(
+                        &status_op_id,
+                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
+                    ) {
+                        return;
+                    }
                     self.set_error(format!(
                         "Provider preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
+                    return;
+                }
+                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
                     return;
                 }
                 let message = match provider {
@@ -776,9 +841,19 @@ impl App {
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
+                    let err = err.to_string();
+                    if self.resolve_persist_op(
+                        &status_op_id,
+                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
+                    ) {
+                        return;
+                    }
                     self.set_error(format!(
                         "Auto-reopen preference saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
+                    return;
+                }
+                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
                     return;
                 }
                 let enabled = auto_reopen_agents.unwrap_or(true);
@@ -799,9 +874,19 @@ impl App {
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
+                    let err = err.to_string();
+                    if self.resolve_persist_op(
+                        &status_op_id,
+                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
+                    ) {
+                        return;
+                    }
                     self.set_error(format!(
                         "Startup command saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
+                    return;
+                }
+                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
                     return;
                 }
                 match startup_command {
@@ -824,9 +909,19 @@ impl App {
                     .config_writer
                     .save_eager(self.engine.config.clone())
                 {
+                    let err = err.to_string();
+                    if self.resolve_persist_op(
+                        &status_op_id,
+                        PersistFinalOutcome::ConfigWriteFailed(err.clone()),
+                    ) {
+                        return;
+                    }
                     self.set_error(format!(
                         "Environment variables saved to the database for \"{project_name}\", but config.toml could not be updated: {err}"
                     ));
+                    return;
+                }
+                if self.resolve_persist_op(&status_op_id, PersistFinalOutcome::Saved) {
                     return;
                 }
                 if env_count == 0 {
