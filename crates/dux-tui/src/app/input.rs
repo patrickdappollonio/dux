@@ -1236,20 +1236,48 @@ impl App {
         let cfg = provider_config(&self.engine.config, &session.provider);
         let prov = provider::create_provider(session.provider.as_str(), cfg);
         let tx = self.engine.worker_tx.clone();
+        // Resolve the render-time keybinding labels HERE (the worker thread has
+        // no access to `self.bindings`) and bake them into the StatusOp's
+        // outcomes. The status rides a separate StatusOpCompleted event; the
+        // CommitMessageGenerated/Failed events (shared with the web) keep doing
+        // only their domain work (set the draft text / clear the overlay).
+        let exit_key = self.bindings.label_for(Action::ExitCommitInput);
+        let commit_key = self.bindings.label_for(Action::CommitChanges);
+        let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
+        let op = dux_core::engine::status_op(
+            "Generating AI commit message from staged diff\u{2026}",
+        )
+        .on_success(move |_: &String| {
+            dux_core::engine::Final::info(format!(
+                "AI commit message generated. Press {exit_key} to exit, then {commit_key} to commit.",
+            ))
+        })
+        .on_failure(move |e: &String| {
+            dux_core::engine::Final::error(format!(
+                "Failed to generate AI commit message: {e}. \
+                 You can write one manually or retry with {gen_key}.",
+            ))
+        });
+        let pending = op.pending_status();
         self.commit_input
             .set_overlay("Generating commit message\u{2026}");
-        self.set_busy("Generating AI commit message from staged diff\u{2026}");
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
             Ok(message) => {
+                let resolved = op.resolve(&Ok::<String, String>(message.clone()));
+                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
                 let _ = tx.send(WorkerEvent::CommitMessageGenerated {
                     session_id,
                     message,
                 });
             }
             Err(e) => {
+                let err = e.to_string();
+                let resolved = op.resolve(&Err::<String, String>(err.clone()));
+                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
                 let _ = tx.send(WorkerEvent::CommitMessageFailed {
                     session_id,
-                    error: e.to_string(),
+                    error: err,
                 });
             }
         });

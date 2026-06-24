@@ -242,29 +242,19 @@ impl App {
                 session_id: _,
                 message,
             } => {
+                // Domain only: drop the draft into the input. The user-facing
+                // status rides the StatusOp's separate StatusOpCompleted event.
                 self.commit_input.clear_overlay();
                 self.commit_input.set_text(message);
                 self.input_target = InputTarget::CommitMessage;
-                {
-                    let exit_key = self.bindings.label_for(Action::ExitCommitInput);
-                    let commit_key = self.bindings.label_for(Action::CommitChanges);
-                    self.set_info(format!(
-                        "AI commit message generated. Press {exit_key} to exit, then {commit_key} to commit.",
-                    ));
-                }
             }
             EventReaction::CommitMessageFailed {
                 session_id: _,
-                error: err,
+                error: _,
             } => {
+                // Domain only: clear the overlay. The failure status rides the
+                // StatusOp's separate StatusOpCompleted event.
                 self.commit_input.clear_overlay();
-                {
-                    let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
-                    self.set_error(format!(
-                        "Failed to generate AI commit message: {err}. \
-                         You can write one manually or retry with {gen_key}.",
-                    ));
-                }
             }
 
             EventReaction::BrowserEntriesArrived { dir, entries } => {
