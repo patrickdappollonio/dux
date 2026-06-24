@@ -1281,17 +1281,6 @@ impl Engine {
                 EventReaction::CommitMessageFailed { session_id, error }
             }
             WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
-            WorkerEvent::PushCompleted { key, result } => match result {
-                Ok(()) => EventReaction::Status(
-                    StatusUpdate::info(
-                        "Pushed to remote successfully. Your changes are now available to collaborators.",
-                    )
-                    .with_key(key),
-                ),
-                Err(e) => EventReaction::Status(
-                    StatusUpdate::error(format!("Push to remote failed: {e}")).with_key(key),
-                ),
-            },
             WorkerEvent::PullCompleted {
                 repo_path,
                 target,

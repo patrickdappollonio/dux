@@ -267,10 +267,6 @@ pub enum WorkerEvent {
         session_id: String,
         error: String,
     },
-    PushCompleted {
-        key: String,
-        result: Result<(), String>,
-    },
     /// A `spawn_status_op` worker finished and carried back its resolved final
     /// (the success/failure message or a clear, already keyed).
     StatusOpCompleted {

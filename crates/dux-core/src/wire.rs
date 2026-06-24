@@ -70,6 +70,11 @@ pub mod status_keys {
     pub fn launch(session_id: &str) -> String {
         format!("{LAUNCH_PREFIX}:{session_id}")
     }
+
+    /// Push operation key, parameterised by worktree path.
+    pub fn push(worktree_path: &str) -> String {
+        format!("{PUSH_PREFIX}:{worktree_path}")
+    }
 }
 
 /// For a completed background operation, return the web status key whose Busy
@@ -5655,47 +5660,40 @@ mod tests {
     }
 
     #[test]
-    fn push_busy_and_completion_carry_the_same_key() {
-        // The PushCompleted success and failure must carry the same key that the
-        // push busy was emitted with, so the web loading toast is cleared on
-        // completion rather than stacking a new toast beside it.
+    fn push_routes_through_status_op_with_matching_key() {
+        // Push now dispatches through a StatusOp: the pending Busy and the
+        // worker-resolved final must share the push key so the web toast is
+        // replaced in place rather than stranded.
         let (mut engine, _tmp) = test_engine();
-        engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let worktree = std::path::PathBuf::from("/tmp/s1-worktree");
+        let worktree = std::path::PathBuf::from("/tmp/does-not-exist-push-wt");
         let expected_key = format!("push:{}", worktree.to_string_lossy());
 
-        // Success path must carry the push key.
-        let reaction = engine.process_worker_event(WorkerEvent::PushCompleted {
-            key: expected_key.clone(),
-            result: Ok(()),
-        });
-        match &reaction {
+        let pending = engine
+            .apply(Command::Push {
+                worktree_path: worktree,
+            })
+            .expect("push dispatch");
+        match pending {
             EventReaction::Status(s) => {
-                assert_eq!(
-                    s.key.as_deref(),
-                    Some(expected_key.as_str()),
-                    "push success must carry the push key"
-                );
-                assert_eq!(s.tone, StatusTone::Info);
+                assert_eq!(s.tone, StatusTone::Busy);
+                assert_eq!(s.key.as_deref(), Some(expected_key.as_str()));
             }
-            _ => panic!("expected EventReaction::Status (push success)"),
+            _ => panic!("expected a pending Busy Status"),
         }
 
-        // Failure path must also be keyed.
-        let reaction = engine.process_worker_event(WorkerEvent::PushCompleted {
-            key: expected_key.clone(),
-            result: Err("network error".to_string()),
-        });
-        match &reaction {
+        // The worker fails (bogus path); its resolved final must carry the key.
+        let ev = engine.worker_rx.recv().expect("completion event");
+        match engine.process_worker_event(ev) {
             EventReaction::Status(s) => {
-                assert_eq!(
-                    s.key.as_deref(),
-                    Some(expected_key.as_str()),
-                    "push failure must carry the push key"
-                );
+                assert_eq!(s.key.as_deref(), Some(expected_key.as_str()));
                 assert_eq!(s.tone, StatusTone::Error);
+                assert!(
+                    s.message.starts_with("Push to remote failed:"),
+                    "unexpected message: {}",
+                    s.message
+                );
             }
-            _ => panic!("expected EventReaction::Status (push failure)"),
+            _ => panic!("expected a keyed error final"),
         }
     }
 

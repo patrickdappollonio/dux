@@ -579,32 +579,20 @@ impl Engine {
             },
 
             Command::Push { worktree_path } => {
-                let push_key = format!("push:{}", worktree_path.to_string_lossy());
-                let push_key_panic = push_key.clone();
-                Ok(self.spawn_command_worker(
-                    CommandWorkerSpec {
-                        label: "push".into(),
-                        in_flight_key: None,
-                        busy_status: Some(
-                            StatusUpdate::busy("Pushing to remote\u{2026}")
-                                .with_key(push_key.clone()),
-                        ),
-                        already_running_status: None,
-                        panic_event: Some(Box::new(move |reason| WorkerEvent::PushCompleted {
-                            key: push_key_panic,
-                            result: Err(format!("Push worker panicked: {reason}")),
-                        })),
-                    },
-                    move |tx| {
-                        let result = crate::git::push(&worktree_path)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string());
-                        let _ = tx.send(WorkerEvent::PushCompleted {
-                            key: push_key,
-                            result,
-                        });
-                    },
-                ))
+                let key = crate::wire::status_keys::push(&worktree_path.to_string_lossy());
+                let op = crate::engine::status_op(key, "Pushing to remote\u{2026}")
+                    .on_success(|_: &()| {
+                        crate::engine::Final::info(
+                            "Pushed to remote successfully. Your changes are now available to collaborators.",
+                        )
+                    })
+                    .on_failure(|e: &String| {
+                        crate::engine::Final::error(format!("Push to remote failed: {e}"))
+                    });
+                let wt = worktree_path.clone();
+                Ok(self.spawn_status_op(op, move || {
+                    crate::git::push(&wt).map(|_| ()).map_err(|e| e.to_string())
+                }))
             }
 
             Command::Pull {
