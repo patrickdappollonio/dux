@@ -165,6 +165,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_web_checkout_ops: std::collections::HashMap::new(),
         pending_web_add_project_ops: std::collections::HashMap::new(),
         pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+        pending_delete_ops_web: std::collections::HashMap::new(),
     };
     let mut app = App {
         engine,
@@ -247,6 +248,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_auth_ops: std::collections::HashMap::new(),
         pending_worktree_ops: std::collections::HashMap::new(),
         pending_pr_lookup_ops: std::collections::HashMap::new(),
+        pending_delete_ops: std::collections::HashMap::new(),
     };
     app.interactive_patterns = app.bindings.interactive_byte_patterns();
     app.rebuild_left_items();

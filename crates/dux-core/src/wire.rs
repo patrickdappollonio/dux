@@ -22,14 +22,12 @@ pub mod status_keys {
     /// Agent-launch key prefix. Parameterised by session id at call sites:
     /// `format!("{LAUNCH_PREFIX}:{session_id}")`.
     pub const LAUNCH_PREFIX: &str = "launch";
-    /// Session-delete key prefix. Parameterised by session id at call sites:
-    /// `format!("{DELETE_PREFIX}:{session_id}")`.
-    pub const DELETE_PREFIX: &str = "delete";
-    // The checkout-default, add-project-checkout, and pr-lookup operations no
-    // longer use hand-authored key prefixes: their busies carry the opaque id of
-    // a `HandlerStatusOp` (see `Engine::pending_web_*_ops`) so the busy and its
-    // final correlate without a shared string. The clear-workaround they needed
-    // (`web_completed_busy_key_to_clear`) was removed with them.
+    // The checkout-default, add-project-checkout, pr-lookup, and async
+    // worktree-delete operations no longer use hand-authored key prefixes: their
+    // busies carry the opaque id of a `HandlerStatusOp` (see
+    // `Engine::pending_web_*_ops` / `Engine::pending_delete_ops_web`) so the busy
+    // and its final correlate without a shared string. The clear-workaround they
+    // needed (`web_completed_busy_key_to_clear`) was removed with them.
     /// Push key prefix. Parameterised by worktree path at call sites:
     /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
     pub const PUSH_PREFIX: &str = "push";
@@ -1583,7 +1581,6 @@ impl Engine {
     pub fn drive_delete_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
         match reaction {
             EventReaction::BeginDeleteSessionView(view) => {
-                let delete_key = format!("{}:{}", status_keys::DELETE_PREFIX, view.session_id);
                 match &view.outcome {
                     BeginDeleteSessionOutcome::AlreadyInFlight => vec![WireStatus::new(
                         "error",
@@ -1591,7 +1588,34 @@ impl Engine {
                     )],
                     BeginDeleteSessionOutcome::NotFound => vec![],
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                        vec![WireStatus::new("busy", busy_message.clone()).with_key(delete_key)]
+                        // Mint a keyed HandlerStatusOp whose opaque id correlates
+                        // this busy to the final resolved when the git-removal
+                        // worker reports back, and stash it keyed by session id.
+                        // The resolver reproduces the web's exact wording for every
+                        // terminal `WebDeleteOutcome`.
+                        let op = crate::engine::status_op(busy_message.clone()).resolve_in_handler(
+                            |o: &crate::engine::WebDeleteOutcome| {
+                                use crate::engine::{Final, WebDeleteOutcome};
+                                match o {
+                                    WebDeleteOutcome::Succeeded { message } => {
+                                        Final::info(message.clone())
+                                    }
+                                    WebDeleteOutcome::SucceededGone => {
+                                        Final::info("Agent and worktree removed.")
+                                    }
+                                    WebDeleteOutcome::Failed { message } => {
+                                        Final::error(format!("Worktree delete failed: {message}"))
+                                    }
+                                    WebDeleteOutcome::CleanupFailed { message } => {
+                                        Final::error(format!("Session cleanup failed: {message}"))
+                                    }
+                                }
+                            },
+                        );
+                        let pending = WireStatus::from_update(&op.pending_status());
+                        self.pending_delete_ops_web
+                            .insert(view.session_id.clone(), op);
+                        vec![pending]
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {
                         let removal = *removal;
@@ -1615,25 +1639,40 @@ impl Engine {
                     // The session was already removed by another path (e.g. its
                     // project was deleted, taking its sessions with it) before
                     // this worker reported back. The worktree removal still
-                    // completed, so resolve the keyed `delete:{id}` busy with a
-                    // same-key final rather than stranding the toast until the
-                    // busy-timeout Warning.
-                    vec![
-                        WireStatus::new("info", "Agent and worktree removed.")
-                            .with_key(format!("{}:{session_id}", status_keys::DELETE_PREFIX)),
-                    ]
+                    // completed, so resolve the keyed busy with its same-key final
+                    // rather than stranding the toast until the busy-timeout
+                    // Warning. If no op is stashed (the TUI path, or a synthetic
+                    // event), emit nothing.
+                    self.resolve_web_delete_op(
+                        session_id,
+                        &crate::engine::WebDeleteOutcome::SucceededGone,
+                    )
                 }
             }
             EventReaction::WorktreeRemoveFailed {
                 session_id,
                 message,
-            } => {
-                vec![
-                    WireStatus::new("error", format!("Worktree delete failed: {message}"))
-                        .with_key(format!("{}:{session_id}", status_keys::DELETE_PREFIX)),
-                ]
-            }
+            } => self.resolve_web_delete_op(
+                session_id,
+                &crate::engine::WebDeleteOutcome::Failed {
+                    message: message.clone(),
+                },
+            ),
             _ => vec![],
+        }
+    }
+
+    /// Pop the web delete op for `session_id` and resolve it into its keyed final
+    /// WireStatus. Returns `[]` when no op is stashed (the TUI path, or a
+    /// synthetic completion event with no preceding `AsyncStarted`).
+    fn resolve_web_delete_op(
+        &mut self,
+        session_id: &str,
+        outcome: &crate::engine::WebDeleteOutcome,
+    ) -> Vec<WireStatus> {
+        match self.pending_delete_ops_web.remove(session_id) {
+            Some(op) => wire_statuses_from_reaction(&op.resolve(outcome).into_reaction()),
+            None => vec![],
         }
     }
 
@@ -1642,24 +1681,39 @@ impl Engine {
         session_id: &str,
         removal: WorktreeRemoval,
     ) -> Vec<WireStatus> {
-        let delete_key = format!("{}:{session_id}", status_keys::DELETE_PREFIX);
+        // If a keyed op is stashed for this session (the async path emitted its
+        // busy), the success message must resolve THAT op so the spinner is
+        // replaced by its same-key final. The synchronous inline path has no op
+        // stashed, so it falls back to an unkeyed info status (its busy, if any,
+        // is the legacy `delete:{id}` key only on the async path — gone now).
         match self.apply(Command::FinishDeleteSession {
             session_id: session_id.to_string(),
             removal,
             update_status: true,
         }) {
-            Ok(EventReaction::FinishDeleteSessionView(view)) => vec![
-                WireStatus::new(
-                    "info",
-                    delete_session_status_message(&view.outcome, &view.removal),
-                )
-                .with_key(delete_key),
-            ],
+            Ok(EventReaction::FinishDeleteSessionView(view)) => {
+                let message = delete_session_status_message(&view.outcome, &view.removal);
+                match self.pending_delete_ops_web.remove(session_id) {
+                    Some(op) => wire_statuses_from_reaction(
+                        &op.resolve(&crate::engine::WebDeleteOutcome::Succeeded { message })
+                            .into_reaction(),
+                    ),
+                    None => vec![WireStatus::new("info", message)],
+                }
+            }
             Ok(_) => vec![],
-            Err(e) => vec![
-                WireStatus::new("error", format!("Session cleanup failed: {e:#}"))
-                    .with_key(delete_key),
-            ],
+            Err(e) => match self.pending_delete_ops_web.remove(session_id) {
+                Some(op) => wire_statuses_from_reaction(
+                    &op.resolve(&crate::engine::WebDeleteOutcome::CleanupFailed {
+                        message: format!("{e:#}"),
+                    })
+                    .into_reaction(),
+                ),
+                None => vec![WireStatus::new(
+                    "error",
+                    format!("Session cleanup failed: {e:#}"),
+                )],
+            },
         }
     }
 
@@ -4440,15 +4494,110 @@ mod tests {
     }
 
     #[test]
+    fn drive_delete_followup_resolves_op_on_success_present() {
+        // The async success path with the session still present: AsyncStarted
+        // mints the keyed op, then WorktreeRemoveSucceeded runs the cascade and
+        // resolves THAT op so the busy is replaced by its same-key final with the
+        // byte-identical web wording.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let begin = EventReaction::BeginDeleteSessionView(Box::new(
+            crate::engine::BeginDeleteSessionView {
+                session_id: "s1".to_string(),
+                outcome: BeginDeleteSessionOutcome::AsyncStarted {
+                    busy_message: "Removing worktree for agent \"feat\"\u{2026}".to_string(),
+                },
+            },
+        ));
+        let busy = engine.drive_delete_followup(&begin);
+        let busy_key = busy[0].key.clone().expect("busy key");
+
+        let reaction = EventReaction::WorktreeRemoveSucceeded {
+            session_id: "s1".to_string(),
+            branch_already_deleted: false,
+            our_busy_message: None,
+        };
+        let statuses = engine.drive_delete_followup(&reaction);
+        assert_eq!(statuses.len(), 1, "expected one final: {statuses:?}");
+        assert_eq!(statuses[0].key.as_deref(), Some(busy_key.as_str()));
+        assert_eq!(statuses[0].tone, "info");
+        assert!(
+            statuses[0].message.contains("Deleted agent")
+                && statuses[0].message.contains("removed its worktree"),
+            "unexpected status: {}",
+            statuses[0].message
+        );
+        assert!(
+            engine.pending_delete_ops_web.is_empty(),
+            "op must be consumed on resolution"
+        );
+    }
+
+    #[test]
+    fn drive_delete_followup_resolves_op_on_failure() {
+        // The async failure path resolves the keyed op into a same-key error with
+        // the byte-identical "Worktree delete failed: …" wording.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.sessions.push(session);
+
+        let begin = EventReaction::BeginDeleteSessionView(Box::new(
+            crate::engine::BeginDeleteSessionView {
+                session_id: "s1".to_string(),
+                outcome: BeginDeleteSessionOutcome::AsyncStarted {
+                    busy_message: "Removing worktree for agent \"feat\"\u{2026}".to_string(),
+                },
+            },
+        ));
+        let busy_key = engine.drive_delete_followup(&begin)[0]
+            .key
+            .clone()
+            .expect("busy key");
+
+        let reaction = EventReaction::WorktreeRemoveFailed {
+            session_id: "s1".to_string(),
+            message: "fatal: not a git repository".to_string(),
+        };
+        let statuses = engine.drive_delete_followup(&reaction);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].key.as_deref(), Some(busy_key.as_str()));
+        assert_eq!(statuses[0].tone, "error");
+        assert_eq!(
+            statuses[0].message,
+            "Worktree delete failed: fatal: not a git repository",
+        );
+    }
+
+    #[test]
     fn drive_delete_followup_clears_busy_when_session_already_gone() {
         // Edge: another path (e.g. the session's project was removed, taking its
         // sessions with it) dropped the session before the async git-removal
         // worker reported back. The worktree removal still completed, so the
-        // keyed `delete:{id}` busy toast MUST be resolved with a same-key final
-        // rather than stranded forever (it would otherwise time out to a
-        // spurious Warning). Mirrors the TUI's `our_busy_message` clear.
+        // keyed busy toast MUST be resolved with a same-key final rather than
+        // stranded forever (it would otherwise time out to a spurious Warning).
+        // The busy/final now correlate by the op's opaque id (minted in the
+        // AsyncStarted branch), not `delete:{id}`.
         let (mut engine, _tmp) = test_engine();
-        // No session present in `engine.sessions`.
+        // Establish the op by driving the AsyncStarted branch.
+        let begin = EventReaction::BeginDeleteSessionView(Box::new(
+            crate::engine::BeginDeleteSessionView {
+                session_id: "s1".to_string(),
+                outcome: BeginDeleteSessionOutcome::AsyncStarted {
+                    busy_message: "Removing worktree for agent \"feat\"\u{2026}".to_string(),
+                },
+            },
+        ));
+        let busy = engine.drive_delete_followup(&begin);
+        assert_eq!(busy.len(), 1);
+        assert_eq!(busy[0].tone, "busy");
+        let busy_key = busy[0].key.clone().expect("busy must carry a key");
+
+        // No session present in `engine.sessions`; the worker reports success.
         let reaction = EventReaction::WorktreeRemoveSucceeded {
             session_id: "s1".to_string(),
             branch_already_deleted: false,
@@ -4462,9 +4611,10 @@ mod tests {
         );
         assert_eq!(
             statuses[0].key.as_deref(),
-            Some("delete:s1"),
+            Some(busy_key.as_str()),
             "the final must carry the same key as the busy"
         );
+        assert_eq!(statuses[0].message, "Agent and worktree removed.");
         assert_ne!(statuses[0].tone, "busy", "must resolve, not re-show a busy");
     }
 

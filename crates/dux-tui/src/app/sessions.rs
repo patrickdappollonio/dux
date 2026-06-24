@@ -868,6 +868,76 @@ impl App {
     /// git work is required the session is cleaned up synchronously — that
     /// path only touches in-memory state and SQLite, which is effectively
     /// instantaneous.
+    /// Build the keyed status op for an async worktree deletion. The resolver
+    /// captures the dispatch-time session facts (provider / project name / branch
+    /// name / display name) — the session is still present at dispatch because
+    /// cleanup is deferred until git succeeds — and reproduces the TUI's exact
+    /// wording for every terminal [`TuiDeleteOutcome`].
+    pub(super) fn build_delete_status_op(
+        &self,
+        session_id: &str,
+        busy_message: String,
+    ) -> dux_core::engine::HandlerStatusOp<TuiDeleteOutcome> {
+        let (provider, branch_name, name, project_name) = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| {
+                let provider = s.provider.as_str().to_string();
+                let branch_name = s.branch_name.clone();
+                let name = s.title.as_deref().unwrap_or(&s.branch_name).to_string();
+                let project_name = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|p| p.id == s.project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                (provider, branch_name, name, project_name)
+            })
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    "<unknown>".to_string(),
+                )
+            });
+        dux_core::engine::status_op(busy_message).resolve_in_handler(
+            move |o: &TuiDeleteOutcome| match o {
+                TuiDeleteOutcome::SucceededPresent {
+                    branch_already_deleted,
+                } => {
+                    if *branch_already_deleted {
+                        dux_core::engine::Final::info(format!(
+                            "Deleted agent (branch \"{branch_name}\" was already removed)."
+                        ))
+                    } else {
+                        dux_core::engine::Final::info(format!(
+                            "Deleted {provider} agent from project \"{project_name}\" with branch \"{branch_name}\"."
+                        ))
+                    }
+                }
+                TuiDeleteOutcome::SucceededGone {
+                    our_busy_still_showing,
+                } => {
+                    if *our_busy_still_showing {
+                        dux_core::engine::Final::info("Worktree removal finished.")
+                    } else {
+                        dux_core::engine::Final::clear()
+                    }
+                }
+                TuiDeleteOutcome::FailedNamed { message } => dux_core::engine::Final::error(
+                    format!("Worktree delete failed for {provider} agent \"{name}\": {message}"),
+                ),
+                TuiDeleteOutcome::FailedBare { message } => {
+                    dux_core::engine::Final::error(format!("Worktree delete failed: {message}"))
+                }
+            },
+        )
+    }
+
     pub(crate) fn begin_delete_session(&mut self, session_id: &str, delete_worktree: bool) {
         match self.engine.apply(Command::BeginDeleteSession {
             session_id: session_id.to_string(),
@@ -2943,6 +3013,7 @@ mod tests {
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_delete_ops_web: std::collections::HashMap::new(),
         };
         let mut app = App {
             engine,
@@ -3027,6 +3098,7 @@ mod tests {
             pending_auth_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_delete_ops: std::collections::HashMap::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -3123,6 +3195,7 @@ mod tests {
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
+            pending_delete_ops_web: std::collections::HashMap::new(),
         }
     }
 
@@ -4069,14 +4142,13 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        // Simulate the Busy state set by `begin_delete_session`, including
-        // the tracking map entry.
+        // Simulate the Busy state set by `begin_delete_session`, including the
+        // keyed status op stashed in `pending_delete_ops`.
         let busy_msg = "Removing worktree for agent \"branch-s1\"\u{2026}";
-        app.set_busy(busy_msg);
+        let op = app.build_delete_status_op("s1", busy_msg.to_string());
+        app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        app.pending_delete_ops.insert("s1".to_string(), op);
         app.engine.pending_deletions.insert("s1".to_string());
-        app.engine
-            .deletion_busy_messages
-            .insert("s1".to_string(), busy_msg.to_string());
 
         // Another code path removes the session before the worker replies.
         app.engine.sessions.retain(|s| s.id != "s1");
@@ -4117,10 +4189,9 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
+        let op = app.build_delete_status_op("s1", "Removing worktree\u{2026}".to_string());
+        app.pending_delete_ops.insert("s1".to_string(), op);
         app.engine.pending_deletions.insert("s1".to_string());
-        app.engine
-            .deletion_busy_messages
-            .insert("s1".to_string(), "Removing worktree\u{2026}".to_string());
         app.engine.sessions.retain(|s| s.id != "s1");
 
         // Another action already set a non-Busy status.
@@ -4162,11 +4233,12 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        app.engine.pending_deletions.insert("s1".to_string());
-        app.engine.deletion_busy_messages.insert(
-            "s1".to_string(),
+        let op = app.build_delete_status_op(
+            "s1",
             "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
         );
+        app.pending_delete_ops.insert("s1".to_string(), op);
+        app.engine.pending_deletions.insert("s1".to_string());
         app.engine.sessions.retain(|s| s.id != "s1");
 
         // An unrelated operation set its own Busy message.
@@ -4249,6 +4321,12 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
+        let op = app.build_delete_status_op(
+            "s1",
+            "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
+        );
+        app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        app.pending_delete_ops.insert("s1".to_string(), op);
         app.engine.pending_deletions.insert("s1".to_string());
 
         app.engine
@@ -4269,6 +4347,59 @@ mod tests {
             msg.contains("not a git repository"),
             "error should include the git error, got: {msg}",
         );
+    }
+
+    /// The async success path (session still present at completion) now resolves
+    /// the keyed delete op rather than letting `apply_finish_delete_session_outcome`
+    /// author the line. The wording must stay byte-identical to the legacy path.
+    #[test]
+    fn async_delete_success_resolves_op_with_exact_wording() {
+        for (branch_already_deleted, expected) in [
+            (
+                false,
+                "Deleted claude agent from project \"demo\" with branch \"branch-s1\".",
+            ),
+            (
+                true,
+                "Deleted agent (branch \"branch-s1\" was already removed).",
+            ),
+        ] {
+            let mut s1 = make_session("s1", "claude", "/tmp/wt");
+            s1.project_id = "project-1".to_string();
+            let project = make_project("project-1", "claude");
+            let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+            let op = app.build_delete_status_op(
+                "s1",
+                "Removing worktree for agent \"branch-s1\"\u{2026}".to_string(),
+            );
+            app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            app.pending_delete_ops.insert("s1".to_string(), op);
+            app.engine.pending_deletions.insert("s1".to_string());
+
+            app.engine
+                .worker_tx
+                .send(WorkerEvent::WorktreeRemoveCompleted {
+                    session_id: "s1".to_string(),
+                    result: Ok(branch_already_deleted),
+                })
+                .expect("channel send");
+            app.drain_events();
+
+            assert_eq!(
+                app.status.message(),
+                expected,
+                "branch_already_deleted={branch_already_deleted}",
+            );
+            assert!(
+                !app.engine.sessions.iter().any(|s| s.id == "s1"),
+                "session should be cleaned up after async success",
+            );
+            assert!(
+                app.pending_delete_ops.is_empty(),
+                "the op must be consumed on resolution",
+            );
+        }
     }
 
     #[test]
