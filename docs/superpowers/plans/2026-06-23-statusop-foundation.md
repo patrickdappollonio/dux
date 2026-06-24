@@ -726,6 +726,27 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
+## Status (2026-06-23)
+
+**Foundation complete and proven.** Tasks 1–6 are done and committed; both
+migration patterns now have a working, tested reference implementation:
+
+- Pure-status: `push` via `spawn_status_op` (`b1f6390`).
+- Domain-ful: `pull` via carry-`ResolvedFinal`-alongside-`PullCompleted` (`b6d6e6d`).
+
+The `Final`/`ResolvedFinal`/`StatusOp` types, the `spawn_status_op` round-trip,
+and `EventReaction::ClearStatus` are in place (`3962efe`, `f8cd44e`). Whole
+workspace clippy-clean; 704 core + 780 tui + 173 web tests pass.
+
+**Remaining for full sealing (each a mechanical application of the patterns
+above):** migrate commit-message (engine/web), create, the launch/reconnect
+family, delete/worktree-removal, the web checkout/add-project/pr-lookup ops,
+open-path, clipboard-copy, branch-rename, auth-users, project-persistence, and
+the ~15 TUI `set_busy` call sites; then **seal** by making
+`KeyedStatusController::set(.., Busy, ..)` crate-private and deleting
+`App::set_busy`, `StatusUpdate::busy`, and the free busy `WireStatus`
+constructors; finally add the §3.6.2 pairing test harness.
+
 ## Architectural finding (from the push migration)
 
 `push` is a *pure-status* op: its completion emits only a status, so it fits
