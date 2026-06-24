@@ -1280,6 +1280,7 @@ impl Engine {
             WorkerEvent::CommitMessageFailed { session_id, error } => {
                 EventReaction::CommitMessageFailed { session_id, error }
             }
+            WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
             WorkerEvent::PushCompleted { key, result } => match result {
                 Ok(()) => EventReaction::Status(
                     StatusUpdate::info(

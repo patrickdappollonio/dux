@@ -271,6 +271,11 @@ pub enum WorkerEvent {
         key: String,
         result: Result<(), String>,
     },
+    /// A `spawn_status_op` worker finished and carried back its resolved final
+    /// (the success/failure message or a clear, already keyed).
+    StatusOpCompleted {
+        resolved: crate::engine::ResolvedFinal,
+    },
     PullCompleted {
         repo_path: String,
         target: PullTarget,
