@@ -10,6 +10,7 @@ mod in_flight;
 mod lifecycle;
 mod resume_fallback;
 mod spawn_worker;
+pub mod status_op;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -29,6 +30,7 @@ pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec, format_panic_payload,
 };
+pub use status_op::{Final, ResolvedFinal, StatusOp, status_op};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
