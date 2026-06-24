@@ -296,7 +296,26 @@ impl App {
         raw_input: String,
     ) -> Result<()> {
         self.prompt = PromptState::None;
-        self.set_busy(format!("Resolving PR for project \"{}\"...", project.name));
+        // Mint a HandlerStatusOp keyed by an opaque id. Its busy shows now; both
+        // terminal outcomes resolve to a CLEAR in `drain_events` when the
+        // `PullRequestResolved` event returns carrying this id. The visible final
+        // comes from elsewhere (the name prompt's `set_info` on success, the
+        // engine's error `Status` on failure), so the op only DISMISSES its busy
+        // — but keying it guarantees the spinner is replaced rather than stranding
+        // to the busy timeout. The id rides through the lookup worker and back.
+        let op = dux_core::engine::status_op(format!(
+            "Resolving PR for project \"{}\"...",
+            project.name
+        ))
+        .resolve_in_handler(|o: &PrLookupFinalOutcome| match o {
+            PrLookupFinalOutcome::HandedOff | PrLookupFinalOutcome::Failed => {
+                dux_core::engine::Final::clear()
+            }
+        });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_pr_lookup_ops.insert(op_id.clone(), op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -307,16 +326,21 @@ impl App {
             // `worker_tx` is moved into the job; `tx_panic` is kept outside
             // `catch_unwind` so it remains valid if the job panics.
             let tx_panic = worker_tx.clone();
+            let op_id_panic = op_id.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::gh::run_pull_request_lookup_job(
-                    project, raw_input, None, worker_tx, None,
+                    project,
+                    raw_input,
+                    None,
+                    worker_tx,
+                    Some(op_id),
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
                 dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
                     result: Err(format!("Worker panicked: {reason}")),
-                    status_op_id: None,
+                    status_op_id: Some(op_id_panic),
                 });
             }
         });
@@ -3002,6 +3026,7 @@ mod tests {
             pending_persist_ops: std::collections::HashMap::new(),
             pending_auth_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
+            pending_pr_lookup_ops: std::collections::HashMap::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

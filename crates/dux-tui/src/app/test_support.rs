@@ -246,6 +246,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_persist_ops: std::collections::HashMap::new(),
         pending_auth_ops: std::collections::HashMap::new(),
         pending_worktree_ops: std::collections::HashMap::new(),
+        pending_pr_lookup_ops: std::collections::HashMap::new(),
     };
     app.interactive_patterns = app.bindings.interactive_byte_patterns();
     app.rebuild_left_items();
