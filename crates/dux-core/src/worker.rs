@@ -363,6 +363,14 @@ pub enum WorkerEvent {
         message: String,
         warn: bool,
         result: Result<(), String>,
+        /// Correlation id for the TUI `HandlerStatusOp` minted at the add
+        /// dispatch site, whose final is resolved in the completion handler
+        /// (the post-worker config write is fallible and the warn tone is known
+        /// only here). Rides back to the immediate handler AND, when an arrival
+        /// is deferred by an open reload barrier, into the stash so the later
+        /// `ConfigReloadReady` replay resolves the right op. `None` for callers
+        /// that don't drive a handler-resolved status.
+        status_op_id: Option<String>,
     },
     StartupCommandRerunCompleted(crate::startup::StartupCommandResult),
     StartupCommandLogsLoaded {

@@ -187,6 +187,19 @@ pub enum EventReaction {
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
 
+    // -- Web-UI login-user add (App resolves the HandlerStatusOp). --
+    /// A web-UI login-user add finished: the bcrypt hash ran off-thread and the
+    /// engine performed the fallible post-worker config write. The Engine already
+    /// adopted (or rolled back) `config.auth.users`; the App only surfaces the
+    /// final. When `status_op_id` is `Some`, the App pops the matching
+    /// `HandlerStatusOp<AuthUserFinalOutcome>` and resolves it into the keyed
+    /// final; when `None` (web/wire, engine internals) the App/wire builds the
+    /// `StatusUpdate` directly via `AuthUserFinalOutcome::into_status`.
+    AuthUsersOutcome {
+        outcome: AuthUserFinalOutcome,
+        status_op_id: Option<String>,
+    },
+
     // -- Startup command / log viewer (App formats key + opens overlay). --
     StartupCommandSucceeded {
         project_name: String,
@@ -356,6 +369,58 @@ pub enum ProjectPersistenceView {
         project_name: String,
         env_count: usize,
     },
+}
+
+/// Handler-computed outcome for a web-UI login-user add (see
+/// [`crate::worker::WorkerEvent::AuthUsersPersisted`]). The bcrypt hash runs on a
+/// background thread; the engine handler then performs the fallible post-worker
+/// `config.toml` write (and a removal-empties-the-list warn flag), producing one
+/// of these results the worker never sees. A TUI `HandlerStatusOp` resolver
+/// (declared at the add dispatch site) maps this to the final user message; the
+/// `None`-correlation-id callers (web/wire, the engine's own tests) instead build
+/// the `StatusUpdate` directly via [`Self::into_status`].
+///
+/// The message and `warn` tone are decided where they always were — the worker
+/// builds the success line, the engine builds the single error template — and are
+/// carried here verbatim so both surfaces stay byte-identical to the pre-op code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthUserFinalOutcome {
+    /// The hash succeeded and the post-worker config write succeeded. `message`
+    /// is the verbose, already-formatted status line; `warn` requests a
+    /// warning-tone status (set when a change empties the valid-user set, which
+    /// disables the login gate — an add never empties it, so the add path always
+    /// passes `false`).
+    Saved { warn: bool, message: String },
+    /// The hash/DB worker result was `Err`, OR the post-worker config write
+    /// failed. Both currently surface the same error template, so they fold into
+    /// one variant carrying the formatted error detail.
+    Errored(String),
+}
+
+impl AuthUserFinalOutcome {
+    /// Build the keyed-or-unkeyed final [`StatusUpdate`] for the callers that do
+    /// NOT drive a TUI `HandlerStatusOp` (web/wire and the engine's own
+    /// internals): the same tones and byte-identical messages a resolver would
+    /// produce. `key` correlates the status to a pending busy when one exists.
+    pub fn into_status(self, key: Option<String>) -> StatusUpdate {
+        let update = match self {
+            AuthUserFinalOutcome::Saved {
+                warn: true,
+                message,
+            } => StatusUpdate::warning(message),
+            AuthUserFinalOutcome::Saved {
+                warn: false,
+                message,
+            } => StatusUpdate::info(message),
+            AuthUserFinalOutcome::Errored(err) => StatusUpdate::error(format!(
+                "Could not save web UI login users to config.toml: {err}"
+            )),
+        };
+        match key {
+            Some(key) => update.with_key(key),
+            None => update,
+        }
+    }
 }
 
 /// What happened to the session's worktree during deletion. Each variant maps
@@ -1152,28 +1217,28 @@ impl Engine {
         // reloaded config, so the final on-disk state is reloaded-config +
         // in-flight user change. Multiple arrivals folded into one by the
         // stash: last one wins.
-        let pending_auth_reaction = self
-            .pending_auth_users
-            .take()
-            .map(|(users, message, warn)| {
-                let previous = self.config.auth.users.clone();
-                self.config.auth.users = users;
-                match self.config_writer.save_eager(self.config.clone()) {
-                    Ok(()) => {
-                        if warn {
-                            EventReaction::Status(StatusUpdate::warning(message))
-                        } else {
-                            EventReaction::Status(StatusUpdate::info(message))
+        let pending_auth_reaction =
+            self.pending_auth_users
+                .take()
+                .map(|(users, message, warn, status_op_id)| {
+                    let previous = self.config.auth.users.clone();
+                    self.config.auth.users = users;
+                    // Same tone/message decision as the immediate handler, carried
+                    // back as an outcome so the App resolves the deferred op (it
+                    // stayed stashed across the reload barrier) against it, keyed by
+                    // the id that rode in on AuthUsersPersisted.
+                    let outcome = match self.config_writer.save_eager(self.config.clone()) {
+                        Ok(()) => AuthUserFinalOutcome::Saved { warn, message },
+                        Err(err) => {
+                            self.config.auth.users = previous;
+                            AuthUserFinalOutcome::Errored(err.to_string())
                         }
+                    };
+                    EventReaction::AuthUsersOutcome {
+                        outcome,
+                        status_op_id,
                     }
-                    Err(err) => {
-                        self.config.auth.users = previous;
-                        EventReaction::Status(StatusUpdate::error(format!(
-                            "Could not save web UI login users to config.toml: {err}"
-                        )))
-                    }
-                }
-            });
+                });
 
         if !must_preswap {
             // No pre-swap needed (no deferral, no auth replay): the bare reloaded
@@ -1648,6 +1713,7 @@ impl Engine {
                 message,
                 warn,
                 result,
+                status_op_id,
             } => {
                 // Clear the single-flight guard on BOTH outcomes so the next
                 // add/remove can start; opening either prompt while this was set
@@ -1657,40 +1723,39 @@ impl Engine {
                     Ok(()) => {
                         // If a config reload is in progress, the eager writer is
                         // quiesced and would reject this write. Stash the payload
-                        // and replay it when `ConfigReloadReady` closes the barrier
-                        // (after the reloaded config is applied), so the
-                        // user-initiated change is never silently lost. Multiple
-                        // arrivals within one reload window fold: the last one wins.
+                        // (and its op id) and replay it when `ConfigReloadReady`
+                        // closes the barrier (after the reloaded config is
+                        // applied), so the user-initiated change is never silently
+                        // lost. The op stays stashed on the App side until the
+                        // replay emits its final. Multiple arrivals within one
+                        // reload window fold: the last one wins.
                         if self.reloading {
-                            self.pending_auth_users = Some((users, message, warn));
+                            self.pending_auth_users = Some((users, message, warn, status_op_id));
                             return EventReaction::Nothing;
                         }
                         // Adopt the new user list and write it to config via the
                         // eager queue; roll back in-memory state on write failure.
+                        // The tone/message decision is carried back as an outcome:
+                        // the App resolves its HandlerStatusOp against it, or (the
+                        // None callers) builds the StatusUpdate via into_status.
                         let previous = self.config.auth.users.clone();
                         self.config.auth.users = users;
-                        match self.config_writer.save_eager(self.config.clone()) {
-                            Ok(()) => {
-                                // A removal that empties the list disables the
-                                // gate, so its message carries a warning tone.
-                                let update = if warn {
-                                    StatusUpdate::warning(message)
-                                } else {
-                                    StatusUpdate::info(message)
-                                };
-                                EventReaction::Status(update)
-                            }
+                        let outcome = match self.config_writer.save_eager(self.config.clone()) {
+                            Ok(()) => AuthUserFinalOutcome::Saved { warn, message },
                             Err(err) => {
                                 self.config.auth.users = previous;
-                                EventReaction::Status(StatusUpdate::error(format!(
-                                    "Could not save web UI login users to config.toml: {err}"
-                                )))
+                                AuthUserFinalOutcome::Errored(err.to_string())
                             }
+                        };
+                        EventReaction::AuthUsersOutcome {
+                            outcome,
+                            status_op_id,
                         }
                     }
-                    Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                        "Could not save web UI login users to config.toml: {err}"
-                    ))),
+                    Err(err) => EventReaction::AuthUsersOutcome {
+                        outcome: AuthUserFinalOutcome::Errored(err),
+                        status_op_id,
+                    },
                 }
             }
             WorkerEvent::StartupCommandRerunCompleted(result) => match result.status {
@@ -1863,6 +1928,7 @@ mod tests {
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
+            EventReaction::AuthUsersOutcome { .. } => "AuthUsersOutcome",
             EventReaction::StartupCommandSucceeded { .. } => "StartupCommandSucceeded",
             EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
             EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
@@ -2503,8 +2569,11 @@ mod tests {
             project_id: "p1".to_string(),
             project_name: "Pee One".to_string(),
         };
-        let outcome =
-            engine.process_project_persistence_completed(action, Err("disk full".to_string()), None);
+        let outcome = engine.process_project_persistence_completed(
+            action,
+            Err("disk full".to_string()),
+            None,
+        );
         // Engine did NOT mutate state on error.
         assert_eq!(engine.projects.len(), 1);
         assert!(matches!(
@@ -3641,9 +3710,11 @@ mod tests {
             message: "Added user alice.".to_string(),
             warn: false,
             result: Ok(()),
+            status_op_id: Some("op-auth".to_string()),
         });
 
-        // The reaction must be Nothing — not an error, not a status.
+        // The reaction must be Nothing — not an error, not a status. The op stays
+        // stashed on the App side; the replay emits the final later.
         assert!(
             matches!(reaction, EventReaction::Nothing),
             "expected Nothing during reload, got {}",
@@ -3651,10 +3722,14 @@ mod tests {
         );
         // In-flight guard is cleared regardless of deferral.
         assert!(!engine.is_in_flight(&InFlightKey::AuthUsers));
-        // The payload is stashed, not applied to config yet.
+        // The payload is stashed, not applied to config yet. The op id rides
+        // along so the later replay resolves the right op.
         assert!(
-            engine.pending_auth_users.is_some(),
-            "payload must be stashed"
+            matches!(
+                engine.pending_auth_users.as_ref(),
+                Some((_, _, _, Some(id))) if id == "op-auth"
+            ),
+            "payload (with its op id) must be stashed"
         );
         assert!(
             engine.config.auth.users.is_empty(),
@@ -3670,7 +3745,12 @@ mod tests {
 
         // Stash a pending update as if AuthUsersPersisted arrived during reload.
         let users = vec!["bob:hash".to_string()];
-        engine.pending_auth_users = Some((users.clone(), "Added user bob.".to_string(), false));
+        engine.pending_auth_users = Some((
+            users.clone(),
+            "Added user bob.".to_string(),
+            false,
+            Some("op-auth".to_string()),
+        ));
 
         // Deliver a successful ConfigReloadReady with a config that has a
         // different (or empty) auth.users — the in-flight update must win.
@@ -3709,17 +3789,24 @@ mod tests {
             engine.config.auth.users, users,
             "in-flight user update must survive the surface's config re-apply"
         );
-        // The reaction must include the auth-users status message.
-        let contains_auth_status = match &reaction {
-            EventReaction::Status(s) => s.message.contains("Added user bob"),
-            EventReaction::Multi(v) => v.iter().any(
-                |r| matches!(r, EventReaction::Status(s) if s.message.contains("Added user bob")),
-            ),
-            _ => false,
-        };
+        // The reaction must include the auth-users outcome, carrying the saved
+        // message and the op id that rode in on the stash, so the App resolves
+        // the right deferred op into the final.
+        fn finds_auth_bob(r: &EventReaction) -> bool {
+            match r {
+                EventReaction::AuthUsersOutcome {
+                    outcome: AuthUserFinalOutcome::Saved { message, .. },
+                    status_op_id,
+                } => {
+                    message.contains("Added user bob") && status_op_id.as_deref() == Some("op-auth")
+                }
+                EventReaction::Multi(v) => v.iter().any(finds_auth_bob),
+                _ => false,
+            }
+        }
         assert!(
-            contains_auth_status,
-            "reaction must surface the auth-users status message; got {}",
+            finds_auth_bob(&reaction),
+            "reaction must surface the auth-users outcome with its op id; got {}",
             reaction_kind(&reaction),
         );
     }
@@ -3738,10 +3825,28 @@ mod tests {
             message: String::new(),
             warn: false,
             result: Err("bcrypt failed".to_string()),
+            status_op_id: Some("op-auth".to_string()),
         });
 
-        // Error is surfaced immediately, not deferred.
-        let status = unwrap_status(reaction);
+        // Error is surfaced immediately, not deferred. The outcome carries the
+        // op id so the App resolves the matching op to the error final, and
+        // `into_status` reproduces the byte-identical error message.
+        let (outcome, status_op_id) = match reaction {
+            EventReaction::AuthUsersOutcome {
+                outcome,
+                status_op_id,
+            } => (outcome, status_op_id),
+            other => panic!(
+                "expected AuthUsersOutcome reaction, got {}",
+                reaction_kind(&other)
+            ),
+        };
+        assert_eq!(status_op_id.as_deref(), Some("op-auth"));
+        assert!(
+            matches!(&outcome, AuthUserFinalOutcome::Errored(e) if e.contains("bcrypt failed")),
+            "error detail must be carried; got: {outcome:?}"
+        );
+        let status = outcome.into_status(status_op_id);
         assert_eq!(status.tone, StatusTone::Error);
         assert!(
             status.message.contains("bcrypt failed"),
@@ -3767,6 +3872,7 @@ mod tests {
             message: "Added alice.".to_string(),
             warn: false,
             result: Ok(()),
+            status_op_id: Some("op-alice".to_string()),
         });
         // Second event (arrives before barrier closes).
         let _ = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
@@ -3774,14 +3880,20 @@ mod tests {
             message: "Added bob.".to_string(),
             warn: false,
             result: Ok(()),
+            status_op_id: Some("op-bob".to_string()),
         });
 
-        // Only the second payload is stashed.
-        let (stashed_users, stashed_msg, _) = engine
+        // Only the second payload is stashed (its op id too).
+        let (stashed_users, stashed_msg, _, stashed_op_id) = engine
             .pending_auth_users
             .take()
             .expect("payload must be stashed");
         assert_eq!(stashed_users.len(), 2, "second (last) event must win");
+        assert_eq!(
+            stashed_op_id.as_deref(),
+            Some("op-bob"),
+            "last event's op id must win the fold"
+        );
         assert!(
             stashed_msg.contains("bob"),
             "message must be from last event"
