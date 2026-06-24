@@ -579,8 +579,7 @@ impl Engine {
             },
 
             Command::Push { worktree_path } => {
-                let key = crate::wire::status_keys::push(&worktree_path.to_string_lossy());
-                let op = crate::engine::status_op(key, "Pushing to remote\u{2026}")
+                let op = crate::engine::status_op("Pushing to remote\u{2026}")
                     .on_success(|_: &()| {
                         crate::engine::Final::info(
                             "Pushed to remote successfully. Your changes are now available to collaborators.",
@@ -609,21 +608,16 @@ impl Engine {
                 // Build the correlation key for the busy→final pair. Both ends
                 // must use the same key so the web layer can dismiss the busy
                 // toast when the completion arrives.
-                let pull_status_key = match &target {
-                    PullTarget::Session => format!("pull-session:{repo_key}"),
-                    PullTarget::Project { project_id, .. } => {
-                        format!("pull-project:{project_id}")
-                    }
-                };
                 // Build the tri-state op: the success/failure messages are
-                // declared here alongside the pending. The worker resolves the
-                // matching closure and carries the result back on PullCompleted;
-                // the completion handler keeps the domain mutations.
+                // declared here alongside the pending, correlated by the op's own
+                // opaque id. The worker resolves the matching closure and carries
+                // the result back on PullCompleted; the completion handler keeps
+                // the domain mutations.
                 let op = match &target {
                     PullTarget::Project { project_name, .. } => {
                         let pn_ok = project_name.clone();
                         let pn_err = project_name.clone();
-                        crate::engine::status_op(pull_status_key.clone(), busy_message)
+                        crate::engine::status_op(busy_message)
                             .on_success(move |_: &Option<String>| {
                                 crate::engine::Final::info(format!(
                                     "Refreshed project \"{pn_ok}\". Local branch is up to date with remote."
@@ -636,7 +630,7 @@ impl Engine {
                             })
                     }
                     PullTarget::Session => {
-                        crate::engine::status_op(pull_status_key.clone(), busy_message)
+                        crate::engine::status_op(busy_message)
                             .on_success(|_: &Option<String>| {
                                 crate::engine::Final::info(
                                     "Pulled latest changes from remote successfully. Local branch is up to date.",
@@ -648,7 +642,7 @@ impl Engine {
                     }
                 };
                 let pending = op.pending_status();
-                let panic_key = pull_status_key.clone();
+                let panic_key = op.key().to_string();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: format!("pull:{repo_key}"),
