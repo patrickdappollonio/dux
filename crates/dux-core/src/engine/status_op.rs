@@ -132,6 +132,50 @@ impl NeedsSuccess {
             _t: PhantomData,
         }
     }
+
+    /// Alternative to `on_success`/`on_failure` for operations whose final is
+    /// decided LATER, in the completion handler, from an outcome the worker
+    /// can't see (post-worker fallible state, a 3-way result, render context).
+    /// The single closure is declared HERE (so the outcome is still mandatory at
+    /// dispatch) but receives a handler-computed `Outcome` and runs where that
+    /// outcome exists. The op is correlated to its pending by the opaque id.
+    pub fn resolve_in_handler<O, F>(self, f: F) -> HandlerStatusOp<O>
+    where
+        F: FnOnce(&O) -> Final + Send + 'static,
+    {
+        HandlerStatusOp {
+            key: self.key,
+            pending: self.pending,
+            resolver: Box::new(f),
+        }
+    }
+}
+
+/// A status op whose [`Final`] is produced in the completion handler from a
+/// handler-computed `Outcome` (see [`NeedsSuccess::resolve_in_handler`]). The
+/// dispatch site emits [`Self::pending_status`] and stashes the op keyed by
+/// [`Self::id`]; the handler retrieves it and calls [`Self::resolve`].
+pub struct HandlerStatusOp<O> {
+    key: String,
+    pending: String,
+    resolver: Box<dyn FnOnce(&O) -> Final + Send>,
+}
+
+impl<O> HandlerStatusOp<O> {
+    pub fn id(&self) -> &str {
+        &self.key
+    }
+
+    /// The keyed [`StatusTone::Busy`] to show while the operation runs.
+    pub fn pending_status(&self) -> StatusUpdate {
+        StatusUpdate::busy(self.pending.clone()).with_key(self.key.clone())
+    }
+
+    /// Run the resolver against the handler-computed outcome, returning the
+    /// keyed final.
+    pub fn resolve(self, outcome: &O) -> ResolvedFinal {
+        ResolvedFinal::new(self.key, (self.resolver)(outcome))
+    }
 }
 
 pub struct NeedsFailure<T> {
@@ -276,6 +320,43 @@ mod tests {
             }
             _ => panic!("expected a resolved keyed Status"),
         }
+    }
+
+    #[test]
+    fn handler_status_op_resolves_an_n_way_outcome_in_the_handler() {
+        // The outcome (3-way here) is decided in the handler, not the worker.
+        enum Outcome {
+            Ok,
+            DbFail(String),
+            ConfigFail(String),
+        }
+        let build = || {
+            status_op("Saving\u{2026}").resolve_in_handler(|o: &Outcome| match o {
+                Outcome::Ok => Final::info("Saved."),
+                Outcome::DbFail(e) => Final::error(format!("DB failed: {e}")),
+                Outcome::ConfigFail(e) => {
+                    Final::warning(format!("Saved to DB, config failed: {e}"))
+                }
+            })
+        };
+        // The pending carries the op's own opaque id.
+        let op = build();
+        let id = op.id().to_string();
+        let pending = op.pending_status();
+        assert_eq!(pending.tone, StatusTone::Busy);
+        assert_eq!(pending.key.as_deref(), Some(id.as_str()));
+
+        // Each handler-decided outcome resolves through the single closure
+        // (resolve consumes the op, so build a fresh one per branch).
+        assert_eq!(build().resolve(&Outcome::Ok).outcome, Final::info("Saved."));
+        assert_eq!(
+            build().resolve(&Outcome::DbFail("locked".into())).outcome,
+            Final::error("DB failed: locked")
+        );
+        assert_eq!(
+            build().resolve(&Outcome::ConfigFail("disk".into())).outcome,
+            Final::warning("Saved to DB, config failed: disk")
+        );
     }
 
     #[test]
