@@ -276,6 +276,10 @@ pub enum WorkerEvent {
         repo_path: String,
         target: PullTarget,
         result: Result<Option<String>, String>,
+        /// The status final resolved by the dispatch-site StatusOp (the success
+        /// or failure message, already keyed). The handler still uses `result`
+        /// for its domain mutations and emits this for the user-facing status.
+        status: crate::engine::ResolvedFinal,
     },
     BrowserEntriesReady {
         dir: PathBuf,

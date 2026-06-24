@@ -6890,6 +6890,13 @@ not_a_real_action = ["x"]
                     leading_branch: app.engine.projects[0].leading_branch.clone(),
                 },
                 result: Ok(Some("feature/demo".to_string())),
+                status: dux_core::engine::ResolvedFinal::new(
+                    format!("pull-project:{}", app.engine.projects[0].id),
+                    dux_core::engine::Final::info(format!(
+                        "Refreshed project \"{}\". Local branch is up to date with remote.",
+                        app.engine.projects[0].name
+                    )),
+                ),
             })
             .expect("queue worker event");
 

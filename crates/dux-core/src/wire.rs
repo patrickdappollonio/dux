@@ -5660,6 +5660,52 @@ mod tests {
     }
 
     #[test]
+    fn pull_project_routes_through_status_op_with_matching_key() {
+        // The domain-ful pull op declares its messages at dispatch via a
+        // StatusOp; the worker resolves the failure closure and carries the
+        // keyed final back on PullCompleted.
+        let (mut engine, _tmp) = test_engine();
+        let repo = std::path::PathBuf::from("/tmp/does-not-exist-pull-wt");
+        // spawn_command_worker delivers the busy via a CommandWorkerStarted
+        // event and returns Nothing, so drain the busy event first.
+        let dispatched = engine
+            .apply(Command::Pull {
+                repo_path: repo,
+                target: crate::worker::PullTarget::Project {
+                    project_id: "p1".into(),
+                    project_name: "Demo".into(),
+                    leading_branch: Some("main".into()),
+                },
+                busy_message: "Refreshing\u{2026}".into(),
+                already_running_message: "Already refreshing.".into(),
+            })
+            .expect("pull dispatch");
+        assert!(matches!(dispatched, EventReaction::Nothing));
+        let busy_ev = engine.worker_rx.recv().expect("busy event");
+        match engine.process_worker_event(busy_ev) {
+            EventReaction::Status(s) => {
+                assert_eq!(s.tone, StatusTone::Busy);
+                assert_eq!(s.key.as_deref(), Some("pull-project:p1"));
+            }
+            _ => panic!("expected a pending Busy Status"),
+        }
+        let ev = engine.worker_rx.recv().expect("completion event");
+        match engine.process_worker_event(ev) {
+            EventReaction::Status(s) => {
+                assert_eq!(s.key.as_deref(), Some("pull-project:p1"));
+                assert_eq!(s.tone, StatusTone::Error);
+                assert!(
+                    s.message
+                        .starts_with("Project refresh failed for \"Demo\":"),
+                    "unexpected message: {}",
+                    s.message
+                );
+            }
+            _ => panic!("expected a keyed error final"),
+        }
+    }
+
+    #[test]
     fn push_routes_through_status_op_with_matching_key() {
         // Push now dispatches through a StatusOp: the pending Busy and the
         // worker-resolved final must share the push key so the web toast is
