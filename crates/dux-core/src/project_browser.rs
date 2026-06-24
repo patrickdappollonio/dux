@@ -218,6 +218,7 @@ pub fn run_project_branch_status_job(project: Project, worker_tx: Sender<WorkerE
 pub fn run_checkout_project_default_branch_inspection_job(
     project: Project,
     worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
     let result = git::current_branch(&repo_path)
@@ -236,7 +237,11 @@ pub fn run_checkout_project_default_branch_inspection_job(
             (branch, warning_kind)
         })
         .map_err(|err| format!("{err:#}"));
-    let _ = worker_tx.send(WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result });
+    let _ = worker_tx.send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
+        project,
+        result,
+        status_op_id,
+    });
 }
 
 /// Background job for the second phase of the non-default-branch checkout flow:
@@ -250,6 +255,7 @@ pub fn run_add_project_checkout_job(
     action: NonDefaultBranchAction,
     target_branch: String,
     worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
 ) {
     let path = action.repo_path().to_string();
     let result = git::switch_branch(Path::new(&path), &target_branch).map_err(|e| format!("{e:#}"));
@@ -257,6 +263,7 @@ pub fn run_add_project_checkout_job(
         action,
         target_branch,
         result,
+        status_op_id,
     });
 }
 
@@ -312,7 +319,7 @@ mod tests {
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 
-        run_checkout_project_default_branch_inspection_job(project, worker_tx);
+        run_checkout_project_default_branch_inspection_job(project, worker_tx, None);
 
         match worker_rx.recv().expect("worker event") {
             WorkerEvent::CheckoutProjectDefaultBranchInspected { result, .. } => {

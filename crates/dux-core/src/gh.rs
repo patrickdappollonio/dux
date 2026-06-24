@@ -335,6 +335,7 @@ pub fn run_pull_request_lookup_job(
     raw_input: String,
     custom_name: Option<String>,
     worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
 ) {
     let lookup = match git::remote_github_repo(Path::new(&project.path)) {
         Some(remote) => parse_pull_request_lookup(&raw_input, &remote.host, &remote.owner_repo),
@@ -348,6 +349,7 @@ pub fn run_pull_request_lookup_job(
         Err(message) => {
             let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
                 result: Err(message),
+                status_op_id,
             });
             return;
         }
@@ -381,7 +383,10 @@ pub fn run_pull_request_lookup_job(
         )),
         Err(err) => Err(format!("Failed to run gh pr view: {err}")),
     };
-    let _ = worker_tx.send(WorkerEvent::PullRequestResolved { result });
+    let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
+        result,
+        status_op_id,
+    });
 }
 
 fn parse_resolved_pull_request_json(

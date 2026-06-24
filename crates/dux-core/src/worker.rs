@@ -318,6 +318,12 @@ pub enum WorkerEvent {
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
     PullRequestResolved {
         result: Result<ResolvedPullRequest, String>,
+        /// Correlation id for a web `HandlerStatusOp` whose final is resolved in
+        /// the completion handler. Rides from the `apply_wire` dispatch through
+        /// the lookup worker so the lookup FAILURE (here) and the lookup SUCCESS
+        /// handoff (in `drive_pr_lookup_followup`) resolve the right op. `None`
+        /// for the TUI, which keeps its prompt-after-resolution flow.
+        status_op_id: Option<String>,
     },
     RefsChanged(String),
     /// Background `git worktree remove` for a session-initiated delete has
@@ -336,6 +342,12 @@ pub enum WorkerEvent {
         action: NonDefaultBranchAction,
         target_branch: String,
         result: Result<(), String>,
+        /// Correlation id for a web `HandlerStatusOp`. For a `CheckoutProjectDefault`
+        /// action it resolves the checkout op in `process_worker_event` (both
+        /// outcomes); for an `AddProject` action it resolves the add-project op's
+        /// switch FAILURE here (the SUCCESS resolves later in the followup).
+        /// `None` for the TUI, which keeps its unkeyed `Status` finals.
+        status_op_id: Option<String>,
     },
     /// Background inspection of the selected project checkout before opening
     /// the New Agent prompt.
@@ -350,6 +362,11 @@ pub enum WorkerEvent {
     CheckoutProjectDefaultBranchInspected {
         project: Project,
         result: Result<(String, Option<BranchWarningKind>), String>,
+        /// Correlation id for a web checkout `HandlerStatusOp`, carried through to
+        /// worker 2 (`run_add_project_checkout_job`) so the eventual
+        /// `NonDefaultBranchCheckoutCompleted` resolves the right op. `None` for
+        /// the TUI.
+        status_op_id: Option<String>,
     },
     ConfigReloadReady(Box<Result<Config, String>>),
     ProjectPersistenceCompleted {

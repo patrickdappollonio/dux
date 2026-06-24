@@ -8206,6 +8206,7 @@ not_a_real_action = ["x"]
                 action: NonDefaultBranchAction::CheckoutProjectDefault { project },
                 target_branch: "main".to_string(),
                 result: Ok(()),
+                status_op_id: None,
             })
             .unwrap();
 
@@ -9901,6 +9902,7 @@ not_a_real_action = ["x"]
                     head_ref_name: "feature/pr-42".to_string(),
                     custom_name: None,
                 }),
+                status_op_id: None,
             })
             .expect("send PR resolution");
         app.drain_events();

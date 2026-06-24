@@ -681,14 +681,6 @@ pub(crate) fn run_engine_loop(
         // Draining worker events may insert a launched provider (AgentLaunchReady)
         // into `engine.providers`, which resolves pending subscribes below.
         while let Ok(event) = engine.worker_rx.try_recv() {
-            // Some operations (checkout-default, add-project-checkout, PR-lookup)
-            // key their busy toast on the web but complete through a reaction
-            // whose final is unkeyed (shared with the TUI's anonymous slot), so
-            // nothing replaces the keyed spinner. Derive that key from the raw
-            // event — which still carries full identity — and clear it after the
-            // followups run, so the busy dismisses while its success/error
-            // message still shows.
-            let busy_key_to_clear = dux_core::wire::web_completed_busy_key_to_clear(&event);
             let reaction = engine.process_worker_event(event);
             for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
                 let _ = thread_status_tx.send(status);
@@ -713,19 +705,18 @@ pub(crate) fn run_engine_loop(
             // A new-agent-from-PR lookup (gh pr view) just resolved: the TUI would
             // open a name prompt here, but the web already sent the name, so
             // OpenNewAgentPromptForPr drives the actual CreateAgentRequest::PullRequest
-            // dispatch. A lookup FAILURE instead produced an error Status, already
-            // surfaced by the wire_statuses drain above.
-            for status in engine.drive_pr_lookup_followup(&reaction) {
+            // dispatch. A lookup FAILURE instead produced a keyed error Status
+            // (resolving the PR-lookup op), already surfaced by the wire_statuses
+            // drain above. On SUCCESS the followup hands off to the create busy and
+            // returns the PR-lookup op's clear key so its spinner is dismissed.
+            let pr_followup = engine.drive_pr_lookup_followup(&reaction);
+            for status in pr_followup.statuses {
                 let _ = thread_status_tx.send(status);
             }
-
-            // Clear the keyed busy for an operation whose final was unkeyed (see
-            // `web_completed_busy_key_to_clear`). The success/error message was
-            // already broadcast above as an unkeyed transient; this dismisses the
-            // lingering spinner so it does not survive to the busy timeout.
-            if let Some(key) = busy_key_to_clear {
+            for key in pr_followup.clear_keys {
                 thread_status_tx.clear(key);
             }
+
             // A launch that resolved to a vanished session or a startup
             // auto-reopen emits no final but may have left a keyed create/launch
             // busy open. Clear both candidate keys (a no-op when not open).
