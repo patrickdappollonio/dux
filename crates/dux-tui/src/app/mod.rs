@@ -212,6 +212,31 @@ pub struct App {
     /// op's home for the full deferral window, not just one tick.
     pub(crate) pending_auth_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<dux_core::engine::AuthUserFinalOutcome>>,
+    /// In-flight worktree-picker load ops whose final is decided in the
+    /// completion handler. The picker dispatch mints a
+    /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
+    /// pending busy, and stashes it here keyed by that id. The matching
+    /// [`dux_core::engine::EventReaction::ProjectWorktreesArrived`] carries the
+    /// id back; the handler pops the op and resolves it against the
+    /// handler-computed [`WorktreesFinalOutcome`] (the final depends on whether
+    /// the picker is still open and matching, which the worker can't see).
+    pub(crate) pending_worktree_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<WorktreesFinalOutcome>>,
+}
+
+/// Handler-computed outcome for a worktree-picker load op (see
+/// [`App::pending_worktree_ops`]). Which final fires depends on whether the
+/// picker is still open and matching when the worktrees arrive, a fact the
+/// worker never sees. The op's resolver (declared at dispatch) maps this to the
+/// final user message.
+pub enum WorktreesFinalOutcome {
+    /// The picker is still open and the worktrees loaded successfully.
+    Loaded,
+    /// The picker is still open but the load failed; carries the error.
+    Failed(String),
+    /// The picker was dismissed or switched before its worktrees loaded, so
+    /// nothing consumed the result. Dismiss the busy with no message.
+    Dismissed,
 }
 
 /// Handler-computed outcome for a project-persistence op (see
@@ -1527,6 +1552,7 @@ impl App {
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
             pending_auth_ops: HashMap::new(),
+            pending_worktree_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and

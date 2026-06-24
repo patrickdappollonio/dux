@@ -218,8 +218,28 @@ impl App {
             selected: None,
             error: None,
         });
-        self.engine.spawn_project_worktrees_worker(project);
-        self.set_busy("Loading git worktrees for the selected project...");
+        // Declare the loading→final states together. The final is decided in the
+        // completion handler (it depends on whether the picker is still open and
+        // matching when the worktrees arrive, which the worker can't see), so use
+        // a HandlerStatusOp with a 3-way outcome. The failure name matches the
+        // handler's prompt name (same project, resolved here at dispatch).
+        let project_name = project.name.clone();
+        let op = dux_core::engine::status_op("Loading git worktrees for the selected project...")
+            .resolve_in_handler(move |o: &WorktreesFinalOutcome| match o {
+                WorktreesFinalOutcome::Loaded => dux_core::engine::Final::info(
+                    "Choose an available worktree to launch a new agent.",
+                ),
+                WorktreesFinalOutcome::Failed(error) => dux_core::engine::Final::error(format!(
+                    "Failed to load worktrees for project \"{project_name}\": {error}"
+                )),
+                WorktreesFinalOutcome::Dismissed => dux_core::engine::Final::clear(),
+            });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_worktree_ops.insert(op_id.clone(), op);
+        self.engine
+            .spawn_project_worktrees_worker(project, Some(op_id));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -1626,6 +1646,27 @@ impl App {
         let terminal = self.engine.config.startup_command_terminal.clone();
         let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
             .unwrap_or_default();
+        // Declare the loading→final states together. The success message needs
+        // the palette keybinding label (render context only the main thread has);
+        // resolve it HERE and bake it into the op's outcomes. The status rides a
+        // separate StatusOpCompleted event from the worker.
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        let success_name = project.name.clone();
+        let failure_name = project.name.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Rerunning startup command for agent \"{branch}\"..."
+        ))
+        .on_success(move |_: &()| {
+            dux_core::engine::Final::info(format!(
+                "Startup command completed for project \"{success_name}\". Press {palette_key} and run read-startup-command-logs to view the latest log.",
+            ))
+        })
+        .on_failure(move |err: &String| {
+            dux_core::engine::Final::error(format!(
+                "Startup command failed for project \"{failure_name}\": {err}. Run read-startup-command-logs for details.",
+            ))
+        });
+        let pending = op.pending_status();
         std::thread::spawn(move || {
             let result = crate::startup::run_startup_command(
                 &paths,
@@ -1637,11 +1678,10 @@ impl App {
                     env,
                 },
             );
-            let _ = tx.send(WorkerEvent::StartupCommandRerunCompleted(result));
+            let resolved = op.resolve(&result.status);
+            let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
         });
-        self.set_busy(format!(
-            "Rerunning startup command for agent \"{branch}\"..."
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         Ok(())
     }
 
@@ -1774,18 +1814,40 @@ impl App {
     ) {
         let paths = self.engine.paths.clone();
         let tx = self.engine.worker_tx.clone();
-        let status_label = scope_label.clone();
+        // Declare the loading→final states together. The status rides a separate
+        // StatusOpCompleted event; the StartupLogArrived domain event (which opens
+        // the overlay) keeps doing only its domain work.
+        let success_label = scope_label.clone();
+        let failure_label = scope_label.clone();
+        let op = dux_core::engine::status_op(format!(
+            "Opening startup command logs for {scope_label}..."
+        ))
+        .on_success(move |_: &crate::startup::StartupCommandLatestLog| {
+            dux_core::engine::Final::info(format!(
+                "Opened startup command logs for {success_label}."
+            ))
+        })
+        .on_failure(move |err: &String| {
+            dux_core::engine::Final::error(format!(
+                "Could not read startup command logs for {failure_label}: {err}"
+            ))
+        });
+        let pending = op.pending_status();
         std::thread::spawn(move || {
             let result = crate::startup::latest_log_for_scope(&paths, scope)
                 .map_err(|err| format!("{err:#}"));
-            let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
-                scope_label,
-                result,
-            });
+            let resolved = op.resolve(&result);
+            let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+            // Only the success path has domain work (opening the overlay); the
+            // failure status is fully carried by the StatusOpCompleted above.
+            if let Ok(log) = result {
+                let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
+                    scope_label,
+                    result: Ok(log),
+                });
+            }
         });
-        self.set_busy(format!(
-            "Opening startup command logs for {status_label}..."
-        ));
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
     }
 
     pub(crate) fn open_change_theme_prompt(&mut self) -> Result<()> {
@@ -2265,7 +2327,9 @@ impl App {
                     "Agent's path copied to clipboard.",
                     &self.engine.worker_tx,
                 ) {
-                    Ok(()) => self.set_busy("Copying path to clipboard…"),
+                    Ok(pending) => {
+                        self.apply_reaction(dux_core::engine::EventReaction::Status(pending))
+                    }
                     Err(e) => self.set_error(format!("Copy path failed: {e}")),
                 }
                 Ok(())
@@ -2928,6 +2992,7 @@ mod tests {
             server_flip_preflight_pending: false,
             pending_persist_ops: std::collections::HashMap::new(),
             pending_auth_ops: std::collections::HashMap::new(),
+            pending_worktree_ops: std::collections::HashMap::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

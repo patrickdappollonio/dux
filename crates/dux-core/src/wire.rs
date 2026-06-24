@@ -665,6 +665,7 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         EventReaction::ProjectWorktreesArrived {
             project_id,
             result: Err(message),
+            ..
         } => vec![
             WireStatus::new("error", format!("Failed to list worktrees: {message}")).with_key(
                 format!("{}:{project_id}", status_keys::WORKTREE_LIST_PREFIX),
@@ -5533,6 +5534,7 @@ mod tests {
         let bare = EventReaction::ProjectWorktreesArrived {
             project_id: "p1".to_string(),
             result: Err("git worktree list failed".to_string()),
+            status_op_id: None,
         };
         let s = wire_statuses_from_reaction(&bare);
         assert_eq!(
@@ -5548,6 +5550,7 @@ mod tests {
         let ok = EventReaction::ProjectWorktreesArrived {
             project_id: "p1".to_string(),
             result: Ok(Vec::new()),
+            status_op_id: None,
         };
         assert!(
             wire_statuses_from_reaction(&ok).is_empty(),
@@ -5597,6 +5600,7 @@ mod tests {
         let r = EventReaction::ProjectWorktreesArrived {
             project_id: "p1".into(),
             result: Err("boom".into()),
+            status_op_id: None,
         };
         assert_eq!(
             wire_statuses_from_reaction(&r)[0].key.as_deref(),

@@ -916,10 +916,15 @@ impl Engine {
         );
     }
 
-    pub fn spawn_project_worktrees_worker(&mut self, project: Project) {
+    pub fn spawn_project_worktrees_worker(
+        &mut self,
+        project: Project,
+        status_op_id: Option<String>,
+    ) {
         let paths = self.paths.clone();
         let sessions = self.sessions.clone();
         let project_id_for_panic = project.id.clone();
+        let status_op_id_for_panic = status_op_id.clone();
         self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: format!("project-worktrees:{}", project.id),
@@ -927,6 +932,7 @@ impl Engine {
                 panic_event: Some(Box::new(move |reason| WorkerEvent::ProjectWorktreesReady {
                     project_id: project_id_for_panic,
                     result: Err(format!("Project-worktrees worker panicked: {reason}")),
+                    status_op_id: status_op_id_for_panic,
                 })),
             },
             move |tx| {
@@ -940,6 +946,7 @@ impl Engine {
                 let _ = tx.send(WorkerEvent::ProjectWorktreesReady {
                     project_id: project.id,
                     result,
+                    status_op_id,
                 });
             },
         );
