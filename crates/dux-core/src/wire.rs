@@ -25,15 +25,11 @@ pub mod status_keys {
     /// Session-delete key prefix. Parameterised by session id at call sites:
     /// `format!("{DELETE_PREFIX}:{session_id}")`.
     pub const DELETE_PREFIX: &str = "delete";
-    /// Checkout-project-default-branch key prefix. Parameterised by project id
-    /// at call sites: `format!("{CHECKOUT_DEFAULT_PREFIX}:{project_id}")`.
-    pub const CHECKOUT_DEFAULT_PREFIX: &str = "checkout-default";
-    /// Add-project-checkout-default key prefix. Parameterised by path at call
-    /// sites: `format!("{ADD_PROJECT_CHECKOUT_PREFIX}:{path}")`.
-    pub const ADD_PROJECT_CHECKOUT_PREFIX: &str = "add-project-checkout";
-    /// PR-lookup key prefix. Parameterised by project id at call sites:
-    /// `format!("{PR_LOOKUP_PREFIX}:{project_id}")`.
-    pub const PR_LOOKUP_PREFIX: &str = "pr-lookup";
+    // The checkout-default, add-project-checkout, and pr-lookup operations no
+    // longer use hand-authored key prefixes: their busies carry the opaque id of
+    // a `HandlerStatusOp` (see `Engine::pending_web_*_ops`) so the busy and its
+    // final correlate without a shared string. The clear-workaround they needed
+    // (`web_completed_busy_key_to_clear`) was removed with them.
     /// Push key prefix. Parameterised by worktree path at call sites:
     /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
     pub const PUSH_PREFIX: &str = "push";
@@ -49,22 +45,6 @@ pub mod status_keys {
         format!("{CREATE_PREFIX}:{project_id}")
     }
 
-    /// Checkout-project-default-branch operation key (web). One constructor for
-    /// the busy and the clear so they cannot drift.
-    pub fn checkout_default(project_id: &str) -> String {
-        format!("{CHECKOUT_DEFAULT_PREFIX}:{project_id}")
-    }
-
-    /// Add-project-checkout operation key (web), parameterised by repo path.
-    pub fn add_project_checkout(path: &str) -> String {
-        format!("{ADD_PROJECT_CHECKOUT_PREFIX}:{path}")
-    }
-
-    /// PR-lookup operation key (web), parameterised by project id.
-    pub fn pr_lookup(project_id: &str) -> String {
-        format!("{PR_LOOKUP_PREFIX}:{project_id}")
-    }
-
     /// Agent-launch operation key, parameterised by session id. Used by the
     /// reconnect/launch busy and its finals.
     pub fn launch(session_id: &str) -> String {
@@ -74,39 +54,6 @@ pub mod status_keys {
     /// Push operation key, parameterised by worktree path.
     pub fn push(worktree_path: &str) -> String {
         format!("{PUSH_PREFIX}:{worktree_path}")
-    }
-}
-
-/// For a completed background operation, return the web status key whose Busy
-/// toast must be cleared, if any.
-///
-/// The web keys these operations' busies, but their completion reactions emit
-/// finals that are UNKEYED or lose the operation identity (a bare `Status`) —
-/// shared with the TUI, which pairs them through the anonymous slot. So the web
-/// actor clears the keyed busy here from the raw `WorkerEvent`, which still
-/// carries full identity for both the success and failure outcomes of the same
-/// variant. Returns `None` for events whose final is already keyed (delete,
-/// push, pull, create) or that own no web busy.
-///
-/// Known gap: a PR-lookup *failure* (`PullRequestResolved { result: Err(..) }`)
-/// carries no project id, so its `pr-lookup:{id}` busy is not cleared here and
-/// instead self-heals to the timed-out warning. Fixing it requires threading
-/// the project id through the failure event.
-pub fn web_completed_busy_key_to_clear(event: &crate::worker::WorkerEvent) -> Option<String> {
-    use crate::worker::{NonDefaultBranchAction, WorkerEvent};
-    match event {
-        WorkerEvent::NonDefaultBranchCheckoutCompleted { action, .. } => match action {
-            NonDefaultBranchAction::CheckoutProjectDefault { project } => {
-                Some(status_keys::checkout_default(&project.id))
-            }
-            NonDefaultBranchAction::AddProject { path, .. } => {
-                Some(status_keys::add_project_checkout(path))
-            }
-        },
-        WorkerEvent::PullRequestResolved { result: Ok(pr) } => {
-            Some(status_keys::pr_lookup(&pr.project.id))
-        }
-        _ => None,
     }
 }
 
@@ -510,6 +457,17 @@ impl WireStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct WireCommandOutcome {
     pub status: Option<WireStatus>,
+}
+
+/// Statuses produced by a web `drive_*_followup`, plus any keyed busies the
+/// followup resolved to a `Final::Clear`. A `WireStatus` cannot represent a
+/// clear (it has no "clear" tone — clearing is a separate `StatusEmitter::clear`
+/// operation), so the followup hands the clear KEYS back for the web actor to
+/// dismiss. The `statuses` are broadcast as usual.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WebFollowupStatuses {
+    pub statuses: Vec<WireStatus>,
+    pub clear_keys: Vec<String>,
 }
 
 fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
@@ -1151,14 +1109,48 @@ impl Engine {
             "Checking the default branch for project \"{}\"...",
             project.name
         );
-        let checkout_key = status_keys::checkout_default(project_id);
+        // Mint a HandlerStatusOp whose opaque id correlates the busy to its final.
+        // The resolver captures the project name and re-emits the byte-identical
+        // message for every terminal outcome of the two-worker chain (resolved in
+        // `process_worker_event` for the short-circuit cases and the switch result).
+        let project_name = project.name.clone();
+        let op = crate::engine::status_op(busy).resolve_in_handler(
+            move |o: &crate::engine::WebCheckoutOutcome| {
+                use crate::engine::{Final, WebCheckoutOutcome};
+                match o {
+                    WebCheckoutOutcome::Ok { target_branch } => Final::info(format!(
+                        "Checked out \"{target_branch}\" for project \"{project_name}\"."
+                    )),
+                    WebCheckoutOutcome::Failed {
+                        target_branch,
+                        repo_path,
+                    } => Final::error(format!(
+                        "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
+                    )),
+                    WebCheckoutOutcome::AlreadyLeading { current_branch } => Final::info(format!(
+                        "Project \"{project_name}\" is already on the leading branch \"{current_branch}\"."
+                    )),
+                    WebCheckoutOutcome::Heuristic { current_branch } => Final::error(format!(
+                        "Can't determine the default branch for project \"{project_name}\" while it is on \"{current_branch}\". Resolve the default branch in your terminal and retry."
+                    )),
+                    WebCheckoutOutcome::InspectFailed { error } => Final::error(format!(
+                        "Couldn't inspect the default branch for project \"{project_name}\": {error}"
+                    )),
+                }
+            },
+        );
+        let op_id = op.id().to_string();
+        let pending = WireStatus::from_update(&op.pending_status());
+        self.pending_web_checkout_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
             crate::project_browser::run_checkout_project_default_branch_inspection_job(
-                project, worker_tx,
+                project,
+                worker_tx,
+                Some(op_id),
             );
         });
-        Ok(WireStatus::new("busy", busy).with_key(checkout_key))
+        Ok(pending)
     }
 
     /// Check out the repo's default branch first, then add it as a project,
@@ -1202,12 +1194,40 @@ impl Engine {
         // (reason "before adding the project").
         let busy =
             format!("Checking out \"{default_branch}\" in {path_str} before adding the project...");
-        let checkout_add_key = status_keys::add_project_checkout(&path_str);
+        // Mint a HandlerStatusOp: the SUCCESS final is resolved in
+        // `drive_add_project_followup` (after the inline add yields its combined
+        // message) and the switch FAILURE in `process_worker_event`; both share
+        // this op's opaque id so the busy is replaced, not stranded.
+        let op = crate::engine::status_op(busy).resolve_in_handler(
+            move |o: &crate::engine::WebAddProjectOutcome| {
+                use crate::engine::{Final, WebAddProjectOutcome};
+                match o {
+                    WebAddProjectOutcome::Added { status_message } => {
+                        Final::info(status_message.clone())
+                    }
+                    WebAddProjectOutcome::SwitchFailed {
+                        target_branch,
+                        repo_path,
+                    } => Final::error(format!(
+                        "Couldn't check out \"{target_branch}\" in {repo_path} — resolve in your terminal and retry."
+                    )),
+                    WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
+                }
+            },
+        );
+        let op_id = op.id().to_string();
+        let pending = WireStatus::from_update(&op.pending_status());
+        self.pending_web_add_project_ops.insert(op_id.clone(), op);
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
-            crate::project_browser::run_add_project_checkout_job(action, default_branch, worker_tx);
+            crate::project_browser::run_add_project_checkout_job(
+                action,
+                default_branch,
+                worker_tx,
+                Some(op_id),
+            );
         });
-        Ok(WireStatus::new("busy", busy).with_key(checkout_add_key))
+        Ok(pending)
     }
 
     /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
@@ -1286,13 +1306,34 @@ impl Engine {
         // does the same with `None` for the name). Busy copy mirrors the TUI's
         // `set_busy` in `dispatch_pull_request_lookup`.
         let busy = format!("Resolving PR for project \"{}\"...", project.name);
-        let pr_key = status_keys::pr_lookup(project_id);
+        // Mint a HandlerStatusOp: on SUCCESS the lookup hands off to the create
+        // dispatch (whose `create:{id}` busy takes over), so this op's busy is
+        // cleared with no message (resolved in `drive_pr_lookup_followup`); on
+        // FAILURE it resolves to the keyed error (in `process_worker_event`).
+        let op = crate::engine::status_op(busy).resolve_in_handler(
+            move |o: &crate::engine::WebPrLookupOutcome| {
+                use crate::engine::{Final, WebPrLookupOutcome};
+                match o {
+                    WebPrLookupOutcome::HandedOff => Final::clear(),
+                    WebPrLookupOutcome::Failed { message } => Final::error(message.clone()),
+                }
+            },
+        );
+        let op_id = op.id().to_string();
+        let pending = WireStatus::from_update(&op.pending_status());
+        self.pending_web_pr_lookup_ops.insert(op_id.clone(), op);
         let raw_input = pr.to_string();
         let worker_tx = self.worker_tx.clone();
         std::thread::spawn(move || {
-            crate::gh::run_pull_request_lookup_job(project, raw_input, custom_name, worker_tx);
+            crate::gh::run_pull_request_lookup_job(
+                project,
+                raw_input,
+                custom_name,
+                worker_tx,
+                Some(op_id),
+            );
         });
-        Ok(WireStatus::new("busy", busy).with_key(pr_key))
+        Ok(pending)
     }
 
     /// Drive a PR-lookup follow-up to completion, returning user-facing statuses.
@@ -1311,9 +1352,9 @@ impl Engine {
     /// pre-computation here. A lookup FAILURE instead produced an error `Status`,
     /// surfaced by the actor's `wire_statuses_from_reaction` drain. Other
     /// reactions return `[]`.
-    pub fn drive_pr_lookup_followup(&mut self, reaction: &EventReaction) -> Vec<WireStatus> {
+    pub fn drive_pr_lookup_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
         match reaction {
-            EventReaction::OpenNewAgentPromptForPr(pr) => {
+            EventReaction::OpenNewAgentPromptForPr { pr, status_op_id } => {
                 let pr = pr.as_ref();
                 // Seed the head branch as the name when no custom name was sent,
                 // matching the TUI prompt's default (`Some(head_ref_name)`).
@@ -1340,7 +1381,7 @@ impl Engine {
                     custom_name,
                     use_existing_branch: false,
                 };
-                match self.apply(Command::DispatchCreateAgentRequest {
+                let statuses = match self.apply(Command::DispatchCreateAgentRequest {
                     request: Box::new(request),
                     busy_message: busy_message.clone(),
                     term_size: (80, 24),
@@ -1350,9 +1391,27 @@ impl Engine {
                         "error",
                         format!("Failed to create an agent from PR #{}: {e:#}", pr.number),
                     )],
+                };
+                // The lookup busy hands off to the create dispatch's `create:{id}`
+                // busy (emitted above), so resolve the PR-lookup op to a CLEAR so
+                // the `Resolving PR…` spinner is dismissed rather than stranded.
+                // Done even when the create dispatch Errs (no create busy opened),
+                // so the spinner never survives to the timeout.
+                let mut clear_keys = Vec::new();
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_web_pr_lookup_ops.remove(id)
+                {
+                    let resolved = op.resolve(&crate::engine::WebPrLookupOutcome::HandedOff);
+                    if let EventReaction::ClearStatus(key) = resolved.into_reaction() {
+                        clear_keys.push(key);
+                    }
+                }
+                WebFollowupStatuses {
+                    statuses,
+                    clear_keys,
                 }
             }
-            _ => vec![],
+            _ => WebFollowupStatuses::default(),
         }
     }
 
@@ -1378,6 +1437,7 @@ impl Engine {
                 name,
                 target_branch,
                 leading_branch,
+                status_op_id,
             } => {
                 let display_name = if name.trim().is_empty() {
                     PathBuf::from(path)
@@ -1413,7 +1473,12 @@ impl Engine {
                 // (still a Rust `Ok`, but the add was rolled back). Inspect the
                 // reaction so a rolled-back add is reported as the failure it was,
                 // not the optimistic "added project" success.
-                match self.apply(Command::PersistProject {
+                //
+                // The user-facing statuses (`statuses`) stay byte-identical to the
+                // pre-StatusOp behavior. When `status_op_id` is Some (always, for
+                // the web), we ALSO resolve the add-project op so its busy is
+                // replaced by the keyed final instead of being separately cleared.
+                let statuses = match self.apply(Command::PersistProject {
                     action: Box::new(ProjectPersistenceAction::Add {
                         project,
                         status_message: status_message.clone(),
@@ -1423,7 +1488,7 @@ impl Engine {
                     Ok(EventReaction::ProjectPersistenceOutcome(outcome))
                         if matches!(outcome.view, ProjectPersistenceView::Added { .. }) =>
                     {
-                        vec![WireStatus::new("info", status_message)]
+                        vec![WireStatus::new("info", status_message.clone())]
                     }
                     // A rolled-back add surfaces as an error-toned Status; relay it
                     // verbatim so the user learns the add failed and was undone.
@@ -1434,7 +1499,39 @@ impl Engine {
                             "Checked out \"{target_branch}\" but couldn't add the project: {e:#}"
                         ),
                     )],
+                };
+
+                // Resolve the add-project op against the same outcome the
+                // `statuses` carry, keying the final to the op's id so it replaces
+                // the busy. The op's resolver re-emits the SAME message: a clean
+                // add → `Added` (info), any failure → `AddFailed` (the relayed
+                // error text). When no op is registered (id None, or already
+                // consumed by a switch-failure path), fall back to `statuses`.
+                if let Some(id) = status_op_id
+                    && let Some(op) = self.pending_web_add_project_ops.remove(id)
+                {
+                    let is_success = statuses.iter().any(|s| s.tone == "info");
+                    let outcome = if is_success {
+                        crate::engine::WebAddProjectOutcome::Added {
+                            status_message: status_message.clone(),
+                        }
+                    } else {
+                        // Surface the same failure text the unkeyed `statuses`
+                        // would have shown (the engine's rolled-back error or the
+                        // apply error), now keyed so it replaces the busy.
+                        let message = statuses
+                            .iter()
+                            .find(|s| s.tone == "error")
+                            .map(|s| s.message.clone())
+                            .unwrap_or_else(|| status_message.clone());
+                        crate::engine::WebAddProjectOutcome::AddFailed { message }
+                    };
+                    // The add-project op always resolves to a Message (never a
+                    // Clear), so `into_reaction()` is a keyed `Status` that
+                    // `wire_statuses_from_reaction` renders directly.
+                    return wire_statuses_from_reaction(&op.resolve(&outcome).into_reaction());
                 }
+                statuses
             }
             _ => vec![],
         }
@@ -1455,17 +1552,22 @@ impl Engine {
             EventReaction::DispatchProjectDefaultBranchCheckout {
                 project,
                 default_branch,
+                status_op_id,
             } => {
                 let action = NonDefaultBranchAction::CheckoutProjectDefault {
                     project: project.clone(),
                 };
                 let target_branch = default_branch.clone();
+                // Forward the checkout op's id into worker 2 so its eventual
+                // `NonDefaultBranchCheckoutCompleted` resolves the right op.
+                let status_op_id = status_op_id.clone();
                 let worker_tx = self.worker_tx.clone();
                 std::thread::spawn(move || {
                     crate::project_browser::run_add_project_checkout_job(
                         action,
                         target_branch,
                         worker_tx,
+                        status_op_id,
                     );
                 });
                 vec![]
@@ -2899,11 +3001,75 @@ mod tests {
             .expect("apply");
         let s = outcome.status.expect("busy status");
         assert_eq!(s.tone, "busy");
-        assert_eq!(
-            s.key.as_deref(),
-            Some("checkout-default:p1"),
-            "checkout busy must carry the keyed project id"
+        // The busy now carries the checkout op's opaque correlation id (not a
+        // hand-authored key); its final shares the same id so it replaces this
+        // spinner. The op is registered until the worker chain resolves it.
+        let key = s.key.as_deref().expect("checkout busy must be keyed");
+        assert!(
+            key.starts_with("op-"),
+            "checkout busy must carry the StatusOp's opaque id, got {key:?}"
         );
+        assert!(
+            engine.pending_web_checkout_ops.contains_key(key),
+            "the checkout op must be registered under its busy key"
+        );
+    }
+
+    #[test]
+    fn checkout_default_branch_resolves_op_with_keyed_success() {
+        // Drive the full two-worker chain (inspect → switch) and assert the
+        // success final REPLACES the busy on the same opaque op id, with the
+        // byte-identical message — the migration's core invariant.
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        let (mut engine, _tmp) = test_engine();
+        let mut project = sample_project("p1", &work.to_string_lossy());
+        // Force the Known-default path: no stored leading branch, so worker 1
+        // resolves the default branch from the clone's origin/HEAD.
+        project.leading_branch = None;
+        project.path_missing = false;
+        engine.projects.push(project);
+
+        let busy = engine
+            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
+                project_id: "p1".into(),
+            })
+            .expect("apply")
+            .status
+            .expect("busy");
+        let busy_key = busy.key.clone().expect("checkout busy must be keyed");
+
+        // Worker 1 (inspection) → DispatchProjectDefaultBranchCheckout reaction →
+        // the followup spawns worker 2 (the switch).
+        let ev1 = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("inspection event");
+        let r1 = engine.process_worker_event(ev1);
+        let _ = engine.drive_checkout_followup(&r1);
+
+        // Worker 2 (switch) completion resolves the op into the keyed final.
+        let ev2 = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("switch event");
+        let r2 = engine.process_worker_event(ev2);
+        let statuses = wire_statuses_from_reaction(&r2);
+        let status = statuses.last().expect("final status");
+        assert_eq!(status.tone, "info");
+        assert_eq!(
+            status.message,
+            "Checked out \"main\" for project \"p1-name\"."
+        );
+        assert_eq!(
+            status.key.as_deref(),
+            Some(busy_key.as_str()),
+            "the checkout final must reuse the busy's op id"
+        );
+        assert!(
+            !engine.pending_web_checkout_ops.contains_key(&busy_key),
+            "the checkout op must be consumed once resolved"
+        );
+        assert_eq!(current_git_branch(&work), "main");
     }
 
     #[test]
@@ -2926,10 +3092,63 @@ mod tests {
             .expect("dispatch lookup");
         let status = outcome.status.expect("synchronous busy status");
         assert_eq!(status.tone, "busy");
+        // The busy now carries the PR-lookup op's opaque correlation id; on
+        // success the followup clears it (the create busy takes over), on failure
+        // it is resolved to a keyed error.
+        let key = status.key.as_deref().expect("PR busy must be keyed");
+        assert!(
+            key.starts_with("op-"),
+            "PR busy must carry the StatusOp's opaque id, got {key:?}"
+        );
+        assert!(
+            engine.pending_web_pr_lookup_ops.contains_key(key),
+            "the PR-lookup op must be registered under its busy key"
+        );
+    }
+
+    #[test]
+    fn pr_lookup_failure_resolves_op_with_keyed_error() {
+        // Closes the previously-documented gap: a PR-lookup FAILURE used to leave
+        // its busy stranded (the failure event carried no project id). Now the
+        // failure resolves the op into a keyed error that REPLACES the busy.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        enable_gh(&mut engine);
+        let mut project = sample_project("p1", &repo.path().to_string_lossy());
+        project.path_missing = false;
+        engine.projects.push(project);
+
+        let busy_key = engine
+            .apply_wire(WireCommand::CreateAgentFromPr {
+                project_id: "p1".to_string(),
+                pr: "#42".to_string(),
+                name: "my-agent".to_string(),
+            })
+            .expect("dispatch")
+            .status
+            .expect("busy")
+            .key
+            .expect("keyed busy");
+
+        // Simulate the lookup worker reporting a failure carrying the op id (the
+        // real worker forwards the id it was spawned with).
+        let reaction =
+            engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
+                result: Err("gh pr view failed".to_string()),
+                status_op_id: Some(busy_key.clone()),
+            });
+        let statuses = wire_statuses_from_reaction(&reaction);
+        let status = statuses.last().expect("final status");
+        assert_eq!(status.tone, "error");
+        assert_eq!(status.message, "gh pr view failed");
         assert_eq!(
             status.key.as_deref(),
-            Some("pr-lookup:p1"),
-            "PR busy must carry the pr-lookup key"
+            Some(busy_key.as_str()),
+            "the PR-lookup failure must reuse the busy's op id to replace it"
+        );
+        assert!(
+            !engine.pending_web_pr_lookup_ops.contains_key(&busy_key),
+            "the PR-lookup op must be consumed once resolved"
         );
     }
 
@@ -3022,6 +3241,7 @@ mod tests {
             "unexpected busy message: {}",
             busy.message
         );
+        let busy_key = busy.key.clone().expect("add busy must be keyed");
 
         let statuses = drive_add_project_chain(&mut engine);
         let status = statuses.last().expect("final status");
@@ -3032,6 +3252,18 @@ mod tests {
                 .contains("Checked out \"main\" and added project \"Demo\" to the workspace."),
             "unexpected message: {}",
             status.message
+        );
+        // The success final shares the busy's opaque op id, so it REPLACES the
+        // spinner on the same key (the migration's core invariant), and the op is
+        // consumed from the registry.
+        assert_eq!(
+            status.key.as_deref(),
+            Some(busy_key.as_str()),
+            "the add-project final must reuse the busy's op id"
+        );
+        assert!(
+            !engine.pending_web_add_project_ops.contains_key(&busy_key),
+            "the add-project op must be consumed once resolved"
         );
         // HEAD actually moved, and the project landed.
         assert_eq!(current_git_branch(&work), "main");
@@ -3138,8 +3370,9 @@ mod tests {
     #[test]
     fn add_project_checkout_default_busy_is_keyed() {
         // Known default ("main") differs from HEAD ("feature/x"): the wire
-        // returns a keyed busy with `add-project-checkout:{path}` so the web
-        // can replace it when the switch worker completes.
+        // returns a busy carrying the add-project op's opaque correlation id so
+        // the web can replace it when the switch worker (or the inline add)
+        // resolves the op.
         let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
         let path_str = work.to_string_lossy().to_string();
         let (mut engine, _tmp) = test_engine();
@@ -3152,11 +3385,14 @@ mod tests {
             .expect("add-checkout");
         let status = outcome.status.expect("busy status");
         assert_eq!(status.tone, "busy");
-        let expected_key = format!("add-project-checkout:{path_str}");
-        assert_eq!(
-            status.key.as_deref(),
-            Some(expected_key.as_str()),
-            "add-project-checkout busy must carry the keyed path"
+        let key = status.key.as_deref().expect("add busy must be keyed");
+        assert!(
+            key.starts_with("op-"),
+            "add-project-checkout busy must carry the StatusOp's opaque id, got {key:?}"
+        );
+        assert!(
+            engine.pending_web_add_project_ops.contains_key(key),
+            "the add-project op must be registered under its busy key"
         );
     }
 
@@ -4139,70 +4375,6 @@ mod tests {
             "unexpected status: {}",
             statuses[0].message
         );
-    }
-
-    #[test]
-    fn web_completed_busy_key_to_clear_maps_each_keyed_op() {
-        use crate::worker::{NonDefaultBranchAction, ResolvedPullRequest, WorkerEvent};
-
-        // checkout-default: keyed by project id.
-        let ev = WorkerEvent::NonDefaultBranchCheckoutCompleted {
-            action: NonDefaultBranchAction::CheckoutProjectDefault {
-                project: sample_project("p1", "/repo"),
-            },
-            target_branch: "main".into(),
-            result: Ok(()),
-        };
-        assert_eq!(
-            web_completed_busy_key_to_clear(&ev).as_deref(),
-            Some("checkout-default:p1")
-        );
-
-        // add-project-checkout: keyed by path. Identity survives on failure too.
-        let ev = WorkerEvent::NonDefaultBranchCheckoutCompleted {
-            action: NonDefaultBranchAction::AddProject {
-                path: "/some/repo".into(),
-                name: "Repo".into(),
-                leading_branch: "main".into(),
-            },
-            target_branch: "main".into(),
-            result: Err("boom".into()),
-        };
-        assert_eq!(
-            web_completed_busy_key_to_clear(&ev).as_deref(),
-            Some("add-project-checkout:/some/repo")
-        );
-
-        // pr-lookup success: keyed by project id.
-        let ev = WorkerEvent::PullRequestResolved {
-            result: Ok(ResolvedPullRequest {
-                project: sample_project("p9", "/repo"),
-                host: "github.com".into(),
-                owner_repo: "o/r".into(),
-                number: 7,
-                title: "t".into(),
-                state: "open".into(),
-                head_ref_name: "feat".into(),
-                custom_name: None,
-            }),
-        };
-        assert_eq!(
-            web_completed_busy_key_to_clear(&ev).as_deref(),
-            Some("pr-lookup:p9")
-        );
-
-        // pr-lookup failure carries no project id → no clear (documented gap).
-        let ev = WorkerEvent::PullRequestResolved {
-            result: Err("gh failed".into()),
-        };
-        assert_eq!(web_completed_busy_key_to_clear(&ev), None);
-
-        // An event whose final is already keyed (delete) owns no extra clear.
-        let ev = WorkerEvent::WorktreeRemoveCompleted {
-            session_id: "s1".into(),
-            result: Ok(false),
-        };
-        assert_eq!(web_completed_busy_key_to_clear(&ev), None);
     }
 
     #[test]
@@ -5240,8 +5412,8 @@ mod tests {
         project.path_missing = false;
         engine.projects.push(project.clone());
 
-        let reaction =
-            EventReaction::OpenNewAgentPromptForPr(Box::new(crate::worker::ResolvedPullRequest {
+        let reaction = EventReaction::OpenNewAgentPromptForPr {
+            pr: Box::new(crate::worker::ResolvedPullRequest {
                 project,
                 host: "github.com".to_string(),
                 owner_repo: "octocat/Hello-World".to_string(),
@@ -5250,14 +5422,19 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/pr-42".to_string(),
                 custom_name: Some("my-agent".to_string()),
-            }));
+            }),
+            // No registered op (id None), so the followup returns no clear key and
+            // resolves nothing — the create busy flows through the worker channel.
+            status_op_id: None,
+        };
         // The followup dispatches the create worker; the busy status is posted on
         // the worker channel (CommandWorkerStarted), so the followup itself
         // returns no synchronous status on the happy path.
-        let statuses = engine.drive_pr_lookup_followup(&reaction);
+        let followup = engine.drive_pr_lookup_followup(&reaction);
         assert!(
-            statuses.is_empty(),
-            "create dispatch busy flows via the worker channel, not the return: {statuses:?}"
+            followup.statuses.is_empty(),
+            "create dispatch busy flows via the worker channel, not the return: {:?}",
+            followup.statuses
         );
         assert!(
             engine.is_in_flight(&InFlightKey::CreateAgent),
@@ -5282,8 +5459,8 @@ mod tests {
         project.path_missing = false;
         engine.projects.push(project.clone());
 
-        let reaction =
-            EventReaction::OpenNewAgentPromptForPr(Box::new(crate::worker::ResolvedPullRequest {
+        let reaction = EventReaction::OpenNewAgentPromptForPr {
+            pr: Box::new(crate::worker::ResolvedPullRequest {
                 project,
                 host: "github.com".to_string(),
                 owner_repo: "octocat/Hello-World".to_string(),
@@ -5292,7 +5469,9 @@ mod tests {
                 state: "OPEN".to_string(),
                 head_ref_name: "feature/head".to_string(),
                 custom_name: None,
-            }));
+            }),
+            status_op_id: None,
+        };
         let _ = engine.drive_pr_lookup_followup(&reaction);
         let busy = first_command_busy_message(&engine);
         assert!(
@@ -5304,8 +5483,8 @@ mod tests {
     #[test]
     fn drive_pr_lookup_followup_ignores_unrelated_reactions() {
         let (mut engine, _tmp) = test_engine();
-        let statuses = engine.drive_pr_lookup_followup(&EventReaction::Nothing);
-        assert!(statuses.is_empty());
+        let followup = engine.drive_pr_lookup_followup(&EventReaction::Nothing);
+        assert!(followup.statuses.is_empty() && followup.clear_keys.is_empty());
     }
 
     // ── RunMacro / UpdateMacros wire mapping ────────────────────────────────

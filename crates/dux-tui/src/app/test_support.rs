@@ -162,6 +162,9 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pty_input: std::collections::HashMap::new(),
         last_foreground_refresh: None,
         pending_auth_users: None,
+        pending_web_checkout_ops: std::collections::HashMap::new(),
+        pending_web_add_project_ops: std::collections::HashMap::new(),
+        pending_web_pr_lookup_ops: std::collections::HashMap::new(),
     };
     let mut app = App {
         engine,

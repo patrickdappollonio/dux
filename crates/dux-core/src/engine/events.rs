@@ -144,7 +144,13 @@ pub enum EventReaction {
     },
 
     // -- PR / refs follow-ups. --
-    OpenNewAgentPromptForPr(Box<ResolvedPullRequest>),
+    OpenNewAgentPromptForPr {
+        pr: Box<ResolvedPullRequest>,
+        /// Correlation id for a web PR-lookup `HandlerStatusOp`. `Some` on the web
+        /// handoff path (the followup clears this op's busy once the create
+        /// dispatch takes over); `None` for the TUI, which opens a name prompt.
+        status_op_id: Option<String>,
+    },
 
     // -- Worktree delete follow-up. --
     WorktreeRemoveSucceeded {
@@ -171,6 +177,10 @@ pub enum EventReaction {
         name: String,
         target_branch: String,
         leading_branch: String,
+        /// Correlation id for a web add-project `HandlerStatusOp`. `Some` on the
+        /// web path, resolved in `drive_add_project_followup` after the inline
+        /// add; `None` for the TUI.
+        status_op_id: Option<String>,
     },
 
     // -- Branch inspection follow-ups (App helpers). --
@@ -181,6 +191,11 @@ pub enum EventReaction {
     DispatchProjectDefaultBranchCheckout {
         project: Project,
         default_branch: String,
+        /// Correlation id for a web checkout `HandlerStatusOp`, forwarded by
+        /// `drive_checkout_followup` into worker 2 so the eventual
+        /// `NonDefaultBranchCheckoutCompleted` resolves the right op. `None` for
+        /// the TUI.
+        status_op_id: Option<String>,
     },
 
     // -- Config reload (App helpers). --
@@ -1541,9 +1556,28 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
-            WorkerEvent::PullRequestResolved { result } => match result {
-                Ok(pr) => EventReaction::OpenNewAgentPromptForPr(Box::new(pr)),
-                Err(message) => EventReaction::Status(StatusUpdate::error(message)),
+            WorkerEvent::PullRequestResolved {
+                result,
+                status_op_id,
+            } => match result {
+                Ok(pr) => EventReaction::OpenNewAgentPromptForPr {
+                    pr: Box::new(pr),
+                    status_op_id,
+                },
+                Err(message) => {
+                    // Web path: resolve the PR-lookup op into a keyed error so the
+                    // busy is replaced (closes the previously-documented gap where
+                    // a failed lookup stranded its busy to the timeout warning).
+                    // TUI path (`status_op_id == None`) keeps the unkeyed error.
+                    if let Some(id) = status_op_id
+                        && let Some(op) = self.pending_web_pr_lookup_ops.remove(&id)
+                    {
+                        op.resolve(&crate::engine::WebPrLookupOutcome::Failed { message })
+                            .into_reaction()
+                    } else {
+                        EventReaction::Status(StatusUpdate::error(message))
+                    }
+                }
             },
             WorkerEvent::RefsChanged(session_id) => {
                 logger::debug(&format!(
@@ -1599,44 +1633,87 @@ impl Engine {
                 action,
                 target_branch,
                 result,
-            } => match result {
-                Ok(()) => match action {
-                    NonDefaultBranchAction::AddProject {
-                        path,
-                        name,
-                        leading_branch,
-                    } => EventReaction::AddProjectAfterBranchCheckout {
-                        path,
-                        name,
-                        target_branch,
-                        leading_branch,
-                    },
-                    NonDefaultBranchAction::CheckoutProjectDefault { project } => {
-                        if let Some(existing) =
-                            self.projects.iter_mut().find(|p| p.id == project.id)
-                        {
-                            existing.current_branch = target_branch.clone();
-                            existing.branch_status = ProjectBranchStatus::Leading;
+                status_op_id,
+            } => {
+                match result {
+                    Ok(()) => match action {
+                        NonDefaultBranchAction::AddProject {
+                            path,
+                            name,
+                            leading_branch,
+                        } => EventReaction::AddProjectAfterBranchCheckout {
+                            path,
+                            name,
+                            target_branch,
+                            leading_branch,
+                            // The SUCCESS message is built in `drive_add_project_followup`
+                            // after the inline add, so the op is resolved there, not here.
+                            status_op_id,
+                        },
+                        NonDefaultBranchAction::CheckoutProjectDefault { project } => {
+                            if let Some(existing) =
+                                self.projects.iter_mut().find(|p| p.id == project.id)
+                            {
+                                existing.current_branch = target_branch.clone();
+                                existing.branch_status = ProjectBranchStatus::Leading;
+                            }
+                            // Web path: resolve the checkout op into its keyed info
+                            // final (same message). TUI path keeps the unkeyed Status.
+                            if let Some(id) = status_op_id
+                                && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                            {
+                                op.resolve(&crate::engine::WebCheckoutOutcome::Ok { target_branch })
+                                    .into_reaction()
+                            } else {
+                                EventReaction::Status(StatusUpdate::info(format!(
+                                    "Checked out \"{target_branch}\" for project \"{}\".",
+                                    project.name
+                                )))
+                            }
                         }
-                        EventReaction::Status(StatusUpdate::info(format!(
-                            "Checked out \"{target_branch}\" for project \"{}\".",
-                            project.name
+                    },
+                    Err(err) => {
+                        // Preserve the full git stderr in the log so debugging
+                        // stays possible after the status line summary is
+                        // overwritten by the next message.
+                        let path = action.repo_path().to_string();
+                        logger::error(&format!(
+                            "non-default branch checkout failed for {path}: {err}"
+                        ));
+                        // Web path: resolve the matching op into a keyed error (same
+                        // message). The op kind depends on the action: a checkout-default
+                        // failure resolves the checkout op, an add-project switch failure
+                        // resolves the add-project op. TUI path keeps the unkeyed Status.
+                        if let Some(id) = status_op_id {
+                            match action {
+                                NonDefaultBranchAction::CheckoutProjectDefault { .. } => {
+                                    if let Some(op) = self.pending_web_checkout_ops.remove(&id) {
+                                        return op
+                                            .resolve(&crate::engine::WebCheckoutOutcome::Failed {
+                                                target_branch,
+                                                repo_path: path,
+                                            })
+                                            .into_reaction();
+                                    }
+                                }
+                                NonDefaultBranchAction::AddProject { .. } => {
+                                    if let Some(op) = self.pending_web_add_project_ops.remove(&id) {
+                                        return op
+                                        .resolve(&crate::engine::WebAddProjectOutcome::SwitchFailed {
+                                            target_branch,
+                                            repo_path: path,
+                                        })
+                                        .into_reaction();
+                                    }
+                                }
+                            }
+                        }
+                        EventReaction::Status(StatusUpdate::error(format!(
+                            "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
                         )))
                     }
-                },
-                Err(err) => {
-                    // Preserve the full git stderr in the log so debugging
-                    // stays possible after the status line summary is
-                    // overwritten by the next message.
-                    let path = action.repo_path().to_string();
-                    logger::error(&format!(
-                        "non-default branch checkout failed for {path}: {err}"
-                    ));
-                    EventReaction::Status(StatusUpdate::error(format!(
-                        "Couldn't check out \"{target_branch}\" in {path} — resolve in your terminal and retry."
-                    )))
                 }
-            },
+            }
             WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
                 Ok(inspection) => {
                     if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
@@ -1671,7 +1748,17 @@ impl Engine {
                     EventReaction::Nothing
                 }
             },
-            WorkerEvent::CheckoutProjectDefaultBranchInspected { project, result } => {
+            WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                project,
+                result,
+                status_op_id,
+            } => {
+                // Web path: every terminal outcome of worker 1 must resolve the
+                // checkout op's busy. The Known case forwards the id to worker 2
+                // (which resolves later); the short-circuit cases (already-leading,
+                // heuristic, inspect-failed) resolve it here. Helper closure pops
+                // the op (if any) so the byte-identical message can be re-emitted
+                // either keyed (web) or unkeyed (TUI).
                 match result {
                     Ok((current_branch, warning_kind)) => match warning_kind {
                         Some(BranchWarningKind::Known { default_branch }) => {
@@ -1680,13 +1767,23 @@ impl Engine {
                             EventReaction::DispatchProjectDefaultBranchCheckout {
                                 project,
                                 default_branch,
+                                status_op_id,
                             }
                         }
                         Some(BranchWarningKind::Heuristic) => {
-                            EventReaction::Status(StatusUpdate::error(format!(
-                                "Can't determine the default branch for project \"{}\" while it is on \"{}\". Resolve the default branch in your terminal and retry.",
-                                project.name, current_branch
-                            )))
+                            if let Some(id) = status_op_id
+                                && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                            {
+                                op.resolve(&crate::engine::WebCheckoutOutcome::Heuristic {
+                                    current_branch,
+                                })
+                                .into_reaction()
+                            } else {
+                                EventReaction::Status(StatusUpdate::error(format!(
+                                    "Can't determine the default branch for project \"{}\" while it is on \"{}\". Resolve the default branch in your terminal and retry.",
+                                    project.name, current_branch
+                                )))
+                            }
                         }
                         None => {
                             if let Some(existing) =
@@ -1695,16 +1792,36 @@ impl Engine {
                                 existing.current_branch = current_branch.clone();
                                 existing.branch_status = ProjectBranchStatus::Leading;
                             }
-                            EventReaction::Status(StatusUpdate::info(format!(
-                                "Project \"{}\" is already on the leading branch \"{}\".",
-                                project.name, current_branch
-                            )))
+                            if let Some(id) = status_op_id
+                                && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                            {
+                                op.resolve(&crate::engine::WebCheckoutOutcome::AlreadyLeading {
+                                    current_branch,
+                                })
+                                .into_reaction()
+                            } else {
+                                EventReaction::Status(StatusUpdate::info(format!(
+                                    "Project \"{}\" is already on the leading branch \"{}\".",
+                                    project.name, current_branch
+                                )))
+                            }
                         }
                     },
-                    Err(err) => EventReaction::Status(StatusUpdate::error(format!(
-                        "Couldn't inspect the default branch for project \"{}\": {err}",
-                        project.name
-                    ))),
+                    Err(err) => {
+                        if let Some(id) = status_op_id
+                            && let Some(op) = self.pending_web_checkout_ops.remove(&id)
+                        {
+                            op.resolve(&crate::engine::WebCheckoutOutcome::InspectFailed {
+                                error: err,
+                            })
+                            .into_reaction()
+                        } else {
+                            EventReaction::Status(StatusUpdate::error(format!(
+                                "Couldn't inspect the default branch for project \"{}\": {err}",
+                                project.name
+                            )))
+                        }
+                    }
                 }
             }
             WorkerEvent::ConfigReloadReady(result) => self.process_config_reload_ready(*result),
@@ -1914,7 +2031,7 @@ mod tests {
             EventReaction::CommitMessageFailed { .. } => "CommitMessageFailed",
             EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
             EventReaction::ProjectWorktreesArrived { .. } => "ProjectWorktreesArrived",
-            EventReaction::OpenNewAgentPromptForPr(_) => "OpenNewAgentPromptForPr",
+            EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",
             EventReaction::WorktreeRemoveSucceeded { .. } => "WorktreeRemoveSucceeded",
             EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",
             EventReaction::ResourceStatsArrived(_) => "ResourceStatsArrived",

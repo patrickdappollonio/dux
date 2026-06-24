@@ -317,7 +317,10 @@ impl App {
                 }
             }
 
-            EventReaction::OpenNewAgentPromptForPr(pr) => {
+            EventReaction::OpenNewAgentPromptForPr {
+                pr,
+                status_op_id: _,
+            } => {
                 let pr = *pr;
                 let request = CreateAgentRequest::PullRequest {
                     project: pr.project.clone(),
@@ -419,6 +422,7 @@ impl App {
                 name,
                 target_branch,
                 leading_branch,
+                status_op_id: _,
             } => {
                 let display_name = if name.trim().is_empty() {
                     std::path::Path::new(&path)
@@ -479,6 +483,7 @@ impl App {
             EventReaction::DispatchProjectDefaultBranchCheckout {
                 project,
                 default_branch,
+                status_op_id: _,
             } => {
                 self.dispatch_non_default_branch_checkout(
                     NonDefaultBranchAction::CheckoutProjectDefault { project },

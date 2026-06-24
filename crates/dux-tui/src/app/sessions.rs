@@ -308,12 +308,15 @@ impl App {
             // `catch_unwind` so it remains valid if the job panics.
             let tx_panic = worker_tx.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                dux_core::gh::run_pull_request_lookup_job(project, raw_input, None, worker_tx);
+                dux_core::gh::run_pull_request_lookup_job(
+                    project, raw_input, None, worker_tx, None,
+                );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
                 dux_core::logger::error(&format!("pull-request-lookup worker panicked: {reason}"));
                 let _ = tx_panic.send(WorkerEvent::PullRequestResolved {
                     result: Err(format!("Worker panicked: {reason}")),
+                    status_op_id: None,
                 });
             }
         });
@@ -403,6 +406,7 @@ impl App {
                     action,
                     target_branch,
                     worker_tx,
+                    None,
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
@@ -413,6 +417,7 @@ impl App {
                     action: action_panic,
                     target_branch: branch_panic,
                     result: Err(format!("Worker panicked: {reason}")),
+                    status_op_id: None,
                 });
             }
         });
@@ -469,7 +474,7 @@ impl App {
             let project_panic = project.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::project_browser::run_checkout_project_default_branch_inspection_job(
-                    project, worker_tx,
+                    project, worker_tx, None,
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
@@ -481,6 +486,7 @@ impl App {
                 let _ = tx_panic.send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
                     project: project_panic,
                     result: Err(format!("Worker panicked: {reason}")),
+                    status_op_id: None,
                 });
             }
         });
@@ -2910,6 +2916,9 @@ mod tests {
             pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
             pending_auth_users: None,
+            pending_web_checkout_ops: std::collections::HashMap::new(),
+            pending_web_add_project_ops: std::collections::HashMap::new(),
+            pending_web_pr_lookup_ops: std::collections::HashMap::new(),
         };
         let mut app = App {
             engine,
@@ -3086,6 +3095,9 @@ mod tests {
             pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
             pending_auth_users: None,
+            pending_web_checkout_ops: std::collections::HashMap::new(),
+            pending_web_add_project_ops: std::collections::HashMap::new(),
+            pending_web_pr_lookup_ops: std::collections::HashMap::new(),
         }
     }
 

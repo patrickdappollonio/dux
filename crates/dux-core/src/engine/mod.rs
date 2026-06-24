@@ -204,6 +204,74 @@ pub struct Engine {
     /// the TUI `HandlerStatusOp` minted at the add dispatch site, so the replay
     /// resolves the right op (it rode in on `AuthUsersPersisted`).
     pub pending_auth_users: Option<(Vec<String>, String, bool, Option<String>)>,
+
+    /// Web-side `HandlerStatusOp`s awaiting completion, keyed by the op's opaque
+    /// id. These three ops run entirely server-side (the web actor drives them);
+    /// the busy is emitted from `apply_wire` carrying the op's id, and the final
+    /// is resolved when the operation's worker chain completes. The TUI drives the
+    /// same worker chains with `status_op_id == None`, so these registries stay
+    /// empty for it. The op is popped (consumed) exactly once at resolution.
+    ///
+    /// Checkout-default-branch: resolved in `process_worker_event`'s
+    /// `NonDefaultBranchCheckoutCompleted` handler (both Ok and Err finals are
+    /// produced there).
+    pub pending_web_checkout_ops: HashMap<String, HandlerStatusOp<WebCheckoutOutcome>>,
+    /// Add-project "Check Out & Add": SUCCESS is resolved in
+    /// `drive_add_project_followup` (after the inline add); the switch FAILURE is
+    /// resolved in `process_worker_event`'s `NonDefaultBranchCheckoutCompleted`
+    /// Err handler. Mutually exclusive, so the op is consumed once.
+    pub pending_web_add_project_ops: HashMap<String, HandlerStatusOp<WebAddProjectOutcome>>,
+    /// New-agent-from-PR lookup: the SUCCESS handoff (the lookup resolved, the
+    /// create dispatch's `create:{id}` busy takes over) is resolved in
+    /// `drive_pr_lookup_followup` as a `Final::Clear`; the lookup FAILURE is
+    /// resolved in `process_worker_event`'s `PullRequestResolved` Err handler.
+    pub pending_web_pr_lookup_ops: HashMap<String, HandlerStatusOp<WebPrLookupOutcome>>,
+}
+
+/// Handler-computed outcome for the web checkout-project-default-branch op. The
+/// final message is built by the op's resolver from this plus the project name
+/// captured at dispatch. Covers every terminal path of the two-worker chain: the
+/// inspection (worker 1) can short-circuit with already-leading / heuristic /
+/// inspect-failed before any switch runs, and the switch (worker 2) finishes
+/// with success / failure.
+pub enum WebCheckoutOutcome {
+    /// The `git switch` (worker 2) succeeded onto `target_branch`.
+    Ok { target_branch: String },
+    /// The `git switch` (worker 2) failed; `repo_path` is the source checkout path.
+    Failed {
+        target_branch: String,
+        repo_path: String,
+    },
+    /// Worker 1 found the project already on its leading branch; no switch ran.
+    AlreadyLeading { current_branch: String },
+    /// Worker 1 could only heuristically guess the default branch, so it refused.
+    Heuristic { current_branch: String },
+    /// Worker 1's inspection itself failed.
+    InspectFailed { error: String },
+}
+
+/// Handler-computed outcome for the web add-project "Check Out & Add" op.
+pub enum WebAddProjectOutcome {
+    /// The switch and the inline project-add both succeeded; `status_message` is
+    /// the combined "Checked out X and added project Y" line.
+    Added { status_message: String },
+    /// The `git switch` failed before the add ran.
+    SwitchFailed {
+        target_branch: String,
+        repo_path: String,
+    },
+    /// The switch succeeded but the inline add was rolled back; `message` is the
+    /// already-formatted failure line.
+    AddFailed { message: String },
+}
+
+/// Handler-computed outcome for the web new-agent-from-PR lookup op.
+pub enum WebPrLookupOutcome {
+    /// The lookup resolved and the create dispatch took over (its `create:{id}`
+    /// busy now owns the spinner), so this op's busy is cleared with no message.
+    HandedOff,
+    /// The lookup failed; `message` is the already-formatted error line.
+    Failed { message: String },
 }
 
 /// How recently an agent must have emitted PTY output to count as actively

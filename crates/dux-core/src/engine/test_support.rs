@@ -77,6 +77,9 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pty_input: HashMap::new(),
         last_foreground_refresh: None,
         pending_auth_users: None,
+        pending_web_checkout_ops: HashMap::new(),
+        pending_web_add_project_ops: HashMap::new(),
+        pending_web_pr_lookup_ops: HashMap::new(),
     };
     (engine, tmp)
 }
