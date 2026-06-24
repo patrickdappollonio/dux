@@ -101,6 +101,10 @@ pub enum EventReaction {
     Nothing,
     /// Set the status line.
     Status(StatusUpdate),
+    /// Dismiss a keyed status with no replacement message (the `Final::Clear`
+    /// outcome of a `StatusOp`). The TUI removes the keyed entry; the web emits
+    /// a `StatusCleared` frame for the key.
+    ClearStatus(String),
     /// Perform multiple reactions in order.
     Multi(Vec<EventReaction>),
 
@@ -1869,6 +1873,7 @@ mod tests {
         match r {
             EventReaction::Nothing => "Nothing",
             EventReaction::Status(_) => "Status",
+            EventReaction::ClearStatus(_) => "ClearStatus",
             EventReaction::Multi(_) => "Multi",
             EventReaction::RebuildLeftItems => "RebuildLeftItems",
             EventReaction::ReloadChangedFiles => "ReloadChangedFiles",

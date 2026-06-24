@@ -216,6 +216,11 @@ impl App {
                 // replaced; Warning/Error persist until the next status.
                 self.status.set(Instant::now(), key, tone, message);
             }
+            EventReaction::ClearStatus(key) => {
+                // The `Final::Clear` outcome of a StatusOp: dismiss the keyed
+                // entry with no replacement message.
+                self.status.clear(&key, None);
+            }
 
             EventReaction::Multi(reactions) => {
                 for r in reactions {
@@ -1153,6 +1158,31 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a StatusOp)
+    /// must remove the keyed entry with no replacement.
+    #[test]
+    fn clear_status_reaction_dismisses_the_keyed_entry() {
+        use crate::statusline::StatusTone;
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.status.set(
+            std::time::Instant::now(),
+            Some("push:/a".to_string()),
+            StatusTone::Busy,
+            "Pushing\u{2026}",
+        );
+        app.apply_reaction(dux_core::engine::EventReaction::ClearStatus(
+            "push:/a".into(),
+        ));
+        assert!(
+            app.status
+                .snapshot()
+                .iter()
+                .all(|s| s.key.as_deref() != Some("push:/a")),
+            "ClearStatus must remove the keyed entry"
+        );
     }
 
     /// A successful create launch must replace the engine's keyed `create:{id}`

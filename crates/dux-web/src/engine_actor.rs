@@ -732,6 +732,10 @@ pub(crate) fn run_engine_loop(
             for key in dux_core::wire::web_launch_ready_keys_to_clear(&reaction) {
                 thread_status_tx.clear(key);
             }
+            // A StatusOp resolved to `Final::Clear`: dismiss the keyed toast.
+            if let dux_core::engine::EventReaction::ClearStatus(key) = &reaction {
+                thread_status_tx.clear(key.clone());
+            }
 
             // A project mutation just updated SQLite + in-memory projects; mirror
             // it into the portable config.toml so a later TUI start doesn't clobber it.
