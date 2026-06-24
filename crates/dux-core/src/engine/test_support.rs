@@ -80,6 +80,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pending_web_checkout_ops: HashMap::new(),
         pending_web_add_project_ops: HashMap::new(),
         pending_web_pr_lookup_ops: HashMap::new(),
+        pending_delete_ops_web: HashMap::new(),
     };
     (engine, tmp)
 }

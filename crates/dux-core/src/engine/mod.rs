@@ -226,6 +226,35 @@ pub struct Engine {
     /// `drive_pr_lookup_followup` as a `Final::Clear`; the lookup FAILURE is
     /// resolved in `process_worker_event`'s `PullRequestResolved` Err handler.
     pub pending_web_pr_lookup_ops: HashMap<String, HandlerStatusOp<WebPrLookupOutcome>>,
+    /// Web-side async worktree-deletion ops (the "Removing worktree for agent …"
+    /// busy). Keyed by **session id** (the completion `WorktreeRemoveCompleted`
+    /// event carries `session_id`, so it is the natural correlation handle), not
+    /// the op's opaque id. The busy is emitted from `drive_delete_followup`'s
+    /// `AsyncStarted` branch carrying the op's id; the final is resolved in the
+    /// same followup's `WorktreeRemoveSucceeded` / `WorktreeRemoveFailed` branches
+    /// against a [`WebDeleteOutcome`]. The TUI drives the same worker chain but
+    /// keeps its own op in the App layer, so this registry stays empty for it.
+    pub pending_delete_ops_web: HashMap<String, HandlerStatusOp<WebDeleteOutcome>>,
+}
+
+/// Handler-computed outcome for a web async worktree-deletion op (see
+/// [`Engine::pending_delete_ops_web`]). The completion event knows whether the
+/// git removal succeeded; the followup additionally observes whether the session
+/// record is still present (driving the FinishDeleteSession cascade vs the
+/// already-gone fallback). The resolver (declared at dispatch) maps this to the
+/// final user message, byte-identical to the pre-op web wording.
+pub enum WebDeleteOutcome {
+    /// Git removal succeeded and the session was still present — the
+    /// `FinishDeleteSession` cascade ran and produced this status message.
+    Succeeded { message: String },
+    /// Git removal succeeded but the session was already gone (e.g. its project
+    /// was removed) before the worker reported back.
+    SucceededGone,
+    /// Git removal failed; `message` is the git error.
+    Failed { message: String },
+    /// Git removal succeeded but the post-removal `FinishDeleteSession` cascade
+    /// failed; `message` is the formatted error.
+    CleanupFailed { message: String },
 }
 
 /// Handler-computed outcome for the web checkout-project-default-branch op. The

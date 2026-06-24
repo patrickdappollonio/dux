@@ -885,9 +885,7 @@ impl Engine {
                 )
                 .on_success(|_: &()| crate::engine::Final::clear())
                 .on_failure(|e: &String| {
-                    crate::engine::Final::error(format!(
-                        "Couldn't generate a commit message: {e}"
-                    ))
+                    crate::engine::Final::error(format!("Couldn't generate a commit message: {e}"))
                 });
                 // Capture the opaque id BEFORE moving `op` into the worker; the
                 // panic path can't reach `op` (it's consumed/lost on a panic) so
@@ -917,14 +915,12 @@ impl Engine {
                         // move-of-`op`-then-return is accepted by the compiler.
                         let diff_text = match crate::git::staged_diff_text(&worktree) {
                             Ok(d) if d.trim().is_empty() => {
-                                let error =
-                                    "No staged changes to summarize. Stage files first."
-                                        .to_string();
-                                let resolved =
-                                    op.resolve(&Err::<(), String>(error.clone()));
-                                let _ = tx.send(
-                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
-                                );
+                                let error = "No staged changes to summarize. Stage files first."
+                                    .to_string();
+                                let resolved = op.resolve(&Err::<(), String>(error.clone()));
+                                let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
+                                    resolved,
+                                });
                                 let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
                                     session_id,
                                     error,
@@ -934,11 +930,10 @@ impl Engine {
                             Ok(d) => d,
                             Err(e) => {
                                 let error = format!("Failed to read the staged diff: {e}");
-                                let resolved =
-                                    op.resolve(&Err::<(), String>(error.clone()));
-                                let _ = tx.send(
-                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
-                                );
+                                let resolved = op.resolve(&Err::<(), String>(error.clone()));
+                                let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
+                                    resolved,
+                                });
                                 let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
                                     session_id,
                                     error,
@@ -950,9 +945,9 @@ impl Engine {
                         match prov.run_oneshot(&prompt, &worktree) {
                             Ok(message) => {
                                 let resolved = op.resolve(&Ok::<(), String>(()));
-                                let _ = tx.send(
-                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
-                                );
+                                let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
+                                    resolved,
+                                });
                                 let _ =
                                     tx.send(crate::worker::WorkerEvent::CommitMessageGenerated {
                                         session_id,
@@ -961,11 +956,10 @@ impl Engine {
                             }
                             Err(e) => {
                                 let error = e.to_string();
-                                let resolved =
-                                    op.resolve(&Err::<(), String>(error.clone()));
-                                let _ = tx.send(
-                                    crate::worker::WorkerEvent::StatusOpCompleted { resolved },
-                                );
+                                let resolved = op.resolve(&Err::<(), String>(error.clone()));
+                                let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
+                                    resolved,
+                                });
                                 let _ = tx.send(crate::worker::WorkerEvent::CommitMessageFailed {
                                     session_id,
                                     error,
@@ -985,7 +979,9 @@ impl Engine {
                         // shape so the web final stays byte-identical to before.
                         let resolved = crate::engine::ResolvedFinal::error(
                             op_id,
-                            format!("Couldn't generate a commit message: Worker panicked: {reason}"),
+                            format!(
+                                "Couldn't generate a commit message: Worker panicked: {reason}"
+                            ),
                         );
                         let _ = tx_panic
                             .send(crate::worker::WorkerEvent::StatusOpCompleted { resolved });

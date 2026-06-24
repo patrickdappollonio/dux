@@ -235,6 +235,43 @@ pub struct App {
     /// busy timeout, even though the visible final comes from elsewhere.
     pub(crate) pending_pr_lookup_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<PrLookupFinalOutcome>>,
+    /// In-flight async worktree-deletion status ops (the "Removing worktree for
+    /// agent …" busy). When `begin_delete_session` takes the async path the TUI
+    /// mints a [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows
+    /// its pending busy, and stashes it here keyed by the **session id** (not the
+    /// op id — the completion event carries `session_id`, so that is the natural
+    /// correlation handle). The matching
+    /// [`dux_core::engine::EventReaction::WorktreeRemoveSucceeded`] /
+    /// [`WorktreeRemoveFailed`] pops the op and resolves it against the
+    /// handler-computed [`TuiDeleteOutcome`]. The resolver, declared at dispatch,
+    /// captures the provider / project name / branch name / display name then in
+    /// scope (the session is still present at dispatch — cleanup is deferred until
+    /// git succeeds) and reproduces the surface's exact wording.
+    pub(crate) pending_delete_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<TuiDeleteOutcome>>,
+}
+
+/// Handler-computed outcome for an async worktree-deletion op (see
+/// [`App::pending_delete_ops`]). The completion event only knows whether the git
+/// removal succeeded and (on success) whether the branch was already gone; the
+/// handler additionally observes whether the session record is still present.
+/// The resolver (declared at dispatch, where the session was in scope) maps this
+/// to the final user message.
+pub enum TuiDeleteOutcome {
+    /// Git removal succeeded and the session record is still present (the normal
+    /// case — cleanup runs now). `branch_already_deleted` selects the message.
+    SucceededPresent { branch_already_deleted: bool },
+    /// Git removal succeeded but the session was already removed by another path
+    /// (e.g. its project was deleted) before the worker reported back. Resolve to
+    /// the legacy "Worktree removal finished." line when our busy was still
+    /// showing, else a clear (no message) to preserve the old suppression.
+    SucceededGone { our_busy_still_showing: bool },
+    /// Git removal failed and the session record is still present at completion,
+    /// so the message can name the agent.
+    FailedNamed { message: String },
+    /// Git removal failed and the session was already gone at completion, so the
+    /// message cannot name the agent.
+    FailedBare { message: String },
 }
 
 /// Handler-resolved outcome for a PR-lookup op (see [`App::pending_pr_lookup_ops`]).
@@ -1462,6 +1499,7 @@ impl App {
             pending_web_checkout_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
+            pending_delete_ops_web: HashMap::new(),
         };
         Self::assemble(
             engine,
@@ -1583,6 +1621,7 @@ impl App {
             pending_auth_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
+            pending_delete_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and

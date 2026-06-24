@@ -369,34 +369,51 @@ impl App {
             EventReaction::WorktreeRemoveSucceeded {
                 session_id,
                 branch_already_deleted,
-                our_busy_message,
+                our_busy_message: _,
             } => {
-                // Only update the status line if the current content is still
-                // the Busy message we set when spawning this worker. If
-                // another operation (push, pull, concurrent delete) has since
-                // overwritten it, we should not clobber their message — the
-                // session will visually disappear from the list, which is
-                // sufficient feedback.
-                let our_busy_still_showing = our_busy_message
-                    .as_ref()
-                    .is_some_and(|msg| self.status.anon_busy_matches(msg.as_str()));
-
+                // The "Removing worktree …" busy now rides a keyed
+                // `HandlerStatusOp` stashed in `pending_delete_ops`, so the keyed
+                // final replaces exactly that spinner without comparing it against
+                // the anonymous status line — concurrent operations can never
+                // clobber it. Pop the op and resolve it against the handler-known
+                // outcome; the message wording is unchanged.
+                let op = self.pending_delete_ops.remove(&session_id);
                 if self.engine.sessions.iter().any(|s| s.id == session_id) {
+                    // Cleanup still runs (in-memory + view side); pass
+                    // `update_status=false` so it no longer authors the success
+                    // line — the op owns the final message now.
                     if let Err(e) = self.finish_delete_session(
                         &session_id,
                         WorktreeRemoval::Performed {
                             branch_already_deleted,
                         },
-                        our_busy_still_showing,
+                        false,
                     ) {
                         self.set_error(format!(
                             "Worktree removed but session cleanup failed: {e:#}"
                         ));
+                    } else if let Some(op) = op {
+                        self.apply_reaction(
+                            op.resolve(&TuiDeleteOutcome::SucceededPresent {
+                                branch_already_deleted,
+                            })
+                            .into_reaction(),
+                        );
                     }
-                } else if our_busy_still_showing {
-                    // Session removed by another path; just clear the
-                    // lingering Busy so it doesn't stick.
-                    self.set_info("Worktree removal finished.");
+                } else if let Some(op) = op {
+                    // Session removed by another path. The keyed op can't clobber
+                    // unrelated statuses, but preserve the legacy suppression:
+                    // emit "Worktree removal finished." only when our busy is still
+                    // the anonymous status, otherwise clear with no message.
+                    let our_busy_still_showing = self
+                        .status
+                        .anon_busy_matches(op.pending_status().message.as_str());
+                    self.apply_reaction(
+                        op.resolve(&TuiDeleteOutcome::SucceededGone {
+                            our_busy_still_showing,
+                        })
+                        .into_reaction(),
+                    );
                 }
             }
             EventReaction::WorktreeRemoveFailed {
@@ -404,18 +421,17 @@ impl App {
                 message,
             } => {
                 // Session record is normally still present because we
-                // deferred cleanup until git succeeded. Look up the session
-                // label so the user knows which agent failed — multiple
-                // async deletes can be in flight concurrently, and a bare
-                // error would be ambiguous.
-                if let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) {
-                    let name = session.title.as_deref().unwrap_or(&session.branch_name);
-                    self.set_error(format!(
-                        "Worktree delete failed for {} agent \"{name}\": {message}",
-                        session.provider.as_str(),
-                    ));
-                } else {
-                    self.set_error(format!("Worktree delete failed: {message}"));
+                // deferred cleanup until git succeeded. The keyed op's resolver
+                // captured the session label at dispatch; whether the session is
+                // still present at completion selects the named vs bare wording.
+                let session_present = self.engine.sessions.iter().any(|s| s.id == session_id);
+                if let Some(op) = self.pending_delete_ops.remove(&session_id) {
+                    let outcome = if session_present {
+                        TuiDeleteOutcome::FailedNamed { message }
+                    } else {
+                        TuiDeleteOutcome::FailedBare { message }
+                    };
+                    self.apply_reaction(op.resolve(&outcome).into_reaction());
                 }
             }
 
@@ -601,7 +617,12 @@ impl App {
                     }
                     BeginDeleteSessionOutcome::NotFound => {}
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                        self.set_busy(busy_message);
+                        // Mint a keyed HandlerStatusOp, show its pending busy, and
+                        // stash it keyed by session id so the completion handler
+                        // resolves exactly this spinner.
+                        let op = self.build_delete_status_op(&session_id, busy_message);
+                        self.apply_reaction(EventReaction::Status(op.pending_status()));
+                        self.pending_delete_ops.insert(session_id.clone(), op);
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {
                         if let Err(e) = self.finish_delete_session(&session_id, removal, true) {

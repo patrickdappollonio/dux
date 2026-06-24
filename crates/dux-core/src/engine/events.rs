@@ -516,8 +516,12 @@ pub enum BeginDeleteSessionOutcome {
     NotFound,
     /// Async path: Engine inserted into `pending_deletions`, spawned the
     /// `git::remove_worktree` worker (which posts `WorktreeRemoveCompleted`
-    /// back), and stored `busy_message` in `deletion_busy_messages`. App
-    /// only needs to set the status line.
+    /// back), and stored `busy_message` in `deletion_busy_messages`. Each
+    /// surface mints its OWN keyed `HandlerStatusOp` from this `busy_message`
+    /// (the TUI in `App::pending_delete_ops`, the web in
+    /// `Engine::pending_delete_ops_web`), shows its pending busy, and resolves it
+    /// when `WorktreeRemoveCompleted` reports back — preserving each surface's
+    /// divergent final wording.
     AsyncStarted { busy_message: String },
     /// Inline path: no worktree removal needed (no `delete_worktree` request
     /// or shared with siblings). App should call the existing
