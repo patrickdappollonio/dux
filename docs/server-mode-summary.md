@@ -258,9 +258,13 @@ runtime, and PTYs keep running across the flip because the engine owns them, not
 the surface. The single-instance lock rides inside the engine. Hardening here was
 real: a reviewer empirically proved (gdb) that a runtime drop waited forever on
 `spawn_blocking` PTY forwarders parked in `recv()` while the senders stayed alive,
-fixed via `recv_timeout` + a shutdown flag + a bounded runtime shutdown; tokio
-signal residue that left the resumed TUI unkillable was fixed by restoring
-`SIG_DFL` via libc; the SIGWINCH handler is unregistered per flip. A themed
+fixed via `recv_timeout` + a shutdown flag + a bounded runtime shutdown. The TUI
+now registers its own SIGINT/SIGTERM/SIGHUP handlers (it winds agents down
+gracefully on quit, like the server), so on a flip-back the server no longer
+resets the disposition to `SIG_DFL`: both surfaces share one `signal-hook-registry`
+master handler whose actions are swapped per phase, and forcing `SIG_DFL` would
+leave the resumed TUI's handler dormant. The SIGWINCH and shutdown handlers are
+unregistered per flip. A themed
 `ServerStatusScreen` (existing theme tokens only, wall-clock redraws) shows while
 serving (q/Esc returns to the TUI, Ctrl-C quits).
 
@@ -405,12 +409,29 @@ keyed source differently:
   where all concurrent statuses are visible).
 - **Web = one `sonner` toast per active keyed entry**, using the key as the
   sonner id (re-emit updates in place; clear dismisses; success auto-clears ~6s,
-  warning/error persist). An explicit `StatusCleared { key }` server message
-  (not empty-message overloading) and a full-snapshot replay on connect were
-  required additions. Every Busy→final producer pair was keyed (pull, reconnect,
-  launch, async delete, PR lookup, checkout-default, commit-message, config
-  writes, **ACME** lifecycle), and the local web success toasts that the engine
-  now covers were removed to avoid double-firing.
+  warning/error persist). The `Toaster` enables `closeButton` so any toast —
+  including a long-running Busy spinner whose final has not arrived — can always
+  be dismissed by hand (swipe on touch). An explicit `StatusCleared { key }`
+  server message (not empty-message overloading) and a full-snapshot replay on
+  connect were required additions. Every Busy→final producer pair was keyed (pull,
+  reconnect, launch, async delete, PR lookup, checkout-default, commit-message,
+  config writes, **ACME** lifecycle), and the local web success toasts that the
+  engine now covers were removed to avoid double-firing.
+- **A loading/Busy toast clears only when its final shares the same key.** This
+  is the load-bearing invariant for transient toasts: a Busy and its eventual
+  success/error/`StatusCleared` must carry the *same* per-operation key so the
+  final replaces the spinner in place rather than stacking a second toast and
+  orphaning the first. The agent-creation flow violated this — its dispatch Busy
+  and final were keyed `create:{project_id}`, but the worker's incremental
+  progress (`CreateAgentProgress`: "Attaching to existing branch…", "Launching …
+  in a fresh session…") was emitted **unkeyed**, landing in the controller's
+  anonymous slot. The anonymous slot is **never expired by the busy timeout**
+  (only keyed entries upgrade Busy→Warning), so that progress toast lingered
+  forever. The fix routes `CreateAgentProgress` through the `create:{project_id}`
+  key so dispatch, every progress step, and the final all share one toast id.
+  New Busy-emitting call sites must key their progress the same way (or, like
+  `OpenPath`, keep *both* the Busy and its final unkeyed so they share the
+  anonymous slot — never mix keyed and unkeyed across a Busy→final pair).
 
 This is the one place the branch **reversed a tenet**: the prior "do NOT
 duplicate engine status onto a second surface (no web toast)" rule was updated.
