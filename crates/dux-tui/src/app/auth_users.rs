@@ -107,8 +107,35 @@ impl App {
 
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;
-        self.set_busy(format!("Hashing the password for \"{username}\"\u{2026}"));
-        self.spawn_auth_user_add(username, password, is_update);
+        // The final is decided in the engine's `AuthUsersPersisted` handler (the
+        // bcrypt hash runs off-thread, then a fallible post-worker config write),
+        // so declare all outcomes here on a HandlerStatusOp and resolve it when
+        // the engine hands back the `AuthUsersOutcome`. The success branch builds
+        // the exact message the worker carries; both error branches share the
+        // one config-write error template. `warn` is plumbed through for
+        // generality even though an add never empties the user set (always info).
+        let op =
+            dux_core::engine::status_op(format!("Hashing the password for \"{username}\"\u{2026}"))
+                .resolve_in_handler(move |o: &dux_core::engine::AuthUserFinalOutcome| match o {
+                    dux_core::engine::AuthUserFinalOutcome::Saved {
+                        warn: true,
+                        message,
+                    } => dux_core::engine::Final::warning(message.clone()),
+                    dux_core::engine::AuthUserFinalOutcome::Saved {
+                        warn: false,
+                        message,
+                    } => dux_core::engine::Final::info(message.clone()),
+                    dux_core::engine::AuthUserFinalOutcome::Errored(err) => {
+                        dux_core::engine::Final::error(format!(
+                            "Could not save web UI login users to config.toml: {err}"
+                        ))
+                    }
+                });
+        let pending = op.pending_status();
+        let op_id = op.id().to_string();
+        self.pending_auth_ops.insert(op_id.clone(), op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        self.spawn_auth_user_add(username, password, is_update, Some(op_id));
     }
 
     /// Open `server-remove-user`: a picker over the configured usernames. Each
@@ -199,7 +226,13 @@ impl App {
     /// existing password). Hashing (~250 ms bcrypt) runs on a background thread
     /// so the TUI stays responsive; the config write happens in the engine's
     /// `AuthUsersPersisted` handler once the hash arrives.
-    fn spawn_auth_user_add(&mut self, username: String, password: String, is_update: bool) {
+    fn spawn_auth_user_add(
+        &mut self,
+        username: String,
+        password: String,
+        is_update: bool,
+        status_op_id: Option<String>,
+    ) {
         // Set the single-flight guard at the spawn point; the engine's
         // AuthUsersPersisted arm clears it on completion (success and failure).
         self.engine.mark_in_flight(InFlightKey::AuthUsers);
@@ -214,6 +247,7 @@ impl App {
                         message: String::new(),
                         warn: false,
                         result: Err(format!("could not hash the password: {err:#}")),
+                        status_op_id,
                     });
                     return;
                 }
@@ -230,6 +264,7 @@ impl App {
                 message,
                 warn: false,
                 result: Ok(()),
+                status_op_id,
             });
         });
     }

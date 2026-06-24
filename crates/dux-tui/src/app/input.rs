@@ -7088,6 +7088,14 @@ not_a_real_action = ["x"]
         assert_eq!(persisted.auth.users, app.engine.config.auth.users);
         assert!(app.status.text().contains("alice"));
         assert!(app.status.text().contains("added"));
+        // The HandlerStatusOp resolved: the "Hashing…" busy was REPLACED by the
+        // info-tone success final (not left as a stuck spinner), and the op was
+        // popped from the registry so it cannot resolve twice.
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert!(
+            app.pending_auth_ops.is_empty(),
+            "the resolved add op must be removed from the registry"
+        );
     }
 
     #[test]

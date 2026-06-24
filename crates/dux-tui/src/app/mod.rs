@@ -200,6 +200,18 @@ pub struct App {
     /// only supplies which branch fired and any error string.
     pub(crate) pending_persist_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<PersistFinalOutcome>>,
+    /// In-flight web-UI login-user add ops whose final is decided in the
+    /// completion handler. The add dispatch mints a
+    /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
+    /// pending busy, and stashes it here keyed by that id. The matching
+    /// [`dux_core::engine::EventReaction::AuthUsersOutcome`] carries the id back;
+    /// the handler pops the op and resolves it against the engine-computed
+    /// [`dux_core::engine::AuthUserFinalOutcome`]. Because the engine defers the
+    /// outcome across a config-reload barrier, the op may stay stashed here until
+    /// the later `ConfigReloadReady` replay emits its final — so this map is the
+    /// op's home for the full deferral window, not just one tick.
+    pub(crate) pending_auth_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<dux_core::engine::AuthUserFinalOutcome>>,
 }
 
 /// Handler-computed outcome for a project-persistence op (see
@@ -1514,6 +1526,7 @@ impl App {
             pending_server_flip: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
+            pending_auth_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and
