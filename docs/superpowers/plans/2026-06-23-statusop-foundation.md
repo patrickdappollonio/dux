@@ -726,9 +726,35 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
+## Architectural finding (from the push migration)
+
+`push` is a *pure-status* op: its completion emits only a status, so it fits
+`spawn_status_op` directly. **Most other ops are domain-ful** — their completion
+also mutates engine state and/or fans out follow-up reactions (e.g. `pull` clears
+the in-flight guard, updates project branch state, and emits `ReloadChangedFiles`;
+`create`/`delete`/`launch` rebuild views and persist records). For those, the
+simple `spawn_status_op` (which emits *only* a status) is the wrong shape.
+
+The general pattern for a domain-ful op is **carry the `ResolvedFinal` alongside
+the existing domain event**:
+
+1. At dispatch, build the `StatusOp` (declaring both outcomes) and emit
+   `op.pending_status()` as the busy. Move `op` into the worker.
+2. In the worker, after producing the typed result, call
+   `op.resolve(&result)` and put the resulting `ResolvedFinal` into a new field
+   on the op's existing `WorkerEvent` (e.g. `PullCompleted { …, status: ResolvedFinal }`).
+3. In the completion handler, do the domain work as today, then emit the carried
+   final: `EventReaction::Multi(vec![ resolved.into_reaction(), <domain follow-ups> ])`
+   (or just `resolved.into_reaction()` when there are no follow-ups).
+
+This keeps the three states declared together at the dispatch site (the sealing
+guarantee) while leaving domain logic in the engine handler. Plans 2–5 below use
+this variant for every op except trivially pure-status ones.
+
 ## Out of scope (subsequent plans)
 
-Each is a self-contained follow-on plan that reuses Tasks 1–5 and follows the Task 6 pattern:
+Each is a self-contained follow-on plan that reuses Tasks 1–5 and follows the Task 6
+pattern (pure-status) or the carry-`ResolvedFinal` variant above (domain-ful):
 
 - **Plan 2 — pull + commit-message** (engine `spawn_command_worker` keyed ops).
 - **Plan 3 — create/launch family** (`DispatchCreateAgentRequest`, reconnect) — larger because the completion does domain work; the worker carries `StatusOpCompleted` *in addition to* the existing `AgentLaunchReady*` events, or the `AgentLaunchReady*` events gain a `ResolvedFinal` field.
