@@ -1047,8 +1047,12 @@ impl App {
             }
             AgentLaunchReadyView::SessionMissing => {
                 // The session vanished between dispatch and launch. Resolve any
-                // open launch/create busy so its spinner doesn't linger: drop the
-                // keyed create entry, and clear a still-showing anon launch busy.
+                // open launch/create busy so its spinner doesn't linger: resolve a
+                // keyed reconnect op (clear), drop the keyed create entry, and clear
+                // a still-showing anon launch busy as a final fallback.
+                if let Some(op) = self.pending_reconnect_ops.remove(&outcome.session.id) {
+                    self.apply_reaction(op.resolve(&TuiReconnectOutcome::Missing).into_reaction());
+                }
                 self.status.clear(
                     &dux_core::wire::status_keys::create(&outcome.session.project_id),
                     None,
@@ -1061,7 +1065,14 @@ impl App {
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
-                self.set_info(status_message);
+                // Resolve the keyed reconnect op so its success replaces exactly
+                // the "Launching…"/"Starting fresh…" busy. Falls back to an
+                // anonymous info when no op is stashed (e.g. a launch not driven
+                // through the reconnect dispatch sites).
+                self.resolve_reconnect_op_or(
+                    &outcome.session.id,
+                    TuiReconnectOutcome::Ready { status_message },
+                );
             }
             AgentLaunchReadyView::ResumeFallback {
                 session_id,
@@ -1074,7 +1085,10 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.fullscreen_overlay = FullscreenOverlay::Agent;
                 }
-                self.set_info(status_message);
+                self.resolve_reconnect_op_or(
+                    &session_id,
+                    TuiReconnectOutcome::Ready { status_message },
+                );
             }
             AgentLaunchReadyView::StartupAutoReopen => {}
         }
@@ -1091,22 +1105,33 @@ impl App {
                 self.set_error_keyed(dux_core::wire::status_keys::create(&project_id), message)
             }
             AgentLaunchFailedOutcome::Reconnect {
+                session_id,
                 branch_name,
                 message,
-                ..
             } => {
-                self.set_error(format!(
-                    "Reconnect failed for agent \"{branch_name}\": {message}"
-                ));
+                // Resolve the keyed reconnect op so its error replaces exactly the
+                // "Launching…" busy; fall back to an anonymous error when no op is
+                // stashed (the message is byte-identical either way).
+                self.resolve_reconnect_op_or(
+                    &session_id,
+                    TuiReconnectOutcome::ReconnectFailed {
+                        branch_name,
+                        message,
+                    },
+                );
             }
             AgentLaunchFailedOutcome::ForceReconnect {
+                session_id,
                 branch_name,
                 message,
-                ..
             } => {
-                self.set_error(format!(
-                    "Fresh restart failed for agent \"{branch_name}\": {message}"
-                ));
+                self.resolve_reconnect_op_or(
+                    &session_id,
+                    TuiReconnectOutcome::ForceReconnectFailed {
+                        branch_name,
+                        message,
+                    },
+                );
             }
             AgentLaunchFailedOutcome::ResumeFallback => {
                 // Engine logged + marked Detached; nothing for the view.
@@ -1119,6 +1144,31 @@ impl App {
                 self.set_warning(format!(
                     "Couldn't auto-reopen agent \"{branch_name}\": {message}"
                 ));
+            }
+        }
+    }
+
+    /// Resolve a stashed reconnect/fresh-restart [`HandlerStatusOp`] (keyed by
+    /// session id) against `outcome`, replacing exactly its keyed busy. When no op
+    /// is stashed (a launch ready/failed not driven through the reconnect dispatch
+    /// sites), fall back to applying the SAME final anonymously via the shared
+    /// [`super::reconnect_final`] mapping, so the wording is byte-identical to the
+    /// pre-op behavior.
+    fn resolve_reconnect_op_or(&mut self, session_id: &str, outcome: TuiReconnectOutcome) {
+        if let Some(op) = self.pending_reconnect_ops.remove(session_id) {
+            self.apply_reaction(op.resolve(&outcome).into_reaction());
+            return;
+        }
+        // No op stashed: apply the SAME final anonymously (no key), preserving the
+        // pre-op behavior. `reconnect_final` is the single wording source.
+        match super::reconnect_final(&outcome) {
+            dux_core::engine::Final::Message { tone, text } => {
+                self.status.set(std::time::Instant::now(), None, tone, text);
+            }
+            dux_core::engine::Final::Clear => {
+                if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
+                    self.set_info(String::new());
+                }
             }
         }
     }
@@ -1388,6 +1438,103 @@ mod tests {
             entry_tone.as_deref(),
             Some("info"),
             "the create Busy must be replaced in place by a same-key Info final",
+        );
+    }
+
+    /// A reconnect success must resolve the keyed reconnect op in place: the
+    /// op's pending Busy entry becomes a same-key Info final carrying the exact
+    /// engine-computed status message, and the op is consumed.
+    #[test]
+    fn reconnect_ready_resolves_the_keyed_reconnect_op() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        // Mirror the dispatch site: mint the op, show its pending busy, stash it.
+        let op = app
+            .build_reconnect_status_op(format!("Launching agent \"{}\"...", session.branch_name));
+        let op_key = op.id().to_string();
+        app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        app.pending_reconnect_ops.insert(session.id.clone(), op);
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Reconnected.".to_string(),
+            },
+        });
+
+        let entry = app
+            .status
+            .snapshot()
+            .into_iter()
+            .find(|s| s.key.as_deref() == Some(op_key.as_str()));
+        let entry = entry.expect("the op's keyed entry must still exist, replaced in place");
+        assert_eq!(entry.tone.as_str(), "info");
+        assert_eq!(entry.message, "Reconnected.");
+        assert!(
+            app.pending_reconnect_ops.is_empty(),
+            "the reconnect op must be consumed on resolution",
+        );
+    }
+
+    /// A reconnect FAILURE resolves the same op to a same-key Error final whose
+    /// wording is byte-identical to the legacy anonymous error.
+    #[test]
+    fn reconnect_failed_resolves_the_keyed_reconnect_op() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        let op = app
+            .build_reconnect_status_op(format!("Launching agent \"{}\"...", session.branch_name));
+        let op_key = op.id().to_string();
+        app.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        app.pending_reconnect_ops.insert(session.id.clone(), op);
+
+        app.apply_agent_launch_failed_view(AgentLaunchFailedOutcome::Reconnect {
+            session_id: session.id.clone(),
+            branch_name: "feat".to_string(),
+            message: "nope".to_string(),
+        });
+
+        let entry = app
+            .status
+            .snapshot()
+            .into_iter()
+            .find(|s| s.key.as_deref() == Some(op_key.as_str()))
+            .expect("the op's keyed entry must still exist, replaced in place");
+        assert_eq!(entry.tone.as_str(), "error");
+        assert_eq!(entry.message, "Reconnect failed for agent \"feat\": nope");
+        assert!(app.pending_reconnect_ops.is_empty());
+    }
+
+    /// When no reconnect op is stashed, the ready/failed handlers fall back to an
+    /// ANONYMOUS final with byte-identical wording, preserving pre-op behavior.
+    #[test]
+    fn reconnect_without_op_falls_back_to_anonymous_final() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        app.apply_agent_launch_failed_view(AgentLaunchFailedOutcome::ForceReconnect {
+            session_id: session.id.clone(),
+            branch_name: "feat".to_string(),
+            message: "boom".to_string(),
+        });
+
+        assert_eq!(
+            app.status.message(),
+            "Fresh restart failed for agent \"feat\": boom"
+        );
+        // No keyed entry was created for the anonymous fallback.
+        assert!(
+            app.status.snapshot().iter().all(|s| s.key.is_none()
+                || s.tone.as_str() != "error"
+                || s.message != "Fresh restart failed for agent \"feat\": boom"),
+            "fallback must be anonymous (no key)",
         );
     }
 
