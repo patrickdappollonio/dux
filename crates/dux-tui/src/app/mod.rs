@@ -2769,17 +2769,34 @@ impl App {
             let sid = session.id.clone();
             let new_branch = name.clone();
             let tx = self.engine.worker_tx.clone();
+            // Declare the loading→final states together; the worker resolves the
+            // matching message and carries it back on BranchRenameCompleted.
+            let success_branch = new_branch.clone();
+            let op = dux_core::engine::status_op(format!("Renaming branch to \"{name}\"\u{2026}"))
+                .on_success(move |_: &()| {
+                    dux_core::engine::Final::info(format!(
+                        "Renamed agent and branch to \"{success_branch}\"."
+                    ))
+                })
+                .on_failure(|e: &String| {
+                    dux_core::engine::Final::error(format!(
+                        "Branch rename failed, reverted agent name: {e}"
+                    ))
+                });
+            let pending = op.pending_status();
             std::thread::spawn(move || {
                 let result = git::rename_branch(Path::new(&worktree), &old_branch, &new_branch)
                     .map_err(|e| e.to_string());
+                let status = op.resolve(&result);
                 let _ = tx.send(WorkerEvent::BranchRenameCompleted {
                     session_id: sid,
                     new_branch,
                     previous_title,
                     result,
+                    status,
                 });
             });
-            self.set_busy(format!("Renaming branch to \"{name}\"\u{2026}"));
+            self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         } else {
             self.set_info(format!("Renamed agent to \"{name}\"."));
             self.engine.update_branch_sync_sessions();

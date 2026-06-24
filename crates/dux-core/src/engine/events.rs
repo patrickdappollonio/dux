@@ -1329,48 +1329,47 @@ impl Engine {
                 new_branch,
                 previous_title,
                 result,
-            } => match result {
-                Ok(()) => {
-                    if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                        session.branch_name = new_branch.clone();
-                        session.updated_at = Utc::now();
-                        if let Err(err) = self.session_store.upsert_session(session) {
-                            logger::error(&format!(
-                                "failed to persist branch rename for {} (new branch: {}): {err}",
-                                session.id, new_branch,
-                            ));
+                status,
+            } => {
+                // Domain work depends on the outcome; the user-facing message was
+                // resolved at dispatch by the StatusOp and rides in `status`.
+                match &result {
+                    Ok(()) => {
+                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
+                        {
+                            session.branch_name = new_branch.clone();
+                            session.updated_at = Utc::now();
+                            if let Err(err) = self.session_store.upsert_session(session) {
+                                logger::error(&format!(
+                                    "failed to persist branch rename for {} (new branch: {}): {err}",
+                                    session.id, new_branch,
+                                ));
+                            }
+                        }
+                        self.update_branch_sync_sessions();
+                    }
+                    Err(_) => {
+                        // Revert the title so the session doesn't stay in a mixed
+                        // state where the display name changed but the branch
+                        // didn't.
+                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
+                        {
+                            session.title = previous_title;
+                            session.updated_at = Utc::now();
+                            if let Err(err) = self.session_store.upsert_session(session) {
+                                logger::error(&format!(
+                                    "failed to persist branch-rename revert for {}: {err}",
+                                    session.id,
+                                ));
+                            }
                         }
                     }
-                    self.update_branch_sync_sessions();
-                    EventReaction::Multi(vec![
-                        EventReaction::RebuildLeftItems,
-                        EventReaction::Status(StatusUpdate::info(format!(
-                            "Renamed agent and branch to \"{new_branch}\"."
-                        ))),
-                    ])
                 }
-                Err(e) => {
-                    // Revert the title so the session doesn't stay in a
-                    // mixed state where the display name changed but the
-                    // branch didn't.
-                    if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
-                        session.title = previous_title;
-                        session.updated_at = Utc::now();
-                        if let Err(err) = self.session_store.upsert_session(session) {
-                            logger::error(&format!(
-                                "failed to persist branch-rename revert for {}: {err}",
-                                session.id,
-                            ));
-                        }
-                    }
-                    EventReaction::Multi(vec![
-                        EventReaction::RebuildLeftItems,
-                        EventReaction::Status(StatusUpdate::error(format!(
-                            "Branch rename failed, reverted agent name: {e}"
-                        ))),
-                    ])
-                }
-            },
+                EventReaction::Multi(vec![
+                    EventReaction::RebuildLeftItems,
+                    status.into_reaction(),
+                ])
+            }
             WorkerEvent::BranchSyncReady(updates) => {
                 let mut changed = false;
                 for (session_id, actual_branch) in updates {

@@ -300,6 +300,9 @@ pub enum WorkerEvent {
         new_branch: String,
         previous_title: Option<String>,
         result: Result<(), String>,
+        /// Status final resolved at dispatch by the rename StatusOp; the handler
+        /// runs its domain revert/persist and emits this for the user message.
+        status: crate::engine::ResolvedFinal,
     },
     ResourceStatsReady(Vec<ResourceStats>),
     GhStatusChecked(crate::model::GhStatus),
