@@ -171,6 +171,14 @@ impl<O> HandlerStatusOp<O> {
         StatusUpdate::busy(self.pending.clone()).with_key(self.key.clone())
     }
 
+    /// An UPDATED keyed busy on the same id, for operations that report progress
+    /// mid-flight (e.g. agent creation streaming "Creating worktree…", "Launching
+    /// session…"). Does not consume the op — the eventual [`Self::resolve`] still
+    /// replaces it. Replaces the old hand-keyed progress re-emit.
+    pub fn progress(&self, message: impl Into<String>) -> StatusUpdate {
+        StatusUpdate::busy(message).with_key(self.key.clone())
+    }
+
     /// Run the resolver against the handler-computed outcome, returning the
     /// keyed final.
     pub fn resolve(self, outcome: &O) -> ResolvedFinal {
@@ -357,6 +365,23 @@ mod tests {
             build().resolve(&Outcome::ConfigFail("disk".into())).outcome,
             Final::warning("Saved to DB, config failed: disk")
         );
+    }
+
+    #[test]
+    fn handler_status_op_progress_reuses_the_id_without_consuming() {
+        let op = status_op("Creating worktree\u{2026}").resolve_in_handler(|_: &()| Final::clear());
+        let id = op.id().to_string();
+        // Progress updates re-emit a busy on the SAME id and don't consume the op.
+        let p1 = op.progress("Launching session\u{2026}");
+        assert_eq!(p1.tone, StatusTone::Busy);
+        assert_eq!(p1.key.as_deref(), Some(id.as_str()));
+        assert_eq!(p1.message, "Launching session\u{2026}");
+        let p2 = op.progress("Almost there\u{2026}");
+        assert_eq!(p2.key.as_deref(), Some(id.as_str()));
+        // Still resolvable afterward (op was not consumed by progress).
+        let resolved = op.resolve(&());
+        assert_eq!(resolved.key, id);
+        assert_eq!(resolved.outcome, Final::Clear);
     }
 
     #[test]
