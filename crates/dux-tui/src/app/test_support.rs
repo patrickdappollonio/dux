@@ -253,6 +253,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_delete_ops: std::collections::HashMap::new(),
         pending_reconnect_ops: std::collections::HashMap::new(),
         pending_checkout_inspect_ops: std::collections::HashMap::new(),
+        pending_server_flip_op: None,
+        pending_config_reload_op: None,
     };
     app.interactive_patterns = app.bindings.interactive_byte_patterns();
     app.rebuild_left_items();

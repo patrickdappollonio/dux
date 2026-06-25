@@ -2945,7 +2945,19 @@ impl App {
             self.set_warning("Web server start already in progress.".to_string());
             return;
         }
-        self.set_busy("Starting the web server — your agents keep running.".to_string());
+        // Mint the flip's keyed busy op. The plain-success arm re-emits this op's
+        // busy text (with the serve URLs) via `progress` and lets the spinner ride
+        // until the flip; the warning/error arms resolve it. The resolver covers
+        // only the two terminal-with-message outcomes (see `TuiServerFlipOutcome`).
+        let op = dux_core::engine::status_op(
+            "Starting the web server — your agents keep running.".to_string(),
+        )
+        .resolve_in_handler(|o: &TuiServerFlipOutcome| match o {
+            TuiServerFlipOutcome::Warned(text) => dux_core::engine::Final::warning(text.clone()),
+            TuiServerFlipOutcome::Failed(text) => dux_core::engine::Final::error(text.clone()),
+        });
+        self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+        self.pending_server_flip_op = Some(op);
         self.server_flip_preflight_pending = true;
         let port = self.engine.config.server.port;
         let tailscale_enabled = self.engine.config.server.tailscale_enabled;
@@ -3192,6 +3204,8 @@ mod tests {
             pending_delete_ops: std::collections::HashMap::new(),
             pending_reconnect_ops: std::collections::HashMap::new(),
             pending_checkout_inspect_ops: std::collections::HashMap::new(),
+            pending_server_flip_op: None,
+            pending_config_reload_op: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -3358,11 +3372,36 @@ mod tests {
         );
     }
 
+    /// Mint and stash a server-flip op exactly as `start_web_server` does (without
+    /// spawning the real pre-flight worker), returning nothing — the op lives in
+    /// `app.pending_server_flip_op`. The keyed busy is shown so the
+    /// `ServerFlipPreflightReady` handler under test has a stashed op to advance.
+    fn stash_server_flip_op(app: &mut App) {
+        let op = dux_core::engine::status_op(
+            "Starting the web server — your agents keep running.".to_string(),
+        )
+        .resolve_in_handler(|o: &TuiServerFlipOutcome| match o {
+            TuiServerFlipOutcome::Warned(text) => dux_core::engine::Final::warning(text.clone()),
+            TuiServerFlipOutcome::Failed(text) => dux_core::engine::Final::error(text.clone()),
+        });
+        app.apply_reaction(EventReaction::Status(op.pending_status()));
+        app.pending_server_flip_op = Some(op);
+        assert_eq!(
+            app.status.tone(),
+            crate::statusline::StatusTone::Busy,
+            "the keyed busy must show after dispatch"
+        );
+    }
+
     #[test]
-    fn server_flip_preflight_ready_ok_stashes_flip() {
-        // The worker's success path: a constructed event carrying bound listeners
-        // and URLs stashes the flip and shows a busy status.
+    fn server_flip_preflight_ready_ok_progresses_busy_and_stashes_flip() {
+        // The worker's plain-success path: a constructed event carrying bound
+        // listeners and URLs stashes the flip and ADVANCES the keyed busy (via
+        // `progress`) to the URL-bearing line — still a Busy spinner, same op,
+        // which rides until the run loop flips. The op stays stashed (no success
+        // final), byte-identical to today.
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        stash_server_flip_op(&mut app);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let url = format!("http://{}", listener.local_addr().unwrap());
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
@@ -3375,26 +3414,46 @@ mod tests {
             .as_ref()
             .expect("a successful pre-flight stashes the flip");
         assert_eq!(listeners.len(), 1);
-        assert_eq!(urls, &vec![url]);
-        assert!(app.status.message().contains("Starting the web server"));
+        assert_eq!(urls, &vec![url.clone()]);
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        assert_eq!(
+            app.status.message(),
+            format!("Starting the web server on {url} — your agents keep running.")
+        );
+        assert!(
+            app.pending_server_flip_op.is_some(),
+            "the plain-success busy rides until the flip, so the op stays stashed"
+        );
     }
 
     #[test]
     fn server_flip_preflight_ready_warning_shows_warning_status() {
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        stash_server_flip_op(&mut app);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let url = format!("http://{}", listener.local_addr().unwrap());
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
-            result: Ok((vec![listener], vec![url])),
+            result: Ok((vec![listener], vec![url.clone()])),
             warning: Some("Tailscale not detected — serving on loopback only.".to_string()),
         });
         assert!(app.pending_server_flip.is_some());
-        assert!(app.status.message().contains("Tailscale not detected"));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert_eq!(
+            app.status.message(),
+            format!(
+                "Tailscale not detected — serving on loopback only. Starting the web server on {url} — your agents keep running."
+            )
+        );
+        assert!(
+            app.pending_server_flip_op.is_none(),
+            "the warning final consumes the op"
+        );
     }
 
     #[test]
     fn server_flip_preflight_ready_err_surfaces_error_and_stays_up() {
         let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        stash_server_flip_op(&mut app);
         app.apply_reaction(EventReaction::ServerFlipPreflightReady {
             result: Err("could not start the web server: address in use".to_string()),
             warning: None,
@@ -3403,10 +3462,14 @@ mod tests {
             app.pending_server_flip.is_none(),
             "a failed pre-flight must not arm the flip"
         );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert_eq!(
+            app.status.message(),
+            "could not start the web server: address in use"
+        );
         assert!(
-            app.status
-                .message()
-                .contains("could not start the web server")
+            app.pending_server_flip_op.is_none(),
+            "the error final consumes the op"
         );
     }
 
