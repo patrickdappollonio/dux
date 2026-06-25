@@ -279,6 +279,40 @@ the free busy `WireStatus` constructors), plus the §3.6.2 pairing test harness.
 This is the large, invasive piece that makes a dangling busy *inexpressible*; it
 is pending an explicit go-ahead because it removes public API across three crates.
 
+## Final outcome (2026-06-25) — seal complete
+
+Every operation that shows an indeterminate ("loading") status was migrated onto
+the `StatusOp` object, and the raw busy emitters are sealed:
+
+- **24 operations migrated** across every integration shape: pure-status
+  (`push`, `open-path`), domain-ful carry-`ResolvedFinal` (`pull`), TUI-spawned
+  (`rename-branch`, clipboard, startup-logs, rerun-startup), separate
+  `StatusOpCompleted` with dispatch-context capture (commit-message TUI+web),
+  handler-resolved `HandlerStatusOp` for post-worker/3-way outcomes (the 6
+  project-persistence ops, auth-users, worktree-list, the 3 web sync ops, delete
+  per-surface, the TUI checkout/branch-inspection chain), engine-resolved Multi
+  sibling with progress re-emit (agent create/launch), PR-resolve, TUI reconnect,
+  and server-flip / config-reload.
+- **`StatusOp` shapes:** `status_op(pending).on_success(..).on_failure(..)`
+  (worker-resolved), `.resolve_in_handler(|&Outcome| Final)` (handler-resolved,
+  N-way), and `HandlerStatusOp::progress` (mid-flight re-emit). Ids are opaque
+  and auto-minted — consumers never author a key, killing key-drift at the source.
+- **Sealed:** `App::set_busy` is `#[cfg(test)]`-only; `StatusUpdate::busy` is
+  `pub(crate)` (no surface crate can construct a bare busy — only the `status_op`
+  module does, via `pending_status`/`progress`); the web's only production busy
+  path is `WireStatus::from_update` fed by a sealed `StatusUpdate`. A dangling
+  loading status is now inexpressible in surface code.
+- **Three enforcement layers:** (1) compile-time — the typestate builder forces
+  both outcomes and the sealed constructors prevent bypass; (2) test-time — each
+  migrated op carries a pairing test asserting its busy resolves; (3) runtime —
+  the controller upgrades+logs any leaked busy (keyed or anonymous) at the 20s
+  timeout, so even a hypothetical leak self-heals and is diagnosable in `dux.log`.
+
+A handful of completion events that became status-only after migration were
+deleted rather than kept (`PushCompleted`, `StartupCommandRerunCompleted`); the
+create-progress hand-keyed fallback was dropped (a stale tick after the op
+resolves is simply ignored).
+
 ## Appendix A — Confirmed leak inventory (implementation checklist)
 
 Verified by three parallel audits of the TUI, the web `WireStatus` stream, and the web
