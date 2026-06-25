@@ -286,6 +286,60 @@ pub struct App {
     ///    resolved when that worker's `NonDefaultBranchCheckoutCompleted` returns.
     pub(crate) pending_checkout_inspect_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiCheckoutInspectOutcome>>,
+    /// In-flight server-flip status op (the "Starting the web server …" busy). A
+    /// flip is terminal — guarded so only one can be in flight — so a single
+    /// `Option` is the natural home rather than a map. `start_web_server` mints a
+    /// [`dux_core::engine::HandlerStatusOp`], shows its keyed busy, and stashes it
+    /// here. When `ServerFlipPreflightReady` lands: the plain-success arm re-emits
+    /// the busy text (now carrying the serve URLs) via [`progress`] on the SAME id
+    /// and LEAVES the op stashed — there is no success final, the spinner simply
+    /// shows until the run loop tears the TUI down for the flip; the
+    /// success-with-warning arm resolves the op to a warning final; the error arm
+    /// resolves it to an error final.
+    ///
+    /// [`progress`]: dux_core::engine::HandlerStatusOp::progress
+    pub(crate) pending_server_flip_op:
+        Option<dux_core::engine::HandlerStatusOp<TuiServerFlipOutcome>>,
+    /// In-flight config-reload status op (the "Reloading config.toml." busy).
+    /// `reload_config_from_disk` mints a [`dux_core::engine::HandlerStatusOp`]
+    /// only when a reload worker actually spawned, shows its keyed busy, and
+    /// stashes it here (a reload is terminal, so an `Option` suffices). The
+    /// matching `ApplyReloadedConfig` (success) or `OpenConfigReloadFailedModal`
+    /// (failure) handler pops the op and resolves it against the handler-computed
+    /// [`TuiConfigReloadOutcome`], REPLACING the legacy `set_info`/`set_error`.
+    /// The shared engine `ConfigReloadReady`/`ApplyReloadedConfig` logic (which
+    /// also drives the web and replays deferred commands) is untouched — only the
+    /// TUI's view-handler final is routed through the op.
+    pub(crate) pending_config_reload_op:
+        Option<dux_core::engine::HandlerStatusOp<TuiConfigReloadOutcome>>,
+}
+
+/// Handler-resolved outcome for the server-flip op (see
+/// [`App::pending_server_flip_op`]). The plain-success case never resolves the op
+/// (it re-emits `progress` and lets the spinner ride until the flip), so only the
+/// two terminal-with-message cases are represented here.
+pub enum TuiServerFlipOutcome {
+    /// Pre-flight succeeded but carried a non-fatal warning (e.g. Tailscale not
+    /// detected, serving loopback-only). Resolves to a warning final whose text is
+    /// byte-identical to the legacy `set_warning`.
+    Warned(String),
+    /// Pre-flight failed; resolves to an error final whose text is byte-identical
+    /// to the legacy `set_error`.
+    Failed(String),
+}
+
+/// Handler-resolved outcome for the config-reload op (see
+/// [`App::pending_config_reload_op`]). Each variant carries the exact, byte-
+/// identical message the legacy `set_info`/`set_error` produced.
+pub enum TuiConfigReloadOutcome {
+    /// The reloaded config applied cleanly. Resolves to the success info line.
+    Applied,
+    /// Validation passed but applying the config failed. Resolves to the
+    /// apply-failure error line, interpolating the error detail.
+    ApplyFailed(String),
+    /// Validation failed; the reload-failed modal is opened. Resolves to the
+    /// review-the-modal error line.
+    ValidationFailed,
 }
 
 /// Handler-resolved outcome for a checkout / branch-inspection op (see
@@ -1722,6 +1776,8 @@ impl App {
             pending_delete_ops: HashMap::new(),
             pending_reconnect_ops: HashMap::new(),
             pending_checkout_inspect_ops: HashMap::new(),
+            pending_server_flip_op: None,
+            pending_config_reload_op: None,
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and
@@ -2151,6 +2207,11 @@ impl App {
             .set(Instant::now(), None, StatusTone::Info, message);
     }
 
+    /// Set an anonymous (unkeyed) `Busy` status. Every production busy now rides a
+    /// keyed [`dux_core::engine::HandlerStatusOp`] (or the engine's own keyed
+    /// status), so this remains only as a test helper that simulates an unrelated
+    /// busy already on screen.
+    #[cfg(test)]
     pub(crate) fn set_busy(&mut self, message: impl Into<String>) {
         self.status
             .set(Instant::now(), None, StatusTone::Busy, message);
@@ -2507,7 +2568,25 @@ impl App {
         let spawned = matches!(reaction, dux_core::engine::EventReaction::Nothing);
         self.apply_reaction(reaction);
         if spawned {
-            self.set_busy("Reloading config.toml.");
+            // Mint the reload's keyed busy op. The TUI view handler for the shared
+            // `ApplyReloadedConfig` (success) / `OpenConfigReloadFailedModal`
+            // (failure) reactions resolves it into the keyed final, REPLACING the
+            // legacy `set_info`/`set_error` (byte-identical messages).
+            let op = dux_core::engine::status_op("Reloading config.toml.").resolve_in_handler(
+                |o: &TuiConfigReloadOutcome| match o {
+                    TuiConfigReloadOutcome::Applied => dux_core::engine::Final::info(
+                        "Configuration reloaded. New settings are active now.",
+                    ),
+                    TuiConfigReloadOutcome::ApplyFailed(err) => dux_core::engine::Final::error(
+                        format!("Config validation passed, but applying it failed: {err}"),
+                    ),
+                    TuiConfigReloadOutcome::ValidationFailed => dux_core::engine::Final::error(
+                        "Config reload failed. Review the modal before retrying.",
+                    ),
+                },
+            );
+            self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
+            self.pending_config_reload_op = Some(op);
         }
         Ok(())
     }

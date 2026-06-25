@@ -587,17 +587,40 @@ impl App {
             }
 
             EventReaction::ApplyReloadedConfig(boxed) => {
-                if let Err(err) = self.apply_reloaded_config(*boxed) {
-                    self.set_error(format!(
-                        "Config validation passed, but applying it failed: {err:#}"
-                    ));
+                // Resolve the TUI's keyed reload busy op (if one rode along) into
+                // its keyed final, REPLACING the legacy `set_info`/`set_error` with
+                // byte-identical messages. The shared engine reload logic is
+                // untouched. Fall back to the legacy calls if no op was stashed.
+                let outcome = match self.apply_reloaded_config(*boxed) {
+                    Err(err) => TuiConfigReloadOutcome::ApplyFailed(format!("{err:#}")),
+                    Ok(()) => TuiConfigReloadOutcome::Applied,
+                };
+                if let Some(op) = self.pending_config_reload_op.take() {
+                    self.apply_reaction(op.resolve(&outcome).into_reaction());
                 } else {
-                    self.set_info("Configuration reloaded. New settings are active now.");
+                    match outcome {
+                        TuiConfigReloadOutcome::Applied => {
+                            self.set_info("Configuration reloaded. New settings are active now.");
+                        }
+                        TuiConfigReloadOutcome::ApplyFailed(err) => {
+                            self.set_error(format!(
+                                "Config validation passed, but applying it failed: {err}"
+                            ));
+                        }
+                        TuiConfigReloadOutcome::ValidationFailed => {}
+                    }
                 }
             }
             EventReaction::OpenConfigReloadFailedModal(message) => {
                 self.open_config_reload_failed_modal(message);
-                self.set_error("Config reload failed. Review the modal before retrying.");
+                if let Some(op) = self.pending_config_reload_op.take() {
+                    self.apply_reaction(
+                        op.resolve(&TuiConfigReloadOutcome::ValidationFailed)
+                            .into_reaction(),
+                    );
+                } else {
+                    self.set_error("Config reload failed. Review the modal before retrying.");
+                }
             }
 
             EventReaction::ProjectPersistenceOutcome(boxed) => {
@@ -715,23 +738,46 @@ impl App {
                 // The worker has reported back: clear the in-flight guard on BOTH
                 // arms so a later (legitimate) retry can spawn a fresh pre-flight.
                 self.server_flip_preflight_pending = false;
+                // The flip's keyed busy op was stashed at dispatch; resolve/advance
+                // it here so its spinner is never stranded. Plain success re-emits
+                // the busy with the serve URLs via `progress` (same id) and LEAVES
+                // the op stashed — the spinner shows until the run loop flips; the
+                // warning/error arms resolve the op into a keyed final (byte-
+                // identical to the legacy `set_warning`/`set_error`).
                 match result {
                     Ok((listeners, urls)) => {
                         // Surface the warning (if any) first, then announce the
                         // serve URLs; the flip happens on the next loop iteration.
                         let url_list = urls.join(", ");
                         match warning {
-                            Some(warn) => self.set_warning(format!(
-                                "{warn} Starting the web server on {url_list} — your agents keep running."
-                            )),
-                            None => self.set_busy(format!(
-                                "Starting the web server on {url_list} — your agents keep running."
-                            )),
+                            Some(warn) => {
+                                if let Some(op) = self.pending_server_flip_op.take() {
+                                    self.apply_reaction(
+                                        op.resolve(&TuiServerFlipOutcome::Warned(format!(
+                                            "{warn} Starting the web server on {url_list} — your agents keep running."
+                                        )))
+                                        .into_reaction(),
+                                    );
+                                }
+                            }
+                            None => {
+                                if let Some(op) = &self.pending_server_flip_op {
+                                    let progress = op.progress(format!(
+                                        "Starting the web server on {url_list} — your agents keep running."
+                                    ));
+                                    self.apply_reaction(EventReaction::Status(progress));
+                                }
+                            }
                         }
                         self.pending_server_flip = Some((listeners, urls));
                     }
                     Err(err) => {
-                        self.set_error(err);
+                        if let Some(op) = self.pending_server_flip_op.take() {
+                            self.apply_reaction(
+                                op.resolve(&TuiServerFlipOutcome::Failed(err))
+                                    .into_reaction(),
+                            );
+                        }
                     }
                 }
             }
