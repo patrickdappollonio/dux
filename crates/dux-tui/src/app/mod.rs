@@ -260,7 +260,9 @@ pub struct App {
     /// or failed (Reconnect / ForceReconnect) view pops the op and resolves it
     /// against the handler-computed [`TuiReconnectOutcome`], reproducing the exact
     /// final wording. Create-kind launches are NOT routed through this map: their
-    /// busy/final correlate by the content-addressable `create:{project_id}` key.
+    /// busy/final ride the SHARED engine-side create op
+    /// (`Engine::pending_create_ops`), resolved engine-side to a keyed `Status` that
+    /// both surfaces apply.
     pub(crate) pending_reconnect_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiReconnectOutcome>>,
 }
@@ -1564,6 +1566,8 @@ impl App {
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
             pending_delete_ops_web: HashMap::new(),
+            pending_create_ops: HashMap::new(),
+            pending_web_launch_ops: HashMap::new(),
         };
         Self::assemble(
             engine,
@@ -2119,23 +2123,6 @@ impl App {
     pub(crate) fn set_busy(&mut self, message: impl Into<String>) {
         self.status
             .set(Instant::now(), None, StatusTone::Busy, message);
-    }
-
-    /// Set a keyed Info/success final. Used by a keyed operation's completion
-    /// path so the success replaces the operation's keyed Busy entry (the
-    /// anonymous `set_info` would leave the keyed entry to time out). The key
-    /// MUST match the one its Busy was emitted with.
-    pub(crate) fn set_info_keyed(&mut self, key: impl Into<String>, message: impl Into<String>) {
-        self.status
-            .set(Instant::now(), Some(key.into()), StatusTone::Info, message);
-    }
-
-    /// Set a keyed Error final. Same correlation contract as
-    /// [`Self::set_info_keyed`]: the key must match the operation's Busy key so
-    /// the error replaces the spinner rather than stranding it.
-    pub(crate) fn set_error_keyed(&mut self, key: impl Into<String>, message: impl Into<String>) {
-        self.status
-            .set(Instant::now(), Some(key.into()), StatusTone::Error, message);
     }
 
     pub(crate) fn set_warning(&mut self, message: impl Into<String>) {

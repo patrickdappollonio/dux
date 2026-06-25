@@ -8450,6 +8450,7 @@ not_a_real_action = ["x"]
                 repo_path: app.engine.projects[0].path.clone(),
                 owns_worktree: false,
                 startup_result: None,
+                status_op_id: String::new(),
             },
         );
         app.engine

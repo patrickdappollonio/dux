@@ -24,8 +24,12 @@ pub fn run_create_agent_job(
     config: Config,
     worker_tx: Sender<WorkerEvent>,
     term_size: (u16, u16),
+    status_op_id: String,
 ) {
-    let create_key = format!("create:{}", request.project_id());
+    // The opaque id of the shared create-agent `HandlerStatusOp` keys every
+    // progress/failure event and is carried in `AgentLaunchKind::Create` so the
+    // launch-ready/failed handler can resolve the op's final on the same id.
+    let create_key = status_op_id;
     let (
         project,
         provider,
@@ -47,7 +51,7 @@ pub fn run_create_agent_job(
 
             if pull_before_create {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    key: create_key.clone(),
+                    status_op_id: create_key.clone(),
                     message: format!(
                         "Pulling latest changes for project \"{}\" before creating the agent...",
                         project.name
@@ -69,7 +73,7 @@ pub fn run_create_agent_job(
                         "pre-create pull failed for {}: {err}",
                         project.path
                     ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { key: create_key.clone(), message: format!(
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                         "Failed to pull latest changes for project \"{}\" before creating the agent: {err}",
                         project.name
                     ) });
@@ -93,7 +97,7 @@ pub fn run_create_agent_job(
                 .clone()
                 .unwrap_or_else(|| project.current_branch.clone());
             if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { key: create_key.clone(), message: format!(
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                     "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",
                     project.name, leading_branch
                 ) });
@@ -112,7 +116,7 @@ pub fn run_create_agent_job(
                 )
             };
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: progress,
             });
 
@@ -130,7 +134,7 @@ pub fn run_create_agent_job(
                             project.path
                         ));
                         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            key: create_key.clone(),
+                            status_op_id: create_key.clone(),
                             message: format!(
                                 "Failed to attach to existing branch for project \"{}\": {err}",
                                 project.name
@@ -154,7 +158,7 @@ pub fn run_create_agent_job(
                             project.path
                         ));
                         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            key: create_key.clone(),
+                            status_op_id: create_key.clone(),
                             message: format!(
                                 "Failed to create a new worktree for project \"{}\": {err}",
                                 project.name
@@ -211,7 +215,7 @@ pub fn run_create_agent_job(
 
             if attach_existing {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    key: create_key.clone(),
+                    status_op_id: create_key.clone(),
                     message: format!(
                         "Attaching to existing branch \"{}\" for PR #{} in project \"{}\"...",
                         resolved_name, number, project.name
@@ -219,7 +223,7 @@ pub fn run_create_agent_job(
                 });
             } else {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                    key: create_key.clone(),
+                    status_op_id: create_key.clone(),
                     message: format!(
                         "Fetching PR #{} from {} into branch \"{}\"...",
                         number, owner_repo, resolved_name
@@ -231,7 +235,7 @@ pub fn run_create_agent_job(
                         owner_repo, number
                     ));
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        key: create_key.clone(),
+                        status_op_id: create_key.clone(),
                         message: format!(
                             "Failed to fetch PR #{} from {}: {err}",
                             number, owner_repo
@@ -254,7 +258,7 @@ pub fn run_create_agent_job(
                         owner_repo, number
                     ));
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        key: create_key.clone(),
+                        status_op_id: create_key.clone(),
                         message: format!(
                             "Failed to create a worktree for PR #{} in project \"{}\": {err}",
                             number, project.name
@@ -297,14 +301,14 @@ pub fn run_create_agent_job(
         } => {
             let Some(custom_name) = custom_name else {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    key: create_key.clone(),
+                    status_op_id: create_key.clone(),
                     message: "Forking an agent requires choosing a name first.".to_string(),
                 });
                 return;
             };
             let source_worktree = PathBuf::from(&source_session.worktree_path);
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!("Creating a forked worktree from agent \"{source_label}\"..."),
             });
             let source_head = match git::head_commit(&source_worktree) {
@@ -314,7 +318,7 @@ pub fn run_create_agent_job(
                         "failed to resolve HEAD for {}: {err}",
                         source_session.worktree_path
                     ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { key: create_key.clone(), message: format!(
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                         "Failed to inspect the source worktree for agent \"{source_label}\": {err}",
                     ) });
                     return;
@@ -334,14 +338,14 @@ pub fn run_create_agent_job(
                         "fork worktree creation failed for {}: {err}",
                         project.path
                     ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { key: create_key.clone(), message: format!(
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                         "Failed to create a forked worktree from agent \"{source_label}\": {err}",
                     ) });
                     return;
                 }
             };
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!(
                     "Copying the current filesystem contents from agent \"{source_label}\" into the new fork...",
                 ),
@@ -353,7 +357,7 @@ pub fn run_create_agent_job(
                     worktree_path.display()
                 ));
                 let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { key: create_key.clone(), message: format!(
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                     "Failed to copy the source worktree contents for agent \"{source_label}\": {err}",
                 ) });
                 return;
@@ -385,7 +389,7 @@ pub fn run_create_agent_job(
         } => {
             let agent_name = custom_name.clone().unwrap_or_else(|| branch_name.clone());
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!(
                     "Launching {} in existing worktree \"{}\"...",
                     project.default_provider.as_str(),
@@ -418,7 +422,7 @@ pub fn run_create_agent_job(
             custom_name,
         } => {
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!(
                     "Creating a managed worktree from external worktree \"{source_label}\"...",
                 ),
@@ -431,7 +435,7 @@ pub fn run_create_agent_job(
                         source_worktree_path.display()
                     ));
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                        key: create_key.clone(),
+                        status_op_id: create_key.clone(),
                         message: format!(
                             "Failed to inspect external worktree \"{source_label}\": {err}",
                         ),
@@ -453,14 +457,14 @@ pub fn run_create_agent_job(
                         "external worktree fork creation failed for {}: {err}",
                         project.path
                     ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { key: create_key.clone(), message: format!(
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                         "Failed to create a managed worktree from external worktree \"{source_label}\": {err}",
                     ) });
                     return;
                 }
             };
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!(
                     "Copying dirty and untracked files from external worktree \"{source_label}\"...",
                 ),
@@ -473,7 +477,7 @@ pub fn run_create_agent_job(
                 ));
                 let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    key: create_key.clone(),
+                    status_op_id: create_key.clone(),
                     message: format!(
                         "Failed to copy external worktree contents from \"{source_label}\": {err}",
                     ),
@@ -546,7 +550,7 @@ pub fn run_create_agent_job(
             );
         }
         let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-            key: create_key.clone(),
+            status_op_id: create_key.clone(),
             message: hint,
         });
         return;
@@ -555,7 +559,7 @@ pub fn run_create_agent_job(
         Ok(env) => env,
         Err(err) => {
             let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!(
                     "Invalid environment variables for project \"{}\": {err:#}",
                     project.name
@@ -571,7 +575,7 @@ pub fn run_create_agent_job(
         .filter(|command| !command.is_empty())
         .map(|command| {
             let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                key: create_key.clone(),
+                status_op_id: create_key.clone(),
                 message: format!(
                     "Running startup command for agent \"{}\"...",
                     session.branch_name
@@ -614,7 +618,7 @@ pub fn run_create_agent_job(
         )
     };
     let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-        key: create_key.clone(),
+        status_op_id: create_key.clone(),
         message: launch_message,
     });
     // crossterm::terminal::size() returns (cols, rows).
@@ -631,6 +635,7 @@ pub fn run_create_agent_job(
             repo_path: repo_path.to_string_lossy().to_string(),
             owns_worktree,
             startup_result,
+            status_op_id: create_key.clone(),
         },
     };
     run_agent_launch_job(request, worker_tx);

@@ -19,35 +19,18 @@ pub mod status_keys {
     /// Worktree-list failure key. Parameterised by project id at call sites:
     /// `format!("{WORKTREE_LIST_PREFIX}:{project_id}")`.
     pub const WORKTREE_LIST_PREFIX: &str = "worktree-list";
-    /// Agent-launch key prefix. Parameterised by session id at call sites:
-    /// `format!("{LAUNCH_PREFIX}:{session_id}")`.
-    pub const LAUNCH_PREFIX: &str = "launch";
-    // The checkout-default, add-project-checkout, pr-lookup, and async
-    // worktree-delete operations no longer use hand-authored key prefixes: their
-    // busies carry the opaque id of a `HandlerStatusOp` (see
-    // `Engine::pending_web_*_ops` / `Engine::pending_delete_ops_web`) so the busy
-    // and its final correlate without a shared string. The clear-workaround they
-    // needed (`web_completed_busy_key_to_clear`) was removed with them.
+    // The checkout-default, add-project-checkout, pr-lookup, async worktree-delete,
+    // create-agent, and reconnect/force-restart launch operations no longer use
+    // hand-authored key prefixes: their busies carry the opaque id of a
+    // `HandlerStatusOp` (see `Engine::pending_web_*_ops`,
+    // `Engine::pending_delete_ops_web`, `Engine::pending_create_ops`, and
+    // `Engine::pending_web_launch_ops`) so the busy and its final correlate without
+    // a shared string. The clear-workarounds they needed
+    // (`web_completed_busy_key_to_clear`, `web_launch_ready_keys_to_clear`) were
+    // removed with them.
     /// Push key prefix. Parameterised by worktree path at call sites:
     /// `format!("{PUSH_PREFIX}:{worktree_path}")`.
     pub const PUSH_PREFIX: &str = "push";
-    /// Create-agent key prefix. Parameterised by project id at call sites:
-    /// `format!("{CREATE_PREFIX}:{project_id}")`.
-    pub const CREATE_PREFIX: &str = "create";
-
-    /// Create-agent operation key. Used by BOTH the busy emission and its
-    /// success/failure finals so the two cannot drift onto different keys — the
-    /// single-constructor discipline from the tri-state status design. Prefer
-    /// this over hand-formatting the prefix at call sites.
-    pub fn create(project_id: &str) -> String {
-        format!("{CREATE_PREFIX}:{project_id}")
-    }
-
-    /// Agent-launch operation key, parameterised by session id. Used by the
-    /// reconnect/launch busy and its finals.
-    pub fn launch(session_id: &str) -> String {
-        format!("{LAUNCH_PREFIX}:{session_id}")
-    }
 
     /// Push operation key, parameterised by worktree path.
     pub fn push(worktree_path: &str) -> String {
@@ -55,27 +38,29 @@ pub mod status_keys {
     }
 }
 
-/// Keys to clear after an agent-launch reaction whose ready-view emits no status
-/// (`SessionMissing`/`StartupAutoReopen`) yet may have left a keyed busy open.
-///
-/// A launch dispatch keys its busy `create:{project_id}` (create-kind) or
-/// `launch:{session_id}` (reconnect-kind); when the launch resolves to a
-/// vanished session or a startup auto-reopen the wire layer returns no final, so
-/// the web actor clears BOTH candidate keys here. Clearing a key with no open
-/// toast is a harmless no-op, so emitting both avoids needing to know the launch
-/// kind. Returns empty for every other reaction.
-pub fn web_launch_ready_keys_to_clear(reaction: &EventReaction) -> Vec<String> {
-    match reaction {
-        EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
-            AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
-                vec![
-                    status_keys::create(&outcome.session.project_id),
-                    status_keys::launch(&outcome.session.id),
-                ]
-            }
-            _ => vec![],
-        },
-        _ => vec![],
+/// Map a [`WebLaunchOutcome`] to its final user message. Shared by the web
+/// reconnect/force-restart op resolver (in `reconnect_session`) and the anonymous
+/// fallback path (`drive_web_launch_followup`, used when no op was stashed — e.g.
+/// a resume-fallback retry or startup auto-reopen, which never go through
+/// `reconnect_session`) so the wording cannot drift between the two. Mirrors the
+/// TUI's `reconnect_final`.
+fn web_launch_final(o: &crate::engine::WebLaunchOutcome) -> crate::engine::Final {
+    use crate::engine::{Final, WebLaunchOutcome};
+    match o {
+        WebLaunchOutcome::Ready { status_message } => Final::info(status_message.clone()),
+        WebLaunchOutcome::ReconnectFailed {
+            branch_name,
+            message,
+        } => Final::error(format!(
+            "Reconnect failed for agent \"{branch_name}\": {message}"
+        )),
+        WebLaunchOutcome::ForceReconnectFailed {
+            branch_name,
+            message,
+        } => Final::error(format!(
+            "Fresh restart failed for agent \"{branch_name}\": {message}"
+        )),
+        WebLaunchOutcome::Missing => Final::clear(),
     }
 }
 
@@ -506,104 +491,15 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
         } => vec![WireStatus::from_update(
             &outcome.clone().into_status(status_op_id.clone()),
         )],
-        EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
-            // Create-kind failure is keyed so it replaces the "Creating…" busy
-            // toast that shares the same create:{project_id} key.
-            AgentLaunchFailedOutcome::Create {
-                project_id,
-                message,
-            } => {
-                vec![WireStatus::keyed(
-                    format!("{}:{project_id}", status_keys::CREATE_PREFIX),
-                    "error",
-                    message.clone(),
-                )]
-            }
-            // Reconnect-family variants carry session_id (added in Task 4) so the
-            // failure replaces the "launching…" busy that shares the same key.
-            AgentLaunchFailedOutcome::Reconnect {
-                session_id,
-                branch_name,
-                message,
-            } => vec![WireStatus::keyed(
-                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
-                "error",
-                format!("Reconnect failed for agent \"{branch_name}\": {message}"),
-            )],
-            AgentLaunchFailedOutcome::ForceReconnect {
-                session_id,
-                branch_name,
-                message,
-            } => vec![WireStatus::keyed(
-                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
-                "error",
-                format!("Fresh restart failed for agent \"{branch_name}\": {message}"),
-            )],
-            AgentLaunchFailedOutcome::StartupAutoReopen {
-                session_id,
-                branch_name,
-                message,
-            } => vec![WireStatus::keyed(
-                format!("{}:{session_id}", status_keys::LAUNCH_PREFIX),
-                "warning",
-                format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
-            )],
-            AgentLaunchFailedOutcome::ResumeFallback => vec![],
-        },
-        // A successful launch must REPLACE the "launching…" Busy status the
-        // dispatch set, or it lingers forever on the web. Mirror the TUI's
-        // `apply_agent_launch_ready_view`: the create/reconnect status on success,
-        // an error if persistence or the startup command failed.
-        EventReaction::AgentLaunchReadyView(outcome) => {
-            let session_id = &outcome.session.id;
-            let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
-            // Create-kind outcomes use create:{project_id} so the success/failure
-            // replaces the "Creating…" busy that was keyed the same way.
-            let create_key = format!(
-                "{}:{}",
-                status_keys::CREATE_PREFIX,
-                outcome.session.project_id
-            );
-            match &outcome.view {
-                AgentLaunchReadyView::CreatePersistFailed { error } => {
-                    vec![WireStatus::keyed(
-                        create_key,
-                        "error",
-                        format!("Failed to persist session: {error}"),
-                    )]
-                }
-                AgentLaunchReadyView::CreateCommitted {
-                    status_message,
-                    startup_result_error,
-                } => match startup_result_error {
-                    Some(err) => vec![WireStatus::keyed(
-                        create_key,
-                        "error",
-                        format!(
-                            "Startup command failed for agent \"{}\": {err}. Run \
-                             read-startup-command-logs for details.",
-                            outcome.session.branch_name
-                        ),
-                    )],
-                    None => vec![WireStatus::keyed(
-                        create_key,
-                        "info",
-                        status_message.clone(),
-                    )],
-                },
-                AgentLaunchReadyView::Reconnect { status_message }
-                | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
-                    vec![WireStatus::keyed(
-                        launch_key,
-                        "info",
-                        status_message.clone(),
-                    )]
-                }
-                AgentLaunchReadyView::SessionMissing | AgentLaunchReadyView::StartupAutoReopen => {
-                    vec![]
-                }
-            }
-        }
+        // Create-kind launch finals (success / startup-error / persist-fail /
+        // launch-fail) are resolved ENGINE-SIDE against the shared
+        // `Engine::pending_create_ops` op and ride alongside the launch View as a
+        // sibling `Status` in the same `Multi`, surfaced by the `EventReaction::Status`
+        // arm above. Reconnect / force-restart / resume-fallback / startup-auto-reopen
+        // finals are resolved per-surface in `drive_web_launch_followup` against
+        // `Engine::pending_web_launch_ops`. So both launch View reactions emit nothing
+        // here, avoiding a double status.
+        EventReaction::AgentLaunchFailedView(_) | EventReaction::AgentLaunchReadyView(_) => vec![],
         // DeleteTerminal is a one-shot info; no busy precedes it, so it stays
         // unkeyed (anonymous slot).
         EventReaction::DeleteTerminalView(view) => view
@@ -1051,11 +947,21 @@ impl Engine {
         } else {
             format!("Launching agent \"{branch_name}\"...")
         };
-        let launch_key = format!("{}:{session_id}", status_keys::LAUNCH_PREFIX);
         match reaction {
             EventReaction::DispatchAgentLaunchView(view) => {
                 if view.launched {
-                    Ok(Some(WireStatus::new("busy", busy).with_key(launch_key)))
+                    // Mint the web reconnect/force-restart op: its opaque id
+                    // correlates this busy to the final resolved when the launch
+                    // reports back (in `drive_web_launch_followup`). The web
+                    // counterpart to the TUI's `App.pending_reconnect_ops`. Stashed
+                    // by session id (the launch completion carries the session).
+                    let op = crate::engine::status_op(busy).resolve_in_handler(
+                        |o: &crate::engine::WebLaunchOutcome| web_launch_final(o),
+                    );
+                    let pending = WireStatus::from_update(&op.pending_status());
+                    self.pending_web_launch_ops
+                        .insert(session_id.to_string(), op);
+                    Ok(Some(pending))
                 } else {
                     Ok(view.status.as_ref().map(WireStatus::from_update))
                 }
@@ -1305,9 +1211,10 @@ impl Engine {
         // `set_busy` in `dispatch_pull_request_lookup`.
         let busy = format!("Resolving PR for project \"{}\"...", project.name);
         // Mint a HandlerStatusOp: on SUCCESS the lookup hands off to the create
-        // dispatch (whose `create:{id}` busy takes over), so this op's busy is
-        // cleared with no message (resolved in `drive_pr_lookup_followup`); on
-        // FAILURE it resolves to the keyed error (in `process_worker_event`).
+        // dispatch (whose busy, keyed by the shared create op's opaque id, takes
+        // over), so this op's busy is cleared with no message (resolved in
+        // `drive_pr_lookup_followup`); on FAILURE it resolves to the keyed error
+        // (in `process_worker_event`).
         let op = crate::engine::status_op(busy).resolve_in_handler(
             move |o: &crate::engine::WebPrLookupOutcome| {
                 use crate::engine::{Final, WebPrLookupOutcome};
@@ -1390,9 +1297,10 @@ impl Engine {
                         format!("Failed to create an agent from PR #{}: {e:#}", pr.number),
                     )],
                 };
-                // The lookup busy hands off to the create dispatch's `create:{id}`
-                // busy (emitted above), so resolve the PR-lookup op to a CLEAR so
-                // the `Resolving PR…` spinner is dismissed rather than stranded.
+                // The lookup busy hands off to the create dispatch's busy (emitted
+                // above, keyed by the shared create op's opaque id), so resolve the
+                // PR-lookup op to a CLEAR so the `Resolving PR…` spinner is
+                // dismissed rather than stranded.
                 // Done even when the create dispatch Errs (no create busy opened),
                 // so the spinner never survives to the timeout.
                 let mut clear_keys = Vec::new();
@@ -1673,6 +1581,119 @@ impl Engine {
         match self.pending_delete_ops_web.remove(session_id) {
             Some(op) => wire_statuses_from_reaction(&op.resolve(outcome).into_reaction()),
             None => vec![],
+        }
+    }
+
+    /// Drive the web reconnect / force-restart launch follow-up to completion.
+    /// Called from the web engine actor's worker-event drain alongside
+    /// `drive_delete_followup`: when a launch reports back, its
+    /// `AgentLaunchReadyView` / `AgentLaunchFailedView` reaction resolves the web
+    /// launch op (`Engine::pending_web_launch_ops`) stashed by `reconnect_session`,
+    /// replacing the "Launching…" / "Starting fresh…" busy with the same-key final.
+    ///
+    /// This is the web counterpart to the TUI's `resolve_reconnect_op_or`. When no
+    /// op is stashed (a resume-fallback retry or a startup auto-reopen, neither of
+    /// which goes through `reconnect_session`), the same final is emitted UNKEYED —
+    /// byte-identical text, and there is no preceding web busy on those paths to
+    /// dismiss. Create-kind launches are resolved engine-side, never here.
+    pub fn drive_web_launch_followup(&mut self, reaction: &EventReaction) -> WebFollowupStatuses {
+        match reaction {
+            EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
+                AgentLaunchReadyView::Reconnect { status_message }
+                | AgentLaunchReadyView::ResumeFallback { status_message, .. } => self
+                    .resolve_web_launch_op_or(
+                        &outcome.session.id,
+                        crate::engine::WebLaunchOutcome::Ready {
+                            status_message: status_message.clone(),
+                        },
+                    ),
+                AgentLaunchReadyView::SessionMissing => self.resolve_web_launch_op_or(
+                    &outcome.session.id,
+                    crate::engine::WebLaunchOutcome::Missing,
+                ),
+                // StartupAutoReopen success is silent (mirrors the TUI). A create
+                // commit/persist-fail final is resolved engine-side, not here.
+                AgentLaunchReadyView::StartupAutoReopen
+                | AgentLaunchReadyView::CreateCommitted { .. }
+                | AgentLaunchReadyView::CreatePersistFailed { .. } => {
+                    WebFollowupStatuses::default()
+                }
+            },
+            EventReaction::AgentLaunchFailedView(outcome) => match outcome.as_ref() {
+                AgentLaunchFailedOutcome::Reconnect {
+                    session_id,
+                    branch_name,
+                    message,
+                } => self.resolve_web_launch_op_or(
+                    session_id,
+                    crate::engine::WebLaunchOutcome::ReconnectFailed {
+                        branch_name: branch_name.clone(),
+                        message: message.clone(),
+                    },
+                ),
+                AgentLaunchFailedOutcome::ForceReconnect {
+                    session_id,
+                    branch_name,
+                    message,
+                } => self.resolve_web_launch_op_or(
+                    session_id,
+                    crate::engine::WebLaunchOutcome::ForceReconnectFailed {
+                        branch_name: branch_name.clone(),
+                        message: message.clone(),
+                    },
+                ),
+                // Startup-auto-reopen failure is an unkeyed warning (no web busy
+                // precedes it, as it never goes through `reconnect_session`), and
+                // resume-fallback failure is silent — both mirror the TUI.
+                AgentLaunchFailedOutcome::StartupAutoReopen {
+                    branch_name,
+                    message,
+                    ..
+                } => WebFollowupStatuses {
+                    statuses: vec![WireStatus::new(
+                        "warning",
+                        format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
+                    )],
+                    clear_keys: Vec::new(),
+                },
+                // A create-kind launch failure is resolved engine-side, not here.
+                AgentLaunchFailedOutcome::ResumeFallback
+                | AgentLaunchFailedOutcome::Create { .. } => WebFollowupStatuses::default(),
+            },
+            _ => WebFollowupStatuses::default(),
+        }
+    }
+
+    /// Resolve the web launch op for `session_id` against `outcome`, or apply the
+    /// SAME final UNKEYED when no op is stashed (mirroring the TUI's
+    /// `resolve_reconnect_op_or` fallback). A `Final::Clear` becomes a `clear_keys`
+    /// entry (the op path) or a no-op (the keyless fallback path, where there is no
+    /// busy to clear).
+    fn resolve_web_launch_op_or(
+        &mut self,
+        session_id: &str,
+        outcome: crate::engine::WebLaunchOutcome,
+    ) -> WebFollowupStatuses {
+        match self.pending_web_launch_ops.remove(session_id) {
+            Some(op) => match op.resolve(&outcome).into_reaction() {
+                EventReaction::Status(update) => WebFollowupStatuses {
+                    statuses: vec![WireStatus::from_update(&update)],
+                    clear_keys: Vec::new(),
+                },
+                EventReaction::ClearStatus(key) => WebFollowupStatuses {
+                    statuses: Vec::new(),
+                    clear_keys: vec![key],
+                },
+                _ => WebFollowupStatuses::default(),
+            },
+            None => match web_launch_final(&outcome) {
+                crate::engine::Final::Message { tone, text } => WebFollowupStatuses {
+                    statuses: vec![WireStatus::new(tone.as_wire(), text)],
+                    clear_keys: Vec::new(),
+                },
+                // No op and no busy to dismiss: nothing to do.
+                crate::engine::Final::Clear => WebFollowupStatuses::default(),
+            },
         }
     }
 
@@ -3549,20 +3570,17 @@ mod tests {
     }
 
     #[test]
-    fn wire_statuses_formats_launch_failure() {
+    fn wire_statuses_launch_failure_view_is_empty_followup_emits_the_final() {
+        // Reconnect / force-restart launch failures are resolved per-surface in
+        // `drive_web_launch_followup` (see its own tests), so the bare View emits
+        // nothing through `wire_statuses_from_reaction`.
         let r =
             EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
                 session_id: "s1".to_string(),
                 branch_name: "feat".to_string(),
                 message: "nope".to_string(),
             }));
-        let s = wire_statuses_from_reaction(&r);
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].tone, "error");
-        assert!(
-            s[0].message
-                .contains("Reconnect failed for agent \"feat\": nope")
-        );
+        assert!(wire_statuses_from_reaction(&r).is_empty());
     }
 
     #[test]
@@ -3574,10 +3592,14 @@ mod tests {
     }
 
     #[test]
-    fn wire_statuses_reports_launch_success() {
-        // A committed create must emit the success status so the web's
-        // "launching…" Busy is replaced rather than lingering forever.
-        let outcome = crate::engine::AgentLaunchReadyOutcome {
+    fn wire_statuses_create_view_is_empty_engine_emits_the_final() {
+        // The create success / startup-error finals are resolved ENGINE-SIDE
+        // against the shared create op and ride alongside the View as a sibling
+        // `Status` in the same `Multi`. `wire_statuses_from_reaction` on the bare
+        // View therefore emits nothing — the sibling `Status` is surfaced by the
+        // `EventReaction::Status` arm. (The engine-side resolution is covered in
+        // `engine::events` tests, where the private op registry is accessible.)
+        let committed = crate::engine::AgentLaunchReadyOutcome {
             session: sample_session("s1", "p1", "feat"),
             pty_size: (24, 80),
             detached_session_id: None,
@@ -3586,31 +3608,24 @@ mod tests {
                 startup_result_error: None,
             },
         };
-        let s =
-            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].tone, "info");
-        assert_eq!(s[0].message, "Launched agent \"feat\".");
-    }
+        assert!(
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(committed)))
+                .is_empty()
+        );
 
-    #[test]
-    fn wire_statuses_reports_launch_startup_failure() {
-        let outcome = crate::engine::AgentLaunchReadyOutcome {
+        let startup_failed = crate::engine::AgentLaunchReadyOutcome {
             session: sample_session("s1", "p1", "feat"),
             pty_size: (24, 80),
             detached_session_id: None,
-            view: AgentLaunchReadyView::CreateCommitted {
-                status_message: "ignored on failure".to_string(),
-                startup_result_error: Some("boom".to_string()),
+            view: AgentLaunchReadyView::CreatePersistFailed {
+                error: "db error".to_string(),
             },
         };
-        let s =
-            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
-        assert_eq!(s.len(), 1);
-        assert_eq!(s[0].tone, "error");
         assert!(
-            s[0].message
-                .contains("Startup command failed for agent \"feat\": boom")
+            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
+                startup_failed
+            )))
+            .is_empty()
         );
     }
 
@@ -4464,33 +4479,106 @@ mod tests {
     }
 
     #[test]
-    fn web_launch_ready_keys_to_clear_covers_no_final_views() {
+    fn drive_web_launch_followup_resolves_reconnect_op_in_place() {
         use crate::engine::AgentLaunchReadyOutcome;
+        let (mut engine, _tmp) = test_engine();
         let mut session = sample_session("s1", "p1", "feat");
         session.project_id = "p1".into();
 
-        // SessionMissing emits no final → clear both candidate busy keys.
+        // Mint the web launch op as `reconnect_session` would: its opaque id keys
+        // the busy and the eventual final.
+        let op = crate::engine::status_op("Launching agent \"feat\"...")
+            .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| web_launch_final(o));
+        let op_id = op.id().to_string();
+        engine.pending_web_launch_ops.insert("s1".into(), op);
+
         let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
-            view: AgentLaunchReadyView::SessionMissing,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Reconnected.".into(),
+            },
         }));
-        assert_eq!(
-            web_launch_ready_keys_to_clear(&reaction),
-            vec!["create:p1".to_string(), "launch:s1".to_string()],
-        );
+        let followup = engine.drive_web_launch_followup(&reaction);
+        assert_eq!(followup.statuses.len(), 1);
+        assert_eq!(followup.statuses[0].tone, "info");
+        assert_eq!(followup.statuses[0].message, "Reconnected.");
+        // Replaced in place on the op's opaque id, and the op is consumed.
+        assert_eq!(followup.statuses[0].key.as_deref(), Some(op_id.as_str()));
+        assert!(engine.pending_web_launch_ops.is_empty());
+    }
 
-        // A normal committed launch emits its own keyed final → nothing to clear.
+    #[test]
+    fn drive_web_launch_followup_clears_busy_on_session_missing() {
+        use crate::engine::AgentLaunchReadyOutcome;
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.project_id = "p1".into();
+
+        let op = crate::engine::status_op("Launching agent \"feat\"...")
+            .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| web_launch_final(o));
+        let op_id = op.id().to_string();
+        engine.pending_web_launch_ops.insert("s1".into(), op);
+
+        // SessionMissing resolves the op to a CLEAR (no replacement message).
         let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
             session,
             pty_size: (80, 24),
             detached_session_id: None,
-            view: AgentLaunchReadyView::Reconnect {
-                status_message: "ok".into(),
-            },
+            view: AgentLaunchReadyView::SessionMissing,
         }));
-        assert!(web_launch_ready_keys_to_clear(&reaction).is_empty());
+        let followup = engine.drive_web_launch_followup(&reaction);
+        assert!(followup.statuses.is_empty());
+        assert_eq!(followup.clear_keys, vec![op_id]);
+        assert!(engine.pending_web_launch_ops.is_empty());
+    }
+
+    #[test]
+    fn drive_web_launch_followup_reconnect_failure_resolves_op_error() {
+        let (mut engine, _tmp) = test_engine();
+        let op = crate::engine::status_op("Launching agent \"feat\"...")
+            .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| web_launch_final(o));
+        let op_id = op.id().to_string();
+        engine.pending_web_launch_ops.insert("s1".into(), op);
+
+        let reaction =
+            EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+                session_id: "s1".into(),
+                branch_name: "feat".into(),
+                message: "nope".into(),
+            }));
+        let followup = engine.drive_web_launch_followup(&reaction);
+        assert_eq!(followup.statuses.len(), 1);
+        assert_eq!(followup.statuses[0].tone, "error");
+        assert_eq!(
+            followup.statuses[0].message,
+            "Reconnect failed for agent \"feat\": nope"
+        );
+        assert_eq!(followup.statuses[0].key.as_deref(), Some(op_id.as_str()));
+    }
+
+    #[test]
+    fn drive_web_launch_followup_startup_auto_reopen_failure_is_unkeyed_warning() {
+        // No web op is stashed for startup-auto-reopen (it never goes through
+        // reconnect_session), so the failure is an UNKEYED warning with the
+        // byte-identical message.
+        let (mut engine, _tmp) = test_engine();
+        let reaction = EventReaction::AgentLaunchFailedView(Box::new(
+            AgentLaunchFailedOutcome::StartupAutoReopen {
+                session_id: "s1".into(),
+                branch_name: "feat".into(),
+                message: "boom".into(),
+            },
+        ));
+        let followup = engine.drive_web_launch_followup(&reaction);
+        assert_eq!(followup.statuses.len(), 1);
+        assert_eq!(followup.statuses[0].tone, "warning");
+        assert_eq!(
+            followup.statuses[0].message,
+            "Couldn't auto-reopen agent \"feat\": boom"
+        );
+        assert!(followup.statuses[0].key.is_none());
     }
 
     #[test]
@@ -4971,10 +5059,11 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_session_busy_is_keyed_with_launch_session_id() {
-        // The busy emitted by a successful reconnect dispatch must carry
-        // `launch:{session_id}` so the web can replace it in place when the
-        // launch later completes or fails.
+    fn reconnect_session_busy_is_keyed_with_the_web_launch_op_id() {
+        // The busy emitted by a successful reconnect dispatch must carry the
+        // opaque id of a web launch op stashed in `pending_web_launch_ops` (keyed
+        // by session id), so the web can replace it in place when the launch later
+        // completes or fails.
         let (mut engine, tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         let mut session = sample_session("s1", "p1", "feat");
@@ -4991,10 +5080,15 @@ mod tests {
             .expect("apply_wire");
         let status = outcome.status.expect("busy status");
         assert_eq!(status.tone, "busy");
+        let busy_key = status.key.expect("reconnect busy carries an opaque op id");
+        let op = engine
+            .pending_web_launch_ops
+            .get("s1")
+            .expect("the web launch op must be stashed by session id");
         assert_eq!(
-            status.key.as_deref(),
-            Some("launch:s1"),
-            "reconnect busy must carry launch key"
+            op.id(),
+            busy_key,
+            "the busy key must match the stashed op's opaque id"
         );
     }
 
@@ -5970,87 +6064,70 @@ mod tests {
     }
 
     #[test]
-    fn wire_statuses_key_launch_ready_replaces_busy() {
-        // CreateCommitted and CreatePersistFailed use create:{project_id} so
-        // the final replaces the "Creating…" busy (keyed the same way).
-        // Reconnect-family arms keep launch:{session_id}.
+    fn wire_statuses_launch_views_emit_nothing_finals_are_op_resolved() {
+        // Every launch View reaction now emits NOTHING through
+        // `wire_statuses_from_reaction`: create finals are resolved engine-side and
+        // ride as a sibling `Status`; reconnect / force-restart / startup-auto-
+        // reopen finals are resolved per-surface in `drive_web_launch_followup`.
         let session = sample_session("s1", "p1", "feat");
 
-        let outcome = crate::engine::AgentLaunchReadyOutcome {
-            session: session.clone(),
-            pty_size: (24, 80),
-            detached_session_id: None,
-            view: AgentLaunchReadyView::CreateCommitted {
+        for view in [
+            AgentLaunchReadyView::CreateCommitted {
                 status_message: "Launched.".to_string(),
                 startup_result_error: None,
             },
-        };
-        let s =
-            wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(outcome)));
-        assert_eq!(s[0].key.as_deref(), Some("create:p1"));
-
-        let outcome_fail = crate::engine::AgentLaunchReadyOutcome {
-            session: session.clone(),
-            pty_size: (24, 80),
-            detached_session_id: None,
-            view: AgentLaunchReadyView::CreatePersistFailed {
+            AgentLaunchReadyView::CreatePersistFailed {
                 error: "db error".to_string(),
             },
-        };
-        let s = wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
-            outcome_fail,
-        )));
-        assert_eq!(s[0].key.as_deref(), Some("create:p1"));
-    }
+            AgentLaunchReadyView::Reconnect {
+                status_message: "ok".to_string(),
+            },
+            AgentLaunchReadyView::SessionMissing,
+            AgentLaunchReadyView::StartupAutoReopen,
+        ] {
+            let outcome = crate::engine::AgentLaunchReadyOutcome {
+                session: session.clone(),
+                pty_size: (24, 80),
+                detached_session_id: None,
+                view,
+            };
+            assert!(
+                wire_statuses_from_reaction(&EventReaction::AgentLaunchReadyView(Box::new(
+                    outcome
+                )))
+                .is_empty()
+            );
+        }
 
-    #[test]
-    fn wire_statuses_key_launch_failed_reconnect_variants() {
-        // Reconnect-family failures carry the session_id so they replace the busy.
-        let r =
-            EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Reconnect {
+        for outcome in [
+            AgentLaunchFailedOutcome::Reconnect {
                 session_id: "s1".to_string(),
                 branch_name: "feat".to_string(),
                 message: "nope".to_string(),
-            }));
-        assert_eq!(
-            wire_statuses_from_reaction(&r)[0].key.as_deref(),
-            Some("launch:s1")
-        );
-
-        let r = EventReaction::AgentLaunchFailedView(Box::new(
+            },
             AgentLaunchFailedOutcome::ForceReconnect {
                 session_id: "s2".to_string(),
                 branch_name: "feat".to_string(),
                 message: "nope".to_string(),
             },
-        ));
-        assert_eq!(
-            wire_statuses_from_reaction(&r)[0].key.as_deref(),
-            Some("launch:s2")
-        );
-
-        let r = EventReaction::AgentLaunchFailedView(Box::new(
             AgentLaunchFailedOutcome::StartupAutoReopen {
                 session_id: "s3".to_string(),
                 branch_name: "feat".to_string(),
                 message: "nope".to_string(),
             },
-        ));
-        assert_eq!(
-            wire_statuses_from_reaction(&r)[0].key.as_deref(),
-            Some("launch:s3")
-        );
-
-        // Create-kind is now keyed with create:{project_id} so the failure
-        // replaces the "Creating…" busy that shares the same key.
-        let r = EventReaction::AgentLaunchFailedView(Box::new(AgentLaunchFailedOutcome::Create {
-            project_id: "p1".to_string(),
-            message: "boom".to_string(),
-        }));
-        assert_eq!(
-            wire_statuses_from_reaction(&r)[0].key.as_deref(),
-            Some("create:p1")
-        );
+            AgentLaunchFailedOutcome::Create {
+                project_id: "p1".to_string(),
+                message: "boom".to_string(),
+            },
+            AgentLaunchFailedOutcome::ResumeFallback,
+        ] {
+            assert!(
+                wire_statuses_from_reaction(&EventReaction::AgentLaunchFailedView(Box::new(
+                    outcome
+                )))
+                .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -6146,41 +6223,32 @@ mod tests {
     }
 
     #[test]
-    fn create_agent_failed_event_carries_the_create_key() {
-        // CreateAgentFailed must carry a key matching the create busy so the
-        // web can dismiss the immortal spinner on failure.
+    fn create_agent_failed_event_resolves_the_op_on_its_opaque_id() {
+        // CreateAgentFailed resolves the shared create op so the web dismisses the
+        // "Creating a new agent…" spinner in place, replaced by the error final on
+        // the op's own opaque id.
         let (mut engine, _tmp) = test_engine();
-        let expected_key = "create:p1";
+        let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
+            |o: &crate::engine::CreateLaunchOutcome| match o {
+                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                    crate::engine::Final::error(message.clone())
+                }
+                _ => crate::engine::Final::clear(),
+            },
+        );
+        let op_id = op.id().to_string();
+        engine.pending_create_ops.insert(op_id.clone(), op);
 
         let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
-            key: expected_key.to_string(),
+            status_op_id: op_id.clone(),
             message: "worker panicked".to_string(),
         });
-        match &reaction {
-            EventReaction::Status(s) => {
-                assert_eq!(
-                    s.key.as_deref(),
-                    Some(expected_key),
-                    "CreateAgentFailed must carry the create key"
-                );
-                assert_eq!(s.tone, StatusTone::Error);
-            }
-            _ => panic!("expected EventReaction::Status (CreateAgentFailed)"),
-        }
-    }
-
-    #[test]
-    fn create_agent_launch_failed_outcome_carries_project_id() {
-        // AgentLaunchFailedOutcome::Create must carry project_id so wire.rs
-        // can key the error to dismiss the create busy toast.
-        let outcome = AgentLaunchFailedOutcome::Create {
-            project_id: "p1".to_string(),
-            message: "failed".to_string(),
-        };
-        let statuses =
-            wire_statuses_from_reaction(&EventReaction::AgentLaunchFailedView(Box::new(outcome)));
+        // Project the engine reaction through the wire to confirm the web sees the
+        // keyed error on the op's id.
+        let statuses = wire_statuses_from_reaction(&reaction);
         assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].key.as_deref(), Some("create:p1"));
+        assert_eq!(statuses[0].key.as_deref(), Some(op_id.as_str()));
         assert_eq!(statuses[0].tone, "error");
+        assert_eq!(statuses[0].message, "worker panicked");
     }
 }

@@ -464,28 +464,72 @@ impl Engine {
                 busy_message,
                 term_size,
             } => {
-                let create_key = crate::wire::status_keys::create(request.project_id());
-                let create_key_panic = create_key.clone();
+                // Pre-check the in-flight guard BEFORE minting/stashing the op so a
+                // rejected dispatch (an agent is already being created) cannot leak
+                // an unresolved op into `pending_create_ops`. `spawn_command_worker`
+                // applies the same guard, but only AFTER consuming the spec, so the
+                // op must not exist yet when it short-circuits.
+                if self.is_in_flight(&InFlightKey::CreateAgent) {
+                    return Ok(EventReaction::Status(StatusUpdate::error(
+                        "An agent is already being created or forked.",
+                    )));
+                }
+                // Mint the shared create-agent `HandlerStatusOp`: its opaque id
+                // correlates the dispatch busy, every progress re-emit, and the
+                // eventual final (resolved engine-side in the launch-ready /
+                // launch-failed handlers from a `CreateLaunchOutcome`). The
+                // resolver reproduces the create wording byte-for-byte for both
+                // surfaces.
+                let op = crate::engine::status_op(busy_message).resolve_in_handler(
+                    |o: &crate::engine::CreateLaunchOutcome| {
+                        use crate::engine::{CreateLaunchOutcome, Final};
+                        match o {
+                            CreateLaunchOutcome::Committed { status_message } => {
+                                Final::info(status_message.clone())
+                            }
+                            CreateLaunchOutcome::StartupFailed { branch_name, error } => {
+                                Final::error(format!(
+                                    "Startup command failed for agent \"{branch_name}\": {error}. \
+                                     Run read-startup-command-logs for details."
+                                ))
+                            }
+                            CreateLaunchOutcome::PersistFailed { error } => {
+                                Final::error(format!("Failed to persist session: {error}"))
+                            }
+                            CreateLaunchOutcome::Failed { message } => {
+                                Final::error(message.clone())
+                            }
+                        }
+                    },
+                );
+                let op_id = op.id().to_string();
+                let op_id_for_job = op_id.clone();
+                let op_id_panic = op_id.clone();
+                let pending = op.pending_status();
+                self.pending_create_ops.insert(op_id.clone(), op);
                 let paths = self.paths.clone();
                 let config = self.config.clone();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: "create-agent".into(),
                         in_flight_key: Some(InFlightKey::CreateAgent),
-                        busy_status: Some(
-                            StatusUpdate::busy(busy_message).with_key(create_key.clone()),
-                        ),
+                        busy_status: Some(pending),
                         already_running_status: Some(StatusUpdate::error(
                             "An agent is already being created or forked.",
                         )),
                         panic_event: Some(Box::new(move |reason| WorkerEvent::CreateAgentFailed {
-                            key: create_key_panic,
+                            status_op_id: op_id_panic,
                             message: format!("Agent-creation worker panicked: {reason}"),
                         })),
                     },
                     move |tx| {
                         crate::agent_job::run_create_agent_job(
-                            *request, paths, config, tx, term_size,
+                            *request,
+                            paths,
+                            config,
+                            tx,
+                            term_size,
+                            op_id_for_job,
                         );
                     },
                 ))

@@ -98,6 +98,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pending_web_add_project_ops: HashMap::new(),
         pending_web_pr_lookup_ops: HashMap::new(),
         pending_delete_ops_web: HashMap::new(),
+        pending_create_ops: HashMap::new(),
+        pending_web_launch_ops: HashMap::new(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),

@@ -222,9 +222,10 @@ pub struct Engine {
     /// Err handler. Mutually exclusive, so the op is consumed once.
     pub pending_web_add_project_ops: HashMap<String, HandlerStatusOp<WebAddProjectOutcome>>,
     /// New-agent-from-PR lookup: the SUCCESS handoff (the lookup resolved, the
-    /// create dispatch's `create:{id}` busy takes over) is resolved in
-    /// `drive_pr_lookup_followup` as a `Final::Clear`; the lookup FAILURE is
-    /// resolved in `process_worker_event`'s `PullRequestResolved` Err handler.
+    /// create dispatch's busy — keyed by the shared create op's opaque id — takes
+    /// over) is resolved in `drive_pr_lookup_followup` as a `Final::Clear`; the
+    /// lookup FAILURE is resolved in `process_worker_event`'s `PullRequestResolved`
+    /// Err handler.
     pub pending_web_pr_lookup_ops: HashMap<String, HandlerStatusOp<WebPrLookupOutcome>>,
     /// Web-side async worktree-deletion ops (the "Removing worktree for agent …"
     /// busy). Keyed by **session id** (the completion `WorktreeRemoveCompleted`
@@ -235,6 +236,74 @@ pub struct Engine {
     /// against a [`WebDeleteOutcome`]. The TUI drives the same worker chain but
     /// keeps its own op in the App layer, so this registry stays empty for it.
     pub pending_delete_ops_web: HashMap<String, HandlerStatusOp<WebDeleteOutcome>>,
+
+    /// Create-agent ops (the "Creating a new agent…" busy and its progress
+    /// re-emits). SHARED by both surfaces because the create busy is emitted
+    /// engine-side via `spawn_command_worker` and its final wording is
+    /// byte-identical on the TUI and the web. Keyed by the op's opaque id, which
+    /// threads from the `DispatchCreateAgentRequest` dispatch through
+    /// `CreateAgentRequest`/`AgentLaunchKind::Create.status_op_id` so it survives
+    /// the worktree-creation → PTY-launch round trip and is still present on the
+    /// `AgentLaunchReady`/`AgentLaunchFailed` completion. The op is resolved
+    /// ENGINE-SIDE in `process_agent_launch_ready`/`process_agent_launch_failed`
+    /// (and on `CreateAgentFailed`) against a [`CreateLaunchOutcome`], producing a
+    /// keyed `Status` reaction returned alongside the View as a `Multi` — so
+    /// whichever surface is running applies the same final. Progress re-emits via
+    /// `op.progress(message)` without consuming the op.
+    pub pending_create_ops: HashMap<String, HandlerStatusOp<CreateLaunchOutcome>>,
+
+    /// Web-side reconnect / force-restart launch ops (the "Launching agent…" /
+    /// "Starting fresh agent…" busy). The web counterpart to the TUI's
+    /// `App.pending_reconnect_ops`: the TUI and web both resolve these from the
+    /// `AgentLaunchReady`/`AgentLaunchFailed` View, but each on its OWN surface so
+    /// the engine does not double-emit. Keyed by **session id** (the launch
+    /// completion carries the session, the natural correlation handle). The busy
+    /// is minted in `reconnect_session`; the final is resolved in
+    /// `drive_web_launch_followup` against a [`WebLaunchOutcome`]. Empty for the
+    /// TUI, which keeps its own op in the App layer.
+    pub pending_web_launch_ops: HashMap<String, HandlerStatusOp<WebLaunchOutcome>>,
+}
+
+/// Handler-computed outcome for a create-agent op (see
+/// [`Engine::pending_create_ops`]). The create launch resolves to one of these in
+/// the engine's launch-ready / launch-failed handlers; the resolver (declared at
+/// the `DispatchCreateAgentRequest` dispatch site) maps it to the final user
+/// message, byte-identical to the pre-op wording on both surfaces.
+pub enum CreateLaunchOutcome {
+    /// The session was committed and the agent surface is ready. `status_message`
+    /// is the create-kind success line.
+    Committed { status_message: String },
+    /// The session committed but its startup command failed; `branch_name` and
+    /// `error` build the startup-failure line.
+    StartupFailed { branch_name: String, error: String },
+    /// `session_store.upsert_session` failed before the session could be
+    /// committed; `error` is the persistence error.
+    PersistFailed { error: String },
+    /// The launch (or the create worker) failed; `message` is the already-formatted
+    /// error line.
+    Failed { message: String },
+}
+
+/// Handler-computed outcome for a web reconnect / force-restart launch op (see
+/// [`Engine::pending_web_launch_ops`]). Mirrors the TUI's reconnect outcome; the
+/// resolver maps it to the final user message, byte-identical to the web's
+/// pre-op `wire_statuses_from_reaction` wording.
+pub enum WebLaunchOutcome {
+    /// Reconnect / force-reconnect succeeded; `status_message` is the success line.
+    Ready { status_message: String },
+    /// Reconnect failed; `branch_name`/`message` build the reconnect-failure line.
+    ReconnectFailed {
+        branch_name: String,
+        message: String,
+    },
+    /// Force-restart failed; `branch_name`/`message` build the fresh-restart line.
+    ForceReconnectFailed {
+        branch_name: String,
+        message: String,
+    },
+    /// The session vanished between dispatch and launch; the busy is cleared with
+    /// no replacement message.
+    Missing,
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see
@@ -296,8 +365,9 @@ pub enum WebAddProjectOutcome {
 
 /// Handler-computed outcome for the web new-agent-from-PR lookup op.
 pub enum WebPrLookupOutcome {
-    /// The lookup resolved and the create dispatch took over (its `create:{id}`
-    /// busy now owns the spinner), so this op's busy is cleared with no message.
+    /// The lookup resolved and the create dispatch took over (its busy, keyed by
+    /// the shared create op's opaque id, now owns the spinner), so this op's busy
+    /// is cleared with no message.
     HandedOff,
     /// The lookup failed; `message` is the already-formatted error line.
     Failed { message: String },

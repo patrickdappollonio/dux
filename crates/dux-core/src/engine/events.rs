@@ -13,7 +13,7 @@ use std::time::Instant;
 use chrono::Utc;
 
 use crate::config::Config;
-use crate::engine::{Engine, InFlightKey};
+use crate::engine::{CreateLaunchOutcome, Engine, InFlightKey, ResolvedFinal};
 use crate::logger;
 use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
@@ -629,30 +629,67 @@ impl Engine {
 }
 
 impl Engine {
+    /// Combine a launch View reaction with the create op's resolved final (when
+    /// the launch was a create-kind, whose shared op is resolved engine-side). The
+    /// final rides ALONGSIDE the View as a `Multi`, so whichever surface is running
+    /// applies the View's non-status work AND the same keyed final. Non-create
+    /// launches carry no final here (their reconnect op is resolved per-surface).
+    fn launch_view_with_final(
+        view: EventReaction,
+        create_final: Option<ResolvedFinal>,
+    ) -> EventReaction {
+        match create_final {
+            Some(resolved) => EventReaction::Multi(vec![view, resolved.into_reaction()]),
+            None => view,
+        }
+    }
+
+    /// Resolve the shared create op (if one is stashed) against `outcome`, popping
+    /// it from the registry. Returns the keyed final for `launch_view_with_final`.
+    fn resolve_create_op(
+        &mut self,
+        status_op_id: &str,
+        outcome: CreateLaunchOutcome,
+    ) -> Option<ResolvedFinal> {
+        self.pending_create_ops
+            .remove(status_op_id)
+            .map(|op| op.resolve(&outcome))
+    }
+
     pub fn process_agent_launch_ready(
         &mut self,
         data: AgentLaunchReadyData,
-    ) -> AgentLaunchReadyOutcome {
+    ) -> (AgentLaunchReadyOutcome, Option<ResolvedFinal>) {
         let AgentLaunchReadyData { request, client } = data;
         let session = request.session.clone();
         let pty_size = request.pty_size;
         self.clear_in_flight(&InFlightKey::AgentLaunch(session.id.clone()));
 
-        if matches!(request.kind, AgentLaunchKind::Create { .. }) {
+        if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
+            let status_op_id = status_op_id.clone();
             self.clear_in_flight(&InFlightKey::CreateAgent);
             if let Err(err) = self.session_store.upsert_session(&session) {
                 logger::error(&format!(
                     "session store upsert failed for {}: {err}",
                     session.id,
                 ));
-                return AgentLaunchReadyOutcome {
-                    session,
-                    pty_size,
-                    detached_session_id: None,
-                    view: AgentLaunchReadyView::CreatePersistFailed {
+                let create_final = self.resolve_create_op(
+                    &status_op_id,
+                    CreateLaunchOutcome::PersistFailed {
                         error: err.to_string(),
                     },
-                };
+                );
+                return (
+                    AgentLaunchReadyOutcome {
+                        session,
+                        pty_size,
+                        detached_session_id: None,
+                        view: AgentLaunchReadyView::CreatePersistFailed {
+                            error: err.to_string(),
+                        },
+                    },
+                    create_final,
+                );
             }
             let detached =
                 self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
@@ -676,15 +713,31 @@ impl Engine {
             };
             let startup_result_error = startup_result.and_then(|r| r.status.err());
 
-            return AgentLaunchReadyOutcome {
-                session,
-                pty_size,
-                detached_session_id: detached.map(|d| d.id),
-                view: AgentLaunchReadyView::CreateCommitted {
-                    status_message,
-                    startup_result_error,
+            // Resolve the shared create op engine-side so both surfaces replace the
+            // create busy with the SAME final (success line or startup-failure).
+            let create_outcome = match &startup_result_error {
+                Some(error) => CreateLaunchOutcome::StartupFailed {
+                    branch_name: session.branch_name.clone(),
+                    error: error.clone(),
+                },
+                None => CreateLaunchOutcome::Committed {
+                    status_message: status_message.clone(),
                 },
             };
+            let create_final = self.resolve_create_op(&status_op_id, create_outcome);
+
+            return (
+                AgentLaunchReadyOutcome {
+                    session,
+                    pty_size,
+                    detached_session_id: detached.map(|d| d.id),
+                    view: AgentLaunchReadyView::CreateCommitted {
+                        status_message,
+                        startup_result_error,
+                    },
+                },
+                create_final,
+            );
         }
 
         // Non-Create branches share the "drop on missing session" guard.
@@ -693,12 +746,15 @@ impl Engine {
                 "dropping launched PTY for missing session {}",
                 session.id,
             ));
-            return AgentLaunchReadyOutcome {
-                session,
-                pty_size,
-                detached_session_id: None,
-                view: AgentLaunchReadyView::SessionMissing,
-            };
+            return (
+                AgentLaunchReadyOutcome {
+                    session,
+                    pty_size,
+                    detached_session_id: None,
+                    view: AgentLaunchReadyView::SessionMissing,
+                },
+                None,
+            );
         }
 
         let detached =
@@ -727,12 +783,15 @@ impl Engine {
             AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
         };
 
-        AgentLaunchReadyOutcome {
-            session,
-            pty_size,
-            detached_session_id: detached.map(|d| d.id),
-            view,
-        }
+        (
+            AgentLaunchReadyOutcome {
+                session,
+                pty_size,
+                detached_session_id: detached.map(|d| d.id),
+                view,
+            },
+            None,
+        )
     }
 
     pub fn process_project_persistence_completed(
@@ -1094,47 +1153,67 @@ impl Engine {
     pub fn process_agent_launch_failed(
         &mut self,
         data: AgentLaunchFailedData,
-    ) -> AgentLaunchFailedOutcome {
+    ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
         let AgentLaunchFailedData { request, message } = data;
         let session = request.session;
         self.clear_in_flight(&InFlightKey::AgentLaunch(session.id.clone()));
 
         match request.kind {
-            AgentLaunchKind::Create { .. } => {
+            AgentLaunchKind::Create { status_op_id, .. } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
-                AgentLaunchFailedOutcome::Create {
-                    project_id: session.project_id.clone(),
-                    message,
-                }
+                // Resolve the shared create op to its keyed error final so both
+                // surfaces replace the create busy in place with the same message.
+                let create_final = self.resolve_create_op(
+                    &status_op_id,
+                    CreateLaunchOutcome::Failed {
+                        message: message.clone(),
+                    },
+                );
+                (
+                    AgentLaunchFailedOutcome::Create {
+                        project_id: session.project_id.clone(),
+                        message,
+                    },
+                    create_final,
+                )
             }
-            AgentLaunchKind::Reconnect { .. } => AgentLaunchFailedOutcome::Reconnect {
-                session_id: session.id,
-                branch_name: session.branch_name,
-                message,
-            },
-            AgentLaunchKind::ForceReconnect { .. } => AgentLaunchFailedOutcome::ForceReconnect {
-                session_id: session.id,
-                branch_name: session.branch_name,
-                message,
-            },
+            AgentLaunchKind::Reconnect { .. } => (
+                AgentLaunchFailedOutcome::Reconnect {
+                    session_id: session.id,
+                    branch_name: session.branch_name,
+                    message,
+                },
+                None,
+            ),
+            AgentLaunchKind::ForceReconnect { .. } => (
+                AgentLaunchFailedOutcome::ForceReconnect {
+                    session_id: session.id,
+                    branch_name: session.branch_name,
+                    message,
+                },
+                None,
+            ),
             AgentLaunchKind::ResumeFallback { .. } => {
                 logger::error(&format!(
                     "fallback PTY spawn failed for {}: {}",
                     session.id, message,
                 ));
                 self.mark_session_status(&session.id, SessionStatus::Detached);
-                AgentLaunchFailedOutcome::ResumeFallback
+                (AgentLaunchFailedOutcome::ResumeFallback, None)
             }
             AgentLaunchKind::StartupAutoReopen => {
                 logger::error(&format!(
                     "startup auto-reopen failed for agent \"{}\": {}",
                     session.branch_name, message,
                 ));
-                AgentLaunchFailedOutcome::StartupAutoReopen {
-                    session_id: session.id,
-                    branch_name: session.branch_name,
-                    message,
-                }
+                (
+                    AgentLaunchFailedOutcome::StartupAutoReopen {
+                        session_id: session.id,
+                        branch_name: session.branch_name,
+                        message,
+                    },
+                    None,
+                )
             }
         }
     }
@@ -1322,20 +1401,51 @@ impl Engine {
     pub fn process_worker_event(&mut self, event: WorkerEvent) -> EventReaction {
         match event {
             WorkerEvent::CommandWorkerStarted(status) => EventReaction::Status(status),
-            WorkerEvent::CreateAgentProgress { key, message } => {
-                EventReaction::Status(StatusUpdate::busy(message).with_key(key))
+            WorkerEvent::CreateAgentProgress {
+                status_op_id,
+                message,
+            } => {
+                // Re-emit an updated busy on the SAME opaque id via the op's
+                // `progress`, without consuming the op (the eventual final still
+                // resolves it). Falls back to a hand-keyed busy if the op is
+                // somehow missing, so the progress is never dropped.
+                match self.pending_create_ops.get(&status_op_id) {
+                    Some(op) => EventReaction::Status(op.progress(message)),
+                    None => {
+                        EventReaction::Status(StatusUpdate::busy(message).with_key(status_op_id))
+                    }
+                }
             }
-            WorkerEvent::CreateAgentFailed { key, message } => {
+            WorkerEvent::CreateAgentFailed {
+                status_op_id,
+                message,
+            } => {
                 self.clear_in_flight(&InFlightKey::CreateAgent);
-                EventReaction::Status(StatusUpdate::error(message).with_key(key))
+                // The create worker failed before any launch was attempted (e.g.
+                // worktree creation failed). Resolve the shared create op to its
+                // keyed error final so both surfaces replace the busy in place.
+                match self.pending_create_ops.remove(&status_op_id) {
+                    Some(op) => op
+                        .resolve(&CreateLaunchOutcome::Failed { message })
+                        .into_reaction(),
+                    None => {
+                        EventReaction::Status(StatusUpdate::error(message).with_key(status_op_id))
+                    }
+                }
             }
             WorkerEvent::AgentLaunchReady(boxed) => {
-                let outcome = self.process_agent_launch_ready(*boxed);
-                EventReaction::AgentLaunchReadyView(Box::new(outcome))
+                let (outcome, create_final) = self.process_agent_launch_ready(*boxed);
+                Self::launch_view_with_final(
+                    EventReaction::AgentLaunchReadyView(Box::new(outcome)),
+                    create_final,
+                )
             }
             WorkerEvent::AgentLaunchFailed(boxed) => {
-                let outcome = self.process_agent_launch_failed(*boxed);
-                EventReaction::AgentLaunchFailedView(Box::new(outcome))
+                let (outcome, create_final) = self.process_agent_launch_failed(*boxed);
+                Self::launch_view_with_final(
+                    EventReaction::AgentLaunchFailedView(Box::new(outcome)),
+                    create_final,
+                )
             }
             WorkerEvent::ChangedFilesReady {
                 staged,
@@ -2415,12 +2525,24 @@ mod tests {
     // ── CreateAgentFailed ────────────────────────────────────────────────
 
     #[test]
-    fn create_agent_failed_flips_inflight_and_returns_error_status() {
+    fn create_agent_failed_flips_inflight_and_resolves_the_op_error() {
         let (mut engine, _tmp) = test_engine();
         engine.mark_in_flight(InFlightKey::CreateAgent);
+        // Stash a create op as the dispatch would; the failure resolves it to a
+        // same-key error final.
+        let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
+            |o: &crate::engine::CreateLaunchOutcome| match o {
+                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                    crate::engine::Final::error(message.clone())
+                }
+                _ => crate::engine::Final::clear(),
+            },
+        );
+        let op_id = op.id().to_string();
+        engine.pending_create_ops.insert(op_id.clone(), op);
 
         let reaction = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
-            key: "create:p1".to_string(),
+            status_op_id: op_id.clone(),
             message: "nope".to_string(),
         });
 
@@ -2428,34 +2550,40 @@ mod tests {
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Error);
         assert_eq!(status.message, "nope");
-        // The failure must carry the same create key as the busy so the web
-        // clears the "Creating a new agent…" loading toast on completion.
-        assert_eq!(status.key.as_deref(), Some("create:p1"));
+        // The failure carries the op's opaque id so the web replaces the
+        // "Creating a new agent…" loading toast in place, and the op is consumed.
+        assert_eq!(status.key.as_deref(), Some(op_id.as_str()));
+        assert!(engine.pending_create_ops.is_empty());
     }
 
     #[test]
-    fn create_agent_progress_is_keyed_with_the_create_key() {
-        // Regression: progress updates used to be emitted unkeyed, landing in the
-        // anonymous status slot. That slot is never expired by the busy timeout,
-        // and the keyed success/failure (create:{project_id}) could not dismiss
-        // it, so a "Launching … in a fresh session…" toast lingered forever on
-        // the web. The progress MUST carry the same create key as its final.
+    fn create_agent_progress_re_emits_a_busy_on_the_op_id() {
+        // The progress event re-emits a busy on the create op's opaque id without
+        // consuming the op, so the dispatch busy and every progress render as one
+        // in-place toast that the final dismisses.
         let (mut engine, _tmp) = test_engine();
+        let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
+            |_: &crate::engine::CreateLaunchOutcome| crate::engine::Final::clear(),
+        );
+        let op_id = op.id().to_string();
+        engine.pending_create_ops.insert(op_id.clone(), op);
 
         let reaction = engine.process_worker_event(WorkerEvent::CreateAgentProgress {
-            key: "create:p1".to_string(),
+            status_op_id: op_id.clone(),
             message: "Launching codex in a fresh session...".to_string(),
         });
 
         let status = unwrap_status(reaction);
         assert_eq!(status.tone, StatusTone::Busy);
-        assert_eq!(status.key.as_deref(), Some("create:p1"));
+        assert_eq!(status.key.as_deref(), Some(op_id.as_str()));
+        // The op is NOT consumed by progress.
+        assert!(engine.pending_create_ops.contains_key(&op_id));
     }
 
     #[test]
     fn create_progress_busy_is_dismissed_by_the_keyed_failure() {
-        // End-to-end on the keyed controller: a busy progress on create:p1
-        // followed by a keyed error on the same key replaces it in place, so the
+        // End-to-end on the keyed controller: a busy progress on the op's id
+        // followed by a keyed error on the SAME id replaces it in place, so the
         // controller never strands a busy entry (and the web toast is reused,
         // not duplicated).
         use crate::statusline::{KeyedStatusController, StatusTone as Tone};
@@ -2464,8 +2592,25 @@ mod tests {
         let now = Instant::now();
         let mut controller = KeyedStatusController::with_clear_after(Duration::from_secs(6));
 
-        // Simulate the wire projection: progress busy then failure, same key.
-        let progress = engine_progress_status();
+        // Drive a real op end-to-end so the progress and the failure share its id.
+        let (mut engine, _tmp) = test_engine();
+        let op = crate::engine::status_op("Creating a new agent\u{2026}").resolve_in_handler(
+            |o: &crate::engine::CreateLaunchOutcome| match o {
+                crate::engine::CreateLaunchOutcome::Failed { message } => {
+                    crate::engine::Final::error(message.clone())
+                }
+                _ => crate::engine::Final::clear(),
+            },
+        );
+        let op_id = op.id().to_string();
+        engine.pending_create_ops.insert(op_id.clone(), op);
+
+        let progress = unwrap_status(engine.process_worker_event(
+            WorkerEvent::CreateAgentProgress {
+                status_op_id: op_id.clone(),
+                message: "Attaching to existing branch \"x\" for project \"y\"...".to_string(),
+            },
+        ));
         controller.set(
             now,
             progress.key.clone(),
@@ -2475,27 +2620,22 @@ mod tests {
         assert_eq!(controller.snapshot().len(), 1);
         assert_eq!(controller.snapshot()[0].tone, "busy");
 
+        let failure = engine.process_worker_event(WorkerEvent::CreateAgentFailed {
+            status_op_id: op_id.clone(),
+            message: "Failed to create a new worktree.".to_string(),
+        });
+        let failure = unwrap_status(failure);
         controller.set(
             now,
-            Some("create:p1".to_string()),
+            failure.key.clone(),
             Tone::Error,
-            "Failed to create a new worktree.",
+            failure.message.clone(),
         );
-        // Still one entry on the same key — the busy was replaced, not stacked.
+        // Still one entry on the same id — the busy was replaced, not stacked.
         let snap = controller.snapshot();
         assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].key.as_deref(), Some("create:p1"));
+        assert_eq!(snap[0].key.as_deref(), Some(op_id.as_str()));
         assert_eq!(snap[0].tone, "error");
-    }
-
-    fn engine_progress_status() -> StatusUpdate {
-        let (mut engine, _tmp) = test_engine();
-        unwrap_status(
-            engine.process_worker_event(WorkerEvent::CreateAgentProgress {
-                key: "create:p1".to_string(),
-                message: "Attaching to existing branch \"x\" for project \"y\"...".to_string(),
-            }),
-        )
     }
 
     // Sanity: the unused-import linter won't catch AgentLaunchFailedData
@@ -2545,10 +2685,11 @@ mod tests {
                 repo_path: String::from("/tmp/wt"),
                 owns_worktree: true,
                 startup_result: None,
+                status_op_id: String::new(),
             },
             "boom",
         );
-        let outcome = engine.process_agent_launch_failed(data);
+        let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
         assert!(!engine.is_in_flight(&InFlightKey::CreateAgent));
         assert!(
@@ -2572,7 +2713,7 @@ mod tests {
             },
             "boom",
         );
-        let outcome = engine.process_agent_launch_failed(data);
+        let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(outcome, AgentLaunchFailedOutcome::ResumeFallback));
         assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);
@@ -2591,7 +2732,7 @@ mod tests {
             },
             "boom",
         );
-        let outcome = engine.process_agent_launch_failed(data);
+        let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(
             outcome,
             AgentLaunchFailedOutcome::Reconnect { session_id, branch_name, message }
@@ -2603,7 +2744,7 @@ mod tests {
     fn process_agent_launch_failed_startup_auto_reopen_returns_branch_and_message() {
         let (mut engine, _tmp) = test_engine();
         let data = make_failed_data("s1", "feat/x", AgentLaunchKind::StartupAutoReopen, "boom");
-        let outcome = engine.process_agent_launch_failed(data);
+        let (outcome, _create_final) = engine.process_agent_launch_failed(data);
         assert!(matches!(
             outcome,
             AgentLaunchFailedOutcome::StartupAutoReopen { session_id, branch_name, message }
@@ -3520,7 +3661,7 @@ mod tests {
                 busy_status: None,
                 already_running_status: None,
                 panic_event: Some(Box::new(|reason| WorkerEvent::CreateAgentFailed {
-                    key: "create:test".to_string(),
+                    status_op_id: "op-test".to_string(),
                     message: format!("panic: {reason}"),
                 })),
             },
