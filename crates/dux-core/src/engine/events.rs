@@ -48,7 +48,13 @@ impl StatusUpdate {
             key: None,
         }
     }
-    pub fn busy(message: impl Into<String>) -> Self {
+    /// SEALED: a `Busy` status may only be born from a [`StatusOp`] (its
+    /// `pending_status`/`progress`). This constructor is `pub(crate)` so no
+    /// surface crate can hand-roll an indeterminate status without declaring its
+    /// outcomes; only the `status_op` module is meant to call it.
+    ///
+    /// [`StatusOp`]: crate::engine::StatusOp
+    pub(crate) fn busy(message: impl Into<String>) -> Self {
         Self {
             tone: StatusTone::Busy,
             message: message.into(),
@@ -1407,13 +1413,12 @@ impl Engine {
             } => {
                 // Re-emit an updated busy on the SAME opaque id via the op's
                 // `progress`, without consuming the op (the eventual final still
-                // resolves it). Falls back to a hand-keyed busy if the op is
-                // somehow missing, so the progress is never dropped.
+                // resolves it). If the op is already gone the create has
+                // resolved, so this progress tick is stale — drop it. (A busy can
+                // only be born from a StatusOp; there is no hand-keyed fallback.)
                 match self.pending_create_ops.get(&status_op_id) {
                     Some(op) => EventReaction::Status(op.progress(message)),
-                    None => {
-                        EventReaction::Status(StatusUpdate::busy(message).with_key(status_op_id))
-                    }
+                    None => EventReaction::Nothing,
                 }
             }
             WorkerEvent::CreateAgentFailed {
