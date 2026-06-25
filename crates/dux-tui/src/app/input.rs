@@ -4868,7 +4868,7 @@ impl App {
                 NonDefaultBranchAction::AddProject { .. } => "before adding the project",
                 NonDefaultBranchAction::CheckoutProjectDefault { .. } => "for the selected project",
             };
-            self.dispatch_non_default_branch_checkout(action, target, reason.to_string());
+            self.dispatch_non_default_branch_checkout(action, target, reason.to_string(), None);
         } else {
             match action {
                 NonDefaultBranchAction::AddProject {
@@ -6506,6 +6506,7 @@ mod tests {
                     current_branch: branch.to_string(),
                     leading_branch: leading_branch.to_string(),
                 }),
+                status_op_id: None,
             })
             .unwrap();
         app.drain_events();

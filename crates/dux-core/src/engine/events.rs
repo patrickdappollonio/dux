@@ -1828,7 +1828,13 @@ impl Engine {
                     }
                 }
             }
-            WorkerEvent::CreateAgentBranchInspected { project, result } => match result {
+            WorkerEvent::CreateAgentBranchInspected {
+                project,
+                result,
+                // The TUI resolves its keyed busy in `drain_events` (the op is
+                // App-side); the engine keeps its unkeyed `Status`/view reactions.
+                status_op_id: _,
+            } => match result {
                 Ok(inspection) => {
                     if let Some(existing) = self.projects.iter_mut().find(|p| p.id == project.id) {
                         existing.current_branch = inspection.current_branch.clone();

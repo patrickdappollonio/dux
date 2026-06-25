@@ -358,6 +358,12 @@ pub enum WorkerEvent {
     CreateAgentBranchInspected {
         project: Project,
         result: Result<CreateAgentBranchInspection, String>,
+        /// Correlation id for a TUI `HandlerStatusOp` whose keyed busy is dismissed
+        /// when the inspection completes (the visible final comes from the
+        /// downstream `ContinueCreateAgentAfterInspection` prompt's `set_info` on
+        /// success, or the engine's error `Status` on failure). `None` for callers
+        /// that don't drive a handler-resolved status. This flow is TUI-only.
+        status_op_id: Option<String>,
     },
     ProjectBranchStatusReady {
         project_id: String,
