@@ -717,10 +717,16 @@ pub(crate) fn run_engine_loop(
                 thread_status_tx.clear(key);
             }
 
-            // A launch that resolved to a vanished session or a startup
-            // auto-reopen emits no final but may have left a keyed create/launch
-            // busy open. Clear both candidate keys (a no-op when not open).
-            for key in dux_core::wire::web_launch_ready_keys_to_clear(&reaction) {
+            // A reconnect / force-restart launch reported back: resolve the web
+            // launch op (Engine::pending_web_launch_ops) so its "Launching…" /
+            // "Starting fresh…" busy is replaced by the same-key final (or cleared
+            // when the session vanished). Create-kind launch finals are resolved
+            // engine-side and ride the wire_statuses drain above.
+            let launch_followup = engine.drive_web_launch_followup(&reaction);
+            for status in launch_followup.statuses {
+                let _ = thread_status_tx.send(status);
+            }
+            for key in launch_followup.clear_keys {
                 thread_status_tx.clear(key);
             }
             // A StatusOp resolved to `Final::Clear`: dismiss the keyed toast.

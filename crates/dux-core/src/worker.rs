@@ -131,6 +131,11 @@ pub enum AgentLaunchKind {
         repo_path: String,
         owns_worktree: bool,
         startup_result: Option<crate::startup::StartupCommandResult>,
+        /// Opaque correlation id of the shared create-agent `HandlerStatusOp`
+        /// (see `Engine::pending_create_ops`). Threads from the
+        /// `DispatchCreateAgentRequest` dispatch through the worker so the
+        /// launch-ready / launch-failed handlers can resolve the op's final.
+        status_op_id: String,
     },
     Reconnect {
         status_message: String,
@@ -228,17 +233,16 @@ pub enum WorkerEvent {
     /// any event the worker can produce.
     CommandWorkerStarted(StatusUpdate),
     /// A progress update emitted while an agent is being created/forked/attached.
-    /// `key` is the per-operation `create:{project_id}` correlation key shared by
-    /// the dispatch's busy status and the eventual success/failure, so the web
-    /// renders all of them as one in-place toast that the final state dismisses.
-    /// Without the key the busy would land in the anonymous status slot, which is
-    /// never expired by the busy timeout and so would linger forever.
+    /// `status_op_id` is the opaque id of the shared create-agent `HandlerStatusOp`
+    /// (see `Engine::pending_create_ops`); the handler looks the op up and re-emits
+    /// `op.progress(message)` on the same id, so the dispatch's busy and every
+    /// progress update render as one in-place toast that the final state dismisses.
     CreateAgentProgress {
-        key: String,
+        status_op_id: String,
         message: String,
     },
     CreateAgentFailed {
-        key: String,
+        status_op_id: String,
         message: String,
     },
     AgentLaunchReady(Box<AgentLaunchReadyData>),

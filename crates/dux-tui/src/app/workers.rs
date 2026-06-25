@@ -1013,15 +1013,14 @@ impl App {
             self.engine.pty_input.remove(&id);
         }
         match outcome.view {
-            AgentLaunchReadyView::CreatePersistFailed { error } => {
-                // Keyed final so it replaces the engine's `create:{id}` busy
-                // rather than leaving the spinner to time out.
-                let key = dux_core::wire::status_keys::create(&outcome.session.project_id);
-                self.set_error_keyed(key, format!("Failed to persist session: {error}"));
+            AgentLaunchReadyView::CreatePersistFailed { .. } => {
+                // The create op's keyed error final is resolved ENGINE-SIDE and
+                // arrives alongside this View as a sibling `Status` in the same
+                // `Multi`, so there is no status to set here.
             }
             AgentLaunchReadyView::CreateCommitted {
-                status_message,
-                startup_result_error,
+                status_message: _,
+                startup_result_error: _,
             } => {
                 self.rebuild_left_items();
                 self.selected_left = self
@@ -1033,30 +1032,19 @@ impl App {
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
                 self.fullscreen_overlay = FullscreenOverlay::Agent;
-                // Keyed finals so the create success/startup-error replaces the
-                // engine's `create:{id}` busy entry instead of stranding it.
-                let key = dux_core::wire::status_keys::create(&outcome.session.project_id);
-                if let Some(err) = startup_result_error {
-                    self.set_error_keyed(key, format!(
-                        "Startup command failed for agent \"{}\": {err}. Run read-startup-command-logs for details.",
-                        outcome.session.branch_name
-                    ));
-                } else {
-                    self.set_info_keyed(key, status_message);
-                }
+                // The create success / startup-error keyed final is resolved
+                // ENGINE-SIDE and arrives as a sibling `Status` in the same
+                // `Multi`; this arm keeps only the non-status view work.
             }
             AgentLaunchReadyView::SessionMissing => {
                 // The session vanished between dispatch and launch. Resolve any
-                // open launch/create busy so its spinner doesn't linger: resolve a
-                // keyed reconnect op (clear), drop the keyed create entry, and clear
-                // a still-showing anon launch busy as a final fallback.
+                // open reconnect busy so its spinner doesn't linger (a create
+                // launch never reaches SessionMissing — it commits unconditionally
+                // — so only the reconnect op needs clearing here), then clear a
+                // still-showing anon launch busy as a final fallback.
                 if let Some(op) = self.pending_reconnect_ops.remove(&outcome.session.id) {
                     self.apply_reaction(op.resolve(&TuiReconnectOutcome::Missing).into_reaction());
                 }
-                self.status.clear(
-                    &dux_core::wire::status_keys::create(&outcome.session.project_id),
-                    None,
-                );
                 if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
                     self.set_info(String::new());
                 }
@@ -1096,13 +1084,10 @@ impl App {
 
     fn apply_agent_launch_failed_view(&mut self, outcome: AgentLaunchFailedOutcome) {
         match outcome {
-            AgentLaunchFailedOutcome::Create {
-                project_id,
-                message,
-            } => {
-                // Keyed to the create op so a launch failure after the worktree
-                // was created still replaces the `create:{id}` busy spinner.
-                self.set_error_keyed(dux_core::wire::status_keys::create(&project_id), message)
+            AgentLaunchFailedOutcome::Create { .. } => {
+                // The create op's keyed error final is resolved ENGINE-SIDE and
+                // arrives as a sibling `Status` in the same `Multi`, so this arm
+                // has no status to set.
             }
             AgentLaunchFailedOutcome::Reconnect {
                 session_id,
@@ -1389,34 +1374,17 @@ mod tests {
         );
     }
 
-    /// A successful create launch must replace the engine's keyed `create:{id}`
-    /// Busy with a same-key Info final, not an anonymous one — otherwise the
-    /// keyed Busy entry lingers and times out to a spurious Warning.
+    /// The create launch final (success / startup-error / persist-fail / launch-
+    /// fail) is now resolved ENGINE-SIDE against the shared `pending_create_ops`
+    /// op and arrives as a sibling keyed `Status` in the same `Multi` as the launch
+    /// View; the TUI's `CreateCommitted` view arm only does the non-status work
+    /// (rebuild/select/show surface) and sets NO status. The engine-side
+    /// resolution is covered in `engine::events` tests.
     #[test]
-    fn create_committed_replaces_the_keyed_create_busy() {
-        use crate::statusline::StatusTone;
-
+    fn create_committed_view_sets_no_status_on_the_tui() {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session = app.engine.sessions[0].clone();
-        let project_id = session.project_id.clone();
-        let create_key = dux_core::wire::status_keys::create(&project_id);
-
-        // Simulate the engine's keyed create Busy.
-        app.status.set(
-            std::time::Instant::now(),
-            Some(create_key.clone()),
-            StatusTone::Busy,
-            "Creating worktree…",
-        );
-        assert_eq!(
-            app.status
-                .snapshot()
-                .iter()
-                .find(|s| s.key.as_deref() == Some(create_key.as_str()))
-                .map(|s| s.tone.as_str()),
-            Some("busy"),
-        );
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
             session,
@@ -1428,16 +1396,9 @@ mod tests {
             },
         });
 
-        let entry_tone = app
-            .status
-            .snapshot()
-            .into_iter()
-            .find(|s| s.key.as_deref() == Some(create_key.as_str()))
-            .map(|s| s.tone);
-        assert_eq!(
-            entry_tone.as_deref(),
-            Some("info"),
-            "the create Busy must be replaced in place by a same-key Info final",
+        assert!(
+            app.status.snapshot().is_empty(),
+            "the create View arm must not set any status; the engine emits the keyed final",
         );
     }
 
@@ -1649,6 +1610,7 @@ mod tests {
             Config::default(),
             worker_tx,
             (80, 24),
+            "op-test".to_string(),
         );
 
         match worker_rx.recv().expect("worker event") {
@@ -1698,11 +1660,17 @@ mod tests {
             Config::default(),
             worker_tx,
             (80, 24),
+            "op-create-1".to_string(),
         );
 
         match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentProgress { key, message } => {
-                assert_eq!(key, "create:project-1");
+            WorkerEvent::CreateAgentProgress {
+                status_op_id,
+                message,
+            } => {
+                // The progress carries the opaque op id passed into the job, not a
+                // content-addressable create:{project_id} key.
+                assert_eq!(status_op_id, "op-create-1");
                 assert_eq!(
                     message,
                     "Pulling latest changes for project \"demo\" before creating the agent..."
