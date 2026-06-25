@@ -407,16 +407,41 @@ impl App {
     /// the source repo before registering the project. On success, the
     /// `WorkerEvent::NonDefaultBranchCheckoutCompleted` handler continues the
     /// selected action; on failure it surfaces the git error.
+    ///
+    /// `carried_op_id` lets the checkout-default-branch chain (worker 1) keep ONE
+    /// `pending_checkout_inspect_ops` op spanning the inspect→switch sequence: when
+    /// `Some`, the op already lives in the map and its busy text was already
+    /// re-emitted as a `progress` by the chain handler, so this only forwards the
+    /// id into worker 2. When `None` (the standalone add-project / checkout-default
+    /// entry points), this mints a fresh op, shows its keyed busy, and stashes it.
     pub(crate) fn dispatch_non_default_branch_checkout(
         &mut self,
         action: NonDefaultBranchAction,
         target_branch: String,
         reason: String,
+        carried_op_id: Option<String>,
     ) {
         let path = action.repo_path().to_string();
-        self.set_busy(format!(
-            "Checking out \"{target_branch}\" in {path} {reason}..."
-        ));
+        let status_op_id = match carried_op_id {
+            Some(id) => id,
+            None => {
+                // The keyed busy is dismissed by the op's `Final::Clear` when the
+                // worker reports back; the visible final (the engine's unkeyed
+                // success/error `Status`, or the TUI's add-project view handler)
+                // is authored elsewhere, byte-for-byte unchanged.
+                let op = dux_core::engine::status_op(format!(
+                    "Checking out \"{target_branch}\" in {path} {reason}..."
+                ))
+                .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
+                    TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+                });
+                let pending = op.pending_status();
+                let id = op.id().to_string();
+                self.pending_checkout_inspect_ops.insert(id.clone(), op);
+                self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+                id
+            }
+        };
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
@@ -425,12 +450,13 @@ impl App {
             let tx_panic = worker_tx.clone();
             let action_panic = action.clone();
             let branch_panic = target_branch.clone();
+            let op_id_panic = status_op_id.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::project_browser::run_add_project_checkout_job(
                     action,
                     target_branch,
                     worker_tx,
-                    None,
+                    Some(status_op_id),
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
@@ -441,24 +467,42 @@ impl App {
                     action: action_panic,
                     target_branch: branch_panic,
                     result: Err(format!("Worker panicked: {reason}")),
-                    status_op_id: None,
+                    status_op_id: Some(op_id_panic),
                 });
             }
         });
     }
 
     pub(crate) fn dispatch_create_agent_branch_inspection(&mut self, project: Project) {
-        self.set_busy(format!(
+        // The keyed busy is dismissed by the op's `Final::Clear` when
+        // `CreateAgentBranchInspected` returns carrying this id; the visible final
+        // is authored elsewhere (the `ContinueCreateAgentAfterInspection` view
+        // handler's `set_info` on success, the engine's error `Status` on failure),
+        // byte-for-byte unchanged.
+        let op = dux_core::engine::status_op(format!(
             "Checking the current branch for project \"{}\" before creating an agent...",
             project.name
-        ));
+        ))
+        .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
+            TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+        });
+        let pending = op.pending_status();
+        let status_op_id = op.id().to_string();
+        self.pending_checkout_inspect_ops
+            .insert(status_op_id.clone(), op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             let tx_panic = worker_tx.clone();
             let project_panic = project.clone();
+            let op_id_panic = status_op_id.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                super::workers::run_create_agent_branch_inspection_job(project, worker_tx);
+                super::workers::run_create_agent_branch_inspection_job(
+                    project,
+                    worker_tx,
+                    Some(status_op_id),
+                );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
                 dux_core::logger::error(&format!(
@@ -468,6 +512,7 @@ impl App {
                 let _ = tx_panic.send(WorkerEvent::CreateAgentBranchInspected {
                     project: project_panic,
                     result: Err(format!("Worker panicked: {reason}")),
+                    status_op_id: Some(op_id_panic),
                 });
             }
         });
@@ -487,18 +532,35 @@ impl App {
             return Ok(());
         }
 
-        self.set_busy(format!(
+        // ONE op spans the whole chain. Worker 1's short-circuit terminals
+        // (already-leading / heuristic / inspect-failed) resolve it to a clear in
+        // `drain_events` (the engine's unkeyed `Status` carries the visible
+        // message); the Known case forwards this id into worker 2 and re-emits the
+        // busy text via `progress`, so the spinner is continuous with changing text
+        // until worker 2's `NonDefaultBranchCheckoutCompleted` clears it.
+        let op = dux_core::engine::status_op(format!(
             "Checking the default branch for project \"{}\"...",
             project.name
-        ));
+        ))
+        .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
+            TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+        });
+        let pending = op.pending_status();
+        let status_op_id = op.id().to_string();
+        self.pending_checkout_inspect_ops
+            .insert(status_op_id.clone(), op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         let worker_tx = self.engine.worker_tx.clone();
         thread::spawn(move || {
             use std::panic::AssertUnwindSafe;
             let tx_panic = worker_tx.clone();
             let project_panic = project.clone();
+            let op_id_panic = status_op_id.clone();
             if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 dux_core::project_browser::run_checkout_project_default_branch_inspection_job(
-                    project, worker_tx, None,
+                    project,
+                    worker_tx,
+                    Some(status_op_id),
                 );
             })) {
                 let reason = dux_core::engine::format_panic_payload(payload);
@@ -510,7 +572,7 @@ impl App {
                 let _ = tx_panic.send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
                     project: project_panic,
                     result: Err(format!("Worker panicked: {reason}")),
-                    status_op_id: None,
+                    status_op_id: Some(op_id_panic),
                 });
             }
         });
@@ -3129,6 +3191,7 @@ mod tests {
             pending_pr_lookup_ops: std::collections::HashMap::new(),
             pending_delete_ops: std::collections::HashMap::new(),
             pending_reconnect_ops: std::collections::HashMap::new(),
+            pending_checkout_inspect_ops: std::collections::HashMap::new(),
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();
@@ -3380,6 +3443,238 @@ mod tests {
             "expected the success message to remain, got: {}",
             app.status.message()
         );
+    }
+
+    /// Mint and stash a checkout/inspect op exactly as the three dispatch sites
+    /// do, returning its opaque id. Used by the resolution-wiring tests below so
+    /// they exercise `drain_events` without spawning git workers.
+    fn stash_checkout_inspect_op(app: &mut App, busy: &str) -> String {
+        let op = dux_core::engine::status_op(busy.to_string()).resolve_in_handler(
+            |o: &TuiCheckoutInspectOutcome| match o {
+                TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+            },
+        );
+        let pending = op.pending_status();
+        let id = op.id().to_string();
+        app.pending_checkout_inspect_ops.insert(id.clone(), op);
+        app.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        assert_eq!(
+            app.status.tone(),
+            dux_core::statusline::StatusTone::Busy,
+            "the keyed busy must show after dispatch"
+        );
+        id
+    }
+
+    /// Site 3 short-circuit (already-leading): the inspection op resolves to a
+    /// clear, and the visible final is the engine's byte-identical info line.
+    #[test]
+    fn checkout_inspect_op_already_leading_clears_busy_and_shows_engine_message() {
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(Vec::new(), vec![project.clone()]);
+        let id = stash_checkout_inspect_op(
+            &mut app,
+            &format!(
+                "Checking the default branch for project \"{}\"...",
+                project.name
+            ),
+        );
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                project: project.clone(),
+                result: Ok(("main".to_string(), None)),
+                status_op_id: Some(id.clone()),
+            })
+            .unwrap();
+        app.drain_events();
+
+        assert!(
+            !app.pending_checkout_inspect_ops.contains_key(&id),
+            "the op must be consumed so its busy never strands"
+        );
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Info);
+        assert_eq!(
+            app.status.message(),
+            "Project \"demo\" is already on the leading branch \"main\"."
+        );
+    }
+
+    /// Site 3 short-circuit (inspect failed): clears the busy; the engine's
+    /// byte-identical error line shows.
+    #[test]
+    fn checkout_inspect_op_inspect_failed_clears_busy_and_shows_engine_error() {
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(Vec::new(), vec![project.clone()]);
+        let id = stash_checkout_inspect_op(
+            &mut app,
+            &format!(
+                "Checking the default branch for project \"{}\"...",
+                project.name
+            ),
+        );
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                project: project.clone(),
+                result: Err("git exploded".to_string()),
+                status_op_id: Some(id.clone()),
+            })
+            .unwrap();
+        app.drain_events();
+
+        assert!(!app.pending_checkout_inspect_ops.contains_key(&id));
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Error);
+        assert_eq!(
+            app.status.message(),
+            "Couldn't inspect the default branch for project \"demo\": git exploded"
+        );
+    }
+
+    /// Site 3 Known case CHAINS into worker 2: the op must SURVIVE the inspection
+    /// completion (the `DispatchProjectDefaultBranchCheckout` reaction keeps it
+    /// alive), with its busy text re-emitted as worker 2's "Checking out…" line on
+    /// the SAME id — one continuous spinner, changing text. Then worker 2's real
+    /// `git switch` completion clears it. Uses a real repo so worker 2 is
+    /// deterministic (no synthetic event racing the spawned worker).
+    #[test]
+    fn checkout_inspect_op_known_case_keeps_one_spinner_across_the_chain() {
+        fn run_git(cwd: &Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        run_git(repo.path(), &["commit", "--allow-empty", "-m", "init"]);
+        run_git(repo.path(), &["switch", "-c", "feature"]);
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let mut project = make_project("project-1", "claude");
+        project.path = repo_path.clone();
+        let mut app = test_app_with_sessions(Vec::new(), vec![project.clone()]);
+        let id = stash_checkout_inspect_op(
+            &mut app,
+            &format!(
+                "Checking the default branch for project \"{}\"...",
+                project.name
+            ),
+        );
+
+        // Worker 1 found a Known default different from the current branch; this
+        // chains into worker 2 (spawned by the reaction handler).
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                project: project.clone(),
+                result: Ok((
+                    "feature".to_string(),
+                    Some(dux_core::worker::BranchWarningKind::Known {
+                        default_branch: "main".to_string(),
+                    }),
+                )),
+                status_op_id: Some(id.clone()),
+            })
+            .unwrap();
+        app.drain_events();
+
+        // The op SURVIVES (the chain handoff owns it now) and the spinner text
+        // advanced to worker 2's busy on the SAME opaque id.
+        assert!(
+            app.pending_checkout_inspect_ops.contains_key(&id),
+            "the op must survive the inspect→switch handoff"
+        );
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Busy);
+        assert_eq!(
+            app.status.message(),
+            format!("Checking out \"main\" in {repo_path} for the selected project...")
+        );
+
+        // Drain worker 2's real completion (poll briefly; it runs off-thread).
+        for _ in 0..200 {
+            app.drain_events();
+            if !app.pending_checkout_inspect_ops.contains_key(&id) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            !app.pending_checkout_inspect_ops.contains_key(&id),
+            "worker 2's completion must consume the op"
+        );
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Info);
+        assert_eq!(
+            app.status.message(),
+            "Checked out \"main\" for project \"demo\"."
+        );
+    }
+
+    /// Site 1 (checkout-default switch FAILURE): clears the busy; the engine's
+    /// byte-identical error line shows.
+    #[test]
+    fn checkout_inspect_op_switch_failure_clears_busy_and_shows_engine_error() {
+        let mut project = make_project("project-1", "claude");
+        project.path = "/tmp/switch-fail-test".to_string();
+        let mut app = test_app_with_sessions(Vec::new(), vec![project.clone()]);
+        let id = stash_checkout_inspect_op(
+            &mut app,
+            "Checking out \"main\" in /tmp/switch-fail-test for the selected project...",
+        );
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                action: NonDefaultBranchAction::CheckoutProjectDefault { project },
+                target_branch: "main".to_string(),
+                result: Err("switch refused".to_string()),
+                status_op_id: Some(id.clone()),
+            })
+            .unwrap();
+        app.drain_events();
+
+        assert!(!app.pending_checkout_inspect_ops.contains_key(&id));
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Error);
+        assert_eq!(
+            app.status.message(),
+            "Couldn't check out \"main\" in /tmp/switch-fail-test — resolve in your terminal and retry."
+        );
+    }
+
+    /// Site 2 (create-agent branch inspection FAILURE): clears the busy; the
+    /// engine's byte-identical error line shows.
+    #[test]
+    fn create_agent_inspect_op_failure_clears_busy_and_shows_engine_error() {
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(Vec::new(), vec![project.clone()]);
+        let id = stash_checkout_inspect_op(
+            &mut app,
+            &format!(
+                "Checking the current branch for project \"{}\" before creating an agent...",
+                project.name
+            ),
+        );
+
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CreateAgentBranchInspected {
+                project,
+                result: Err("inspection blew up".to_string()),
+                status_op_id: Some(id.clone()),
+            })
+            .unwrap();
+        app.drain_events();
+
+        assert!(!app.pending_checkout_inspect_ops.contains_key(&id));
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Error);
+        assert_eq!(app.status.message(), "inspection blew up");
     }
 
     #[test]

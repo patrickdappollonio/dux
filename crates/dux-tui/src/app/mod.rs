@@ -265,6 +265,36 @@ pub struct App {
     /// both surfaces apply.
     pub(crate) pending_reconnect_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<TuiReconnectOutcome>>,
+    /// In-flight checkout / branch-inspection status ops. Three TUI dispatches feed
+    /// this one map, all keyed by their op's own opaque id and all resolving to a
+    /// [`dux_core::engine::Final::Clear`] (the visible final comes from elsewhere —
+    /// the engine's unkeyed `Status` for the inspect/switch terminals, or a TUI
+    /// `set_info`/`finish_add_project_with_status`/`set_error` in the view handler),
+    /// so the op only DISMISSES its keyed busy and never strands to the busy
+    /// timeout:
+    ///
+    /// 1. `dispatch_non_default_branch_checkout` (add-project & checkout-default
+    ///    switch): id threaded through `run_add_project_checkout_job`, resolved when
+    ///    `NonDefaultBranchCheckoutCompleted` returns carrying it.
+    /// 2. `dispatch_create_agent_branch_inspection`: id threaded through the
+    ///    inspection job, resolved when `CreateAgentBranchInspected` returns.
+    /// 3. `checkout_selected_project_default_branch`: id threaded through worker 1,
+    ///    resolved when `CheckoutProjectDefaultBranchInspected` short-circuits
+    ///    (already-leading / heuristic / inspect-failed), OR — on the Known case —
+    ///    re-emitted as a `progress` busy and the SAME id forwarded into worker 2 so
+    ///    ONE op spans the inspect→switch chain (one spinner, changing text),
+    ///    resolved when that worker's `NonDefaultBranchCheckoutCompleted` returns.
+    pub(crate) pending_checkout_inspect_ops:
+        HashMap<String, dux_core::engine::HandlerStatusOp<TuiCheckoutInspectOutcome>>,
+}
+
+/// Handler-resolved outcome for a checkout / branch-inspection op (see
+/// [`App::pending_checkout_inspect_ops`]). The single `Done` variant resolves to a
+/// clear: every visible final message is authored elsewhere (the engine's unkeyed
+/// `Status`, or a TUI `set_info`/`set_error` in the view handler), so the op's only
+/// job is to dismiss its keyed busy once that final is in place.
+pub enum TuiCheckoutInspectOutcome {
+    Done,
 }
 
 /// Handler-computed outcome for a reconnect / fresh-restart status op (see
@@ -1691,6 +1721,7 @@ impl App {
             pending_pr_lookup_ops: HashMap::new(),
             pending_delete_ops: HashMap::new(),
             pending_reconnect_ops: HashMap::new(),
+            pending_checkout_inspect_ops: HashMap::new(),
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and

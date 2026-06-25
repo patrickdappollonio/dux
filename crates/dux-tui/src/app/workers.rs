@@ -26,7 +26,35 @@ impl App {
                 } => Some((id.clone(), result.is_ok())),
                 _ => None,
             };
+            // The three checkout / branch-inspection completions carry back the
+            // opaque id of the keyed busy their dispatch opened (see
+            // `pending_checkout_inspect_ops`). Capture it before the event is
+            // consumed so we can DISMISS that busy once the visible final is in
+            // place. The op resolves to a clear in every terminal case — EXCEPT the
+            // checkout-default inspection's Known case, which chains into worker 2
+            // (`DispatchProjectDefaultBranchCheckout`): that handler keeps the same
+            // op alive across the chain, so we skip resolution here when the
+            // reaction is the chain handoff.
+            let checkout_inspect_completion = match &event {
+                WorkerEvent::NonDefaultBranchCheckoutCompleted {
+                    status_op_id: Some(id),
+                    ..
+                }
+                | WorkerEvent::CreateAgentBranchInspected {
+                    status_op_id: Some(id),
+                    ..
+                }
+                | WorkerEvent::CheckoutProjectDefaultBranchInspected {
+                    status_op_id: Some(id),
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            };
             let reaction = self.engine.process_worker_event(event);
+            let chains_forward = matches!(
+                reaction,
+                EventReaction::DispatchProjectDefaultBranchCheckout { .. }
+            );
             self.apply_reaction(reaction);
             if let Some((id, succeeded)) = pr_lookup_completion
                 && let Some(op) = self.pending_pr_lookup_ops.remove(&id)
@@ -37,6 +65,12 @@ impl App {
                     PrLookupFinalOutcome::Failed
                 };
                 self.apply_reaction(op.resolve(&outcome).into_reaction());
+            }
+            if let Some(id) = checkout_inspect_completion
+                && !chains_forward
+                && let Some(op) = self.pending_checkout_inspect_ops.remove(&id)
+            {
+                self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
             }
         }
         self.retry_hung_resume_sessions();
@@ -523,12 +557,32 @@ impl App {
             EventReaction::DispatchProjectDefaultBranchCheckout {
                 project,
                 default_branch,
-                status_op_id: _,
+                status_op_id,
             } => {
+                // The checkout-default chain: ONE op spans worker 1 (inspection)
+                // and worker 2 (the switch). Re-emit the carried op's busy with
+                // worker 2's text via `progress` (same opaque id, so the spinner is
+                // continuous), then forward the id so worker 2's completion resolves
+                // exactly this op. If no op rode along (e.g. a future caller passes
+                // `None`), fall back to minting a fresh op inside the dispatch.
+                let path = NonDefaultBranchAction::CheckoutProjectDefault {
+                    project: project.clone(),
+                }
+                .repo_path()
+                .to_string();
+                if let Some(id) = &status_op_id
+                    && let Some(op) = self.pending_checkout_inspect_ops.get(id)
+                {
+                    let progress = op.progress(format!(
+                        "Checking out \"{default_branch}\" in {path} for the selected project..."
+                    ));
+                    self.apply_reaction(EventReaction::Status(progress));
+                }
                 self.dispatch_non_default_branch_checkout(
                     NonDefaultBranchAction::CheckoutProjectDefault { project },
                     default_branch,
                     "for the selected project".to_string(),
+                    status_op_id,
                 );
             }
 
@@ -1293,6 +1347,7 @@ fn truncate_status_output(text: &str, max_chars: usize) -> TruncatedStatusOutput
 pub(crate) fn run_create_agent_branch_inspection_job(
     project: Project,
     worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
     let result = git::current_branch(&repo_path)
@@ -1318,7 +1373,11 @@ pub(crate) fn run_create_agent_branch_inspection_job(
                 leading_branch,
             })
         });
-    let _ = worker_tx.send(WorkerEvent::CreateAgentBranchInspected { project, result });
+    let _ = worker_tx.send(WorkerEvent::CreateAgentBranchInspected {
+        project,
+        result,
+        status_op_id,
+    });
 }
 
 #[cfg(test)]
