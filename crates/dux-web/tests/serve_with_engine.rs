@@ -130,13 +130,18 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     // whether the live terminal survived the round-trip.
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(engine, vec![listener], || {
-            if stop_for_thread.load(Ordering::SeqCst) {
-                ServerTick::ReturnToTui
-            } else {
-                ServerTick::Continue
-            }
-        })
+        let (returned_engine, exit) = serve_with_engine(
+            engine,
+            vec![listener],
+            dux_core::activity::ActivityRing::new(),
+            || {
+                if stop_for_thread.load(Ordering::SeqCst) {
+                    ServerTick::ReturnToTui
+                } else {
+                    ServerTick::Continue
+                }
+            },
+        )
         .expect("serve_with_engine");
 
         // The SAME engine came back: the terminal we created is still live and
@@ -216,13 +221,18 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
 
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(engine, vec![listener], || {
-            if quit_for_thread.load(Ordering::SeqCst) {
-                ServerTick::QuitProcess
-            } else {
-                ServerTick::Continue
-            }
-        })
+        let (returned_engine, exit) = serve_with_engine(
+            engine,
+            vec![listener],
+            dux_core::activity::ActivityRing::new(),
+            || {
+                if quit_for_thread.load(Ordering::SeqCst) {
+                    ServerTick::QuitProcess
+                } else {
+                    ServerTick::Continue
+                }
+            },
+        )
         .expect("serve_with_engine");
         // After QuitProcess teardown the child should have been SIGTERMed; the
         // terminal entry stays in the map but its PTY child is gone.
@@ -280,13 +290,18 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
 
     let (result_tx, result_rx) = std::sync::mpsc::channel::<(ServerExit, bool)>();
     let serve_thread = std::thread::spawn(move || {
-        let (returned_engine, exit) = serve_with_engine(engine, vec![listener], || {
-            if stop_for_thread.load(Ordering::SeqCst) {
-                ServerTick::ReturnToTui
-            } else {
-                ServerTick::Continue
-            }
-        })
+        let (returned_engine, exit) = serve_with_engine(
+            engine,
+            vec![listener],
+            dux_core::activity::ActivityRing::new(),
+            || {
+                if stop_for_thread.load(Ordering::SeqCst) {
+                    ServerTick::ReturnToTui
+                } else {
+                    ServerTick::Continue
+                }
+            },
+        )
         .expect("serve_with_engine");
         // ReturnToTui keeps PTYs alive: the terminal must still be running.
         let alive = returned_engine

@@ -107,22 +107,25 @@ fn run_tui_with_flip() -> Result<()> {
                     }
                 };
 
-                let (engine, exit) = dux_web::serve_with_engine(*engine, listeners, || {
-                    // With the screen up, its keys drive the exit; without it,
-                    // only SIGINT/SIGTERM (handled inside serve) can stop us.
-                    match screen.as_mut() {
-                        Some(screen) => match screen.tick() {
-                            dux_tui::ServerScreenTick::Continue => dux_web::ServerTick::Continue,
-                            dux_tui::ServerScreenTick::ReturnToTui => {
-                                dux_web::ServerTick::ReturnToTui
-                            }
-                            dux_tui::ServerScreenTick::QuitProcess => {
-                                dux_web::ServerTick::QuitProcess
-                            }
-                        },
-                        None => dux_web::ServerTick::Continue,
-                    }
-                })?;
+                let (engine, exit) =
+                    dux_web::serve_with_engine(*engine, listeners, activity, || {
+                        // With the screen up, its keys drive the exit; without it,
+                        // only SIGINT/SIGTERM (handled inside serve) can stop us.
+                        match screen.as_mut() {
+                            Some(screen) => match screen.tick() {
+                                dux_tui::ServerScreenTick::Continue => {
+                                    dux_web::ServerTick::Continue
+                                }
+                                dux_tui::ServerScreenTick::ReturnToTui => {
+                                    dux_web::ServerTick::ReturnToTui
+                                }
+                                dux_tui::ServerScreenTick::QuitProcess => {
+                                    dux_web::ServerTick::QuitProcess
+                                }
+                            },
+                            None => dux_web::ServerTick::Continue,
+                        }
+                    })?;
 
                 // Serving has stopped. Drop the status screen explicitly to
                 // restore the terminal (leave raw mode + alt screen, show the

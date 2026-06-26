@@ -955,8 +955,13 @@ fn resolve_host_only(listeners: &[std::net::TcpListener]) -> bool {
 pub fn serve_with_engine(
     mut engine: Engine,
     listeners: Vec<std::net::TcpListener>,
+    activity: dux_core::activity::ActivityRing,
     mut on_tick: impl FnMut() -> ServerTick,
 ) -> Result<(Engine, ServerExit)> {
+    // The flip owns the terminal with its themed status screen, so this console
+    // writes NOTHING to stdout — but it captures every lifecycle event into the
+    // shared ring that drives the status screen's Activity panel.
+    let console = Console::capture(activity);
     // The flip never disables auth (there is no TUI `--disable-auth` path), and
     // the flip preset's engine config typically has no `[auth]` users, so the
     // gate is off and the UX is unchanged. Building the snapshot from the live
@@ -980,9 +985,9 @@ pub fn serve_with_engine(
             shared: Arc::clone(&auth),
             disable_auth: false,
             host_only,
-            // The flip owns the terminal with its themed status screen, so the
-            // reload arm must NOT print to stdout — a no-op console.
-            console: Console::noop(),
+            // The capture console writes nothing to stdout (the status screen
+            // owns the terminal) but records reload events into the Activity ring.
+            console: console.clone(),
         }),
     );
     engine_actor::spawn_global_workers(&mut engine);
@@ -1055,6 +1060,10 @@ pub fn serve_with_engine(
         Arc::clone(&auth),
         axum::Router::new(),
         RouterParams::plain_http()
+            // The capture console keeps the access log OFF (it is never wanted in
+            // the panel, and access() never reaches emit() to be captured anyway)
+            // while WS/auth handlers feed lifecycle events into the Activity ring.
+            .with_console(console.clone(), false)
             .with_max_websocket_connections(engine.config.server.max_websocket_connections),
     );
     let sweep_task = {
@@ -1305,6 +1314,20 @@ mod tests {
     use crate::console::LoginRow;
     use dux_core::config::PlanAddr;
     use dux_core::engine::Command;
+
+    #[test]
+    fn flip_console_captures_into_the_shared_ring() {
+        // The flip path builds its console from the shared ring; a client-connect
+        // event on that console must land in the ring the status screen reads.
+        let ring = dux_core::activity::ActivityRing::new();
+        let console = crate::console::Console::capture(ring.clone());
+        console.client_connected("10.0.0.7".parse().unwrap());
+        assert_eq!(ring.connections(), 1);
+        assert_eq!(
+            ring.snapshot(dux_core::activity::ACTIVITY_CAP).events.len(),
+            1
+        );
+    }
 
     #[test]
     fn tailscale_bind_warning_names_addr_cause_and_both_remedies() {
