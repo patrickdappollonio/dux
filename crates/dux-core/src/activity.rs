@@ -72,14 +72,22 @@ impl ActivityRing {
     }
 
     /// Append an event, dropping the oldest if the buffer is at capacity, then
-    /// bump the generation. The lock is held only for the push/trim.
+    /// bump the generation — all while holding the lock so a concurrent
+    /// [`Self::snapshot`] can never observe the new event paired with the old
+    /// generation (which would make the reader miss a redraw for that event).
+    ///
+    /// A poisoned lock is recovered rather than propagated: this is a lossy,
+    /// display-only buffer, so a prior panic must not turn every later push into
+    /// a panic and kill the activity subsystem.
     pub fn push(&self, event: ActivityEvent) {
-        {
-            let mut events = self.0.events.lock().unwrap();
-            events.push_back(event);
-            while events.len() > ACTIVITY_CAP {
-                events.pop_front();
-            }
+        let mut events = self
+            .0
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        events.push_back(event);
+        while events.len() > ACTIVITY_CAP {
+            events.pop_front();
         }
         self.0.generation.fetch_add(1, Ordering::Relaxed);
     }
@@ -108,13 +116,24 @@ impl ActivityRing {
     }
 
     /// Snapshot the last `max_events` events plus the current count/generation.
+    ///
+    /// The generation is read while the events lock is held, so it is always
+    /// coherent with the events copied (see [`Self::push`]). The connection
+    /// counter is read here too; it is maintained outside this lock, so it is a
+    /// best-effort count that can momentarily lead or trail the events by a
+    /// frame — acceptable for a status display, and self-corrected within the
+    /// next wall-clock-second redraw.
     pub fn snapshot(&self, max_events: usize) -> ActivitySnapshot {
-        let events = self.0.events.lock().unwrap();
+        let events = self
+            .0
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let start = events.len().saturating_sub(max_events);
         let tail = events.iter().skip(start).cloned().collect();
         ActivitySnapshot {
-            generation: self.generation(),
-            connections: self.connections(),
+            generation: self.0.generation.load(Ordering::Relaxed),
+            connections: self.0.connections.load(Ordering::Relaxed),
             events: tail,
         }
     }
@@ -199,5 +218,56 @@ mod tests {
         ring.connection_closed();
         ring.connection_closed();
         assert_eq!(ring.connections(), 0);
+    }
+
+    #[test]
+    fn concurrent_pushes_and_snapshots_stay_consistent() {
+        // Many producer threads push while a reader snapshots in a tight loop —
+        // the shape of the real workload (tokio workers push, the TUI thread
+        // reads). The ring must never exceed the cap, every reader snapshot must
+        // carry a generation that is consistent with its events (generation is
+        // bumped under the same lock as the push, so a snapshot can never show
+        // more events than its generation accounts for), and nothing may panic.
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 1000;
+        let ring = Arc::new(ActivityRing::new());
+
+        let reader = {
+            let ring = Arc::clone(&ring);
+            thread::spawn(move || {
+                for _ in 0..5000 {
+                    let snap = ring.snapshot(ACTIVITY_CAP);
+                    assert!(snap.events.len() <= ACTIVITY_CAP);
+                    // The events copied under the lock can never outnumber the
+                    // generation read under that same lock.
+                    assert!(snap.events.len() as u64 <= snap.generation);
+                }
+            })
+        };
+
+        let mut producers = Vec::new();
+        for t in 0..THREADS {
+            let ring = Arc::clone(&ring);
+            producers.push(thread::spawn(move || {
+                for n in 0..PER_THREAD {
+                    ring.push(ev(&format!("t{t}-{n}"), ActivityTone::Info));
+                }
+            }));
+        }
+        for p in producers {
+            p.join().unwrap();
+        }
+        reader.join().unwrap();
+
+        let snap = ring.snapshot(ACTIVITY_CAP);
+        assert_eq!(snap.events.len(), ACTIVITY_CAP, "ring stays capped");
+        assert_eq!(
+            snap.generation,
+            (THREADS * PER_THREAD) as u64,
+            "every push bumped the generation exactly once"
+        );
     }
 }
