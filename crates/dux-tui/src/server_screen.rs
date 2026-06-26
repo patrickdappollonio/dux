@@ -27,13 +27,14 @@ use crossterm::event::{
 use crossterm::{cursor, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::ASCII_LOGO;
 use crate::theme::Theme;
+use dux_core::activity::{ActivityEvent, ActivityRing, ActivitySnapshot, ActivityTone};
 use dux_core::config::DuxPaths;
 
 /// What the status screen asks the binary to do after a tick. The binary maps
@@ -49,7 +50,7 @@ pub enum ServerScreenTick {
 
 /// Semantic role for a rendered status line, mapped to concrete [`Theme`]
 /// fields when building ratatui spans. Keeping the content builder
-/// ([`screen_lines`]) terminal-free and theme-free makes it unit-testable
+/// ([`header_lines`]) terminal-free and theme-free makes it unit-testable
 /// without a TTY or a loaded theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
@@ -71,6 +72,8 @@ enum Role {
     Key,
     /// An exit hint's description portion.
     HintDesc,
+    /// One activity-log row's message, styled by its captured tone.
+    Log(ActivityTone),
     /// Vertical spacer (empty line).
     Spacer,
 }
@@ -98,6 +101,11 @@ pub struct ServerStatusScreen {
     /// Uptime second most recently drawn, so [`tick`] redraws only when the
     /// visible value actually changes (wall-clock, not per engine-loop tick).
     last_drawn_secs: u64,
+    /// The shared activity buffer fed by the web console. Snapshotted each draw.
+    activity: ActivityRing,
+    /// Activity generation most recently drawn, so [`tick`] redraws when a new
+    /// event arrives (not only when the uptime second advances).
+    last_drawn_generation: u64,
 }
 
 impl ServerStatusScreen {
@@ -112,6 +120,7 @@ impl ServerStatusScreen {
         user_count: usize,
         theme_name: &str,
         paths: &DuxPaths,
+        activity: ActivityRing,
     ) -> Result<Self> {
         // The theme name comes from `engine.config.ui.theme`; fall back to the
         // bundled default (and log) if it cannot be loaded. We deliberately
@@ -140,8 +149,12 @@ impl ServerStatusScreen {
             // Force the first `tick` redraw by seeding an impossible "last
             // drawn" value; the initial frame is drawn explicitly below.
             last_drawn_secs: u64::MAX,
+            activity,
+            last_drawn_generation: 0,
         };
-        screen.draw(0)?;
+        let snapshot = screen.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
+        screen.last_drawn_generation = snapshot.generation;
+        screen.draw(0, &snapshot)?;
         screen.last_drawn_secs = 0;
         Ok(screen)
     }
@@ -172,23 +185,28 @@ impl ServerStatusScreen {
         }
 
         let secs = self.started.elapsed().as_secs();
-        if secs != self.last_drawn_secs {
-            let _ = self.draw(secs);
+        let snapshot = self.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
+        if secs != self.last_drawn_secs || snapshot.generation != self.last_drawn_generation {
+            let _ = self.draw(secs, &snapshot);
             self.last_drawn_secs = secs;
+            self.last_drawn_generation = snapshot.generation;
         }
         ServerScreenTick::Continue
     }
 
-    /// Draw one frame for the given uptime (seconds).
-    fn draw(&mut self, uptime_secs: u64) -> Result<()> {
+    /// Draw one frame: the header (logo + status), the Activity panel, and the
+    /// footer hints. `snapshot` is taken by the caller so `tick` can compare the
+    /// generation without snapshotting twice.
+    fn draw(&mut self, uptime_secs: u64, snapshot: &ActivitySnapshot) -> Result<()> {
         let theme = &self.theme;
-        let lines = screen_lines(
+        let header = header_lines(
             &self.urls,
             self.loopback,
             self.auth_enabled,
             self.user_count,
             uptime_secs,
         );
+        let footer = footer_hint_lines();
         self.terminal.draw(|frame| {
             let area = frame.area();
             // Pre-fill the whole frame with the theme background so the alt
@@ -197,46 +215,69 @@ impl ServerStatusScreen {
             let bg = Block::default().style(Style::default().bg(theme.app_bg));
             frame.render_widget(bg, area);
 
-            // Padding between the rounded border and the content, matching the
-            // breathing room of the TUI's overlays so nothing is glued to the edge.
-            const H_PAD: u16 = 2;
-            const V_PAD: u16 = 1;
-
-            // Size the box to the widest line that must NOT wrap (logo, heading,
-            // URLs, uptime, hints); the long security warning wraps within it.
-            let content_width = content_width_for(&lines).max(1);
-            let block_width = (content_width + 2 * H_PAD + 2).min(area.width.max(1));
-            // Inner content width = box width minus borders and horizontal padding.
-            let inner_width = block_width.saturating_sub(2 + 2 * H_PAD).max(1);
-
-            let text: Vec<Line> = lines
+            // Vertical split: header (its content height), Activity (fills the
+            // rest, min 3 rows for a border + one line), footer (its rows + a
+            // one-row gap above for breathing room).
+            let full_width = area.width.max(1);
+            let header_rows: u16 = header
                 .iter()
-                .map(|segments| line_for(segments, theme))
-                .collect();
-
-            // Estimate the wrapped height so the long warning line (which wraps)
-            // isn't clipped: sum each line's wrapped row count, then add the two
-            // border rows and the vertical padding. Center that block vertically.
-            let wrapped_rows: u16 = lines
-                .iter()
-                .map(|segments| wrapped_row_count(segments, inner_width))
+                .map(|segs| wrapped_row_count(segs, full_width))
                 .sum();
-            let block_height = (wrapped_rows + 2 + 2 * V_PAD).min(area.height);
-            let x = area.x + area.width.saturating_sub(block_width) / 2;
-            let y = area.y + area.height.saturating_sub(block_height) / 2;
-            let block_area = Rect::new(x, y, block_width, block_height);
+            let footer_rows = footer.len() as u16 + 1;
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(header_rows),
+                    Constraint::Min(3),
+                    Constraint::Length(footer_rows),
+                ])
+                .split(area);
 
+            // ── Header (centered, no border) ────────────────────────────────
+            let header_text: Vec<Line> = header.iter().map(|s| line_for(s, theme)).collect();
+            let header_para = Paragraph::new(header_text)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.app_bg));
+            frame.render_widget(header_para, chunks[0]);
+
+            // ── Activity panel (rounded, themed) ────────────────────────────
+            let count = snapshot.connections;
+            let count_label = format!(" {count} connected ");
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.overlay_border))
                 .style(Style::default().bg(theme.app_bg))
-                .padding(Padding::symmetric(H_PAD, V_PAD));
-            let paragraph = Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: false })
+                .padding(Padding::horizontal(1))
+                .title(Line::from(Span::styled(
+                    " Activity ",
+                    Style::default()
+                        .fg(theme.title_focused)
+                        .add_modifier(Modifier::BOLD),
+                )))
+                .title(
+                    Line::from(Span::styled(
+                        count_label,
+                        Style::default().fg(theme.provider_label_fg),
+                    ))
+                    .right_aligned(),
+                );
+            // Visible rows = inner height (panel height minus the two borders).
+            let inner_rows = chunks[1].height.saturating_sub(2) as usize;
+            let log = activity_lines(&snapshot.events, inner_rows);
+            let log_text: Vec<Line> = log.iter().map(|s| line_for(s, theme)).collect();
+            let log_para = Paragraph::new(log_text)
+                .alignment(Alignment::Left)
                 .block(block);
-            frame.render_widget(paragraph, block_area);
+            frame.render_widget(log_para, chunks[1]);
+
+            // ── Footer hints (centered) ─────────────────────────────────────
+            let footer_text: Vec<Line> = footer.iter().map(|s| line_for(s, theme)).collect();
+            let footer_para = Paragraph::new(footer_text)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.app_bg));
+            frame.render_widget(footer_para, chunks[2]);
         })?;
         Ok(())
     }
@@ -297,18 +338,6 @@ fn line_render_width(segments: &ScreenLine) -> usize {
     width
 }
 
-/// Width of the centered content box's CONTENT (inside borders + padding): the
-/// widest line that must not wrap. The long security warning is excluded so it
-/// wraps within the box instead of stretching it across the whole terminal.
-fn content_width_for(lines: &[ScreenLine]) -> u16 {
-    lines
-        .iter()
-        .filter(|segments| !segments.iter().any(|(_, role)| *role == Role::Warning))
-        .map(|segments| line_render_width(segments).min(u16::MAX as usize) as u16)
-        .max()
-        .unwrap_or(1)
-}
-
 /// Estimate how many rows a content line occupies once wrapped to `inner_width`,
 /// so the box height accounts for the long warning line instead of clipping it.
 /// Uses rendered width (badges included) so multi-byte text and keycaps wrap
@@ -358,15 +387,16 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// Build the screen's content as a pure, terminal-free description: each line is
-/// a list of `(text, Role)` segments. Theme-free so it can be unit-tested
-/// without a TTY or a loaded theme.
+/// Build the header content (logo, heading, URLs, uptime, auth/security line) as
+/// a pure, terminal-free, theme-free description: each line is a list of
+/// `(text, Role)` segments. The exit hints live in [`footer_hint_lines`]; the
+/// activity log in [`activity_lines`].
 ///
 /// The auth/security line is re-keyed off the login gate:
 /// - auth ON  → a quiet informational line naming the configured user count;
 /// - auth OFF + non-loopback → the loud no-auth security warning;
 /// - auth OFF + loopback → nothing (the bind is unreachable off the machine).
-fn screen_lines(
+fn header_lines(
     urls: &[String],
     loopback: bool,
     auth_enabled: bool,
@@ -407,21 +437,42 @@ fn screen_lines(
         )]);
     }
 
-    lines.push(vec![(String::new(), Role::Spacer)]);
-    lines.push(vec![
-        ("q".to_string(), Role::Key),
-        ("Esc".to_string(), Role::Key),
-        (
-            " stop the server and return to dux".to_string(),
-            Role::HintDesc,
-        ),
-    ]);
-    lines.push(vec![
-        ("Ctrl-C".to_string(), Role::Key),
-        (" quit dux entirely".to_string(), Role::HintDesc),
-    ]);
-
     lines
+}
+
+/// The two exit-hint rows shown in the footer (`<q>`/`<Esc>` return, `<Ctrl-C>`
+/// quit). These keys are NOT user-configurable bindings: the TUI keybinding
+/// system isn't running in server mode, so naming them literally is correct.
+fn footer_hint_lines() -> Vec<ScreenLine> {
+    vec![
+        vec![
+            ("q".to_string(), Role::Key),
+            ("Esc".to_string(), Role::Key),
+            (
+                " stop the server and return to dux".to_string(),
+                Role::HintDesc,
+            ),
+        ],
+        vec![
+            ("Ctrl-C".to_string(), Role::Key),
+            (" quit dux entirely".to_string(), Role::HintDesc),
+        ],
+    ]
+}
+
+/// Build the activity log rows: the last `max_rows` events, oldest first, each a
+/// muted `HH:MM:SS` timestamp segment followed by the toned message segment.
+fn activity_lines(events: &[ActivityEvent], max_rows: usize) -> Vec<ScreenLine> {
+    let start = events.len().saturating_sub(max_rows);
+    events[start..]
+        .iter()
+        .map(|e| {
+            vec![
+                (format!("{}  ", e.hms), Role::Muted),
+                (e.message.clone(), Role::Log(e.tone)),
+            ]
+        })
+        .collect()
 }
 
 /// Map a content line's `(text, Role)` segments onto themed ratatui spans.
@@ -466,6 +517,18 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
             Role::AuthInfo => Style::default().fg(theme.provider_label_fg),
             // Exit-hint description: muted hint text.
             Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
+            // Activity-log message: colored by its captured tone, reusing the
+            // existing status palette (Info→muted, Ok→info, Warn→warning,
+            // Error→error). No new theme field needed.
+            Role::Log(tone) => {
+                let fg = match tone {
+                    ActivityTone::Info => theme.provider_label_fg,
+                    ActivityTone::Ok => theme.status_info_fg,
+                    ActivityTone::Warn => theme.warning_fg,
+                    ActivityTone::Error => theme.status_error_fg,
+                };
+                Style::default().fg(fg)
+            }
             // `Key` is handled above; `Spacer` is empty.
             Role::Key | Role::Spacer => Style::default(),
         };
@@ -481,7 +544,7 @@ mod tests {
     // No terminal-touching tests live here: raw mode / alt screen in CI is a
     // non-starter (there is no TTY). The terminal lifecycle is the thin shell
     // in `new`/`draw`/`Drop`; only the pure helpers (`action_for_key`,
-    // `screen_lines`, `format_uptime`) are unit-tested below.
+    // `header_lines`, `format_uptime`) are unit-tested below.
 
     fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
@@ -604,26 +667,12 @@ mod tests {
         assert_eq!(line_render_width(&line), 12);
     }
 
-    #[test]
-    fn content_width_excludes_the_wrapping_warning() {
-        // The security warning is far longer than any other line; it must be
-        // excluded from the box width so it wraps inside instead of stretching
-        // the box across the whole terminal.
-        let lines = screen_lines(&one("http://0.0.0.0:8080"), false, false, 0, 0);
-        let warning_w = lines
-            .iter()
-            .find(|s| s.iter().any(|(_, r)| *r == Role::Warning))
-            .map(line_render_width)
-            .expect("non-loopback auth-off screen has a warning line");
-        assert!((content_width_for(&lines) as usize) < warning_w);
-    }
-
-    /// Wrap one URL in the `&[String]` shape `screen_lines` now expects.
+    /// Wrap one URL in the `&[String]` shape `header_lines` expects.
     fn one(url: &str) -> Vec<String> {
         vec![url.to_string()]
     }
 
-    /// Collapse a `screen_lines` result into the joined plain text of every
+    /// Collapse a `header_lines` result into the joined plain text of every
     /// segment so content assertions don't care about segment boundaries.
     fn plain_text(lines: &[ScreenLine]) -> String {
         lines
@@ -640,7 +689,7 @@ mod tests {
 
     #[test]
     fn content_includes_url_and_heading_and_uptime() {
-        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 42);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
@@ -655,7 +704,7 @@ mod tests {
             "http://127.0.0.1:8080".to_string(),
             "http://100.101.102.103:8080".to_string(),
         ];
-        let lines = screen_lines(&urls, true, false, 0, 0);
+        let lines = header_lines(&urls, true, false, 0, 0);
         let text = plain_text(&lines);
         assert!(text.contains("http://127.0.0.1:8080"));
         assert!(text.contains("http://100.101.102.103:8080"));
@@ -672,7 +721,7 @@ mod tests {
 
     #[test]
     fn loopback_auth_off_omits_the_warning() {
-        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
         let text = plain_text(&lines);
         assert!(!text.contains("NO authentication"));
         assert!(!text.contains("Login required"));
@@ -687,7 +736,7 @@ mod tests {
 
     #[test]
     fn non_loopback_auth_off_includes_the_loud_warning() {
-        let lines = screen_lines(&one("http://0.0.0.0:8080"), false, false, 0, 0);
+        let lines = header_lines(&one("http://0.0.0.0:8080"), false, false, 0, 0);
         let text = plain_text(&lines);
         assert!(text.contains("NO authentication"));
         assert!(text.contains("control your agents"));
@@ -710,7 +759,7 @@ mod tests {
     fn auth_on_shows_quiet_login_line_not_the_warning() {
         // Auth on: a non-loopback bind is fine — show the quiet informational
         // line, never the loud no-auth warning.
-        let lines = screen_lines(&one("http://0.0.0.0:8080"), false, true, 3, 0);
+        let lines = header_lines(&one("http://0.0.0.0:8080"), false, true, 3, 0);
         let text = plain_text(&lines);
         assert!(text.contains("Login required"));
         assert!(text.contains("3 users configured"));
@@ -731,15 +780,15 @@ mod tests {
 
     #[test]
     fn auth_on_singular_user_uses_singular_noun() {
-        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, true, 1, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, true, 1, 0);
         let text = plain_text(&lines);
         assert!(text.contains("1 user configured"));
         assert!(!text.contains("1 users"));
     }
 
     #[test]
-    fn content_includes_both_exit_hints() {
-        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+    fn footer_hint_lines_carry_both_exit_keys() {
+        let lines = footer_hint_lines();
         let text = plain_text(&lines);
         assert!(text.contains("return to dux"));
         assert!(text.contains("quit dux entirely"));
@@ -757,10 +806,83 @@ mod tests {
     }
 
     #[test]
+    fn header_lines_have_no_exit_hints() {
+        // The exit hints moved to the footer — the header must not carry them.
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+        let text = plain_text(&lines);
+        assert!(!text.contains("return to dux"));
+        assert!(!text.contains("quit dux entirely"));
+        assert!(!lines.iter().flatten().any(|(_, role)| *role == Role::Key));
+    }
+
+    fn ev(hms: &str, msg: &str, tone: ActivityTone) -> ActivityEvent {
+        ActivityEvent {
+            hms: hms.to_string(),
+            tone,
+            message: msg.to_string(),
+        }
+    }
+
+    #[test]
+    fn activity_lines_map_each_tone_to_a_log_role() {
+        let events = vec![
+            ev(
+                "10:00:00",
+                "client connected from 10.0.0.5",
+                ActivityTone::Info,
+            ),
+            ev("10:00:01", "login ok for \"pat\"", ActivityTone::Ok),
+            ev("10:00:02", "login failed from 10.0.0.9", ActivityTone::Warn),
+            ev("10:00:03", "order failed", ActivityTone::Error),
+        ];
+        let lines = activity_lines(&events, 10);
+        assert_eq!(lines.len(), 4);
+        // Each row carries the timestamp (muted) and the toned message.
+        let roles: Vec<Role> = lines
+            .iter()
+            .map(|segs| {
+                segs.iter()
+                    .find(|(_, r)| matches!(r, Role::Log(_)))
+                    .unwrap()
+                    .1
+            })
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                Role::Log(ActivityTone::Info),
+                Role::Log(ActivityTone::Ok),
+                Role::Log(ActivityTone::Warn),
+                Role::Log(ActivityTone::Error),
+            ]
+        );
+        assert!(plain_text(&lines).contains("client connected from 10.0.0.5"));
+        assert!(plain_text(&lines).contains("10:00:00"));
+    }
+
+    #[test]
+    fn activity_lines_show_only_the_last_max_rows() {
+        let events: Vec<ActivityEvent> = (0..20)
+            .map(|n| ev("10:00:00", &format!("event{n}"), ActivityTone::Info))
+            .collect();
+        let lines = activity_lines(&events, 5);
+        assert_eq!(lines.len(), 5, "only the last 5 events are rendered");
+        let text = plain_text(&lines);
+        assert!(text.contains("event15"));
+        assert!(text.contains("event19"));
+        assert!(!text.contains("event14"));
+    }
+
+    #[test]
+    fn activity_lines_empty_is_empty() {
+        assert!(activity_lines(&[], 10).is_empty());
+    }
+
+    #[test]
     fn content_includes_the_wordmark() {
         // The first lines are the shared ASCII wordmark; assert one of its
         // distinctive rows is present so a future logo-export break is caught.
-        let lines = screen_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
         assert!(lines.len() >= ASCII_LOGO.len());
         assert_eq!(lines[0][0].1, Role::Logo);
         assert_eq!(lines[0][0].0, ASCII_LOGO[0]);
