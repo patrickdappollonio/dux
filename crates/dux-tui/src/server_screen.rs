@@ -229,17 +229,26 @@ impl ServerStatusScreen {
             let bg = Block::default().style(Style::default().bg(theme.app_bg));
             frame.render_widget(bg, area);
 
+            // Inset the whole screen so nothing is glued to the terminal edges:
+            // the logo gets top breathing room and the Activity panel's borders
+            // pull in from the left/right/bottom edges.
+            const V_MARGIN: u16 = 1;
+            const H_MARGIN: u16 = 2;
+
             // Vertical split: header (its content height), Activity (fills the
             // rest, min 3 rows for a border + one line), footer (its rows + a
-            // one-row gap above for breathing room).
-            let full_width = area.width.max(1);
+            // one-row gap above for breathing room). Wrapping is measured against
+            // the inset width so the (wrapping) security warning isn't miscounted.
+            let inner_width = area.width.saturating_sub(2 * H_MARGIN).max(1);
             let header_rows: u16 = header
                 .iter()
-                .map(|segs| wrapped_row_count(segs, full_width))
+                .map(|segs| wrapped_row_count(segs, inner_width))
                 .sum();
             let footer_rows = footer.len() as u16 + 1;
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
+                .vertical_margin(V_MARGIN)
+                .horizontal_margin(H_MARGIN)
                 .constraints([
                     Constraint::Length(header_rows),
                     Constraint::Min(3),
