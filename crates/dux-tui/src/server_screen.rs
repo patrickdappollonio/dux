@@ -9,9 +9,10 @@
 //!
 //! The binary drives it as the `serve_with_engine` tick closure: each engine
 //! loop iteration calls [`ServerStatusScreen::tick`], which polls keys without
-//! blocking and redraws only when the displayed uptime second changes (so the
-//! ~50ms engine loop does not cause per-tick redraw churn — refresh cadence is
-//! wall-clock, not tick-count driven, per the project tenets).
+//! blocking and redraws when the displayed uptime second changes OR a new
+//! activity event arrives (so the ~50ms engine loop does not cause per-tick
+//! redraw churn — refresh cadence is wall-clock and event driven, not
+//! tick-count driven, per the project tenets).
 //!
 //! Dependency note: dux-web never sees crossterm/ratatui — the tick closure is
 //! a generic `FnMut`, and this dux-tui helper is wired into it by the binary
@@ -185,9 +186,22 @@ impl ServerStatusScreen {
         }
 
         let secs = self.started.elapsed().as_secs();
+        // Cheap pre-check first: `generation()` is a single lock-free atomic load.
+        // Only take the (locking, cloning) snapshot when a redraw is actually due,
+        // so an idle screen does not clone the ring on every ~50ms tick.
+        let generation = self.activity.generation();
+        if !needs_redraw(
+            secs,
+            self.last_drawn_secs,
+            generation,
+            self.last_drawn_generation,
+        ) {
+            return ServerScreenTick::Continue;
+        }
         let snapshot = self.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
-        if secs != self.last_drawn_secs || snapshot.generation != self.last_drawn_generation {
-            let _ = self.draw(secs, &snapshot);
+        // Only advance the cached state on a successful draw; a failed render is
+        // then retried on the next tick instead of being silently skipped.
+        if self.draw(secs, &snapshot).is_ok() {
             self.last_drawn_secs = secs;
             self.last_drawn_generation = snapshot.generation;
         }
@@ -375,6 +389,14 @@ fn action_for_key(key: KeyEvent) -> Option<ServerScreenTick> {
     }
 }
 
+/// Whether the status screen needs a redraw this tick: either the displayed
+/// uptime second advanced (wall-clock cadence) or a new activity event arrived
+/// (the generation changed). Pure so the redraw cadence is unit-testable without
+/// a terminal.
+fn needs_redraw(secs: u64, last_secs: u64, generation: u64, last_generation: u64) -> bool {
+    secs != last_secs || generation != last_generation
+}
+
 /// Format an uptime as `M:SS` or `H:MM:SS` (e.g. `0:05`, `1:00:05`).
 fn format_uptime(secs: u64) -> String {
     let hours = secs / 3600;
@@ -517,13 +539,16 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
             Role::AuthInfo => Style::default().fg(theme.provider_label_fg),
             // Exit-hint description: muted hint text.
             Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
-            // Activity-log message: colored by its captured tone, reusing the
-            // existing status palette (Info→muted, Ok→info, Warn→warning,
-            // Error→error). No new theme field needed.
+            // Activity-log message: colored by its captured tone, reusing
+            // existing semantic theme fields so the four tones stay visually
+            // distinct (Info→muted, Ok→success-green [the same token diff
+            // additions use], Warn→warning, Error→error). `status_info_fg` is NOT
+            // used for Ok because it equals `provider_label_fg` in the default
+            // theme, which would make Ok and Info indistinguishable.
             Role::Log(tone) => {
                 let fg = match tone {
                     ActivityTone::Info => theme.provider_label_fg,
-                    ActivityTone::Ok => theme.status_info_fg,
+                    ActivityTone::Ok => theme.diff_add,
                     ActivityTone::Warn => theme.warning_fg,
                     ActivityTone::Error => theme.status_error_fg,
                 };
@@ -876,6 +901,18 @@ mod tests {
     #[test]
     fn activity_lines_empty_is_empty() {
         assert!(activity_lines(&[], 10).is_empty());
+    }
+
+    #[test]
+    fn needs_redraw_fires_on_new_second_or_new_event() {
+        // Nothing changed → no redraw.
+        assert!(!needs_redraw(5, 5, 10, 10));
+        // The uptime second advanced → redraw (wall-clock cadence).
+        assert!(needs_redraw(6, 5, 10, 10));
+        // A new activity event arrived (generation advanced) → redraw.
+        assert!(needs_redraw(5, 5, 11, 10));
+        // Both changed → redraw.
+        assert!(needs_redraw(6, 5, 11, 10));
     }
 
     #[test]

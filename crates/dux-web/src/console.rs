@@ -7,8 +7,10 @@
 //!
 //! This is the `dux server` CLI surface ONLY. The in-process TUI↔server flip
 //! ([`crate::serve_with_engine`]) keeps its themed status screen and owns the
-//! terminal, so it MUST NOT print here — it constructs a [`Console::noop`] so
-//! every emit call is a cheap no-op and stdout stays untouched.
+//! terminal, so it MUST NOT print here — it constructs a [`Console::capture`],
+//! which writes nothing to stdout but records lifecycle events into the shared
+//! `ActivityRing` that drives the status screen's Activity panel. (A pure
+//! [`Console::noop`] is used where neither stdout nor capture is wanted.)
 //!
 //! ## What goes where
 //!
@@ -281,9 +283,10 @@ impl Console {
         }
     }
 
-    /// A no-op console: every emit returns immediately and NOTHING is written.
-    /// The TUI flip uses this so the status screen keeps sole ownership of the
-    /// terminal.
+    /// A no-op console: every emit returns immediately and NOTHING is written
+    /// (no stdout, no capture). Used in reload sub-paths and tests where neither
+    /// console output nor Activity capture is wanted. The TUI flip uses
+    /// [`Console::capture`] instead, so its lifecycle events reach the panel.
     pub fn noop() -> Self {
         Self(Arc::new(ConsoleInner {
             color: false,
@@ -1193,8 +1196,10 @@ mod tests {
         let console = Console::capture(ring.clone());
         console.banner(&sample_banner());
         console.access("GET", "/api/me", 200, 3);
-        // Neither the banner nor the access log flows through emit(), so the ring
-        // stays empty — the panel never shows the high-volume access log.
+        // `banner()` and `access()` write straight to the sink and never call
+        // emit() (the only path that captures); `access()` is additionally gated
+        // by `is_active()`, false here. Either way the ring stays empty, so the
+        // panel never shows the high-volume access log.
         assert!(
             ring.snapshot(dux_core::activity::ACTIVITY_CAP)
                 .events
@@ -1212,6 +1217,16 @@ mod tests {
         assert_eq!(ring.connections(), 2);
         console.client_disconnected(ip("10.0.0.1"));
         assert_eq!(ring.connections(), 1);
+        // The counter and the event log move together: each connect/disconnect
+        // also pushes its lifecycle line, so the title count never drifts from
+        // the messages shown below it.
+        let snap = ring.snapshot(dux_core::activity::ACTIVITY_CAP);
+        assert_eq!(snap.events.len(), 3, "two connects + one disconnect");
+        assert!(
+            snap.events[2]
+                .message
+                .contains("client disconnected from 10.0.0.1")
+        );
     }
 
     #[test]
@@ -1224,11 +1239,16 @@ mod tests {
 
     #[test]
     fn noop_console_does_not_capture() {
-        // The plain noop (used by the reload arm in non-flip paths and tests)
-        // has no ring, so nothing is captured and nothing panics.
+        // The plain noop has no capture ring, so even when a ring exists nearby,
+        // emitting through a noop console must leave it untouched (and not panic).
+        let ring = ActivityRing::new();
         let console = Console::noop();
         console.client_connected(ip("10.0.0.1"));
+        console.login_ok("alice", ip("10.0.0.2"));
         assert!(!console.is_active());
+        let snap = ring.snapshot(dux_core::activity::ACTIVITY_CAP);
+        assert!(snap.events.is_empty(), "a noop console captures nothing");
+        assert_eq!(snap.connections, 0);
     }
 
     #[test]
