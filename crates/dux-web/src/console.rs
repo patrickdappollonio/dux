@@ -32,6 +32,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 
+use dux_core::activity::{ActivityEvent, ActivityRing, ActivityTone};
+
 // ── ANSI palette (hand-rolled — no color dependency) ───────────────────────
 
 const RESET: &str = "\x1b[0m";
@@ -79,6 +81,17 @@ impl Tone {
             Tone::Ok => GREEN,
             Tone::Warn => YELLOW,
             Tone::Error => RED,
+        }
+    }
+}
+
+impl From<Tone> for ActivityTone {
+    fn from(tone: Tone) -> Self {
+        match tone {
+            Tone::Info => ActivityTone::Info,
+            Tone::Ok => ActivityTone::Ok,
+            Tone::Warn => ActivityTone::Warn,
+            Tone::Error => ActivityTone::Error,
         }
     }
 }
@@ -195,6 +208,11 @@ pub struct Console(Arc<ConsoleInner>);
 struct ConsoleInner {
     color: bool,
     sink: Sink,
+    /// When set, every `emit()` also pushes a structured event here (and
+    /// connect/disconnect move the connection counter). The in-TUI flip path
+    /// uses this to feed the status screen's Activity panel. `None` for every
+    /// stdout/noop/test console.
+    capture: Option<ActivityRing>,
 }
 
 impl Console {
@@ -218,6 +236,7 @@ impl Console {
                 tx,
                 dropped: AtomicU64::new(0),
             },
+            capture: None,
         }))
     }
 
@@ -238,6 +257,7 @@ impl Console {
                 tx,
                 dropped: AtomicU64::new(0),
             },
+            capture: None,
         }))
     }
 
@@ -268,6 +288,20 @@ impl Console {
         Self(Arc::new(ConsoleInner {
             color: false,
             sink: Sink::Noop,
+            capture: None,
+        }))
+    }
+
+    /// A capture console: a `Noop` stdout sink (it writes nothing to the
+    /// terminal, so the flip's status screen keeps sole ownership of it) whose
+    /// every `emit()` pushes a structured [`ActivityEvent`] into `ring` and
+    /// whose connect/disconnect calls move the ring's connection counter. The
+    /// in-TUI flip path uses this to drive the Activity panel.
+    pub fn capture(ring: ActivityRing) -> Self {
+        Self(Arc::new(ConsoleInner {
+            color: false,
+            sink: Sink::Noop,
+            capture: Some(ring),
         }))
     }
 
@@ -335,10 +369,22 @@ impl Console {
     /// console BEFORE doing any timestamp/format work, so the flip path pays
     /// nothing per emit.
     fn emit(&self, tone: Tone, message: &str) {
-        if !self.is_active() {
+        let active = self.is_active();
+        // Nothing to do if there is neither a capture target nor a live stdout sink.
+        if self.0.capture.is_none() && !active {
             return;
         }
-        self.write_line(format_line(self.0.color, tone, &now_hms(), message));
+        let hms = now_hms();
+        if let Some(ring) = &self.0.capture {
+            ring.push(ActivityEvent {
+                hms: hms.clone(),
+                tone: tone.into(),
+                message: message.to_string(),
+            });
+        }
+        if active {
+            self.write_line(format_line(self.0.color, tone, &hms, message));
+        }
     }
 
     // ── Event renderers (the public emit surface) ──────────────────────────
@@ -355,10 +401,16 @@ impl Console {
     }
 
     pub fn client_connected(&self, ip: IpAddr) {
+        if let Some(ring) = &self.0.capture {
+            ring.connection_opened();
+        }
         self.emit(Tone::Info, &format!("client connected from {ip}"));
     }
 
     pub fn client_disconnected(&self, ip: IpAddr) {
+        if let Some(ring) = &self.0.capture {
+            ring.connection_closed();
+        }
         self.emit(Tone::Info, &format!("client disconnected from {ip}"));
     }
 
@@ -1101,6 +1153,82 @@ mod tests {
         console.login_failed(ip("10.0.0.1"));
         console.access("GET", "/", 200, 1);
         console.banner(&sample_banner());
+    }
+
+    // ── Capture console (the in-TUI flip path) ──────────────────────────────
+
+    #[test]
+    fn capture_console_pushes_lifecycle_events_with_tones() {
+        let ring = ActivityRing::new();
+        let console = Console::capture(ring.clone());
+        console.client_connected(ip("10.0.0.1"));
+        console.login_ok("alice", ip("10.0.0.2"));
+        console.login_failed(ip("10.0.0.3"));
+        console.acme(true, "order failed");
+
+        let snap = ring.snapshot(dux_core::activity::ACTIVITY_CAP);
+        let tones: Vec<ActivityTone> = snap.events.iter().map(|e| e.tone).collect();
+        assert_eq!(
+            tones,
+            vec![
+                ActivityTone::Info,  // client connected
+                ActivityTone::Ok,    // login ok
+                ActivityTone::Warn,  // login failed
+                ActivityTone::Error, // acme failure
+            ]
+        );
+        assert!(
+            snap.events[0]
+                .message
+                .contains("client connected from 10.0.0.1")
+        );
+        assert!(snap.events[1].message.contains("login ok for \"alice\""));
+        // The capture stores the structured message — no ANSI escapes.
+        assert!(!snap.events[0].message.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn capture_console_excludes_banner_and_access_log() {
+        let ring = ActivityRing::new();
+        let console = Console::capture(ring.clone());
+        console.banner(&sample_banner());
+        console.access("GET", "/api/me", 200, 3);
+        // Neither the banner nor the access log flows through emit(), so the ring
+        // stays empty — the panel never shows the high-volume access log.
+        assert!(
+            ring.snapshot(dux_core::activity::ACTIVITY_CAP)
+                .events
+                .is_empty()
+        );
+        assert_eq!(ring.generation(), 0);
+    }
+
+    #[test]
+    fn capture_console_tracks_active_connection_count() {
+        let ring = ActivityRing::new();
+        let console = Console::capture(ring.clone());
+        console.client_connected(ip("10.0.0.1"));
+        console.client_connected(ip("10.0.0.2"));
+        assert_eq!(ring.connections(), 2);
+        console.client_disconnected(ip("10.0.0.1"));
+        assert_eq!(ring.connections(), 1);
+    }
+
+    #[test]
+    fn capture_console_is_inactive_for_stdout_purposes() {
+        // The capture console has a Noop stdout sink, so the access-log
+        // middleware and banner gating (which key off is_active) stay off.
+        let ring = ActivityRing::new();
+        assert!(!Console::capture(ring).is_active());
+    }
+
+    #[test]
+    fn noop_console_does_not_capture() {
+        // The plain noop (used by the reload arm in non-flip paths and tests)
+        // has no ring, so nothing is captured and nothing panics.
+        let console = Console::noop();
+        console.client_connected(ip("10.0.0.1"));
+        assert!(!console.is_active());
     }
 
     #[test]
