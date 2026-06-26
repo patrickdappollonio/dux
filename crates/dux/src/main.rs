@@ -78,6 +78,11 @@ fn run_tui_with_flip() -> Result<()> {
                 let auth_enabled = dux_core::auth::auth_enabled(&engine.config, false);
                 let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
 
+                // The activity buffer is shared between the web console (the
+                // producer, wired in serve_with_engine) and the status screen
+                // (the consumer). Created here so both get the same handle.
+                let activity = dux_core::activity::ActivityRing::new();
+
                 // Try to set up the interactive status screen. If it fails (no
                 // TTY, raw-mode error), fall back to a plain line — the server
                 // must still run. `screen` lives outside the tick closure so we
@@ -89,6 +94,7 @@ fn run_tui_with_flip() -> Result<()> {
                     user_count,
                     &theme_name,
                     &paths,
+                    activity.clone(),
                 ) {
                     Ok(screen) => Some(screen),
                     Err(err) => {
