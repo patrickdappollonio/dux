@@ -1764,6 +1764,43 @@ mod tests {
     }
 
     #[test]
+    fn scroll_region_with_bottom_margin_still_captures_scrollback() {
+        // Regression for the vendored vt100 patch (see third_party/vt100/PATCH.md).
+        // Agent CLIs pin a status bar by setting a DECSTBM scroll region with a
+        // bottom margin (e.g. ESC[1;4r on a 5-row screen). Upstream vt100 drops
+        // every line evicted from the top of the screen while ANY scroll region is
+        // active, so history_len() stayed 0 and PgUp/PgDn/mouse-wheel scrollback
+        // was dead. The patch captures whenever the region is top-anchored
+        // (scroll_top == 0), matching xterm/alacritty/wezterm.
+        let mut terminal = TerminalState::with_scrollback(5, 20, 100);
+        // Set a top-anchored scroll region with a bottom margin: rows 1..4,
+        // leaving row 5 pinned as a status bar.
+        terminal.process(b"\x1b[1;4r");
+        // Home the cursor inside the region.
+        terminal.process(b"\x1b[H");
+        for i in 0..12 {
+            terminal.process(format!("e{i}\r\n").as_bytes());
+        }
+
+        // Before the patch this was 0 (history discarded); now lines that scroll
+        // off the top of the region are captured.
+        assert!(
+            terminal.history_len() > 0,
+            "scroll region with a bottom margin must still feed scrollback, got {}",
+            terminal.history_len()
+        );
+
+        let history = terminal.history_len();
+        terminal.set_scrollback(history);
+        let snapshot = terminal.snapshot();
+        let lines = viewport_lines(&snapshot);
+        assert!(
+            lines.iter().any(|line| line.contains("e0")),
+            "an early line should be visible after scrolling back, got:\n{lines:#?}"
+        );
+    }
+
+    #[test]
     fn scrolling_while_output_arrives_keeps_valid_offset() {
         let mut terminal = TerminalState::with_scrollback(3, 16, 100);
         terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n");
