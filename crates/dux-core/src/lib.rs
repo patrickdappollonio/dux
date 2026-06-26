@@ -4,6 +4,7 @@
 //! crate. Surfaces (TUI, web) depend on `dux-core`, never the reverse.
 
 pub mod action;
+pub mod activity;
 pub mod agent_job;
 pub mod auth;
 pub mod browser;
