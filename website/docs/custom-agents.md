@@ -5,7 +5,7 @@ group: Guides
 order: 50
 ---
 
-A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, and Gemini are
+A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, and Copilot are
 configured out of the box, but the whole point of dux's design is that **any CLI can
 be a provider.** Adding one is a config change, not a code change. There are no
 adapters and no protocol layer to implement. dux runs the command exactly as it

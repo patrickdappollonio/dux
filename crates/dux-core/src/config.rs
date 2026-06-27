@@ -269,14 +269,14 @@ pub struct AuthConfig {
     pub users: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OneshotOutput {
     Stdout,
     Tempfile,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCommandConfig {
     pub command: String,
@@ -519,7 +519,7 @@ pub fn default_terminal_args() -> Vec<String> {
     vec!["-l".to_string()]
 }
 
-pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
+pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
     [
         (
             "claude",
@@ -565,19 +565,6 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
             },
         ),
         (
-            "gemini",
-            ProviderCommandConfig {
-                command: "gemini".to_string(),
-                args: Vec::new(),
-                resume_args: Some(vec!["--resume".to_string()]),
-                resume_wait_timeout_ms: None,
-                oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
-                oneshot_output: OneshotOutput::Stdout,
-                install_hint: Some("brew install gemini-cli".to_string()),
-                forward_scroll: None,
-            },
-        ),
-        (
             "opencode",
             ProviderCommandConfig {
                 command: "opencode".to_string(),
@@ -597,7 +584,7 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
                 args: Vec::new(),
                 // Copilot's --continue resumes the most recent session
                 // globally, not scoped to the current working directory.
-                // Unlike claude/codex/gemini/opencode, there is no flag
+                // Unlike claude/codex/opencode, there is no flag
                 // to limit resume to the CWD, so we disable it.
                 resume_args: None,
                 resume_wait_timeout_ms: None,

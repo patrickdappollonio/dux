@@ -1981,7 +1981,7 @@ impl App {
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Any CLI tool can be a provider: Claude, Codex, Gemini,",
+            "Any CLI tool can be a provider: Claude, Codex, Copilot,",
             body_style,
         )));
         lines.push(Line::from(Span::styled(
