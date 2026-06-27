@@ -3,3 +3,6 @@
 flamegraph.svg
 perf.data
 perf.data.old
+
+# Local-only branch catch-up notes (not for version control)
+docs/server-mode-summary.md
