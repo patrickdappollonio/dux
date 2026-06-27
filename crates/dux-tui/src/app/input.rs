@@ -229,6 +229,28 @@ fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+/// Decide whether a mouse-wheel event should be forwarded to the embedded
+/// child process instead of scrolling dux's own host scrollback.
+///
+/// `None` = auto (forward only when the child owns the alt screen and asked for
+/// mouse); `Some(true)` = always forward; `Some(false)` = never forward.
+fn should_forward_wheel(forward_scroll: Option<bool>, alt_screen: bool, mouse_mode: bool) -> bool {
+    match forward_scroll {
+        Some(v) => v,
+        None => alt_screen && mouse_mode,
+    }
+}
+
+/// Decide whether a page-scroll key (PgUp/PgDn) should be forwarded to the
+/// embedded child process. Page keys don't need mouse mode — in the alt screen
+/// there is no host scrollback, so forward them to the child.
+fn should_forward_page(forward_scroll: Option<bool>, alt_screen: bool) -> bool {
+    match forward_scroll {
+        Some(v) => v,
+        None => alt_screen,
+    }
+}
+
 fn relative_point(rect: Rect, column: u16, row: u16) -> Option<(u16, u16)> {
     contains_point(rect, column, row)
         .then_some((column.saturating_sub(rect.x), row.saturating_sub(rect.y)))
@@ -1702,7 +1724,7 @@ impl App {
                     self.exit_interactive_mode();
                     return Ok(false);
                 }
-                SeqAction::Intercept(Action::ScrollPageUp, _, _) => {
+                SeqAction::Intercept(Action::ScrollPageUp, _, raw) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -1710,11 +1732,20 @@ impl App {
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
-                    if self.last_pty_size.0 > 0 {
+                    let fs = self.selected_surface_forward_scroll();
+                    let alt = self
+                        .selected_terminal_surface_client()
+                        .is_some_and(|p| p.is_alt_screen());
+                    if should_forward_page(fs, alt) {
+                        if let Some(provider) = self.selected_terminal_surface_client() {
+                            let _ = provider.write_bytes(&raw);
+                            forwarded_to_pty = true;
+                        }
+                    } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Up, self.last_pty_size.0 as usize);
                     }
                 }
-                SeqAction::Intercept(Action::ScrollPageDown, _, _) => {
+                SeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
                     flush_forward_batch(
                         &mut forward_batch,
                         is_scrolled_back,
@@ -1722,7 +1753,16 @@ impl App {
                         &mut forwarded_to_pty,
                         self.selected_terminal_surface_client(),
                     );
-                    if self.last_pty_size.0 > 0 {
+                    let fs = self.selected_surface_forward_scroll();
+                    let alt = self
+                        .selected_terminal_surface_client()
+                        .is_some_and(|p| p.is_alt_screen());
+                    if should_forward_page(fs, alt) {
+                        if let Some(provider) = self.selected_terminal_surface_client() {
+                            let _ = provider.write_bytes(&raw);
+                            forwarded_to_pty = true;
+                        }
+                    } else if self.last_pty_size.0 > 0 {
                         self.scroll_pty(ScrollDirection::Down, self.last_pty_size.0 as usize);
                     }
                 }
@@ -1814,15 +1854,16 @@ impl App {
                     );
                     if is_scroll {
                         self.terminal_selection = None;
-                        // Check if the provider has forward_scroll enabled
-                        // (only applies to agents, not companion terminals).
-                        let forward = matches!(self.input_target, InputTarget::Agent)
-                            && self
-                                .selected_session()
-                                .map(|s| {
-                                    provider_config(&self.engine.config, &s.provider).forward_scroll
-                                })
-                                .unwrap_or(false);
+                        // Tri-state forward decision from the selected surface's
+                        // `forward_scroll` policy plus the child's live alt-screen
+                        // and mouse-reporting state. Applies to both agents and
+                        // companion terminals (terminals auto-detect via `None`).
+                        let fs = self.selected_surface_forward_scroll();
+                        let (alt, mouse) = self
+                            .selected_terminal_surface_client()
+                            .map(|p| (p.is_alt_screen(), p.has_mouse_mode()))
+                            .unwrap_or((false, false));
+                        let forward = should_forward_wheel(fs, alt, mouse);
                         if forward {
                             if let Some(provider) = self.selected_terminal_surface_client() {
                                 let _ = provider.write_bytes(&raw);
@@ -5771,13 +5812,40 @@ impl App {
             return;
         }
 
+        // Tri-state forward decision: forward the wheel to the child when its
+        // `forward_scroll` policy (or live alt-screen + mouse-reporting state)
+        // says so; otherwise scroll dux's own host scrollback.
+        let fs = self.selected_surface_forward_scroll();
+        let (alt, mouse_mode) = self
+            .selected_terminal_surface_client()
+            .map(|p| (p.is_alt_screen(), p.has_mouse_mode()))
+            .unwrap_or((false, false));
+
+        if should_forward_wheel(fs, alt, mouse_mode) {
+            // Reconstruct the SGR wheel report the child expects, translated
+            // from screen-absolute coordinates to child-relative ones via the
+            // terminal content area's origin. ScrollUp = button 64, down = 65.
+            // crossterm coordinates are 0-based; the SGR wire format is 1-based.
+            let cb = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                64
+            } else {
+                65
+            };
+            let screen_seq =
+                format!("\x1b[<{cb};{};{}M", mouse.column + 1, mouse.row + 1).into_bytes();
+            if let Some(term_area) = self.mouse_layout.agent_term
+                && let Some(translated) =
+                    crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
+                && let Some(provider) = self.selected_terminal_surface_client()
+            {
+                let _ = provider.write_bytes(&translated);
+                return;
+            }
+        }
+
         let Some(provider) = self.selected_terminal_surface_client() else {
             return;
         };
-
-        // Always handle scroll as host scrollback — never forward to the child
-        // process. The outer terminal's EnableMouseCapture means dux owns the
-        // mouse; forwarding scroll events causes confusion.
         provider.scroll(
             matches!(mouse.kind, MouseEventKind::ScrollUp),
             MOUSE_WHEEL_LINES,
@@ -6455,6 +6523,37 @@ mod tests {
     use ratatui::text::Line;
     use std::process::Command;
     use tempfile::tempdir;
+
+    #[test]
+    fn should_forward_wheel_matrix() {
+        use super::should_forward_wheel;
+        // None = auto: forward only on alt screen AND mouse mode.
+        assert!(should_forward_wheel(None, true, true));
+        assert!(!should_forward_wheel(None, true, false));
+        assert!(!should_forward_wheel(None, false, true));
+        assert!(!should_forward_wheel(None, false, false));
+        // Some(true) = always forward, regardless of live signals.
+        assert!(should_forward_wheel(Some(true), false, false));
+        assert!(should_forward_wheel(Some(true), true, true));
+        assert!(should_forward_wheel(Some(true), false, true));
+        // Some(false) = never forward, even in the alt screen with mouse.
+        assert!(!should_forward_wheel(Some(false), true, true));
+        assert!(!should_forward_wheel(Some(false), false, false));
+    }
+
+    #[test]
+    fn should_forward_page_matrix() {
+        use super::should_forward_page;
+        // None = auto: page keys forward in the alt screen (no mouse needed).
+        assert!(should_forward_page(None, true));
+        assert!(!should_forward_page(None, false));
+        // Some(true) = always forward.
+        assert!(should_forward_page(Some(true), false));
+        assert!(should_forward_page(Some(true), true));
+        // Some(false) = never forward, even in the alt screen.
+        assert!(!should_forward_page(Some(false), true));
+        assert!(!should_forward_page(Some(false), false));
+    }
 
     fn bindings_with_overrides(overrides: &[(Action, &[&str])]) -> RuntimeBindings {
         RuntimeBindings::new(

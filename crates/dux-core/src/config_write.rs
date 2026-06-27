@@ -530,7 +530,15 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
             tbl["install_hint"] = toml_edit::value(hint.as_str());
         }
 
-        tbl["forward_scroll"] = toml_edit::value(config.forward_scroll);
+        // Tri-state: write the bool only when the user pinned a value. An
+        // absent key means auto-detect (forward only to a fullscreen,
+        // mouse-aware child), so omit it when `None`.
+        match config.forward_scroll {
+            Some(value) => tbl["forward_scroll"] = toml_edit::value(value),
+            None => {
+                tbl.remove("forward_scroll");
+            }
+        }
     }
 }
 
@@ -644,6 +652,90 @@ mod tests {
             .filter(|e| e.file_name() != "config.toml")
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn forward_scroll_tri_state_deserializes() {
+        // Absent key -> None; explicit true/false -> Some(..).
+        let absent: crate::config::ProviderCommandConfig =
+            toml::from_str("command = \"claude\"\n").expect("parse absent");
+        assert_eq!(absent.forward_scroll, None);
+
+        let yes: crate::config::ProviderCommandConfig =
+            toml::from_str("command = \"opencode\"\nforward_scroll = true\n").expect("parse true");
+        assert_eq!(yes.forward_scroll, Some(true));
+
+        let no: crate::config::ProviderCommandConfig =
+            toml::from_str("command = \"codex\"\nforward_scroll = false\n").expect("parse false");
+        assert_eq!(no.forward_scroll, Some(false));
+    }
+
+    #[test]
+    fn patch_omits_forward_scroll_when_none_and_writes_when_some() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[defaults]\nprovider = \"claude\"\n").expect("write initial");
+
+        let mut config = Config::default();
+        // Set explicit tri-state values to exercise the writer (None omits the
+        // key, Some writes it); defaults are all None (auto) regardless.
+        if let Some(claude) = config.providers.commands.get_mut("claude") {
+            claude.forward_scroll = None;
+        }
+        if let Some(opencode) = config.providers.commands.get_mut("opencode") {
+            opencode.forward_scroll = Some(true);
+        }
+        let codex = config
+            .providers
+            .commands
+            .get_mut("codex")
+            .expect("codex provider exists");
+        codex.forward_scroll = Some(false);
+
+        patch_config_file(&config_path, &config).expect("patch");
+        let saved = fs::read_to_string(&config_path).expect("read back");
+
+        // Round-trips back to the same tri-state values.
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(
+            parsed
+                .providers
+                .commands
+                .get("claude")
+                .unwrap()
+                .forward_scroll,
+            None,
+            "absent key must parse back to None: {saved}"
+        );
+        assert_eq!(
+            parsed
+                .providers
+                .commands
+                .get("opencode")
+                .unwrap()
+                .forward_scroll,
+            Some(true)
+        );
+        assert_eq!(
+            parsed
+                .providers
+                .commands
+                .get("codex")
+                .unwrap()
+                .forward_scroll,
+            Some(false)
+        );
+
+        // The writer omits the key for None and writes it for Some.
+        let claude_section = saved
+            .split("[providers.claude]")
+            .nth(1)
+            .and_then(|s| s.split("[providers.").next())
+            .unwrap_or("");
+        assert!(
+            !claude_section.contains("forward_scroll"),
+            "None must omit forward_scroll; got: {claude_section}"
+        );
     }
 
     #[test]

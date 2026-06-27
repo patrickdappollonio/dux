@@ -46,9 +46,12 @@ oneshot_args = ["--bare", "-p", "{prompt}", "--tools", "", "--max-turns", "1"]
 oneshot_output = "stdout"
 # Hint shown to the user when the command isn't found on PATH.
 install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
-# When true, scroll events go to the provider instead of dux's own scrollback.
-# Enable this for agents that manage their own scrollback buffer.
-forward_scroll = false
+# Where the mouse wheel and PgUp/PgDn go. Leave this key absent for auto: dux
+# forwards them to the child only when it takes over the screen (a fullscreen,
+# mouse-aware renderer like an agent's alt-screen UI) and otherwise scrolls its
+# own host scrollback. Set true to always forward to the child, or false to
+# never forward (always use dux scrollback).
+# forward_scroll = true
 ```
 
 ### The oneshot placeholders
@@ -79,7 +82,8 @@ resume_args = []
 oneshot_args = ["--out", "{tempfile}", "--prompt", "{prompt}"]
 oneshot_output = "tempfile"
 install_hint = "see https://example.com/install"
-forward_scroll = false
+# forward_scroll left absent: auto-detect (forward only to a fullscreen,
+# mouse-aware child, otherwise dux host scrollback).
 ```
 
 Save the config, and `myagent` is now a provider you can pick when creating an

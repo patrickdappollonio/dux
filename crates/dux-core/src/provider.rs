@@ -87,7 +87,7 @@ mod tests {
             oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         }
     }
 
@@ -100,7 +100,7 @@ mod tests {
             oneshot_args: vec!["-c".to_string(), "echo {prompt} > {tempfile}".to_string()],
             oneshot_output: OneshotOutput::Tempfile,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         }
     }
 
@@ -172,7 +172,7 @@ mod tests {
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         };
         let prov = create_provider("bad", config);
         let cwd = std::env::temp_dir();
@@ -195,7 +195,7 @@ mod tests {
             ],
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         };
         let prov = create_provider("custom", config);
         let cwd = std::env::temp_dir();

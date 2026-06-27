@@ -1108,11 +1108,19 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         ));
     }
     out.push_str(
-        "# When true, scroll events are forwarded to the provider instead of being\n\
-         # handled as dux host scrollback. Enable this for agents that manage their\n\
-         # own scrollback buffer (e.g. opencode).\n",
+        "# Controls whether the mouse wheel and PgUp/PgDn scroll dux's own host\n\
+         # scrollback or get forwarded to the provider. Tri-state:\n\
+         #   (unset) = auto: forward to the child only when it owns the screen and\n\
+         #             wants the wheel (a fullscreen alt-screen, mouse-aware app like\n\
+         #             an agent's renderer); otherwise scroll dux host scrollback.\n\
+         #   true    = always forward scroll + page keys to the child.\n\
+         #   false   = never forward; always use dux host scrollback.\n\
+         # Leave this key absent for auto. Uncomment to pin a value.\n",
     );
-    out.push_str(&format!("forward_scroll = {}\n", config.forward_scroll));
+    match config.forward_scroll {
+        Some(value) => out.push_str(&format!("forward_scroll = {value}\n")),
+        None => out.push_str("# forward_scroll = true\n"),
+    }
     out.push('\n');
 }
 
@@ -1750,7 +1758,7 @@ dangerous = true
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         };
         assert_eq!(cfg.interactive_args(false), ["--interactive"]);
         assert_eq!(
@@ -1766,7 +1774,7 @@ dangerous = true
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         };
         assert_eq!(unsupported.interactive_args(true), ["--interactive"]);
         assert!(!unsupported.supports_session_resume());
@@ -1785,7 +1793,7 @@ dangerous = true
                     oneshot_args: Vec::new(),
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
-                    forward_scroll: false,
+                    forward_scroll: None,
                 },
             )]),
         };
@@ -1814,7 +1822,7 @@ dangerous = true
                     oneshot_args: Vec::new(),
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
-                    forward_scroll: false,
+                    forward_scroll: None,
                 },
             )]),
         };
@@ -2024,7 +2032,7 @@ oneshot_output = "stdout"
                     oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                     oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
-                    forward_scroll: false,
+                    forward_scroll: None,
                 },
             )]),
         };
