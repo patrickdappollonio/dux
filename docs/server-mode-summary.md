@@ -149,8 +149,8 @@ parts:
 
 "**No protocol layer**" is unchanged and load-bearing: providers still run as
 plain CLIs in a real PTY (`portable-pty`), with no JSON-RPC, ACP, or adapter
-binaries. The web path bypasses the server-side `vt100` emulator (xterm.js is its
-own emulator on the client) but the engine still keeps an authoritative `vt100`
+binaries. The web path bypasses the server-side `alacritty_terminal` emulator (xterm.js is its
+own emulator on the client) but the engine still keeps an authoritative `alacritty_terminal`
 grid per session, which is what makes the on-connect repaint possible.
 
 The **`StatusLine`** controller (`dux_core::statusline`) is the single shared
@@ -180,7 +180,7 @@ no server or UI yet (exercised by tests against the headless engine):
   style), so the ViewModel excludes the TUI cursor/focus state.
 - **Wire-command intake** (`dux_core::wire`) — reconstructs and dispatches engine
   `Command`s from a generic, transport-agnostic message.
-- **PTY byte fan-out + on-connect repaint** — bytes still feed the `vt100`
+- **PTY byte fan-out + on-connect repaint** — bytes still feed the `alacritty_terminal`
   emulator (the authoritative grid) **and** a per-session broadcast for web clients. A joining
   client gets the current screen via a synthesized ANSI repaint from the existing
   `TerminalSnapshot` (set alt-screen mode if active, clear, position cursor, emit
@@ -345,7 +345,7 @@ and `vitest` was introduced here as a web test gate.
 - **Scrollback replay.** A web client opening or reconnecting to a session sees
   the **full scrollback history** the TUI shows, not just the visible screen. A
   new `TerminalState::reconnect_repaint` rebuilds the client's primary buffer by
-  printing the entire `vt100` grid as a newline-separated, SGR-tracked line
+  printing the entire `alacritty_terminal` grid as a newline-separated, SGR-tracked line
   stream (the only way to push history into a terminal's scrollback over a byte
   stream), idempotent via `\x1b[3J`; the alt-screen branch is unchanged. The
   ViewModel carries `agent_scrollback_lines` so the web xterm is sized to match
