@@ -3173,6 +3173,19 @@ impl App {
             .count()
     }
 
+    /// The `forward_scroll` policy for the currently selected terminal
+    /// surface. Agents resolve it from their provider config; companion
+    /// terminals have no provider config, so they always auto-detect (`None`).
+    pub(crate) fn selected_surface_forward_scroll(&self) -> Option<bool> {
+        match self.session_surface {
+            SessionSurface::Agent => {
+                let session = self.selected_session()?;
+                provider_config(&self.engine.config, &session.provider).forward_scroll
+            }
+            SessionSurface::Terminal => None,
+        }
+    }
+
     pub(crate) fn selected_terminal_surface_client(&self) -> Option<&PtyClient> {
         match self.session_surface {
             SessionSurface::Agent => {

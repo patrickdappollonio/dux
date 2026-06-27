@@ -286,7 +286,17 @@ pub struct ProviderCommandConfig {
     pub oneshot_args: Vec<String>,
     pub oneshot_output: OneshotOutput,
     pub install_hint: Option<String>,
-    pub forward_scroll: bool,
+    /// Scroll-forwarding policy for the wheel and PgUp/PgDn over this
+    /// provider's embedded PTY. Tri-state:
+    ///
+    /// - `None` (key absent) — auto: forward to the child only when it owns
+    ///   the screen and asked for the wheel (alternate screen + mouse
+    ///   reporting for the wheel; alternate screen alone for the page keys),
+    ///   otherwise scroll dux's own host scrollback. This adapts to apps like
+    ///   Claude Code that switch to a fullscreen alt-screen renderer.
+    /// - `Some(true)` — always forward scroll and page keys to the child.
+    /// - `Some(false)` — never forward; always use dux host scrollback.
+    pub forward_scroll: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,7 +382,7 @@ impl Default for ProviderCommandConfig {
             oneshot_args: Vec::new(),
             oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
-            forward_scroll: false,
+            forward_scroll: None,
         }
     }
 }
@@ -529,7 +539,7 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
                 ],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://claude.ai/install.sh | bash".to_string()),
-                forward_scroll: false,
+                forward_scroll: None,
             },
         ),
         (
@@ -551,7 +561,7 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
                 ],
                 oneshot_output: OneshotOutput::Tempfile,
                 install_hint: Some("brew install --cask codex".to_string()),
-                forward_scroll: false,
+                forward_scroll: None,
             },
         ),
         (
@@ -564,7 +574,7 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
                 oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("brew install gemini-cli".to_string()),
-                forward_scroll: false,
+                forward_scroll: None,
             },
         ),
         (
@@ -577,7 +587,7 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
                 oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://opencode.ai/install | bash".to_string()),
-                forward_scroll: true,
+                forward_scroll: None,
             },
         ),
         (
@@ -598,7 +608,7 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5]
                 ],
                 oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://gh.io/copilot-install | bash".to_string()),
-                forward_scroll: false,
+                forward_scroll: None,
             },
         ),
     ]
