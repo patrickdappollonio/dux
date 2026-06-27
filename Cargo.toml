@@ -48,10 +48,6 @@ rustls-acme = { version = "0.15", default-features = false, features = ["tokio",
 # shutdown. 0.8 targets axum 0.8.
 axum-server = "0.8"
 
-[patch.crates-io]
-# Vendored vt100 0.16.2 with a one-line scrollback fix (see third_party/vt100/PATCH.md).
-vt100 = { path = "third_party/vt100" }
-
 [profile.release]
 opt-level = "z"   # Optimize for size.
 lto = true        # Enable link time optimization.
