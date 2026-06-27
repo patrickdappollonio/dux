@@ -38,6 +38,15 @@ be added. See [Custom CLI Agents](/docs/custom-agents).
 Add a `[providers.<name>]` block to your config; no adapters, no protocol layer.
 See [Custom CLI Agents](/docs/custom-agents).
 
+### The mouse wheel or PgUp won't scroll an agent. Why?
+
+Full-screen agents (Claude Code's full-screen renderer, OpenCode) scroll
+themselves, so dux forwards the wheel and `PgUp`/`PgDn` to them and keeps its
+own scrollback for everyone else, detected automatically. An explicit
+`forward_scroll = true`/`false` in a `[providers.<name>]` block overrides that
+detection; delete the line to return to auto-detect. See
+[Custom CLI Agents](/docs/custom-agents).
+
 ### Can I start an agent from a GitHub PR?
 
 Yes, when the `gh` CLI is installed and authenticated. See
