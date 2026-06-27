@@ -16,7 +16,7 @@ Oh, and it's fast and consumes low resources: more RAM is left for Claude, Codex
 
 Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Open companion terminals next to your agents for builds, tests, or just poking around.
 
-Every agent runs through a PTY, the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Gemini, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, and permission dialogs all work. We don't mess with your setup.
+Every agent runs through a PTY, the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Copilot, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, and permission dialogs all work. We don't mess with your setup.
 
 ## Install
 
@@ -86,7 +86,7 @@ Tab between panes. Resize them with keyboard or mouse. Collapse the sidebar or g
 
 ### Bring Any CLI
 
-Any terminal command can be a provider. The four defaults (Claude, Codex, Gemini, and OpenCode) are pre-configured, but adding your own is a config-only change:
+Any terminal command can be a provider. The four defaults (Claude, Codex, Copilot, and OpenCode) are pre-configured, but adding your own is a config-only change:
 
 ```toml
 [providers.my-agent]

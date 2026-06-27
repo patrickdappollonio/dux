@@ -887,7 +887,7 @@ mod tests {
         let vm = engine.view_model();
 
         // A default Config configures these four providers.
-        for provider in ["claude", "codex", "gemini", "opencode"] {
+        for provider in ["claude", "codex", "copilot", "opencode"] {
             assert!(
                 vm.available_providers.iter().any(|p| p == provider),
                 "available_providers should contain {provider}: {:?}",

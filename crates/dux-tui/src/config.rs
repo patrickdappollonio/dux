@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use toml_edit::{DocumentMut, Item, Value};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::keybindings;
 
@@ -23,8 +23,10 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
-    if apply_config_deprecations(&mut doc)? {
-        // blessed sync-direct: deprecation migration also runs at boot before the queue exists
+    let deprecations_changed = apply_config_deprecations(&mut doc)?;
+    let retired_changed = prune_retired_providers(&mut doc);
+    if deprecations_changed || retired_changed {
+        // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
         dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
     }
@@ -126,6 +128,99 @@ fn apply_config_deprecations_with(
         changed = true;
     }
     Ok(changed)
+}
+
+// ---------------------------------------------------------------------------
+// Retired providers
+//
+// A retired provider once shipped as a default but no longer does. It is no
+// longer rendered into new configs and no longer re-added by
+// `ProvidersConfig::ensure_defaults`. So existing users do not keep a dead
+// stock block forever, an untouched stock block is pruned from their config on
+// load. A user who customized the block (or added one back later) keeps it —
+// config wins for explicit preferences.
+// ---------------------------------------------------------------------------
+
+/// The retired providers and the exact stock block dux shipped for each, so an
+/// untouched stock block can be recognized and removed while a user-customized
+/// block of the same name is preserved.
+fn retired_providers() -> [(&'static str, ProviderCommandConfig); 1] {
+    [("gemini", retired_stock_gemini())]
+}
+
+/// The exact `[providers.gemini]` block dux shipped before Gemini was retired
+/// (Google deprecated the Gemini CLI in favor of Antigravity). Used to
+/// recognize an untouched stock block so it can be pruned from existing
+/// configs.
+fn retired_stock_gemini() -> ProviderCommandConfig {
+    ProviderCommandConfig {
+        command: "gemini".to_string(),
+        args: Vec::new(),
+        resume_args: Some(vec!["--resume".to_string()]),
+        resume_wait_timeout_ms: None,
+        oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
+        oneshot_output: OneshotOutput::Stdout,
+        install_hint: Some("brew install gemini-cli".to_string()),
+        forward_scroll: None,
+    }
+}
+
+/// Remove `[providers.<name>]` tables for retired providers when they still
+/// match the stock block dux shipped. A customized block (or one a user adds
+/// back later) does not match and is left untouched. Returns whether the
+/// document changed.
+fn prune_retired_providers(doc: &mut DocumentMut) -> bool {
+    let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for (name, stock) in retired_providers() {
+        let matches = providers
+            .get(name)
+            .and_then(Item::as_table)
+            .is_some_and(|table| table_matches_provider_config(table, &stock));
+        if matches {
+            providers.remove(name);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Parse a `[providers.<name>]` table (as it appears in config.toml) into a
+/// `ProviderCommandConfig`. Wrapping the table in a standalone document avoids
+/// any ambiguity about table headers when serializing it back to a string.
+fn provider_table_config(table: &Table) -> Option<ProviderCommandConfig> {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        provider: ProviderCommandConfig,
+    }
+    let mut doc = DocumentMut::new();
+    doc.insert("provider", Item::Table(table.clone()));
+    toml::from_str::<Wrapper>(&doc.to_string())
+        .ok()
+        .map(|wrapper| wrapper.provider)
+}
+
+/// The stock block as it round-trips through the renderer dux uses to write
+/// configs. Going through render-then-parse normalizes fields the renderer
+/// materializes (e.g. an absent `resume_wait_timeout_ms` is written as `0`),
+/// so the comparison reflects exactly what dux wrote into existing configs.
+fn canonical_stock_config(stock: &ProviderCommandConfig) -> Option<ProviderCommandConfig> {
+    let mut rendered = String::new();
+    render_provider_config(&mut rendered, "probe", stock);
+    let doc: DocumentMut = rendered.parse().ok()?;
+    let table = doc.get("providers")?.get("probe")?.as_table()?;
+    provider_table_config(table)
+}
+
+/// Whether a config's provider table is the stock block dux shipped (so it can
+/// be retired), as opposed to one the user customized (which is preserved).
+fn table_matches_provider_config(table: &Table, stock: &ProviderCommandConfig) -> bool {
+    match (provider_table_config(table), canonical_stock_config(stock)) {
+        (Some(user), Some(canonical)) => user == canonical,
+        _ => false,
+    }
 }
 
 fn migrate_prompt_for_name(
@@ -1994,14 +2089,63 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn default_gemini_oneshot_uses_prompt_flag() {
+    fn default_provider_commands_excludes_retired_gemini() {
         let providers = default_provider_commands();
-        let gemini = providers.iter().find(|(n, _)| *n == "gemini").unwrap();
-        let cfg = &gemini.1;
-        assert_eq!(cfg.command, "gemini");
-        assert_eq!(cfg.oneshot_args, vec!["-p", "{prompt}"]);
-        assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
-        assert!(cfg.resume_args.is_some());
+        assert_eq!(providers.len(), 4, "four providers ship as defaults");
+        assert!(
+            providers.iter().all(|(name, _)| *name != "gemini"),
+            "gemini was retired and must not ship as a default provider"
+        );
+    }
+
+    #[test]
+    fn prune_retired_providers_removes_stock_gemini_block() {
+        // Render the stock gemini block with the real renderer (exactly how dux
+        // wrote it into existing configs), then confirm the migration prunes it.
+        let mut providers = ProvidersConfig::default();
+        providers
+            .commands
+            .insert("gemini".to_string(), retired_stock_gemini());
+        let mut rendered = String::new();
+        render_provider_configs(&mut rendered, &providers);
+        let mut doc: DocumentMut = rendered.parse().expect("parse rendered providers");
+        assert!(
+            doc["providers"].get("gemini").is_some(),
+            "precondition: the rendered config carries a gemini block"
+        );
+
+        let changed = prune_retired_providers(&mut doc);
+
+        assert!(changed, "stock gemini block should be pruned");
+        assert!(
+            doc["providers"].get("gemini").is_none(),
+            "stock gemini table should be removed from [providers]"
+        );
+        assert!(
+            doc["providers"].get("claude").is_some(),
+            "other provider tables must be left intact"
+        );
+    }
+
+    #[test]
+    fn prune_retired_providers_keeps_customized_gemini_block() {
+        // A user who points gemini at their own command keeps it (config wins).
+        let mut doc: DocumentMut = r#"
+[providers.gemini]
+command = "my-gemini-wrapper"
+oneshot_args = ["-p", "{prompt}"]
+oneshot_output = "stdout"
+"#
+        .parse()
+        .expect("parse doc");
+
+        let changed = prune_retired_providers(&mut doc);
+
+        assert!(!changed, "a customized gemini block must not be pruned");
+        assert!(
+            doc["providers"].get("gemini").is_some(),
+            "a customized gemini block must be preserved"
+        );
     }
 
     #[test]
@@ -2020,7 +2164,7 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn ensure_defaults_adds_opencode_and_gemini() {
+    fn ensure_defaults_adds_opencode_and_copilot_but_not_retired_gemini() {
         let mut providers = ProvidersConfig {
             commands: indexmap::IndexMap::from([(
                 "claude".to_string(),
@@ -2043,14 +2187,16 @@ oneshot_output = "stdout"
             providers.get("opencode").is_some(),
             "opencode should be added"
         );
-        assert!(providers.get("gemini").is_some(), "gemini should be added");
+        assert!(
+            providers.get("gemini").is_none(),
+            "gemini was retired and must not be re-added as a default"
+        );
         assert!(providers.get("codex").is_some(), "codex should be added");
         assert!(
             providers.get("copilot").is_some(),
             "copilot should be added"
         );
         assert_eq!(providers.get("opencode").unwrap().command, "opencode");
-        assert_eq!(providers.get("gemini").unwrap().command, "gemini");
         assert_eq!(providers.get("copilot").unwrap().command, "copilot");
     }
 
@@ -2400,6 +2546,48 @@ args = [\"-l\"]
         assert_eq!(
             mode, 0o600,
             "first-created config must be 0600, got {mode:o}"
+        );
+    }
+
+    #[test]
+    fn ensure_config_prunes_stock_gemini_from_existing_config() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path().to_path_buf();
+        let paths = dux_core::config::DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            lock_path: root.join("dux.lock"),
+            worktrees_root: root.join("worktrees"),
+            root,
+        };
+
+        // Seed an existing config that still ships the stock gemini provider,
+        // rendered exactly as dux would have written it.
+        let mut body = render_default_config();
+        render_provider_config(&mut body, "gemini", &retired_stock_gemini());
+        fs::write(&paths.config_path, &body).expect("seed config");
+        assert!(
+            fs::read_to_string(&paths.config_path)
+                .unwrap()
+                .contains("[providers.gemini]"),
+            "precondition: the seeded config carries a gemini block"
+        );
+
+        let config = ensure_config(&paths).expect("ensure");
+
+        // The pruned block must be gone from disk and not re-added in memory.
+        let saved = fs::read_to_string(&paths.config_path).expect("read");
+        assert!(
+            !saved.contains("[providers.gemini]"),
+            "stock gemini block should be pruned from the persisted config: {saved}"
+        );
+        assert!(
+            config.providers.get("gemini").is_none(),
+            "gemini must not be re-added as a default after pruning"
+        );
+        assert!(
+            config.providers.get("claude").is_some(),
+            "other providers must survive the prune"
         );
     }
 }

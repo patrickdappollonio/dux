@@ -11046,8 +11046,8 @@ cyan = "#00ffff"
                 prompt.selected = prompt
                     .options
                     .iter()
-                    .position(|option| option.provider.as_str() == "gemini")
-                    .expect("gemini option");
+                    .position(|option| option.provider.as_str() == "opencode")
+                    .expect("opencode option");
             }
             other => panic!("expected change-agent-provider prompt, got {other:?}"),
         }
@@ -11058,7 +11058,7 @@ cyan = "#00ffff"
         // Exactly one session still exists; its provider was mutated in place.
         assert_eq!(app.engine.sessions.len(), 1);
         assert_eq!(app.engine.sessions[0].id, original_session_id);
-        assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "opencode");
         assert_eq!(app.engine.sessions[0].worktree_path, original_worktree);
         assert!(matches!(app.prompt, PromptState::None));
 
@@ -11068,9 +11068,9 @@ cyan = "#00ffff"
             .load_sessions()
             .expect("load sessions");
         assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].provider.as_str(), "gemini");
+        assert_eq!(persisted[0].provider.as_str(), "opencode");
 
-        assert!(app.status.text().contains("will use gemini next launch"));
+        assert!(app.status.text().contains("will use opencode next launch"));
     }
 
     #[test]
@@ -11106,8 +11106,8 @@ cyan = "#00ffff"
                 prompt.selected = prompt
                     .options
                     .iter()
-                    .position(|option| option.provider.as_str() == "gemini")
-                    .expect("gemini option");
+                    .position(|option| option.provider.as_str() == "opencode")
+                    .expect("opencode option");
             }
             other => panic!("expected change-agent-provider prompt, got {other:?}"),
         }
@@ -11117,13 +11117,13 @@ cyan = "#00ffff"
 
         // Provider is swapped now; the warning just tells the user the running
         // PTY hasn't caught up yet.
-        assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "opencode");
         let persisted = app
             .engine
             .session_store
             .load_sessions()
             .expect("load sessions");
-        assert_eq!(persisted[0].provider.as_str(), "gemini");
+        assert_eq!(persisted[0].provider.as_str(), "opencode");
         assert!(
             app.engine.providers.contains_key(&session_id),
             "the old PTY keeps running until the user exits it"
@@ -11135,7 +11135,7 @@ cyan = "#00ffff"
         );
         let message = app.status.message().to_string();
         assert!(
-            message.contains("still running") && message.contains("gemini"),
+            message.contains("still running") && message.contains("opencode"),
             "status should explain the agent still runs the old provider, got: {message}"
         );
         assert!(matches!(app.prompt, PromptState::None));
@@ -14875,16 +14875,16 @@ cyan = "#00ffff"
                 prompt.selected = prompt
                     .options
                     .iter()
-                    .position(|option| option.provider.as_str() == "gemini")
-                    .expect("gemini option");
+                    .position(|option| option.provider.as_str() == "opencode")
+                    .expect("opencode option");
             }
             other => panic!("expected picker, got {other:?}"),
         }
         app.apply_change_agent_provider().expect("apply swap");
 
-        // session.provider is now gemini, but the PTY is still running codex;
+        // session.provider is now opencode, but the PTY is still running codex;
         // running_provider_for should reflect that.
-        assert_eq!(app.engine.sessions[0].provider.as_str(), "gemini");
+        assert_eq!(app.engine.sessions[0].provider.as_str(), "opencode");
         assert_eq!(
             app.engine
                 .running_provider_for(&app.engine.sessions[0])
@@ -14909,24 +14909,24 @@ cyan = "#00ffff"
             "pane title should still say Codex (running) after the swap, got: {rendered}"
         );
         assert!(
-            !rendered.contains("Gemini agent"),
-            "pane title should NOT claim Gemini is running yet, got: {rendered}"
+            !rendered.contains("Opencode agent"),
+            "pane title should NOT claim Opencode is running yet, got: {rendered}"
         );
 
         // Sidebar entry should show the running → queued transition.
         assert!(
-            rendered.contains("(codex → gemini)"),
+            rendered.contains("(codex → opencode)"),
             "sidebar should show running provider → next provider, got: {rendered}"
         );
 
-        // Tearing down the PTY clears the pin — the next launch will be gemini.
+        // Tearing down the PTY clears the pin — the next launch will be opencode.
         app.engine.providers.remove(&session_id);
         app.engine.running_provider_pins.remove(&session_id);
         assert_eq!(
             app.engine
                 .running_provider_for(&app.engine.sessions[0])
                 .as_str(),
-            "gemini"
+            "opencode"
         );
 
         // After the PTY is gone, the sidebar collapses back to a single label.
@@ -14943,8 +14943,8 @@ cyan = "#00ffff"
             .map(|cell| cell.symbol())
             .collect();
         assert!(
-            rendered.contains("(gemini)"),
-            "sidebar should collapse to plain (gemini) after the PTY exits, got: {rendered}"
+            rendered.contains("(opencode)"),
+            "sidebar should collapse to plain (opencode) after the PTY exits, got: {rendered}"
         );
         assert!(
             !rendered.contains("→"),

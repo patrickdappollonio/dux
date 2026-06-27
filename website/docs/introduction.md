@@ -6,7 +6,7 @@ order: 1
 ---
 
 `dux` is a terminal UI for running multiple AI coding agents in parallel, one git
-worktree each. It spawns the real CLI for each agent (Claude Code, Codex, Gemini,
+worktree each. It spawns the real CLI for each agent (Claude Code, Codex, Copilot,
 OpenCode, or anything else you can run in a terminal) inside an embedded
 pseudo-terminal. No protocol layer, no adapters, no JSON-RPC. Just the tools you
 already use, side by side, each in its own branch.
@@ -20,7 +20,7 @@ dux has three nouns. Once they click, the whole app makes sense.
 - **Agents** are sessions running inside a project. Each agent gets its own git
   worktree on its own branch, so two agents working on the same repo never step on
   each other.
-- **Providers** are the CLIs that power agents. Claude, Codex, OpenCode, and Gemini
+- **Providers** are the CLIs that power agents. Claude, Codex, OpenCode, and Copilot
   ship configured out of the box, and you can wire up any other command yourself.
 
 The flow is: add a project, spin up an agent, pick a provider. dux creates the
