@@ -40,9 +40,10 @@ See [Custom CLI Agents](/docs/custom-agents).
 
 ### The mouse wheel or PgUp won't scroll an agent. Why?
 
-Full-screen agents (Claude Code's full-screen renderer, OpenCode) scroll
-themselves, so dux forwards the wheel and `PgUp`/`PgDn` to them and keeps its
-own scrollback for everyone else, detected automatically. An explicit
+Some agents take over the whole screen and scroll their own content. A good
+recent example is Claude Code's new full-screen renderer (OpenCode works the
+same way): dux detects this and forwards the wheel and `PgUp`/`PgDn` to the
+agent, while keeping its own scrollback for agents that don't. An explicit
 `forward_scroll = true`/`false` in a `[providers.<name>]` block overrides that
 detection; delete the line to return to auto-detect. See
 [Custom CLI Agents](/docs/custom-agents).
