@@ -12,8 +12,15 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
 import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
-import { selectSession, socket, useDux } from "@/lib/store"
+import { selectSession, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
+import {
+  PtySocket,
+  agentPtyUrl,
+  getActivePtySocket,
+  setActivePtySocket,
+  terminalPtyUrl,
+} from "@/lib/ptySocket"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
@@ -22,6 +29,11 @@ interface TerminalPaneProps {
   // `id` is the session id for an agent and the terminal id for a terminal.
   kind: "agent" | "terminal"
   id: string
+  // The owning session id. Equal to `id` for an agent; the parent session for a
+  // companion terminal. Used to build the nested PTY socket URL and the macro
+  // target, so it is passed explicitly (the spine may not yet list a just-created
+  // terminal when this pane first mounts).
+  sessionId: string
 }
 
 // The Keyboard Lock API (Chromium-only): while the pane is fullscreen it lets
@@ -45,7 +57,7 @@ function unlockKeyboard(): void {
   keyboard?.unlock?.()
 }
 
-export function TerminalPane({ kind, id }: TerminalPaneProps) {
+export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // The padded, background-painted host. Padding must live HERE — one layer
   // OUTSIDE the element xterm opens into — because FitAddon measures the open
   // target's parent via getComputedStyle().height, which under Tailwind's
@@ -63,6 +75,10 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   // visible in fullscreen — fullscreening the pane alone would crop it out.
   const fullscreenRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  // The dedicated PTY socket for the focused target. Created in the wiring effect
+  // and read by the accessory-bar key handlers (defined at component scope) so
+  // they send stdin to the same socket xterm's `onData` does.
+  const ptyRef = useRef<PtySocket | null>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const isMobile = useIsMobile()
   // Visual-viewport height so a FULLSCREEN terminal can keep its content above
@@ -90,21 +106,21 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     setAlt(next.alt)
   }
 
-  const { viewModel } = useDux()
-  // Size xterm's scrollback to the configured `agent_scrollback_lines` so the
-  // reconnect repaint's replayed history isn't trimmed by xterm's 1000-line
-  // default. Read via a ref (not an effect dep) so a ViewModel change never
-  // recreates the terminal; the fallback matches the core default and only
-  // applies before the first ViewModel arrives.
+  const { spine, bootstrap } = useDux()
+  // Size xterm's scrollback to the configured `agent_scrollback_lines` (now from
+  // the bootstrap document) so the reconnect repaint's replayed history isn't
+  // trimmed by xterm's 1000-line default. Read via a ref (not an effect dep) so
+  // a bootstrap change never recreates the terminal; the fallback matches the
+  // core default and only applies before the first bootstrap fetch lands.
   const scrollbackRef = useRef(
-    viewModel?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+    bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
   )
   scrollbackRef.current =
-    viewModel?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+    bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
   const session =
     kind === "agent"
-      ? viewModel?.sessions.find((s) => s.id === id)
-      : viewModel?.sessions.find((s) => s.terminals.some((t) => t.id === id))
+      ? spine?.sessions.find((s) => s.id === id)
+      : spine?.sessions.find((s) => s.terminals.some((t) => t.id === id))
   const hasOutput =
     kind === "agent"
       ? (session?.has_output ?? false)
@@ -119,7 +135,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   const macroTarget: SelectedTarget =
     kind === "agent"
       ? { kind: "agent", sessionId: id }
-      : { kind: "terminal", terminalId: id, sessionId: session?.id ?? id }
+      : { kind: "terminal", terminalId: id, sessionId }
   // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
   // even if a later view model reports `has_output: false` (e.g. an exited
   // agent). Adjusting state during render is the React-sanctioned latch pattern
@@ -128,6 +144,12 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
   if (hasOutput && !everReady) {
     setEverReady(true)
   }
+  // True while the PTY socket has dropped and is retrying (non-blocking). Drives a
+  // "Reconnecting…" overlay that re-arms even after `everReady` has latched, so a
+  // mid-session disconnect is visible rather than the terminal silently freezing.
+  // Cleared on the next (re)open. Input typed while disconnected is dropped by the
+  // socket's readyState guard; this overlay is the signal that it would be.
+  const [reconnecting, setReconnecting] = useState(false)
 
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
@@ -209,8 +231,17 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     fit.fit()
     termRef.current = term
 
-    // The PTY byte feed is wired further down (after the sizing state exists), so
-    // the first-frame handler can resize once the reconnect repaint has rendered.
+    // The dedicated PTY socket for THIS target: the agent's main provider PTY, or
+    // a companion terminal's PTY (nested under its owning session). Opening it IS
+    // the subscription — connecting an agent socket launches/resumes the provider,
+    // exactly as the legacy `Subscribe` did. Registered as the active socket so the
+    // macro picker can write to it; cleared on unmount. The byte feed and the
+    // first-frame resize are wired further down (after the sizing state exists).
+    const pty = new PtySocket(
+      kind === "agent" ? agentPtyUrl(id) : terminalPtyUrl(sessionId, id),
+    )
+    ptyRef.current = pty
+    setActivePtySocket(pty)
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
     // the accessory bar transform a single typed char (Ctrl-chord, Alt/Meta
@@ -226,17 +257,8 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       if (mods.ctrl || mods.alt) {
         setMods({ ctrl: false, alt: false })
       }
-      socket.sendInput(encoder.encode(out))
+      pty.sendInput(encoder.encode(out))
     })
-
-    // Subscribe to the selected target's PTY. The server tracks the currently
-    // subscribed id (agent session OR terminal) and routes input to it, so the
-    // rest of the wiring is identical for both kinds.
-    if (kind === "terminal") {
-      socket.subscribeTerminal(id)
-    } else {
-      socket.subscribe(id)
-    }
 
     // Focus the terminal on selection so the user can type immediately — no extra
     // click into the pane. This effect re-runs (and the pane remounts) on every
@@ -350,7 +372,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       if (term.rows !== lastRows || term.cols !== lastCols) {
         lastRows = term.rows
         lastCols = term.cols
-        socket.resize(id, term.rows, term.cols)
+        pty.sendResize(term.rows, term.cols)
       }
     }
     // Local fit so the canvas matches this viewport right away, and seed
@@ -361,18 +383,20 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     lastRows = term.rows
     lastCols = term.cols
 
-    // Defer the initial PTY resize until the FIRST PTY frame after (re)subscribe
-    // has fully rendered. That frame is the server's reconnect repaint: a STATIC
-    // snapshot taken at the PTY's current size, which can differ from this
-    // viewport. Resizing too early (before the repaint has even arrived over the
-    // wire, or mid-render) races a half-painted buffer and leaves the cursor and
-    // the bottom-anchored agent prompt in the wrong rows; only a later real
-    // resize fixed it. xterm's write callback fires once that frame is parsed, so
-    // we fit + resize right after it lands and the agent's SIGWINCH redraw then
-    // cleanly replaces the snapshot at our true size. The repaint is sent as a
-    // single binary frame, so the first chunk is the whole paint. A fallback
-    // timer covers a session that emits no first frame (e.g. an idle freshly
-    // launched agent) so its PTY still gets sized.
+    // Defer the initial PTY resize until the FIRST PTY frame after each (re)open
+    // has fully rendered. That frame is the server's repaint: a STATIC snapshot
+    // taken at the PTY's current size, which can differ from this viewport.
+    // Resizing too early (before the repaint has even arrived over the wire, or
+    // mid-render) races a half-painted buffer and leaves the cursor and the
+    // bottom-anchored agent prompt in the wrong rows; only a later real resize
+    // fixed it. xterm's write callback fires once that frame is parsed, so we fit
+    // + resize right after it lands and the agent's SIGWINCH redraw then cleanly
+    // replaces the snapshot at our true size. The repaint is sent as a single
+    // binary frame, so the first chunk is the whole paint. A fallback timer covers
+    // a session that emits no first frame (e.g. an idle freshly launched agent) so
+    // its PTY still gets sized. The dedicated socket auto-reconnects, and the
+    // server replays the repaint as the first binary frame on EVERY (re)open, so
+    // `pty.onOpen` re-arms this guard to re-fit/resize after a reconnect too.
     let initialResizeDone = false
     let jiggleTimer: ReturnType<typeof setTimeout> | undefined
     const sendInitialResize = () => {
@@ -390,23 +414,55 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       // winsize change, so the kernel raises SIGWINCH and the agent redraws its
       // true UI, ending at the correct size. This automates the manual
       // divider-nudge that reliably fixed it.
-      socket.resize(id, term.rows, Math.max(1, term.cols - 1))
+      pty.sendResize(term.rows, Math.max(1, term.cols - 1))
       jiggleTimer = setTimeout(() => {
-        socket.resize(id, term.rows, term.cols)
+        pty.sendResize(term.rows, term.cols)
       }, 60)
     }
-    socket.onPtyBytes = (bytes) => {
+    // On a RECONNECT the server replays the FULL scrollback as the first binary
+    // frame. xterm still holds the buffer from before the drop, so writing the
+    // replay on top would stack a second copy of history (duplicated/garbled
+    // output). Reset xterm before that first reconnect frame so the replay
+    // rebuilds the buffer cleanly. The very FIRST open starts from an empty buffer
+    // (a fresh terminal), so it needs no reset — only opens after the first do.
+    let firstOpen = true
+    let resetBeforeNextFrame = false
+    pty.onBytes((bytes) => {
+      if (resetBeforeNextFrame) {
+        resetBeforeNextFrame = false
+        term.reset()
+      }
       if (!initialResizeDone) {
         // Resize only once xterm has parsed this first frame (the repaint).
         term.write(bytes, sendInitialResize)
       } else {
         term.write(bytes)
       }
+    })
+    // On every (re)open the server replays a fresh repaint as the first binary
+    // frame; re-arm the first-frame resize so a reconnect re-fits and re-asserts
+    // this viewport's size (the same handling the very first open gets). A
+    // reconnect (any open after the first) also arms the buffer reset above so the
+    // replayed scrollback replaces, rather than stacks on, the stale buffer.
+    pty.onOpen = () => {
+      initialResizeDone = false
+      setReconnecting(false)
+      if (firstOpen) {
+        firstOpen = false
+      } else {
+        resetBeforeNextFrame = true
+      }
+    }
+    // The socket dropped and is retrying: surface the non-blocking reconnect state.
+    pty.onReconnecting = () => {
+      setReconnecting(true)
     }
     // Fallback for a session that emits no first frame (e.g. an idle freshly
     // launched agent): size its PTY anyway. If the first frame arrives first,
     // the `initialResizeDone` guard makes this a no-op.
     const initialResizeFallback = setTimeout(sendInitialResize, 250)
+    // Open the socket now that the byte feed and first-frame handling are wired.
+    pty.connect()
 
     // (A background tab throttles rAF but not timers, so a resize received
     // while hidden refits late or not at all and its debounced send dedupes to
@@ -451,7 +507,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
           fit.fit()
           lastRows = term.rows
           lastCols = term.cols
-          socket.resize(id, term.rows, term.cols)
+          pty.sendResize(term.rows, term.cols)
         })
       }, 150)
     }
@@ -473,11 +529,18 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
       document.removeEventListener("visibilitychange", resyncToForeground)
       window.removeEventListener("focus", resyncToForeground)
       dataSub.dispose()
-      socket.onPtyBytes = () => {}
+      // Close this target's PTY socket (user-initiated: no reconnect) and clear
+      // the active-socket registration ONLY if it still points at this one. A
+      // focus switch swaps panes; whichever order React runs old-cleanup vs
+      // new-effect, the guard ensures we never null out the incoming pane's
+      // registration (it has already replaced ours by the time we'd clear it).
+      pty.close()
+      if (ptyRef.current === pty) ptyRef.current = null
+      if (getActivePtySocket() === pty) setActivePtySocket(null)
       termRef.current = null
       term.dispose()
     }
-  }, [kind, id])
+  }, [kind, id, sessionId])
 
   // Track fullscreen state for this pane and release the keyboard lock the
   // moment fullscreen ends, however it ends (button, held Esc, tab switch).
@@ -536,7 +599,7 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
     if (mods.ctrl || mods.alt) {
       setMods({ ctrl: false, alt: false })
     }
-    socket.sendInput(encoder.encode(out))
+    ptyRef.current?.sendInput(encoder.encode(out))
     termRef.current?.focus()
   }
 
@@ -670,14 +733,22 @@ export function TerminalPane({ kind, id }: TerminalPaneProps) {
           </Button>
         </SimpleTooltip>
       </div>
-      {!everReady ? (
+      {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
+          never steals input. Shows while the PTY is still starting up (before its
+          first output latches `everReady`) OR whenever the socket has dropped and
+          is reconnecting — the latter re-arms even after `everReady`, so a
+          mid-session disconnect is visible instead of a silently frozen terminal.
+          Reconnect text wins when both apply. */}
+      {!everReady || reconnecting ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <BrailleSpinner className="text-primary" />
             <span className="text-sm text-muted-foreground">
-              {kind === "agent"
-                ? `Starting ${providerName ?? "agent"}…`
-                : "Launching terminal…"}
+              {reconnecting
+                ? "Reconnecting…"
+                : kind === "agent"
+                  ? `Starting ${providerName ?? "agent"}…`
+                  : "Launching terminal…"}
             </span>
           </div>
         </div>

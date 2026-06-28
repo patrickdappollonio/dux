@@ -165,7 +165,37 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "session_prs", "url", "text not null default ''")?;
+        // Per-session monotonic changed-files revision counter (server mode).
+        // Separate from the session record so it is purely housekeeping: a single
+        // chokepoint that hands out a strictly-increasing `rev` per session,
+        // persisted so it survives restarts (never resets to a lower value). The
+        // row is removed when the session is deleted (see `delete_session`).
+        self.conn.execute_batch(
+            r#"
+            create table if not exists changes_rev (
+                session_id text primary key,
+                rev integer not null
+            );
+            "#,
+        )?;
         Ok(())
+    }
+
+    /// Atomically bump and return the next changed-files revision for `session_id`.
+    ///
+    /// First call for a session returns `1`; each subsequent call returns the
+    /// previous value plus one. Implemented as a single upsert with `RETURNING`
+    /// (supported by the bundled SQLite in `rusqlite`) so it is the one chokepoint
+    /// that guarantees a strictly-increasing, persisted `rev` per session — the
+    /// ordering/dedup token web clients apply to changed-files GETs and events.
+    pub fn next_changes_rev(&self, session_id: &str) -> rusqlite::Result<u64> {
+        let rev: i64 = self.conn.query_row(
+            "insert into changes_rev(session_id, rev) values(?1, 1) \
+             on conflict(session_id) do update set rev = rev + 1 returning rev",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(rev as u64)
     }
 
     /// Insert or update a project. If a project with the same path already
@@ -397,6 +427,14 @@ impl SessionStore {
         };
         tx.execute(
             "delete from session_prs where session_id in \
+             (select id from agent_sessions where project_id = ?1)",
+            params![project_id],
+        )?;
+        // Drop the per-session changed-files rev counters BEFORE the sessions
+        // themselves (the subquery resolves the ids while the rows still exist),
+        // so a project removal cannot leave orphaned `changes_rev` rows behind.
+        tx.execute(
+            "delete from changes_rev where session_id in \
              (select id from agent_sessions where project_id = ?1)",
             params![project_id],
         )?;
@@ -702,6 +740,10 @@ impl SessionStore {
         // the rows explicitly to avoid leaking orphaned PR records.
         self.conn
             .execute("delete from session_prs where session_id = ?1", params![id])?;
+        // Drop the per-session changed-files revision counter too, so a deleted
+        // session leaves no housekeeping rows behind.
+        self.conn
+            .execute("delete from changes_rev where session_id = ?1", params![id])?;
         self.conn
             .execute("delete from agent_sessions where id = ?1", params![id])?;
         Ok(())
@@ -837,6 +879,46 @@ mod tests {
     }
 
     #[test]
+    fn next_changes_rev_increments_and_persists_across_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+
+        // First run: the counter starts at 1 and strictly increases per session,
+        // independently per session id.
+        {
+            let store = SessionStore::open(&db).unwrap();
+            assert_eq!(store.next_changes_rev("s1").unwrap(), 1);
+            assert_eq!(store.next_changes_rev("s1").unwrap(), 2);
+            assert_eq!(store.next_changes_rev("s1").unwrap(), 3);
+            // A different session has its own independent counter.
+            assert_eq!(store.next_changes_rev("s2").unwrap(), 1);
+        }
+
+        // Reopen the SAME database file: the counter continues from its last
+        // value rather than resetting (persisted, monotonic across restarts).
+        {
+            let store = SessionStore::open(&db).unwrap();
+            assert_eq!(store.next_changes_rev("s1").unwrap(), 4);
+            assert_eq!(store.next_changes_rev("s2").unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn delete_session_removes_its_changes_rev_row() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        assert_eq!(store.next_changes_rev("s1").unwrap(), 1);
+        assert_eq!(store.next_changes_rev("s1").unwrap(), 2);
+
+        store.delete_session("s1").unwrap();
+
+        // The counter row was dropped, so a fresh session reusing the id starts
+        // back at 1 rather than continuing the deleted session's sequence.
+        assert_eq!(store.next_changes_rev("s1").unwrap(), 1);
+    }
+
+    #[test]
     fn delete_session_also_removes_its_pr_rows() {
         let store = test_store();
         let now = Utc::now();
@@ -888,6 +970,10 @@ mod tests {
             .upsert_session(&test_session_in("c", "p2", now, now))
             .unwrap();
         store.upsert_pr(&stored_pr("a", 1)).unwrap();
+        // Advance a changed-files rev for one of p1's sessions so there is a
+        // `changes_rev` row to prove the bulk removal drops it too.
+        assert_eq!(store.next_changes_rev("a").unwrap(), 1);
+        assert_eq!(store.next_changes_rev("a").unwrap(), 2);
 
         let removed = store.remove_project_records("p1").unwrap();
 
@@ -912,6 +998,9 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(project_ids, vec!["p2".to_string()]);
+        // The deleted session's changes_rev row is gone: a fresh session reusing
+        // the id starts back at 1 rather than continuing the deleted sequence.
+        assert_eq!(store.next_changes_rev("a").unwrap(), 1);
     }
 
     #[test]

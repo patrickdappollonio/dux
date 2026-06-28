@@ -416,6 +416,14 @@ pub struct PtyClient {
     /// Live raw-byte subscribers (web clients). Each receives a clone of every
     /// chunk read from the PTY, independent of TUI scrollback pause. Senders
     /// that have hung up are pruned by the reader loop.
+    ///
+    /// Pruning is reactive: a hung-up `Sender` is only dropped on the next chunk
+    /// read from the PTY (`retain` in the reader loop). The web forwarder's
+    /// `tx.is_closed()` poll bounds the stale-`Sender` window to one output cycle,
+    /// so against a quiet PTY a closed subscriber lingers harmlessly until the next
+    /// byte arrives. A fully-proactive RAII unsubscribe (a guard that removes its
+    /// `Sender` on drop) would prune immediately regardless of PTY traffic; it is a
+    /// deferred future hardening, not required for correctness given the poll above.
     subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>>,
     /// Handle to the background reader thread. Joined in `Drop` (after the
     /// child is killed and reaped) so the thread does not outlive the client.

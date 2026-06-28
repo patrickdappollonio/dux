@@ -80,7 +80,7 @@ describe("resolveWorktreeRelative", () => {
 describe("markdownAssetUrl", () => {
   it("builds an auth-gated proxy URL with encoded params for a relative asset", () => {
     expect(markdownAssetUrl("s 1", "docs/guide.md", "img/a b.png")).toBe(
-      "/api/file/raw?session_id=s%201&path=docs%2Fimg%2Fa%20b.png",
+      "/api/v1/file/raw?session_id=s%201&path=docs%2Fimg%2Fa%20b.png",
     )
   })
 

@@ -1638,6 +1638,7 @@ impl App {
             watched_worktree: Arc::clone(&watched_worktree),
             watched_session_id: None,
             has_active_processes,
+            current_origin: dux_core::statusline::StatusScope::All,
             in_flight: HashSet::new(),
             pr_last_checked: HashMap::new(),
             changed_files_poller_started: AtomicBool::new(false),
@@ -1652,6 +1653,8 @@ impl App {
             pending_delete_ops_web: HashMap::new(),
             pending_create_ops: HashMap::new(),
             pending_web_launch_ops: HashMap::new(),
+            last_created_op_id: None,
+            created_session_by_op: HashMap::new(),
         };
         Self::assemble(
             engine,

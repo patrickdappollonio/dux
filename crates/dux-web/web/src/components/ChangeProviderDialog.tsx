@@ -36,11 +36,15 @@ function ChangeProviderForm({
   const [provider, setProvider] = useState<string>(() => session.provider)
   const label = session.title ?? session.branch_name
 
-  function handleSave() {
-    if (provider !== session.provider) {
-      changeAgentProvider(session.id, provider)
+  async function handleSave() {
+    // No change → just close. Otherwise close only once the change is accepted, so
+    // a rejected/invalid provider keeps the dialog open (error toasted) instead of
+    // dismissing over a change that never applied.
+    if (provider === session.provider) {
+      closeChangeProvider()
+      return
     }
-    closeChangeProvider()
+    if (await changeAgentProvider(session.id, provider)) closeChangeProvider()
   }
 
   return (
@@ -89,12 +93,12 @@ function ChangeProviderForm({
 // Swap which CLI an agent session uses, mirroring the TUI's
 // `change-agent-provider`. The swap is persisted for the NEXT launch — it never
 // kills or relaunches a running agent — so the copy says so. Provider names come
-// from the ViewModel's `available_providers` (the server's configured list), and
+// from the bootstrap document's `available_providers` (the server's configured list), and
 // the server re-validates the choice.
 export function ChangeProviderDialog() {
-  const { changeProviderTarget, viewModel } = useDux()
+  const { changeProviderTarget, spine, bootstrap } = useDux()
   const open = changeProviderTarget !== null
-  const session = viewModel?.sessions.find((s) => s.id === changeProviderTarget)
+  const session = spine?.sessions.find((s) => s.id === changeProviderTarget)
 
   return (
     <Dialog
@@ -106,7 +110,7 @@ export function ChangeProviderDialog() {
       {open && session && (
         <ChangeProviderForm
           session={session}
-          providers={viewModel?.available_providers ?? []}
+          providers={bootstrap?.available_providers ?? []}
         />
       )}
     </Dialog>

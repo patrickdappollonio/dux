@@ -110,7 +110,7 @@ import {
   selectSession,
   selectTerminal,
   setSidebarWidth,
-  socket,
+  toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
@@ -215,10 +215,7 @@ function SessionSubItem({
   }
 
   function handleToggleAutoReopen() {
-    socket.sendCommand("toggle_agent_auto_reopen", {
-      session_id: session.id,
-      enabled: !session.auto_reopen_enabled,
-    })
+    toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)
   }
 
   return (
@@ -718,13 +715,14 @@ function ProjectGroup({
 
 export function AppSidebar() {
   const {
-    viewModel,
+    spine,
+    bootstrap,
     selectedTarget,
     pendingSessionOrder,
     pendingProjectOrder,
   } = useDux()
-  const rawSessions = viewModel?.sessions ?? []
-  const rawProjects = viewModel?.projects ?? []
+  const rawSessions = spine?.sessions ?? []
+  const rawProjects = spine?.projects ?? []
   // Fold any in-flight drag-and-drop overlay over the server order so the rows
   // don't snap back during the ≤50ms round-trip (see `applyPendingOrders`).
   const { projects, sessions } = applyPendingOrders(
@@ -735,7 +733,7 @@ export function AppSidebar() {
   )
 
   const { grouped, withAgents, withoutAgents, realOrder, projectName } =
-    partitionProjects(viewModel?.sidebar, projects, sessions)
+    partitionProjects(spine?.sidebar, projects, sessions)
   // Resolve a project id to its branch-row display (or null when there's
   // nothing to render — empty/unknown branch). Orphan ids (a session whose
   // project is absent) resolve to null, so no stray branch span is emitted.
@@ -754,7 +752,7 @@ export function AppSidebar() {
               <div className="flex flex-1 flex-col gap-0.5 leading-none">
                 <span className="font-semibold">dux</span>
                 <span className="text-sm text-sidebar-foreground/70">
-                  {viewModel?.dux_version}
+                  {bootstrap?.dux_version}
                 </span>
               </div>
             </SidebarMenuButton>

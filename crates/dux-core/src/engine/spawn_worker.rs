@@ -96,7 +96,11 @@ impl Engine {
         //    `process_worker_event` sees busy → completion regardless of how
         //    fast the worker runs.
         let worker_tx = self.worker_tx.clone();
-        if let Some(busy) = spec.busy_status {
+        if let Some(mut busy) = spec.busy_status {
+            // Stamp the command origin so a web operation's busy reaches only the
+            // originating connection. `current_origin` is `All` for the TUI and
+            // every test, so behaviour is unchanged there.
+            busy.scope = self.current_origin.clone();
             let _ = worker_tx.send(WorkerEvent::CommandWorkerStarted(busy));
         }
 
@@ -168,7 +172,12 @@ impl Engine {
         E: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        let pending = op.pending_status();
+        // Stamp the command origin onto the pending busy AND capture it for the
+        // deferred final: by the time the worker completes, `current_origin` has
+        // been reset, so the scope must travel on the `ResolvedFinal`. `All` for
+        // the TUI/tests, so behaviour is unchanged there.
+        let origin = self.current_origin.clone();
+        let pending = op.pending_status().with_scope(origin.clone());
         let key_for_spawn_fail = op.key().to_string();
         let key_for_panic = key_for_spawn_fail.clone();
         let tx = self.worker_tx.clone();
@@ -189,7 +198,8 @@ impl Engine {
                             format!("Worker panicked: {reason}"),
                         )
                     }
-                };
+                }
+                .with_scope(origin);
                 let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
             });
 

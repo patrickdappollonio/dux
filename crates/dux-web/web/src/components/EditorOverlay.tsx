@@ -17,7 +17,6 @@ import {
 import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { FileDiffContents } from "@/lib/fileApi"
-import { shouldShowChangedFiles } from "@/lib/changedFiles"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import { ancestorDirs, buildFileTree } from "@/lib/fileTree"
 import { isLocalAccessHost } from "@/lib/localAccess"
@@ -121,7 +120,7 @@ function EditorBody({
   initialMode,
   closeReqRef,
 }: EditorBodyProps) {
-  const { viewModel } = useDux()
+  const { changes } = useDux()
   const [openPath, setOpenPath] = useState<string | null>(initialPath)
   // "file" shows the editable Monaco buffer; "diff" shows the read-only Monaco
   // DiffEditor (HEAD vs working copy). Toggled in the header.
@@ -201,39 +200,34 @@ function EditorBody({
   // URLs keep the control but disable it with an explanatory tooltip.
   const localAccess = isLocalAccessHost(window.location.hostname)
 
-  // Mark the tree's changed files. Sourced from the (watched) changed-files
-  // broadcast, guarded so a different session's list never leaks in. Stores the
-  // raw git status code per path; FileStatusIcon maps it to an icon + label.
-  const watched = viewModel?.changed_files.watched_session_id ?? null
+  // The changed-files slice, trusted only when it belongs to THIS editor's
+  // session (the editor always operates on the selected session, but a fast
+  // switch could momentarily leave the slice pointed elsewhere).
+  const slice = changes.sessionId === sessionId ? changes : null
+
+  // Mark the tree's changed files from the slice. Stores the raw git status code
+  // per path; FileStatusIcon maps it to an icon + label.
   const changedMap = useMemo(() => {
     const map = new Map<string, string>()
-    if (!shouldShowChangedFiles(watched, sessionId) || !viewModel) return map
-    const { staged, unstaged } = viewModel.changed_files
-    for (const f of [...unstaged, ...staged]) {
+    if (!slice) return map
+    for (const f of [...slice.unstaged, ...slice.staged]) {
       if (!map.has(f.path)) map.set(f.path, f.status)
     }
     return map
-  }, [viewModel, watched, sessionId])
+  }, [slice])
 
-  // A per-file change-signal for the open file from the same broadcast: status +
+  // A per-file change-signal for the open file from the same slice: status +
   // line counts move when the file's content changes (best-effort — an edit that
   // keeps identical +/- counts won't move it). Used ONLY to flag a stale diff, not
   // to key the cache, so it never drives a refetch. Scanning unstaged then staged
   // avoids allocating a combined array on every tick.
   const openFileSignal = useMemo(() => {
-    if (
-      openPath === null ||
-      !viewModel ||
-      !shouldShowChangedFiles(watched, sessionId)
-    ) {
-      return ""
-    }
-    const { staged, unstaged } = viewModel.changed_files
+    if (openPath === null || !slice) return ""
     const f =
-      unstaged.find((x) => x.path === openPath) ??
-      staged.find((x) => x.path === openPath)
+      slice.unstaged.find((x) => x.path === openPath) ??
+      slice.staged.find((x) => x.path === openPath)
     return f ? `${f.status}:${f.additions}:${f.deletions}` : ""
-  }, [openPath, viewModel, watched, sessionId])
+  }, [openPath, slice])
   // The diff is cached per path; ready when the loaded diff is for the open file.
   // While ready, a change-signal differing from the one captured at load means the
   // file changed underneath — surface a reload button (diffStale).

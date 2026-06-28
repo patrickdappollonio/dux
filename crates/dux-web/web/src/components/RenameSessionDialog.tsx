@@ -23,9 +23,9 @@ import {
 // clears the title back to the branch name. State lives in the store, mirroring
 // the new-agent dialog, so the input stays fully controlled.
 export function RenameSessionDialog() {
-  const { renameTarget, renameDraft, viewModel } = useDux()
+  const { renameTarget, renameDraft, spine } = useDux()
   const open = renameTarget !== null
-  const session = viewModel?.sessions.find((s) => s.id === renameTarget)
+  const session = spine?.sessions.find((s) => s.id === renameTarget)
   const branchName = session?.branch_name ?? ""
 
   // Empty is allowed (clears the title). A non-empty invalid name disables save.

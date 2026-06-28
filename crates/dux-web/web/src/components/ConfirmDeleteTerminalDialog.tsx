@@ -21,14 +21,14 @@ import type { TerminalView } from "@/lib/types"
 // focus — the web mirrors that exactly. The ✕ on the sidebar/mobile rows opens
 // this dialog instead of deleting on a single click.
 export function ConfirmDeleteTerminalDialog() {
-  const { deleteTerminalTarget, viewModel } = useDux()
+  const { deleteTerminalTarget, spine } = useDux()
 
   // Derive the terminal from the ViewModel so a process that exits while the
   // dialog is open (the terminal vanishes from the model) closes it gracefully
   // via the effect below, mirroring the TUI's exit handling.
   let terminal: TerminalView | undefined
-  if (deleteTerminalTarget && viewModel) {
-    for (const session of viewModel.sessions) {
+  if (deleteTerminalTarget && spine) {
+    for (const session of spine.sessions) {
       const found = session.terminals.find((t) => t.id === deleteTerminalTarget)
       if (found) {
         terminal = found

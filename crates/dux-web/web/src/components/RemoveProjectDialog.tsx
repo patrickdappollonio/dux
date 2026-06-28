@@ -10,18 +10,18 @@ import {
 import { closeRemoveProject, removeProject, useDux } from "@/lib/store"
 
 export function RemoveProjectDialog() {
-  const { removeProjectTarget, viewModel } = useDux()
+  const { removeProjectTarget, spine } = useDux()
 
   const isOpen = removeProjectTarget !== null
-  const project = viewModel?.projects.find((p) => p.id === removeProjectTarget)
+  const project = spine?.projects.find((p) => p.id === removeProjectTarget)
   // For an orphaned ("ghost") project there is no project record — fall back to
   // the short-id name the sidebar shows for its group.
-  const orphanName = viewModel?.sidebar.groups.find(
+  const orphanName = spine?.sidebar.groups.find(
     (g) => g.project_id === removeProjectTarget,
   )?.name
   const name = project?.name ?? orphanName ?? "this project"
   const agentCount =
-    viewModel?.sessions.filter((s) => s.project_id === removeProjectTarget)
+    spine?.sessions.filter((s) => s.project_id === removeProjectTarget)
       .length ?? 0
 
   function handleConfirm() {

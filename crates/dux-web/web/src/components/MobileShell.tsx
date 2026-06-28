@@ -60,7 +60,6 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { shouldShowChangedFiles } from "@/lib/changedFiles"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { partitionProjects } from "@/lib/projects"
@@ -85,7 +84,7 @@ import {
   selectSession,
   selectTerminal,
   setPaletteOpen,
-  socket,
+  toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
@@ -98,10 +97,7 @@ import { cn } from "@/lib/utils"
 // here so the mobile menu and the desktop menu never drift.
 function SessionActions({ session }: { session: SessionView }) {
   function handleToggleAutoReopen() {
-    socket.sendCommand("toggle_agent_auto_reopen", {
-      session_id: session.id,
-      enabled: !session.auto_reopen_enabled,
-    })
+    toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)
   }
 
   return (
@@ -502,14 +498,14 @@ function ProjectGroupList({
 // their own heading).
 function HomeScreen() {
   const {
-    viewModel,
+    spine,
     selectedTarget,
     pendingSessionOrder,
     pendingProjectOrder,
     auth,
   } = useDux()
-  const rawSessions = viewModel?.sessions ?? []
-  const rawProjects = viewModel?.projects ?? []
+  const rawSessions = spine?.sessions ?? []
+  const rawProjects = spine?.projects ?? []
   // Fold the optimistic drag overlays over the server order (see
   // `applyPendingOrders`) so rows don't snap back during the round-trip.
   const { projects, sessions } = applyPendingOrders(
@@ -519,7 +515,7 @@ function HomeScreen() {
     pendingProjectOrder,
   )
   const { grouped, withAgents, withoutAgents, realOrder, projectName } =
-    partitionProjects(viewModel?.sidebar, projects, sessions)
+    partitionProjects(spine?.sidebar, projects, sessions)
   // Resolve a project id to its branch-row display (or null when there's
   // nothing to render). Orphan ids (a session whose project is absent) resolve
   // to null, so no stray branch span is emitted.
@@ -634,23 +630,18 @@ function HomeScreen() {
 // The focused-terminal spoke: a slim top bar (back · project·branch · changes
 // count · ⋯ actions) over the full-screen shared terminal.
 function TerminalScreen() {
-  const { viewModel, selectedSessionId, selectedTarget, terminalEpoch } = useDux()
-  const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
+  const { spine, selectedSessionId, selectedTarget, terminalEpoch, changes } =
+    useDux()
+  const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
-    ? viewModel?.projects.find((p) => p.id === session.project_id)
+    ? spine?.projects.find((p) => p.id === session.project_id)
     : undefined
-  const changed = viewModel?.changed_files ?? {
-    staged: [],
-    unstaged: [],
-    watched_session_id: null,
-  }
-  // Only count changes when the global watch matches this client's selection —
-  // otherwise the badge could briefly show another session's count (the same
-  // cross-tab guard the changed-files pane uses).
-  const watchedSessionId = viewModel?.changed_files.watched_session_id ?? null
-  const changeCount = shouldShowChangedFiles(watchedSessionId, selectedSessionId)
-    ? changed.staged.length + changed.unstaged.length
-    : 0
+  // Only count changes when the loaded slice belongs to this client's selection,
+  // so the badge never briefly shows another session's count.
+  const changeCount =
+    changes.sessionId === selectedSessionId && changes.phase === "loaded"
+      ? changes.staged.length + changes.unstaged.length
+      : 0
 
   // Defensive fallback: the agent exited (TerminalPane reset the selection) or
   // the target was pruned while we sat here. Show the hub content rather than a
@@ -731,6 +722,7 @@ function TerminalScreen() {
               key={paneKey}
               kind={selectedTarget.kind}
               id={targetId}
+              sessionId={selectedTarget.sessionId}
             />
           </Suspense>
         </ChunkBoundary>

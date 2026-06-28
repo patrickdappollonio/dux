@@ -5,6 +5,7 @@ import {
   commitMacro,
   isMacroSurface,
   macroMatchesSurface,
+  macroPayloadBytes,
   macroTextPreview,
   macrosForTarget,
   validateMacros,
@@ -170,5 +171,38 @@ describe("macroTextPreview", () => {
 
   it("leaves short text untouched", () => {
     expect(macroTextPreview("short", 80)).toBe("short")
+  })
+})
+
+describe("macroPayloadBytes", () => {
+  // An exact port of `dux_core::macros::macro_payload_bytes`; these mirror the
+  // Rust unit tests so the two surfaces stay byte-for-byte identical.
+  const bytes = (s: string) => Array.from(macroPayloadBytes(s))
+  const ALT_ENTER = [0x1b, 0x0d] // ESC, CR
+
+  it("passes plain text through byte-for-byte", () => {
+    expect(bytes("abc")).toEqual([0x61, 0x62, 0x63])
+  })
+
+  it("translates LF, CR, and CRLF each to one Alt+Enter", () => {
+    expect(bytes("a\nb")).toEqual([0x61, ...ALT_ENTER, 0x62])
+    expect(bytes("a\rb")).toEqual([0x61, ...ALT_ENTER, 0x62])
+    expect(bytes("a\r\nb")).toEqual([0x61, ...ALT_ENTER, 0x62])
+  })
+
+  it("translates each newline in a multi-line macro and leading/trailing ones", () => {
+    expect(bytes("a\nb\nc")).toEqual([
+      0x61,
+      ...ALT_ENTER,
+      0x62,
+      ...ALT_ENTER,
+      0x63,
+    ])
+    expect(bytes("\na\n")).toEqual([...ALT_ENTER, 0x61, ...ALT_ENTER])
+  })
+
+  it("preserves multi-byte UTF-8 glyphs intact", () => {
+    // The duck emoji is 4 UTF-8 bytes; none of them is a newline byte.
+    expect(bytes("🦆")).toEqual(Array.from(new TextEncoder().encode("🦆")))
   })
 })

@@ -4,7 +4,7 @@
 //!
 //! HTTP (login/logout/me) goes through `reqwest`; the WebSocket handshake goes
 //! through `tokio-tungstenite`. Both hit the SAME real listening server so the
-//! session cookie minted by `/api/login` is valid on the gated `/ws` upgrade.
+//! session cookie minted by `/api/login` is valid on the gated `/ws/events` upgrade.
 //! Cookies are threaded MANUALLY (capture `set-cookie`, resend as `cookie`) so
 //! the round-trip is explicit and asserted, including the anti-fixation id change.
 
@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use dux_core::config::{DuxPaths, ProjectConfig, ProviderCommandConfig};
 use dux_core::storage::SessionStore;
+use dux_core::wire::WireCommand;
 use dux_web::auth::shared_auth;
 use dux_web::bootstrap::bootstrap_engine;
 use dux_web::engine_actor::{
@@ -157,7 +158,7 @@ fn session_cookie(resp: &reqwest::Response) -> Option<String> {
 #[tokio::test]
 async fn no_users_ws_open_without_auth() {
     // Mirrors the existing suites: with no [auth] users the gate is off, so an
-    // unauthenticated, no-Origin WS connects and gets a view_model frame.
+    // unauthenticated, no-Origin WS connects and gets a `connected` frame.
     let tmp = tempfile::tempdir().unwrap();
     let paths = seed_paths(tmp.path());
     let mut engine = bootstrap_engine(&paths).unwrap();
@@ -183,11 +184,11 @@ async fn no_users_ws_open_without_auth() {
         .unwrap();
     });
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("ws should connect when auth is off");
-    let got = wait_for_view_model(&mut ws).await;
-    assert!(got, "expected a view_model frame with auth off");
+    let got = wait_for_connected(&mut ws).await;
+    assert!(got, "expected a connected frame with auth off");
 }
 
 #[tokio::test]
@@ -229,12 +230,12 @@ async fn ws_connection_cap_rejects_extra_with_503() {
 
     // First connection takes the only permit (acquired before the 101 response,
     // so it is held by the time `connect_async` returns).
-    let (ws1, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let (ws1, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("first ws connects while a slot is free");
 
     // Second connection while the first is open → refused with 503.
-    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect_err("second ws must be refused while the cap is full");
     match err {
@@ -249,9 +250,9 @@ async fn ws_connection_cap_rejects_extra_with_503() {
     drop(ws1);
     let mut reconnected = false;
     for _ in 0..50 {
-        match tokio_tungstenite::connect_async(format!("ws://{addr}/ws")).await {
+        match tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events")).await {
             Ok((mut ws, _)) => {
-                reconnected = wait_for_view_model(&mut ws).await;
+                reconnected = wait_for_connected(&mut ws).await;
                 break;
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -284,7 +285,7 @@ async fn unauthenticated_ws_rejected_with_401_before_upgrade() {
     // A raw WS handshake without a session cookie must get a clean HTTP 401, not
     // an opened-then-closed socket. tungstenite surfaces the non-101 status as a
     // handshake error carrying the response.
-    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect_err("unauthenticated upgrade must be rejected");
     match err {
@@ -361,15 +362,17 @@ async fn login_right_sets_cookie_and_me_reports_user_and_ws_works() {
     let me_body: serde_json::Value = me.json().await.unwrap();
     assert_eq!(me_body["username"], "alice");
 
-    // The cookie'd WS upgrade now succeeds end-to-end (view_model frame).
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    // The cookie'd WS upgrade now succeeds end-to-end (connected frame).
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut().insert("cookie", cookie.parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req)
         .await
         .expect("authenticated WS upgrade should succeed");
     assert!(
-        wait_for_view_model(&mut ws).await,
-        "authenticated WS must stream a view_model frame"
+        wait_for_connected(&mut ws).await,
+        "authenticated WS must stream a connected frame"
     );
 }
 
@@ -396,7 +399,9 @@ async fn logout_kills_the_session_and_ws_is_401_again() {
     assert_eq!(logout.status(), 204);
 
     // The old cookie no longer authenticates the WS upgrade.
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut().insert("cookie", cookie.parse().unwrap());
     let err = tokio_tungstenite::connect_async(req)
         .await
@@ -455,7 +460,9 @@ async fn session_id_rotates_on_login_anti_fixation() {
 #[tokio::test]
 async fn bad_origin_rejected_with_403_when_auth_off() {
     let (addr, _tmp) = boot_with_users(vec![]).await;
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut()
         .insert("origin", "http://evil.example.com".parse().unwrap());
     let err = tokio_tungstenite::connect_async(req)
@@ -482,7 +489,9 @@ async fn bad_origin_rejected_with_403_when_auth_on() {
     // Even WITH a valid session, a cross-origin upgrade is rejected (the Origin
     // check runs regardless of auth; here it must fire before/independent of the
     // session gate).
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut().insert("cookie", cookie.parse().unwrap());
     req.headers_mut()
         .insert("origin", "http://evil.example.com".parse().unwrap());
@@ -499,13 +508,15 @@ async fn bad_origin_rejected_with_403_when_auth_on() {
 async fn same_origin_allowed_when_auth_off() {
     let (addr, _tmp) = boot_with_users(vec![]).await;
     // A matching Origin (same host:port as Host) is allowed.
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut()
         .insert("origin", format!("http://{addr}").parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req)
         .await
         .expect("same-origin WS should connect");
-    assert!(wait_for_view_model(&mut ws).await);
+    assert!(wait_for_connected(&mut ws).await);
 }
 
 #[tokio::test]
@@ -513,10 +524,10 @@ async fn missing_origin_allowed() {
     // The existing suites rely on this: a non-browser client (no Origin) is
     // allowed. Auth off here so the only gate is the Origin check.
     let (addr, _tmp) = boot_with_users(vec![]).await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("missing-Origin WS should connect");
-    assert!(wait_for_view_model(&mut ws).await);
+    assert!(wait_for_connected(&mut ws).await);
 }
 
 // --- Rate limit -----------------------------------------------------------
@@ -668,6 +679,9 @@ async fn reload_config_picks_up_new_user_live() {
             console: dux_web::console::Console::noop(),
         },
     );
+    // Keep a handle clone so the test can trigger a config reload directly (the
+    // legacy `/ws` `reload_config` command path is gone in the REST-first world).
+    let reload_handle = handle.clone();
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -690,7 +704,7 @@ async fn reload_config_picks_up_new_user_live() {
         .unwrap();
     assert_eq!(before.status(), 401, "bob must not exist before the reload");
 
-    // Add bob to config.toml, then trigger reload over an authenticated WS.
+    // Add bob to config.toml, then trigger the reload through the engine handle.
     let bob = user_entry("bob", "bob-pw");
     std::fs::write(
         &paths.config_path,
@@ -698,24 +712,10 @@ async fn reload_config_picks_up_new_user_live() {
     )
     .unwrap();
 
-    let login = c
-        .post(format!("http://{addr}/api/login"))
-        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
-        .send()
+    reload_handle
+        .apply_wire(WireCommand::ReloadConfig {})
         .await
-        .unwrap();
-    let cookie = session_cookie(&login).expect("cookie");
-
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
-    req.headers_mut().insert("cookie", cookie.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
-    let _ = ws.next().await; // initial view_model
-    use futures_util::SinkExt;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
+        .expect("trigger reload");
 
     // Poll until bob can log in (the reload worker re-reads config, the engine
     // applies it, and the loop rebuilds the shared auth snapshot).
@@ -742,7 +742,7 @@ async fn reload_config_picks_up_new_user_live() {
 
 /// Removing a user from config + `reload_config` revokes that user's LIVE
 /// session without a server restart: their existing cookie stops authorizing the
-/// gated `/ws` upgrade (401) and `/api/me` reports 401 (not the stale username).
+/// gated `/ws/events` upgrade (401) and `/api/me` reports 401 (not the stale username).
 /// The gate and `/api/me` re-verify the session's username against the current
 /// auth snapshot on every request, so the live-reload that drops the user takes
 /// effect immediately.
@@ -786,6 +786,7 @@ async fn reload_config_removing_user_revokes_live_session() {
             console: dux_web::console::Console::noop(),
         },
     );
+    let reload_handle = handle.clone();
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -800,8 +801,8 @@ async fn reload_config_removing_user_revokes_live_session() {
 
     let c = client();
 
-    // alice logs in and gets a working session: /api/me 200 and a cookie'd /ws
-    // upgrade succeeds.
+    // alice logs in and gets a working session: /api/me 200 and a cookie'd
+    // `/ws/events` upgrade succeeds.
     let login = c
         .post(format!("http://{addr}/api/login"))
         .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
@@ -819,29 +820,14 @@ async fn reload_config_removing_user_revokes_live_session() {
         .unwrap();
     assert_eq!(me.status(), 200, "alice's session must work before removal");
 
-    // Remove alice from config (keep bob), then trigger reload over bob's
-    // authenticated WS (alice's session is what we're revoking, so we can't use
-    // it to send the reload command reliably; bob drives it).
+    // Remove alice from config (keep bob), then trigger the reload through the
+    // engine handle.
     std::fs::write(&paths.config_path, format!("[auth]\nusers = [\"{bob}\"]\n")).unwrap();
 
-    let bob_login = c
-        .post(format!("http://{addr}/api/login"))
-        .json(&serde_json::json!({"username":"bob","password":"bob-pw"}))
-        .send()
+    reload_handle
+        .apply_wire(WireCommand::ReloadConfig {})
         .await
-        .unwrap();
-    let bob_cookie = session_cookie(&bob_login).expect("bob cookie");
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
-    req.headers_mut()
-        .insert("cookie", bob_cookie.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
-    let _ = ws.next().await; // initial view_model
-    use futures_util::SinkExt;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
+        .expect("trigger reload");
 
     // Poll until alice's /api/me reports 401 (the reload re-read config, the
     // engine applied it, and the loop rebuilt the shared auth snapshot WITHOUT
@@ -867,7 +853,9 @@ async fn reload_config_removing_user_revokes_live_session() {
     );
 
     // And her cookie no longer authorizes the gated /ws upgrade.
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut().insert("cookie", cookie.parse().unwrap());
     let err = tokio_tungstenite::connect_async(req)
         .await
@@ -934,6 +922,7 @@ async fn reload_config_removing_last_user_disables_gate_live() {
             console: dux_web::console::Console::noop(),
         },
     );
+    let reload_handle = handle.clone();
     let app = router_with_auth(handle, auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -947,7 +936,6 @@ async fn reload_config_removing_last_user_disables_gate_live() {
     });
 
     let c = client();
-    // alice logs in and drives the reload over her own (still-valid) WS.
     let login = c
         .post(format!("http://{addr}/api/login"))
         .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
@@ -955,21 +943,14 @@ async fn reload_config_removing_last_user_disables_gate_live() {
         .await
         .unwrap();
     assert_eq!(login.status(), 200);
-    let cookie = session_cookie(&login).expect("cookie");
 
-    // Empty the users list on disk, then trigger the reload.
+    // Empty the users list on disk, then trigger the reload through the handle.
     std::fs::write(&paths.config_path, "[auth]\nusers = []\n").unwrap();
 
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
-    req.headers_mut().insert("cookie", cookie.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
-    let _ = ws.next().await; // initial view_model
-    use futures_util::SinkExt;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
+    reload_handle
+        .apply_wire(WireCommand::ReloadConfig {})
+        .await
+        .expect("trigger reload");
 
     // Poll until /api/me reports auth disabled (200 with the disabled marker),
     // proving the rebuild flipped the gate OFF live.
@@ -1033,47 +1014,23 @@ async fn reload_config_changing_server_setting_warns_restart_needed() {
             console: dux_web::console::Console::noop(),
         },
     );
-    // Subscribe to the server's status broadcast BEFORE moving the handle into
-    // the router so we catch the warning the reload emits.
+    // Subscribe to the server's status broadcast so we catch the warning the
+    // reload emits. The reload is driven directly through the engine handle (no
+    // HTTP/WS round-trip needed — this asserts the engine's own status emission).
     let mut status_rx = handle.subscribe_status();
-    let app = router_with_auth(handle, auth);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
+    let _auth = auth; // keep the shared auth alive for the reload context
 
-    let c = client();
-    let login = c
-        .post(format!("http://{addr}/api/login"))
-        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
-        .send()
-        .await
-        .unwrap();
-    let cookie = session_cookie(&login).expect("cookie");
-
-    // Change the [server] port on disk, then trigger the reload over alice's WS.
+    // Change the [server] port on disk, then trigger the reload through the handle.
     std::fs::write(
         &paths.config_path,
         format!("[auth]\nusers = [\"{alice}\"]\n\n[server]\nport = 9090\n"),
     )
     .unwrap();
 
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
-    req.headers_mut().insert("cookie", cookie.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
-    let _ = ws.next().await; // initial view_model
-    use futures_util::SinkExt;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
+    handle
+        .apply_wire(WireCommand::ReloadConfig {})
+        .await
+        .expect("trigger reload");
 
     // Wait for the drift warning on the status stream.
     let warned = tokio::time::timeout(Duration::from_secs(8), async {
@@ -1140,27 +1097,10 @@ async fn reload_config_non_server_change_does_not_warn_restart() {
             console: dux_web::console::Console::noop(),
         },
     );
+    // Read status via the broadcast and drive the reload through the handle (no
+    // HTTP/WS round-trip needed — this asserts the engine's own status emission).
     let mut status_rx = handle.subscribe_status();
-    let app = router_with_auth(handle, auth);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    let c = client();
-    let login = c
-        .post(format!("http://{addr}/api/login"))
-        .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
-        .send()
-        .await
-        .unwrap();
-    let cookie = session_cookie(&login).expect("cookie");
+    let _auth = auth; // keep the shared auth alive for the reload context
 
     // Add a user but leave [server] port unchanged.
     let bob = user_entry("bob", "bob-pw");
@@ -1170,16 +1110,10 @@ async fn reload_config_non_server_change_does_not_warn_restart() {
     )
     .unwrap();
 
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
-    req.headers_mut().insert("cookie", cookie.parse().unwrap());
-    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.expect("ws");
-    let _ = ws.next().await; // initial view_model
-    use futures_util::SinkExt;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
+    handle
+        .apply_wire(WireCommand::ReloadConfig {})
+        .await
+        .expect("trigger reload");
 
     // The "Configuration reloaded" info confirms the reload was applied. Reaching
     // it WITHOUT seeing a drift warning first proves the warning was suppressed.
@@ -1217,14 +1151,14 @@ async fn reload_config_non_server_change_does_not_warn_restart() {
 type ClientWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Wait (bounded) for a `view_model` frame on the socket, returning whether one
-/// arrived.
-async fn wait_for_view_model(ws: &mut ClientWs) -> bool {
+/// Wait (bounded) for the `connected` handshake frame on a `/ws/events` socket,
+/// returning whether one arrived. It is the FIRST frame the server sends.
+async fn wait_for_connected(ws: &mut ClientWs) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
             && let Ok(t) = m.into_text()
-            && t.contains("\"type\":\"view_model\"")
+            && t.contains("\"event\":\"connected\"")
         {
             return true;
         }
@@ -1234,7 +1168,7 @@ async fn wait_for_view_model(ws: &mut ClientWs) -> bool {
 
 // --- S1: a live socket dies on user revocation -----------------------------
 
-/// Boot a real server whose `/ws` user-existence recheck uses a SHORT period so
+/// Boot a real server whose `/ws/events` user-existence recheck uses a SHORT period so
 /// the revocation test is fast and deterministic, with a real `config.toml` on
 /// disk (so `reload_config` re-reads it). Returns the bound address and the temp
 /// dir that must outlive the server. `loopback` is true (127.0.0.1), but we keep
@@ -1243,7 +1177,12 @@ async fn wait_for_view_model(ws: &mut ClientWs) -> bool {
 async fn boot_for_recheck(
     initial_users: Vec<String>,
     recheck: Duration,
-) -> (SocketAddr, std::path::PathBuf, tempfile::TempDir) {
+) -> (
+    SocketAddr,
+    std::path::PathBuf,
+    dux_web::engine_actor::EngineHandle,
+    tempfile::TempDir,
+) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let paths = seed_paths(&root);
@@ -1277,6 +1216,9 @@ async fn boot_for_recheck(
             console: dux_web::console::Console::noop(),
         },
     );
+    // Return a handle clone so the caller can trigger a config reload directly
+    // (the legacy `/ws` `reload_config` command path is gone).
+    let reload_handle = handle.clone();
     let app = build_router_with_recheck(handle, auth, axum::Router::new(), recheck);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1289,7 +1231,7 @@ async fn boot_for_recheck(
         .await
         .unwrap();
     });
-    (addr, config_path, tmp)
+    (addr, config_path, reload_handle, tmp)
 }
 
 /// S1: a live, ALREADY-UPGRADED WebSocket must close when its user is revoked —
@@ -1302,7 +1244,7 @@ async fn live_ws_closes_when_user_revoked() {
     let recheck = Duration::from_millis(200);
     let alice = user_entry("alice", "secret-pw");
     let bob = user_entry("bob", "bob-pw");
-    let (addr, config_path, _tmp) =
+    let (addr, config_path, reload_handle, _tmp) =
         boot_for_recheck(vec![alice.clone(), bob.clone()], recheck).await;
     let c = client();
 
@@ -1316,40 +1258,24 @@ async fn live_ws_closes_when_user_revoked() {
     assert_eq!(login.status(), 200);
     let cookie = session_cookie(&login).expect("cookie");
 
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut().insert("cookie", cookie.parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req)
         .await
         .expect("alice's authenticated WS must connect");
     assert!(
-        wait_for_view_model(&mut ws).await,
+        wait_for_connected(&mut ws).await,
         "alice's socket must stream at least one frame before revocation"
     );
 
-    // Remove alice (keep bob → gate stays ON), reload config over bob's socket.
+    // Remove alice (keep bob → gate stays ON), reload config through the handle.
     std::fs::write(&config_path, format!("[auth]\nusers = [\"{bob}\"]\n")).unwrap();
-    let bob_login = c
-        .post(format!("http://{addr}/api/login"))
-        .json(&serde_json::json!({"username":"bob","password":"bob-pw"}))
-        .send()
+    reload_handle
+        .apply_wire(WireCommand::ReloadConfig {})
         .await
-        .unwrap();
-    let bob_cookie = session_cookie(&bob_login).expect("bob cookie");
-    let mut bob_req = format!("ws://{addr}/ws").into_client_request().unwrap();
-    bob_req
-        .headers_mut()
-        .insert("cookie", bob_cookie.parse().unwrap());
-    let (mut bob_ws, _) = tokio_tungstenite::connect_async(bob_req)
-        .await
-        .expect("bob ws");
-    let _ = bob_ws.next().await; // initial view_model
-    use futures_util::SinkExt;
-    bob_ws
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-        ))
-        .await
-        .unwrap();
+        .expect("trigger reload");
 
     // alice's socket must close (the recheck sees her gone). Drain frames until
     // the stream ends; bounded so a hang fails the test rather than blocking.
@@ -1367,13 +1293,13 @@ async fn live_ws_closes_when_user_revoked() {
 #[tokio::test]
 async fn auth_off_socket_unaffected_by_recheck() {
     let recheck = Duration::from_millis(100);
-    let (addr, _config_path, _tmp) = boot_for_recheck(vec![], recheck).await;
+    let (addr, _config_path, _reload_handle, _tmp) = boot_for_recheck(vec![], recheck).await;
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("auth-off WS should connect");
     assert!(
-        wait_for_view_model(&mut ws).await,
+        wait_for_connected(&mut ws).await,
         "auth-off socket must stream a frame"
     );
 
@@ -1397,7 +1323,8 @@ async fn live_ws_keeps_streaming_when_gate_downgrades_to_disabled() {
     let alice = user_entry("alice", "secret-pw");
     // Single user: removing them is a WHOLE-GATE downgrade (enabled → disabled),
     // not a per-user revocation.
-    let (addr, config_path, _tmp) = boot_for_recheck(vec![alice.clone()], recheck).await;
+    let (addr, config_path, reload_handle, _tmp) =
+        boot_for_recheck(vec![alice.clone()], recheck).await;
     let c = client();
 
     let login = c
@@ -1409,26 +1336,26 @@ async fn live_ws_keeps_streaming_when_gate_downgrades_to_disabled() {
     assert_eq!(login.status(), 200);
     let cookie = session_cookie(&login).expect("cookie");
 
-    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/ws/events")
+        .into_client_request()
+        .unwrap();
     req.headers_mut().insert("cookie", cookie.parse().unwrap());
     let (mut ws, _) = tokio_tungstenite::connect_async(req)
         .await
         .expect("alice's authenticated WS must connect");
     assert!(
-        wait_for_view_model(&mut ws).await,
+        wait_for_connected(&mut ws).await,
         "alice's socket must stream a frame before the downgrade"
     );
 
-    // Empty the users list, then trigger the reload over alice's OWN socket
-    // (the operator turning their own auth off). On a loopback bind the gate
-    // downgrades to disabled with a warning.
+    // Empty the users list, then trigger the reload through the handle (the
+    // operator turning their own auth off). On a loopback bind the gate downgrades
+    // to disabled with a warning, but alice's already-open socket must stay alive.
     std::fs::write(&config_path, "[auth]\nusers = []\n").unwrap();
-    use futures_util::SinkExt;
-    ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        r#"{"type":"command","command":"reload_config","args":{}}"#.into(),
-    ))
-    .await
-    .unwrap();
+    reload_handle
+        .apply_wire(WireCommand::ReloadConfig {})
+        .await
+        .expect("trigger reload");
 
     // Poll until /api/me reports auth disabled, proving the gate actually
     // downgraded (so the recheck is now in the "gate off" regime).

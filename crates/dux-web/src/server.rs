@@ -1,4 +1,7 @@
-//! axum router + the `/ws` handler bridging the browser to the engine actor.
+//! axum router + the WebSocket handlers (`/ws/events` and the per-PTY sockets)
+//! bridging the browser to the engine actor. All data reads and actions go over
+//! REST (`/api/v1/*`); the sockets carry only change events + status (events) and
+//! terminal byte streams (PTY).
 //!
 //! ## Route structure and the auth gate
 //!
@@ -10,22 +13,23 @@
 //! - OPEN: static assets, `/healthz`, `/api/login`, `/api/me`, `/api/logout`.
 //!   The SPA must load (and call `/api/me`) to render the login screen, so these
 //!   cannot require a session. `/api/logout` is idempotent, so it is open too.
-//! - GATED: `/ws` (and any future data route added to the gated sub-router).
-//!   When auth is on, the gate middleware rejects with `401` BEFORE the WS
-//!   upgrade, so the browser sees a clean HTTP response rather than a socket that
-//!   opens and immediately closes.
+//! - GATED: every `/api/v1/*` route and every WS upgrade (`/ws/events` and the
+//!   per-PTY sockets). When auth is on, the gate middleware rejects with `401`
+//!   BEFORE the WS upgrade, so the browser sees a clean HTTP response rather than
+//!   a socket that opens and immediately closes.
 //!
-//! The Origin check on `/ws` runs REGARDLESS of auth (cross-site WebSocket
-//! hijacking defense): a browser attaches the page's `Origin`, and we only allow
-//! same-host origins. Non-browser clients (no `Origin`) are allowed — documented
-//! tradeoff: a CLI/test client is trusted to not be a hijacked browser tab.
+//! The Origin check on every WS upgrade runs REGARDLESS of auth (cross-site
+//! WebSocket hijacking defense): a browser attaches the page's `Origin`, and we
+//! only allow same-host origins. Non-browser clients (no `Origin`) are allowed —
+//! documented tradeoff: a CLI/test client is trusted to not be a hijacked browser
+//! tab.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -35,12 +39,13 @@ use tower_sessions::cookie::SameSite;
 use tower_sessions::cookie::time::Duration as CookieDuration;
 use tower_sessions::{Expiry, Session, SessionManagerLayer};
 
-use dux_core::statusline::KeyedWireStatus;
+use dux_core::statusline::{KeyedWireStatus, StatusScope};
 
 use crate::auth::{self, RateLimiter, SharedAuth};
+use crate::changes::ChangesService;
 use crate::console::Console;
-use crate::engine_actor::EngineHandle;
-use crate::protocol::{BranchWarningView, ClientMessage, ServerMessage};
+use crate::engine_actor::{EngineHandle, SpineChange};
+use crate::event_bus::{self, Event, EventBus};
 use crate::tls::SweepableMemoryStore;
 
 #[derive(Clone)]
@@ -52,11 +57,11 @@ pub struct AppState {
     /// Per-IP login backoff. Shared (cheap `Arc` clone) so all login requests
     /// hit the same counters.
     pub rate_limiter: RateLimiter,
-    /// How often a live, authenticated `/ws` socket re-verifies that its user
-    /// still exists (see [`handle_socket`]). The HTTP gate cannot revoke an
-    /// ALREADY-upgraded socket, so this periodic recheck closes that gap. A
-    /// constructor-injectable field so the revocation e2e can drive a short
-    /// window instead of waiting the production cadence.
+    /// How often a live, authenticated WebSocket re-verifies that its user
+    /// still exists (see [`handle_events_socket`]/[`handle_pty_socket`]). The HTTP
+    /// gate cannot revoke an ALREADY-upgraded socket, so this periodic recheck
+    /// closes that gap. A constructor-injectable field so the revocation e2e can
+    /// drive a short window instead of waiting the production cadence.
     pub ws_recheck_period: std::time::Duration,
     /// The `dux server` terminal console. A real (stdout) console on the CLI
     /// serve paths; a [`Console::noop`] for the TUI flip (which owns the
@@ -67,11 +72,26 @@ pub struct AppState {
     /// The access middleware checks this AND `console.is_active()` before
     /// emitting, so the flip and disabled-console paths never log.
     pub access_log: bool,
-    /// Caps concurrent `/ws` connections (`[server] max_websocket_connections`).
-    /// `ws_upgrade` takes a permit before upgrading and holds it for the socket's
-    /// lifetime; when none are free the upgrade is refused with HTTP 503. Shared
-    /// (cheap `Arc` clone) so every request hits the same permit pool.
+    /// Caps concurrent WebSocket connections (`[server] max_websocket_connections`).
+    /// SHARED across EVERY WebSocket family — `/ws/events` (`ws_events_upgrade`) and
+    /// the per-PTY sockets (agent/terminal upgrades): each takes a permit before
+    /// upgrading and holds it for the socket's lifetime, so the cap bounds the
+    /// COMBINED live socket count, not each endpoint separately. When none are free
+    /// the upgrade is refused with HTTP 503. A cheap `Arc` clone so every request
+    /// hits the same permit pool.
     pub ws_semaphore: Arc<tokio::sync::Semaphore>,
+    /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
+    /// per-topic interest refcount that drives the changed-files poller.
+    pub event_bus: Arc<EventBus>,
+    /// The per-session changed-files cache + single-flight compute + poller behind
+    /// `GET /api/v1/sessions/:id/changes` and the `session.changes` event. The git
+    /// mutation handlers call `state.changes.invalidate(id)` after a successful
+    /// stage/unstage/discard/commit/write so the pane refreshes immediately.
+    pub changes: Arc<ChangesService>,
+    /// `Idempotency-Key -> created resource id` cache (TTL-bounded) so a retried
+    /// `POST /api/v1/sessions` or `/projects` after a lost response returns the
+    /// same resource instead of creating a duplicate worktree/project.
+    pub idempotency: Arc<crate::rest_common::IdempotencyCache>,
 }
 
 /// Maximum size of a single inbound WebSocket message (text or binary). This
@@ -259,6 +279,33 @@ where
              refused with HTTP 503 and the web UI will be unreachable",
         );
     }
+    // The event bus and changed-files service are web-layer concerns built here.
+    // `ChangesService::new` spawns its supervised poller, so this must run inside a
+    // tokio runtime context — the CLI serve paths build inside `block_on`, and the
+    // flip wraps its `build_app` in `runtime.enter()` (see `serve_with_engine`).
+    let event_bus = Arc::new(EventBus::new());
+    let changes = ChangesService::new(engine.clone(), Arc::clone(&event_bus));
+    // Config-reload -> `config.changed` forwarder. The engine actor fires `()` on
+    // its config-reload broadcast after a successful reload; we turn each into a
+    // coarse `config.changed` event so clients on the `config` topic refetch
+    // `/api/v1/bootstrap`. The engine thread is spawned before this builder runs,
+    // so the bus cannot live on the engine; the forwarder bridges the two. Runs for
+    // the server lifetime (like the ChangesService poller) and exits when the engine
+    // is gone. Requires a tokio runtime context, which every `build_app` caller
+    // provides (the CLI serve paths build inside `block_on`; the flip enters it).
+    spawn_config_changed_forwarder(engine.subscribe_config_reloads(), Arc::clone(&event_bus));
+    // Spine-change -> `projects.changed` / `sessions.changed` forwarder. The engine
+    // loop fires a `SpineChange` whenever the projected projects- or
+    // sessions+sidebar-portion changes; we turn each into the matching coarse event
+    // so clients on the `projects` / `sessions` topics refetch `/api/v1/spine`.
+    // Same lifetime/teardown story as the config forwarder above.
+    spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
+    // Commit-message-ready -> `session.commit_message` forwarder. The engine
+    // broadcasts a `CommitMessageEvent` when a one-shot generation completes; this
+    // turns each into a per-session `session.commit_message` event so a subscribed
+    // client refetches `GET /api/v1/sessions/:id/commit-message`. Same lifetime as
+    // the other forwarders (exits when the engine — and thus the broadcast — is gone).
+    spawn_commit_message_forwarder(engine.subscribe_commit_messages(), Arc::clone(&event_bus));
     let state = AppState {
         engine,
         auth,
@@ -269,6 +316,9 @@ where
         ws_semaphore: Arc::new(tokio::sync::Semaphore::new(
             params.max_websocket_connections as usize,
         )),
+        event_bus,
+        changes,
+        idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
     };
 
     // HttpOnly and SameSite=Strict are the tower-sessions defaults but we set them
@@ -291,9 +341,26 @@ where
     // every new data route here so it inherits the session requirement — the
     // structure can't stop a route from being misplaced into the open group.
     let gated = Router::new()
-        .route("/ws", get(ws_upgrade))
+        .route("/ws/events", get(ws_events_upgrade))
+        // Nested per-PTY byte-stream sockets. One socket per attached PTY: the
+        // agent session's main provider PTY and a companion terminal's PTY. Each
+        // replicates the four WS protections in its upgrade handler.
+        .route("/ws/sessions/{id}/pty", get(ws_session_pty_upgrade))
+        .route(
+            "/ws/sessions/{id}/terminals/{tid}/pty",
+            get(ws_terminal_pty_upgrade),
+        )
         .merge(crate::git_routes::routes())
         .merge(crate::file_routes::routes())
+        .merge(crate::changes_routes::routes())
+        .merge(crate::bootstrap_routes::routes())
+        .merge(crate::spine_routes::routes())
+        .merge(crate::session_actions::routes())
+        .merge(crate::project_actions::routes())
+        .merge(crate::project_reads::routes())
+        .merge(crate::terminal_actions::routes())
+        .merge(crate::browse_routes::routes())
+        .merge(crate::config_routes::routes())
         .merge(extra_gated)
         .route_layer(middleware::from_fn_with_state(state.clone(), gate));
 
@@ -482,546 +549,7 @@ fn origin_host(origin: &str) -> Option<String> {
     }
 }
 
-async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    session: Session,
-    // The peer address for the console connect/disconnect lines. Like the `login`
-    // handler, this requires connect-info on the serve path — the production serve
-    // paths (`run_plain_http`/`run_acme`/the flip) all use
-    // `into_make_service_with_connect_info`, and the test harnesses serve `/ws`
-    // through it too.
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    // Origin check runs even with auth off (CSWSH defense). On rejection we
-    // return a 403 and never upgrade.
-    if !same_origin_allowed(&headers) {
-        return (
-            StatusCode::FORBIDDEN,
-            "cross-origin WebSocket upgrade rejected",
-        )
-            .into_response();
-    }
-
-    // When auth is on, the gate already validated this session's username before
-    // the upgrade. Re-read it (same way the gate does) so the socket loop can
-    // periodically re-verify the user still exists — the HTTP gate cannot revoke
-    // an ALREADY-upgraded socket, so without this recheck a removed user's open
-    // socket would keep streaming AND accepting commands until it closes on its
-    // own. Auth off (or somehow no username) → no recheck (auth-off sockets are
-    // unaffected by the recheck machinery).
-    let recheck_user = if auth::is_enabled(&state.auth) {
-        session
-            .get::<String>(auth::SESSION_USER_KEY)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
-    // Cap concurrent sockets: take a permit BEFORE upgrading so a refusal is a
-    // real HTTP 503 (not an upgrade that immediately closes). The permit moves
-    // into the socket task and frees the slot when `handle_socket` returns.
-    let permit = match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            // Record the refusal so an operator can see the cap is being hit (a
-            // bare 503 in the access log gives no reason). Goes to dux.log
-            // regardless of the access-log toggle.
-            dux_core::logger::warn(&format!(
-                "[server] WebSocket upgrade refused for {}: connection cap reached \
-                 (max_websocket_connections)",
-                peer.ip()
-            ));
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many WebSocket connections; try again shortly",
-            )
-                .into_response();
-        }
-    };
-
-    let auth = state.auth.clone();
-    let recheck_period = state.ws_recheck_period;
-    let console = state.console.clone();
-    let peer_ip = peer.ip();
-    // Bound a single inbound frame (see `MAX_WS_MESSAGE_SIZE`) so one client can't
-    // push an oversized message into the engine's bounded request channel.
-    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_socket(
-                socket,
-                state.engine,
-                auth,
-                recheck_user,
-                recheck_period,
-                console,
-                peer_ip,
-                permit,
-            )
-        })
-        .into_response()
-}
-
 type SharedSink = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
-
-/// Drive one upgraded `/ws` connection.
-///
-/// `recheck_user` is `Some(username)` only when auth is enabled and the gate
-/// validated a session at upgrade; it is `None` for auth-off sockets (no
-/// recheck). When `Some`, a `recheck_period` interval re-verifies the user still
-/// exists in the live auth snapshot — the HTTP gate cannot revoke an already-
-/// upgraded socket, so this recheck closes the gap: on failure we send a Close
-/// frame and break, which kills BOTH the ViewModel/status streaming and command
-/// intake. Auth-off sockets pass `recheck_user = None` and are never rechecked.
-// Each parameter is independent per-connection context (transport, engine, auth
-// recheck inputs, console identity, and the concurrency permit held for the
-// socket's lifetime). They have no shared lifetime or invariant, so bundling them
-// into a struct would add indirection without making the contract clearer.
-#[allow(clippy::too_many_arguments)]
-async fn handle_socket(
-    socket: WebSocket,
-    engine: EngineHandle,
-    auth: SharedAuth,
-    recheck_user: Option<String>,
-    recheck_period: std::time::Duration,
-    console: Console,
-    peer_ip: std::net::IpAddr,
-    // The concurrency-cap permit acquired in `ws_upgrade`. Held for the whole
-    // connection purely for its Drop: when this function returns (socket closed),
-    // the permit frees a slot for the next client. Never read.
-    _permit: tokio::sync::OwnedSemaphorePermit,
-) {
-    // A client just upgraded: announce it on the console (peer IP). The matching
-    // disconnect is logged when this function returns (the loop below breaks on
-    // socket end, including a revocation Close).
-    console.client_connected(peer_ip);
-    let (sink, mut stream) = socket.split();
-    let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
-
-    // Initial ViewModel.
-    let _ = send_view_model(&sink, &engine.view_model_json()).await;
-
-    // Forward ViewModel updates.
-    {
-        let sink = Arc::clone(&sink);
-        let mut vm_rx = engine.subscribe_view_model();
-        tokio::spawn(async move {
-            while vm_rx.changed().await.is_ok() {
-                let json = vm_rx.borrow_and_update().clone();
-                if send_view_model(&sink, &json).await.is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    // Subscribe to the live status broadcast BEFORE reading the snapshot. The
-    // broadcast does NOT replay to receivers created after a send, so if we read
-    // the snapshot first and subscribed second, a status emitted in the gap
-    // (notably during the snapshot's `send_json().await`) would be lost: the
-    // snapshot is already stale and the new subscriber never sees it. Subscribing
-    // first means the gap status is buffered for this receiver; any overlap with
-    // the snapshot is a harmless duplicate (the client re-sets the same value).
-    let mut status_rx = engine.subscribe_status();
-    // Subscribe to clears BEFORE reading the snapshot for the same reason: a
-    // clear emitted between the snapshot read and the clear subscribe would be
-    // silently dropped, leaving a stale toast on screen.
-    let mut status_clear_rx = engine.subscribe_status_clears();
-
-    // Initial statuses: a client connecting mid-operation sees ALL active status
-    // toasts immediately (keyed and anonymous) rather than a blank line until the
-    // next update. Each `KeyedWireStatus` in the snapshot maps to one `Status`
-    // frame. Empty snapshot means nothing is showing, so the loop is a no-op.
-    for msg in status_frames(&engine.status_snapshot()) {
-        if send_json(&sink, &msg).await.is_err() {
-            break;
-        }
-    }
-
-    // Forward engine status/lifecycle updates (background completions, launch
-    // failures, PTY exits, and the auto-clear) live over the broadcast, so every
-    // status — including a transient pending flash — reaches this client. Uses
-    // the receiver subscribed above so nothing emitted since connect is missed.
-    {
-        let sink = Arc::clone(&sink);
-        tokio::spawn(async move {
-            loop {
-                match status_rx.recv().await {
-                    Ok(status) => {
-                        let msg = ServerMessage::Status {
-                            key: status.key,
-                            tone: status.tone,
-                            message: status.message,
-                        };
-                        if send_json(&sink, &msg).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        dux_core::logger::warn(&format!(
-                            "WebSocket client {peer_ip} lagged behind the status broadcast; \
-                             dropped {n} update(s)"
-                        ));
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
-    // Forward keyed-status clears: when a keyed op resolves or expires, the
-    // engine broadcasts the cleared key so each client can dismiss the matching
-    // toast immediately — without waiting for the next `Status` frame.
-    {
-        let sink = Arc::clone(&sink);
-        tokio::spawn(async move {
-            loop {
-                match status_clear_rx.recv().await {
-                    Ok(key) => {
-                        let msg = ServerMessage::StatusCleared { key };
-                        if send_json(&sink, &msg).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        dux_core::logger::warn(&format!(
-                            "WebSocket client {peer_ip} lagged behind the status-clear broadcast; \
-                             dropped {n} clear(s)"
-                        ));
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
-    // Subscribe to the live commit-message broadcast BEFORE reading the snapshot,
-    // same race lesson as the status lane above: the broadcast does not replay to
-    // a receiver created after a send, so a message generated in the gap (notably
-    // during the snapshot's `send_json().await`) would otherwise be lost.
-    let mut commit_rx = engine.subscribe_commit_messages();
-
-    // Initial commit message: a client that reconnected after generation
-    // completed (or in the connect/subscribe gap) still receives the last
-    // generated message. Sent as a DISTINCT snapshot frame so the client applies
-    // it conservatively (only into a matching, still-empty draft) and never
-    // clobbers an in-progress edit. Empty/absent means nothing to deliver.
-    if let Some(event) = engine.commit_message_snapshot()
-        && !event.message.is_empty()
-    {
-        let _ = send_json(
-            &sink,
-            &ServerMessage::CommitMessageSnapshot {
-                session_id: event.session_id,
-                message: event.message,
-            },
-        )
-        .await;
-    }
-
-    // Forward AI-generated commit messages (produced by one-shot provider runs
-    // after a `generate_commit_message` command) to this client. Uses the
-    // receiver subscribed above so nothing emitted since connect is missed.
-    {
-        let sink = Arc::clone(&sink);
-        tokio::spawn(async move {
-            loop {
-                match commit_rx.recv().await {
-                    Ok(event) => {
-                        if send_json(
-                            &sink,
-                            &ServerMessage::CommitMessage {
-                                session_id: event.session_id,
-                                message: event.message,
-                            },
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        dux_core::logger::warn(&format!(
-                            "WebSocket client {peer_ip} lagged behind the commit-message \
-                             broadcast; dropped {n} message(s)"
-                        ));
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
-    let mut subscribed: Option<String> = None;
-    // Exactly one live PTY forwarder per connection. Re-subscribing aborts the previous one so a
-    // single PtyClient's output is never streamed to the same socket twice (which doubled echoed
-    // input). React StrictMode double-mounts and session switching both trigger re-subscribes.
-    let mut pty_forwarder: Option<tokio::task::JoinHandle<()>> = None;
-
-    // Periodic user-existence recheck (only when this is an authenticated
-    // socket). The HTTP gate cannot revoke an already-upgraded socket, so this
-    // recheck closes the gap. The first tick fires immediately, so we burn it to
-    // align subsequent ticks to the period.
-    let mut recheck = tokio::time::interval(recheck_period);
-    if recheck_user.is_some() {
-        recheck.tick().await;
-    }
-
-    loop {
-        let msg = tokio::select! {
-            // Re-verify the session's user still exists. On failure, close the
-            // socket — this stops streaming AND command intake. Disabled for
-            // auth-off sockets (`recheck_user` is None).
-            //
-            // Revocation means: the gate is still ON, but THIS user is gone.
-            // A whole-gate downgrade (the gate flipped OFF entirely — e.g. a
-            // loopback operator removed the last user and reloaded) is a
-            // LOOSENING, not a revocation: the operator deliberately turned auth
-            // off, so the gate no longer protects anyone and there is nothing to
-            // revoke. Closing the operator's own live socket there would be
-            // wrong (transient, but a needless disconnect). So short-circuit
-            // when the gate is no longer enabled — stop rechecking, keep
-            // streaming — BEFORE testing whether the user still exists.
-            _ = recheck.tick(), if recheck_user.is_some() => {
-                if !auth::is_enabled(&auth) {
-                    // Gate downgraded to OFF: this is a loosening, not a
-                    // revocation. Keep this socket streaming.
-                    continue;
-                }
-                let still_valid = recheck_user
-                    .as_deref()
-                    .map(|u| auth::username_exists(&auth, u))
-                    .unwrap_or(false);
-                if !still_valid {
-                    // Best-effort Close frame, then break to tear down.
-                    let mut guard = sink.lock().await;
-                    let _ = guard.send(Message::Close(None)).await;
-                    break;
-                }
-                continue;
-            }
-            next = stream.next() => match next {
-                Some(Ok(msg)) => msg,
-                _ => break,
-            },
-        };
-        match msg {
-            Message::Binary(bytes) => {
-                if let Some(session_id) = &subscribed {
-                    engine.write_pty(session_id.clone(), bytes.to_vec());
-                }
-            }
-            Message::Text(text) => {
-                let Ok(client_msg) = serde_json::from_str::<ClientMessage>(text.as_str()) else {
-                    continue;
-                };
-                match client_msg {
-                    ClientMessage::Command { command, args } => {
-                        let envelope = serde_json::json!({ "command": command, "args": args });
-                        match serde_json::from_value::<dux_core::wire::WireCommand>(envelope) {
-                            Ok(wire) => {
-                                let (status, error) = match engine.apply_wire(wire).await {
-                                    Ok(outcome) => (outcome.status, None),
-                                    Err(e) => (None, Some(e)),
-                                };
-                                let _ = send_json(
-                                    &sink,
-                                    &ServerMessage::CommandResult { status, error },
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = send_json(
-                                    &sink,
-                                    &ServerMessage::CommandResult {
-                                        status: None,
-                                        error: Some(format!("bad command: {e}")),
-                                    },
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                    ClientMessage::Subscribe { session_id } => {
-                        match engine.subscribe_pty(session_id.clone()).await {
-                            Ok((repaint, rx)) => {
-                                // Stop the previous forwarder before streaming the new subscription.
-                                if let Some(prev) = pty_forwarder.take() {
-                                    prev.abort();
-                                }
-                                subscribed = Some(session_id.clone());
-                                send_binary(&sink, repaint).await;
-                                let _ = send_json(&sink, &ServerMessage::Subscribed { session_id })
-                                    .await;
-                                pty_forwarder = Some(spawn_pty_forwarder(
-                                    Arc::clone(&sink),
-                                    rx,
-                                    engine.shutdown_flag(),
-                                ));
-                            }
-                            Err(e) => {
-                                let _ =
-                                    send_json(&sink, &ServerMessage::Error { message: e }).await;
-                            }
-                        }
-                    }
-                    ClientMessage::Resize {
-                        session_id,
-                        rows,
-                        cols,
-                    } => {
-                        engine.resize_pty(session_id, rows, cols);
-                    }
-                    ClientMessage::SubscribeTerminal { terminal_id } => {
-                        match engine.subscribe_terminal(terminal_id.clone()).await {
-                            Ok((repaint, rx)) => {
-                                // Stop the previous forwarder before streaming the new subscription.
-                                if let Some(prev) = pty_forwarder.take() {
-                                    prev.abort();
-                                }
-                                subscribed = Some(terminal_id.clone());
-                                send_binary(&sink, repaint).await;
-                                let _ = send_json(
-                                    &sink,
-                                    &ServerMessage::Subscribed {
-                                        session_id: terminal_id,
-                                    },
-                                )
-                                .await;
-                                pty_forwarder = Some(spawn_pty_forwarder(
-                                    Arc::clone(&sink),
-                                    rx,
-                                    engine.shutdown_flag(),
-                                ));
-                            }
-                            Err(e) => {
-                                let _ =
-                                    send_json(&sink, &ServerMessage::Error { message: e }).await;
-                            }
-                        }
-                    }
-                    ClientMessage::CreateTerminal { session_id } => {
-                        match engine.create_terminal(session_id.clone()).await {
-                            Ok((terminal_id, _label)) => {
-                                let _ = send_json(
-                                    &sink,
-                                    &ServerMessage::TerminalCreated {
-                                        session_id,
-                                        terminal_id,
-                                    },
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ =
-                                    send_json(&sink, &ServerMessage::Error { message: e }).await;
-                            }
-                        }
-                    }
-                    ClientMessage::BrowseDir { path } => {
-                        let dir = path.unwrap_or_else(|| {
-                            std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
-                        });
-                        // fs read off the reactor.
-                        let result = tokio::task::spawn_blocking(move || {
-                            let p = std::path::Path::new(&dir);
-                            let entries = dux_core::project_browser::browser_entries(p)
-                                .into_iter()
-                                .map(|e| crate::protocol::DirEntryView {
-                                    path: e.path.to_string_lossy().to_string(),
-                                    label: e.label,
-                                    is_git_repo: e.is_git_repo,
-                                })
-                                .collect::<Vec<_>>();
-                            (dir, entries)
-                        })
-                        .await;
-                        let msg = match result {
-                            Ok((dir, entries)) => ServerMessage::DirEntries {
-                                path: dir,
-                                entries,
-                                error: None,
-                            },
-                            Err(e) => ServerMessage::DirEntries {
-                                path: String::new(),
-                                entries: vec![],
-                                error: Some(format!("browse failed: {e}")),
-                            },
-                        };
-                        let _ = send_json(&sink, &msg).await;
-                    }
-                    ClientMessage::GenerateAgentName => {
-                        // Pure, fast, and self-contained: answer directly without
-                        // round-tripping through the engine thread.
-                        let name = dux_core::git::docker_style_name();
-                        let _ = send_json(&sink, &ServerMessage::AgentName { name }).await;
-                    }
-                    ClientMessage::ListProjectWorktrees { project_id } => {
-                        // Resolve the project + classification inputs from the
-                        // engine (an instant lookup), then classify off-thread:
-                        // classification shells to git, so it must not run on the
-                        // engine loop or the async reactor (the browse_dir precedent).
-                        let (entries, error) =
-                            match engine.project_worktree_inputs(project_id.clone()).await {
-                                None => (vec![], Some("unknown project".to_string())),
-                                Some((project, paths, sessions)) => {
-                                    match tokio::task::spawn_blocking(move || {
-                                        classify_managed_worktrees(&project, &paths, &sessions)
-                                    })
-                                    .await
-                                    {
-                                        Ok(Ok(entries)) => (entries, None),
-                                        Ok(Err(e)) => (vec![], Some(e)),
-                                        Err(e) => {
-                                            (vec![], Some(format!("worktree listing failed: {e}")))
-                                        }
-                                    }
-                                }
-                            };
-                        let _ = send_json(
-                            &sink,
-                            &ServerMessage::ProjectWorktrees {
-                                project_id,
-                                entries,
-                                error,
-                            },
-                        )
-                        .await;
-                    }
-                    ClientMessage::InspectProjectPath { path } => {
-                        // Pre-flight branch inspection mirroring the TUI's
-                        // add_project: it runs `current_branch` +
-                        // `branch_warning_kind` before showing the
-                        // ConfirmNonDefaultBranch prompt. Both are bounded
-                        // path-based git plumbing reads (no working-tree writes,
-                        // no engine state — the path isn't a project yet), so
-                        // run them directly off the reactor in spawn_blocking,
-                        // following the browse_dir precedent.
-                        let msg = inspect_project_path(path).await;
-                        let _ = send_json(&sink, &msg).await;
-                    }
-                }
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
-    }
-
-    // Connection closed: stop the forwarder so it doesn't linger.
-    if let Some(h) = pty_forwarder.take() {
-        h.abort();
-    }
-
-    // The socket ended (client closed, network drop, or a revocation Close frame
-    // we sent above): announce the disconnect with the same peer IP.
-    console.client_disconnected(peer_ip);
-}
 
 /// How long the forwarder's blocking reader parks per `recv_timeout` before
 /// re-checking `shutdown`. Bounds the worst-case time a forwarder lingers after
@@ -1030,15 +558,26 @@ const FORWARDER_POLL: std::time::Duration = std::time::Duration::from_millis(250
 
 /// Forward std-mpsc PTY bytes into the socket as binary frames, off the async runtime.
 ///
-/// Returns the async pump task's [`JoinHandle`]. Aborting it drops `async_rx`, which makes the
-/// blocking reader's `blocking_send` fail so the blocking task ends and drops its std `Receiver`;
-/// the owning `PtyClient` then prunes that stale subscriber on its next read.
+/// Returns the async pump task's [`JoinHandle`]. Aborting it (or letting it end on a closed socket)
+/// drops `async_rx`, which closes the bounded `tx`. The blocking reader then ends either via a failed
+/// `blocking_send` on the next chunk OR, against a quiet PTY with no further output, via the
+/// `tx.is_closed()` check in its `recv_timeout` timeout arm within one `FORWARDER_POLL` window.
+/// Abort alone is NOT sufficient when the PTY is quiet — without the `is_closed` poll the blocking
+/// task would loop forever. Once it ends it drops its std `Receiver`, so the owning `PtyClient`
+/// prunes that stale subscriber on its next read.
 ///
 /// The blocking reader parks on a bounded `recv_timeout` rather than `recv` so it can also exit on
 /// `shutdown`: the std-mpsc `Sender` lives in the `PtyClient` reader thread and, on a ReturnToTui
 /// flip, the engine (and thus that `Sender`) stays alive, so `recv` would never return Disconnected
 /// and would wedge the tokio blocking pool — hanging the runtime teardown. Polling `shutdown` every
 /// `FORWARDER_POLL` lets the task exit within one window of any teardown even with the engine alive.
+///
+/// The same timeout arm also checks `tx.is_closed()`: when the downstream socket closes against a
+/// QUIET PTY (the async forwarder task ends and drops `async_rx`, but no further PTY output arrives
+/// to make `blocking_send` observe the closure), polling `shutdown` alone would never fire and the
+/// blocking task would loop forever, leaking a blocking-pool thread per focus-switch/disconnect.
+/// Breaking on `is_closed` ends the blocking reader within one poll window of the socket dropping,
+/// which in turn drops the std `Receiver` so the owning `PtyClient` prunes the stale subscriber.
 fn spawn_pty_forwarder(
     sink: SharedSink,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
@@ -1054,7 +593,7 @@ fn spawn_pty_forwarder(
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                    if shutdown.load(std::sync::atomic::Ordering::SeqCst) || tx.is_closed() {
                         break;
                     }
                 }
@@ -1072,114 +611,1034 @@ fn spawn_pty_forwarder(
     })
 }
 
-/// Build the `Status` frames to replay on connect from a status snapshot.
+/// Read the username to periodically recheck for revocation on an authenticated
+/// socket (the HTTP gate cannot revoke an already-upgraded socket). `None` when
+/// auth is disabled or no username is recorded — such sockets are never rechecked.
+/// Shared by the nested PTY upgrade handlers so they recheck identically to `/ws`.
+async fn ws_recheck_user(state: &AppState, session: &Session) -> Option<String> {
+    if auth::is_enabled(&state.auth) {
+        session
+            .get::<String>(auth::SESSION_USER_KEY)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    }
+}
+
+/// Acquire a connection-cap permit before a WS upgrade. `None` means the cap is
+/// exhausted (the caller responds 503); a refusal is logged here with `route` so an
+/// operator can see which endpoint hit the cap. The permit moves into the socket
+/// task and frees the slot when the task returns, so the cap bounds the COMBINED
+/// live socket count across every WS family (see [`AppState::ws_semaphore`]).
+/// Returns `Option` rather than `Result<_, Response>` so the large `Response` does
+/// not bloat the `Err` variant (clippy `result_large_err`).
+fn acquire_ws_permit(
+    state: &AppState,
+    peer_ip: std::net::IpAddr,
+    route: &str,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
+        Ok(permit) => Some(permit),
+        Err(_) => {
+            dux_core::logger::warn(&format!(
+                "[server] {route} upgrade refused for {peer_ip}: connection cap reached \
+                 (max_websocket_connections)"
+            ));
+            None
+        }
+    }
+}
+
+/// Which PTY a nested socket streams: an agent session's main provider PTY (keyed
+/// by session id) or a companion terminal's PTY (keyed by terminal id). Both
+/// resolve through the same engine write/resize routing (`pty_for`), so the socket
+/// loop treats them identically once subscribed; they differ only in how the
+/// upgrade handler validates the path and how the initial subscription is taken.
+enum PtyTarget {
+    Agent(String),
+    Terminal(String),
+}
+
+impl PtyTarget {
+    /// The id used to route stdin writes and resizes (the session id for an agent,
+    /// the terminal id for a companion terminal). The engine's `pty_for` accepts
+    /// either keyspace.
+    fn pty_id(&self) -> &str {
+        match self {
+            PtyTarget::Agent(id) | PtyTarget::Terminal(id) => id,
+        }
+    }
+}
+
+/// A resize control frame on a PTY socket: the Text frame `{"rows":R,"cols":C}`,
+/// distinct from the Binary stdin frames. Routed to `engine.resize_pty` for the
+/// socket's own PTY, so resize is naturally gated — only a socket attached to a PTY
+/// can resize it (multi-viewer last-writer-wins, as today).
+#[derive(serde::Deserialize)]
+struct PtyResizeFrame {
+    rows: u16,
+    cols: u16,
+}
+
+/// Upgrade handler for `GET /ws/sessions/:id/pty` — stream the agent session's main
+/// provider PTY. Replicates the four `/ws` protections (origin check, connection-cap
+/// permit, frame-size limit, user-revocation recheck) and path-validates `:id`
+/// against a known session (404 otherwise, before the upgrade).
+async fn ws_session_pty_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    session: Session,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
+    // Validate the session exists BEFORE the upgrade so a bad id is a clean HTTP
+    // 404 rather than a socket that opens and immediately closes. Length-bound the
+    // id first so a huge path can't drive an engine lookup.
+    if !crate::rest_common::id_within_bound(&id)
+        || state.engine.session_worktree(id.clone()).await.is_none()
+    {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    }
+    let recheck_user = ws_recheck_user(&state, &session).await;
+    let permit = match acquire_ws_permit(&state, peer.ip(), "/ws/sessions/:id/pty") {
+        Some(permit) => permit,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let engine = state.engine.clone();
+    let auth = state.auth.clone();
+    let recheck_period = state.ws_recheck_period;
+    let console = state.console.clone();
+    let peer_ip = peer.ip();
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_pty_socket(
+                socket,
+                engine,
+                PtyTarget::Agent(id),
+                auth,
+                recheck_user,
+                recheck_period,
+                console,
+                peer_ip,
+                permit,
+            )
+        })
+        .into_response()
+}
+
+/// Upgrade handler for `GET /ws/sessions/:id/terminals/:tid/pty` — stream a
+/// companion terminal's PTY. Same four protections as the agent socket, and
+/// path-validates BOTH that `:id` is a known session AND that `:tid` belongs to it
+/// (the legacy `SubscribeTerminal` looked terminals up by id alone; here the path
+/// enforces session ownership). Either failing is a 404 before the upgrade.
+async fn ws_terminal_pty_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path((id, tid)): Path<(String, String)>,
+    session: Session,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
+    if !crate::rest_common::id_within_bound(&id) || !crate::rest_common::id_within_bound(&tid) {
+        return (StatusCode::NOT_FOUND, "unknown terminal").into_response();
+    }
+    if state.engine.session_worktree(id.clone()).await.is_none() {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    }
+    // Enforce that the terminal belongs to THIS session: an unknown terminal, or
+    // one owned by a different session, is a 404 (never a cross-session attach).
+    match state.engine.terminal_session(tid.clone()).await {
+        Some(owner) if owner == id => {}
+        _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
+    }
+    let recheck_user = ws_recheck_user(&state, &session).await;
+    let permit = match acquire_ws_permit(&state, peer.ip(), "/ws/sessions/:id/terminals/:tid/pty") {
+        Some(permit) => permit,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let engine = state.engine.clone();
+    let auth = state.auth.clone();
+    let recheck_period = state.ws_recheck_period;
+    let console = state.console.clone();
+    let peer_ip = peer.ip();
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_pty_socket(
+                socket,
+                engine,
+                PtyTarget::Terminal(tid),
+                auth,
+                recheck_user,
+                recheck_period,
+                console,
+                peer_ip,
+                permit,
+            )
+        })
+        .into_response()
+}
+
+/// Drive one nested per-PTY socket. On open, subscribe to the target PTY and replay
+/// the buffered scrollback/repaint (sized to `agent_scrollback_lines` inside the
+/// `PtyClient`). Then:
+/// server→client is Binary frames of raw PTY bytes; a client→server Binary frame is
+/// PTY stdin; a client→server Text frame `{"rows":R,"cols":C}` is a resize. Close
+/// (or any stream end) detaches by dropping the subscription/forwarder.
+#[allow(clippy::too_many_arguments)]
+async fn handle_pty_socket(
+    socket: WebSocket,
+    engine: EngineHandle,
+    target: PtyTarget,
+    auth: SharedAuth,
+    recheck_user: Option<String>,
+    recheck_period: std::time::Duration,
+    console: Console,
+    peer_ip: std::net::IpAddr,
+    // Held for the socket's lifetime purely for its Drop (frees a connection-cap
+    // slot when this returns). Never read.
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    console.client_connected(peer_ip);
+    let (sink, mut stream) = socket.split();
+    let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
+
+    // Subscribe to the target PTY. An agent subscribe also launches/resumes the
+    // provider if it isn't running yet (the same flow the legacy Subscribe uses);
+    // a terminal subscribe attaches to an already-created companion terminal.
+    let subscription = match &target {
+        PtyTarget::Agent(id) => engine.subscribe_pty(id.clone()).await,
+        PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
+    };
+    let (repaint, rx) = match subscription {
+        Ok(sub) => sub,
+        Err(e) => {
+            // Subscribe failed after the upgrade (e.g. the agent failed to launch,
+            // or the terminal vanished in the gap). Best-effort Close, then exit.
+            dux_core::logger::warn(&format!(
+                "PTY socket subscribe failed for {peer_ip} (pty {:?}): {e}",
+                target.pty_id()
+            ));
+            {
+                let mut guard = sink.lock().await;
+                let _ = guard.send(Message::Close(None)).await;
+            }
+            console.client_disconnected(peer_ip);
+            return;
+        }
+    };
+    // Replay the buffered scrollback/repaint before streaming live bytes.
+    send_binary(&sink, repaint).await;
+    let pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
+
+    // Periodic user-existence recheck (auth-on sockets only), same policy as `/ws`.
+    let mut recheck = tokio::time::interval(recheck_period);
+    if recheck_user.is_some() {
+        recheck.tick().await;
+    }
+
+    loop {
+        let msg = tokio::select! {
+            _ = recheck.tick(), if recheck_user.is_some() => {
+                if !auth::is_enabled(&auth) {
+                    // Gate downgraded to OFF: a loosening, not a revocation. Keep streaming.
+                    continue;
+                }
+                let still_valid = recheck_user
+                    .as_deref()
+                    .map(|u| auth::username_exists(&auth, u))
+                    .unwrap_or(false);
+                if !still_valid {
+                    let mut guard = sink.lock().await;
+                    let _ = guard.send(Message::Close(None)).await;
+                    break;
+                }
+                continue;
+            }
+            next = stream.next() => match next {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+        };
+        match msg {
+            // Binary frame = raw PTY stdin for THIS socket's PTY.
+            Message::Binary(bytes) => {
+                engine.write_pty(target.pty_id().to_string(), bytes.to_vec());
+            }
+            // Text frame = a resize control message. Resize is gated to this socket's
+            // own PTY (the socket IS the subscription); multi-viewer is last-writer-
+            // wins, but only sockets attached to THIS pty can resize it.
+            Message::Text(text) => {
+                if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
+                    engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // Detach: stop the forwarder so it doesn't linger on the subscription.
+    pty_forwarder.abort();
+    console.client_disconnected(peer_ip);
+}
+
+/// The single `config.changed` signal emitted whenever the engine reloads config.
+/// No `id`/`rev` — it is a plain "refetch `/api/v1/bootstrap`" signal delivered on
+/// the coarse `config` topic.
+fn config_changed_event() -> Event {
+    Event::Resource {
+        event: "config.changed".to_string(),
+        id: None,
+        rev: None,
+    }
+}
+
+/// Bridge engine config reloads onto the event bus as `config.changed`. The engine
+/// actor fires `()` on its reload broadcast after each successful reload; this task
+/// re-emits a `config.changed` event so subscribed clients refetch bootstrap. A
+/// `Lagged` recovery still only needs to say "config changed" once (the signal is
+/// value-less and idempotent), so missed reloads coalesce into a single emit.
+/// Exits when the engine — and thus the reload broadcast — is gone. Returns the
+/// task handle (used by tests; the production caller fire-and-forgets it).
+fn spawn_config_changed_forwarder(
+    mut reload_rx: tokio::sync::broadcast::Receiver<()>,
+    bus: Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match reload_rx.recv().await {
+                Ok(()) => bus.emit(config_changed_event()),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    bus.emit(config_changed_event())
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// A coarse `projects.changed` signal: no `id`/`rev`, just "refetch the projects
+/// read" (`/api/v1/projects` or `/api/v1/spine`), delivered on the `projects` topic.
+fn projects_changed_event() -> Event {
+    Event::Resource {
+        event: "projects.changed".to_string(),
+        id: None,
+        rev: None,
+    }
+}
+
+/// A coarse `sessions.changed` signal: no `id`/`rev`, just "refetch the sessions
+/// read" (`/api/v1/sessions` or `/api/v1/spine`), delivered on the `sessions` topic.
+/// Covers session lifecycle/status, the `working` flag, and the terminal list in
+/// Phase 3 (they all live in the sessions/sidebar projection).
+fn sessions_changed_event() -> Event {
+    Event::Resource {
+        event: "sessions.changed".to_string(),
+        id: None,
+        rev: None,
+    }
+}
+
+/// Bridge engine spine changes onto the event bus as coarse `projects.changed` /
+/// `sessions.changed` events. The engine loop fires a [`SpineChange`] per changed
+/// side; this task re-emits the matching event so subscribed clients refetch
+/// `/api/v1/spine`. On `Lagged` it re-emits BOTH coarse signals once (the signals
+/// are value-less and idempotent, so a missed run coalesces into a single refetch
+/// of each side). Exits when the engine — and thus the broadcast — is gone. Returns
+/// the task handle (used by tests; the production caller fire-and-forgets it).
+fn spawn_spine_changed_forwarder(
+    mut spine_rx: tokio::sync::broadcast::Receiver<SpineChange>,
+    bus: Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match spine_rx.recv().await {
+                Ok(SpineChange::Projects) => bus.emit(projects_changed_event()),
+                Ok(SpineChange::Sessions) => bus.emit(sessions_changed_event()),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    bus.emit(projects_changed_event());
+                    bus.emit(sessions_changed_event());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// A `session.commit_message` signal for one session: no `rev`, just "a new
+/// commit message is ready — refetch `/api/v1/sessions/:id/commit-message`",
+/// delivered on the fine `session:<id>:commit-message` topic.
+fn commit_message_event(session_id: String) -> Event {
+    Event::Resource {
+        event: "session.commit_message".to_string(),
+        id: Some(session_id),
+        rev: None,
+    }
+}
+
+/// Bridge engine commit-message completions onto the event bus as per-session
+/// `session.commit_message` events. The engine broadcasts a `CommitMessageEvent`
+/// when a one-shot generation finishes; this re-emits the matching event so a
+/// subscribed client refetches the generated draft. On `Lagged` it cannot know
+/// which sessions it missed, so it emits nothing (the on-connect commit-message
+/// snapshot, also delivered on `/ws/events`, backstops a reconnecting client).
+/// Exits when the engine — and thus the broadcast — is gone. Returns the task
+/// handle (tests use it; the
+/// production caller fire-and-forgets).
+fn spawn_commit_message_forwarder(
+    mut commit_rx: tokio::sync::broadcast::Receiver<crate::engine_actor::CommitMessageEvent>,
+    bus: Arc<EventBus>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match commit_rx.recv().await {
+                Ok(event) => bus.emit(commit_message_event(event.session_id)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Max topics a single `/ws/events` subscribe frame may carry (reject the frame
+/// beyond this) and max total fine topics one connection may hold.
+const MAX_EVENT_TOPICS_PER_FRAME: usize = 64;
+const MAX_EVENT_TOPICS_PER_CONN: usize = 64;
+
+/// Max length (chars) of a single topic string. A topic that exceeds this is
+/// ignored before it is inserted into the set or used for a `session_worktree`
+/// round-trip, so a client cannot push huge strings into the per-connection set or
+/// trigger expensive lookups with them.
+const MAX_TOPIC_LEN: usize = 256;
+
+/// Inbound `/ws/events` control frame: subscribe and/or unsubscribe sets. Both
+/// arrays are optional so `{ "subscribe": [...] }` and `{ "unsubscribe": [...] }`
+/// each parse, and a frame may carry both.
+#[derive(serde::Deserialize)]
+struct EventsClientFrame {
+    #[serde(default)]
+    subscribe: Vec<String>,
+    #[serde(default)]
+    unsubscribe: Vec<String>,
+}
+
+/// Outbound `/ws/events` resource-change signal. Mirrors the event envelope:
+/// `{ "event": "session.changes", "id": "s1", "rev": 42 }`. Also carries the
+/// `connected` handshake (`{ "event": "connected", "id": "<conn>" }`).
+#[derive(serde::Serialize)]
+struct WireEvent {
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rev: Option<u64>,
+}
+
+/// Outbound `/ws/events` status event: the one event carrying an inline payload
+/// (a toast has nothing to GET). Shape:
+/// `{ "event": "status", "key": "op-7", "tone": "info", "message": "…", "scope": "all" }`.
+/// The server has already filtered on `scope`, but it is serialized for wire
+/// parity so a client may render/correlate it.
+#[derive(serde::Serialize)]
+struct WireStatusEvent {
+    event: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    tone: String,
+    message: String,
+    scope: StatusScope,
+}
+
+/// Outbound `/ws/events` status-clear event: dismiss the toast for `key` (a keyed
+/// op resolved or was cleared). `None` clears the anonymous slot. Shape:
+/// `{ "event": "status_cleared", "key": "op-7" }`.
+#[derive(serde::Serialize)]
+struct WireStatusClearedEvent {
+    event: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+}
+
+/// Upgrade handler for `/ws/events`. Replicates the four WS protections (origin
+/// check, connection-cap permit, frame-size limit, user-revocation recheck). The
+/// per-connection `connection_id` (minted inside [`handle_events_socket`]) is sent
+/// as the first frame and drives status-toast scoping: a REST action echoes it via
+/// `X-Connection-Id` so its status reaches only the originating connection.
+async fn ws_events_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    session: Session,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
+    let recheck_user = if auth::is_enabled(&state.auth) {
+        session
+            .get::<String>(auth::SESSION_USER_KEY)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let permit = match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            dux_core::logger::warn(&format!(
+                "[server] /ws/events upgrade refused for {}: connection cap reached \
+                 (max_websocket_connections)",
+                peer.ip()
+            ));
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let auth = state.auth.clone();
+    let recheck_period = state.ws_recheck_period;
+    let console = state.console.clone();
+    let engine = state.engine.clone();
+    let bus = Arc::clone(&state.event_bus);
+    let changes = Arc::clone(&state.changes);
+    let peer_ip = peer.ip();
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_events_socket(
+                socket,
+                engine,
+                bus,
+                changes,
+                auth,
+                recheck_user,
+                recheck_period,
+                console,
+                peer_ip,
+                permit,
+            )
+        })
+        .into_response()
+}
+
+/// Drive one `/ws/events` connection as a single `tokio::select!` loop owning the
+/// subscription `HashSet` and the only path that drains held interests on exit.
+/// There is no separate forwarder task (no double-decrement, no forwarder-dies-
+/// but-handler-lives leak).
 ///
-/// Each open `KeyedWireStatus` in `snapshot` (non-empty message) maps to one
-/// `ServerMessage::Status` frame. Pure and side-effect-free so it can be unit-
-/// tested without a WebSocket. An empty snapshot produces an empty `Vec`.
-fn status_frames(snapshot: &[KeyedWireStatus]) -> Vec<ServerMessage> {
+/// Besides resource-change events, this socket also delivers status toasts: the
+/// live status broadcast, the status-clear broadcast, and the on-connect status
+/// snapshot — all filtered by the per-connection scope rule ([`scope_delivers`])
+/// so one client's operation toasts never leak to another. The on-connect
+/// commit-message snapshot is delivered here too, as `session.commit_message`
+/// events the client refetches.
+#[allow(clippy::too_many_arguments)]
+async fn handle_events_socket(
+    socket: WebSocket,
+    engine: EngineHandle,
+    bus: Arc<EventBus>,
+    changes: Arc<ChangesService>,
+    auth: SharedAuth,
+    recheck_user: Option<String>,
+    recheck_period: std::time::Duration,
+    console: Console,
+    peer_ip: std::net::IpAddr,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    console.client_connected(peer_ip);
+    // A server-assigned random id correlating REST actions with the statuses they
+    // mint, so an operation's toasts (push/commit/launch) are delivered ONLY back
+    // to the originating connection (`StatusScope::Connection`). The client echoes
+    // it as the `X-Connection-Id` header on REST mutations. Never client-supplied.
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    let (sink, mut stream) = socket.split();
+    let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
+    let mut bus_rx = bus.subscribe();
+
+    // First frame: hand the client its connection id (the `X-Connection-Id` REST
+    // mutations echo back so their status toasts scope to this connection only).
+    let _ = send_event(
+        &sink,
+        &WireEvent {
+            event: "connected".to_string(),
+            id: Some(connection_id.clone()),
+            rev: None,
+        },
+    )
+    .await;
+
+    // Subscribe to the live status + status-clear broadcasts BEFORE reading the
+    // snapshot: the broadcast does not replay to a receiver created after a send,
+    // so a status/clear emitted in the gap (notably during a snapshot
+    // `send_event().await`) would be lost. Subscribing first buffers it for this
+    // receiver; any overlap with the snapshot is a harmless duplicate.
+    let mut status_rx = engine.subscribe_status();
+    let mut status_clear_rx = engine.subscribe_status_clears();
+
+    // Initial statuses: a client connecting mid-operation sees ALL active toasts
+    // (keyed and anonymous) immediately, scoped to itself. An empty/fully-filtered
+    // snapshot sends nothing.
+    for ev in status_events(&engine.status_snapshot(), &connection_id) {
+        if send_status_event(&sink, &ev).await.is_err() {
+            console.client_disconnected(peer_ip);
+            return;
+        }
+    }
+
+    // Initial commit messages: a client that reconnected after generation
+    // completed (or in the connect/subscribe gap) is nudged to refetch each
+    // session's last generated message via a `session.commit_message` event. The
+    // client applies it conservatively (only into a matching, still-empty draft).
+    for event in engine.commit_message_snapshots() {
+        if event.message.is_empty() {
+            continue;
+        }
+        let _ = send_event(
+            &sink,
+            &WireEvent {
+                event: "session.commit_message".to_string(),
+                id: Some(event.session_id),
+                rev: None,
+            },
+        )
+        .await;
+    }
+
+    // This connection's fine + coarse topic set (the sole owner), wrapped in a Drop
+    // guard so the held fine-topic interests are drained on EVERY exit — including
+    // task cancellation (a runtime shutdown drops this future at an `.await`), not
+    // just the normal loop break. Leaking interest would keep the poller computing
+    // for a gone connection forever.
+    let mut interest = InterestGuard {
+        subscribed: std::collections::HashSet::new(),
+        bus: Arc::clone(&bus),
+    };
+
+    let mut recheck = tokio::time::interval(recheck_period);
+    if recheck_user.is_some() {
+        recheck.tick().await;
+    }
+
+    loop {
+        tokio::select! {
+            // User-revocation recheck (auth-on sockets only).
+            _ = recheck.tick(), if recheck_user.is_some() => {
+                if !auth::is_enabled(&auth) {
+                    continue;
+                }
+                let still_valid = recheck_user
+                    .as_deref()
+                    .map(|u| auth::username_exists(&auth, u))
+                    .unwrap_or(false);
+                if !still_valid {
+                    let mut guard = sink.lock().await;
+                    let _ = guard.send(Message::Close(None)).await;
+                    break;
+                }
+                continue;
+            }
+            ev = bus_rx.recv() => match ev {
+                Ok(Event::Resource { event, id, rev }) => {
+                    // Forward a resource event only if this connection holds the
+                    // topic it is delivered on. `session.changes` rides the fine
+                    // per-session `session:<id>:changes` topic; `config.changed`
+                    // rides the coarse `config` topic (no id/rev — a plain refetch
+                    // signal for `/api/v1/bootstrap`).
+                    let deliver = match (event.as_str(), &id) {
+                        ("session.changes", Some(sid)) => {
+                            interest.subscribed.contains(&event_bus::changes_topic(sid))
+                        }
+                        ("session.commit_message", Some(sid)) => interest
+                            .subscribed
+                            .contains(&event_bus::commit_message_topic(sid)),
+                        ("config.changed", _) => interest.subscribed.contains("config"),
+                        // Coarse spine signals ride their own coarse topics (no
+                        // id/rev — a plain refetch of `/api/v1/spine`).
+                        ("projects.changed", _) => interest.subscribed.contains("projects"),
+                        ("sessions.changed", _) => interest.subscribed.contains("sessions"),
+                        _ => false,
+                    };
+                    if deliver {
+                        let frame = WireEvent { event, id, rev };
+                        if send_event(&sink, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    dux_core::logger::warn(&format!(
+                        "WebSocket events client {peer_ip} lagged behind the event bus; \
+                         dropped {n} event(s); synthesizing catch-up"
+                    ));
+                    // Write a synthetic catch-up DIRECTLY to this connection's sink
+                    // for each held fine topic (never back onto the broadcast bus).
+                    let mut sink_dead = false;
+                    for topic in interest.subscribed.iter() {
+                        if let Some(sid) = event_bus::session_id_from_changes_topic(topic) {
+                            let frame = WireEvent {
+                                event: "session.changes".to_string(),
+                                id: Some(sid.to_string()),
+                                rev: changes.peek_rev(sid),
+                            };
+                            if send_event(&sink, &frame).await.is_err() {
+                                sink_dead = true;
+                                break;
+                            }
+                        // The fine commit-message topic carries no rev either, so the
+                        // changes branch above never covers it. A lagged client holding
+                        // it must be nudged to refetch each session's generated draft;
+                        // mirror the on-connect commit-message snapshot (only when a
+                        // fresh message actually exists, to avoid a spurious refetch).
+                        } else if let Some(sid) =
+                            event_bus::session_id_from_commit_message_topic(topic)
+                            .filter(|sid| engine.commit_message_for(sid).is_some())
+                        {
+                            let frame = WireEvent {
+                                event: "session.commit_message".to_string(),
+                                id: Some(sid.to_string()),
+                                rev: None,
+                            };
+                            if send_event(&sink, &frame).await.is_err() {
+                                sink_dead = true;
+                                break;
+                            }
+                        }
+                    }
+                    if sink_dead {
+                        break;
+                    }
+                    // The coarse `config` topic carries no per-resource rev, so the
+                    // fine-topic loop above never covers it. A lagged client holding
+                    // `config` would keep stale bootstrap unless we explicitly tell it
+                    // to refetch; emit one `config.changed` directly to this sink
+                    // (mirroring how `spawn_config_changed_forwarder` recovers).
+                    if interest.subscribed.contains("config") {
+                        let frame = WireEvent {
+                            event: "config.changed".to_string(),
+                            id: None,
+                            rev: None,
+                        };
+                        if send_event(&sink, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    // The coarse `projects`/`sessions` topics likewise carry no
+                    // per-resource rev, so a lagged client holding them needs an
+                    // explicit refetch nudge to recover from stale spine data.
+                    if interest.subscribed.contains("projects") {
+                        let frame = WireEvent {
+                            event: "projects.changed".to_string(),
+                            id: None,
+                            rev: None,
+                        };
+                        if send_event(&sink, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    if interest.subscribed.contains("sessions") {
+                        let frame = WireEvent {
+                            event: "sessions.changed".to_string(),
+                            id: None,
+                            rev: None,
+                        };
+                        if send_event(&sink, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            // Live status broadcast. Per-connection scope filter: an `All` status
+            // reaches everyone; a `Connection(id)` status reaches only that
+            // connection — one client's operation toasts stop leaking to others.
+            status = status_rx.recv() => match status {
+                Ok(status) => {
+                    if scope_delivers(&status.scope, &connection_id) {
+                        let ev = WireStatusEvent {
+                            event: "status",
+                            key: status.key,
+                            tone: status.tone,
+                            message: status.message,
+                            scope: status.scope,
+                        };
+                        if send_status_event(&sink, &ev).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    dux_core::logger::warn(&format!(
+                        "WebSocket events client {peer_ip} lagged behind the status \
+                         broadcast; dropped {n} update(s); resending scoped snapshot"
+                    ));
+                    // Recover the missed updates by replaying the current scoped
+                    // status snapshot. The client reconciles by key (it replaces the
+                    // toast for each open status), so missed live updates are healed.
+                    if resend_status_snapshot(&sink, &engine, &connection_id)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            // Keyed-status clears: when a keyed op resolves or expires, dismiss the
+            // matching toast immediately. `None` clears the anonymous slot.
+            cleared = status_clear_rx.recv() => match cleared {
+                Ok(key) => {
+                    let ev = WireStatusClearedEvent {
+                        event: "status_cleared",
+                        key,
+                    };
+                    if send_status_cleared_event(&sink, &ev).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    dux_core::logger::warn(&format!(
+                        "WebSocket events client {peer_ip} lagged behind the status-clear \
+                         broadcast; dropped {n} clear(s); resending scoped snapshot"
+                    ));
+                    // A dropped clear cannot be reconstructed directly, so re-send the
+                    // snapshot of statuses still open: the client reconciles by key
+                    // (the frontend re-syncs to this set), recovering from a missed
+                    // dismissal for any keyed toast no longer present.
+                    if resend_status_snapshot(&sink, &engine, &connection_id)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            next = stream.next() => match next {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(frame) = serde_json::from_str::<EventsClientFrame>(text.as_str()) {
+                        apply_events_frame(&frame, &mut interest.subscribed, &engine, &bus).await;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                // Ignore binary/ping/pong on the events socket.
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+
+    // `interest` (the Drop guard) drains all held fine-topic interests when it
+    // goes out of scope here — on the normal break above AND on task cancellation.
+    drop(interest);
+    console.client_disconnected(peer_ip);
+}
+
+/// Drains a `/ws/events` connection's held fine-topic interests on Drop, so the
+/// global poll-interest refcount is balanced on EVERY exit path — the normal loop
+/// break and task cancellation alike (a runtime shutdown drops the connection
+/// future at an `.await`, which would otherwise skip a hand-written cleanup at the
+/// end of the function). Holds an `Arc<EventBus>` clone so the bus outlives it.
+struct InterestGuard {
+    subscribed: std::collections::HashSet<String>,
+    bus: Arc<EventBus>,
+}
+
+impl Drop for InterestGuard {
+    fn drop(&mut self) {
+        for topic in &self.subscribed {
+            if event_bus::session_id_from_changes_topic(topic).is_some() {
+                self.bus.drop_interest(topic);
+            }
+        }
+    }
+}
+
+/// Apply one subscribe/unsubscribe frame to the connection's topic set, keeping
+/// the global interest refcount exact (`add_interest` only on a genuine insert,
+/// `drop_interest` only on a genuine removal). Validates a `session:<id>:changes`
+/// subscription against a live session before registering interest, and enforces
+/// the per-frame and per-connection topic caps.
+async fn apply_events_frame(
+    frame: &EventsClientFrame,
+    subscribed: &mut std::collections::HashSet<String>,
+    engine: &EngineHandle,
+    bus: &EventBus,
+) {
+    // Process unsubscribes FIRST — they only ever shrink state, so they are always
+    // safe to honor (even on an otherwise-rejected oversized frame) and a frame
+    // carrying both makes room under the cap before the subscribes run.
+    for topic in &frame.unsubscribe {
+        if subscribed.remove(topic) && event_bus::session_id_from_changes_topic(topic).is_some() {
+            bus.drop_interest(topic);
+        }
+    }
+
+    // Only AFTER honoring unsubscribes, reject an oversized subscribe set.
+    if frame.subscribe.len() > MAX_EVENT_TOPICS_PER_FRAME {
+        dux_core::logger::warn(&format!(
+            "/ws/events subscribe frame rejected: {} topics exceeds the {MAX_EVENT_TOPICS_PER_FRAME} cap",
+            frame.subscribe.len()
+        ));
+        return;
+    }
+
+    for topic in &frame.subscribe {
+        if subscribed.len() >= MAX_EVENT_TOPICS_PER_CONN {
+            dux_core::logger::warn(&format!(
+                "/ws/events connection hit the {MAX_EVENT_TOPICS_PER_CONN}-topic cap; \
+                 ignoring further subscriptions"
+            ));
+            break;
+        }
+        // Bound a single topic's length before inserting it or using it for a
+        // (possibly expensive) session lookup.
+        if topic.chars().count() > MAX_TOPIC_LEN {
+            dux_core::logger::debug(&format!(
+                "/ws/events ignoring an over-long topic ({} chars exceeds {MAX_TOPIC_LEN})",
+                topic.chars().count()
+            ));
+            continue;
+        }
+        match event_bus::session_id_from_changes_topic(topic) {
+            // A fine session-changes topic.
+            Some(sid) => {
+                // Already held → O(1), skip the `session_worktree` round-trip.
+                if subscribed.contains(topic) {
+                    continue;
+                }
+                // Validate the session exists before registering interest; drop a
+                // phantom-session subscription with a breadcrumb (the other
+                // rejections log, so this one shouldn't be silent).
+                if engine.session_worktree(sid.to_string()).await.is_none() {
+                    dux_core::logger::debug(&format!(
+                        "/ws/events ignoring subscription to unknown session {sid:?}"
+                    ));
+                    continue;
+                }
+                if subscribed.insert(topic.clone()) {
+                    bus.add_interest(topic);
+                }
+            }
+            // A coarse topic (sessions/projects/config): tracked for forwarding,
+            // but it carries no poll interest in Phase 1.
+            None => {
+                subscribed.insert(topic.clone());
+            }
+        }
+    }
+}
+
+/// Serialize and send one `/ws/events` resource frame as a text message.
+async fn send_event(sink: &SharedSink, ev: &WireEvent) -> Result<(), ()> {
+    let text = serde_json::to_string(ev).map_err(|_| ())?;
+    let mut guard = sink.lock().await;
+    guard.send(Message::Text(text.into())).await.map_err(|_| ())
+}
+
+/// Serialize and send one `/ws/events` status event as a text message.
+async fn send_status_event(sink: &SharedSink, ev: &WireStatusEvent) -> Result<(), ()> {
+    let text = serde_json::to_string(ev).map_err(|_| ())?;
+    let mut guard = sink.lock().await;
+    guard.send(Message::Text(text.into())).await.map_err(|_| ())
+}
+
+/// Serialize and send one `/ws/events` status-clear event as a text message.
+async fn send_status_cleared_event(
+    sink: &SharedSink,
+    ev: &WireStatusClearedEvent,
+) -> Result<(), ()> {
+    let text = serde_json::to_string(ev).map_err(|_| ())?;
+    let mut guard = sink.lock().await;
+    guard.send(Message::Text(text.into())).await.map_err(|_| ())
+}
+
+/// Whether a status of the given [`StatusScope`] is delivered to the connection
+/// with id `conn_id`: `All` reaches everyone; `Connection(id)` reaches only the
+/// matching connection. Shared by the live status arm and the on-connect snapshot
+/// so both delivery paths filter identically.
+fn scope_delivers(scope: &StatusScope, conn_id: &str) -> bool {
+    match scope {
+        StatusScope::All => true,
+        StatusScope::Connection(id) => id == conn_id,
+    }
+}
+
+/// Re-send the current scoped status snapshot to one connection. Used to recover
+/// after a `Lagged` on either the status or status-clear broadcast: the client
+/// reconciles by key (replacing the toast for each still-open status), so missed
+/// live updates and dismissals are healed without the server diffing. Returns
+/// `Err(())` if the sink is dead so the caller can break the connection loop.
+async fn resend_status_snapshot(
+    sink: &SharedSink,
+    engine: &EngineHandle,
+    connection_id: &str,
+) -> Result<(), ()> {
+    for ev in status_events(&engine.status_snapshot(), connection_id) {
+        send_status_event(sink, &ev).await?;
+    }
+    Ok(())
+}
+
+/// Build the status events to replay on connect from a status snapshot.
+///
+/// Each open `KeyedWireStatus` in `snapshot` (non-empty message) whose scope is
+/// deliverable to `conn_id` maps to one [`WireStatusEvent`]. The scope filter
+/// mirrors the live status arm so a client connecting mid-operation does NOT
+/// receive another connection's in-progress `Busy` (a ghost spinner that never
+/// clears). Pure and side-effect-free so it can be unit-tested without a
+/// WebSocket. An empty (or fully-filtered) snapshot produces an empty `Vec`.
+fn status_events(snapshot: &[KeyedWireStatus], conn_id: &str) -> Vec<WireStatusEvent> {
     snapshot
         .iter()
         .filter(|e| !e.message.is_empty())
-        .map(|e| ServerMessage::Status {
+        .filter(|e| scope_delivers(&e.scope, conn_id))
+        .map(|e| WireStatusEvent {
+            event: "status",
             key: e.key.clone(),
             tone: e.tone.clone(),
             message: e.message.clone(),
+            scope: e.scope.clone(),
         })
         .collect()
-}
-
-async fn send_view_model(sink: &SharedSink, json: &str) -> Result<(), ()> {
-    let value: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
-    send_json(sink, &ServerMessage::ViewModel { data: value }).await
-}
-
-async fn send_json(sink: &SharedSink, msg: &ServerMessage) -> Result<(), ()> {
-    let text = serde_json::to_string(msg).map_err(|_| ())?;
-    let mut guard = sink.lock().await;
-    guard.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
 async fn send_binary(sink: &SharedSink, bytes: Vec<u8>) {
     let mut guard = sink.lock().await;
     let _ = guard.send(Message::Binary(bytes.into())).await;
-}
-
-/// Classify a project's git worktrees and project the MANAGED ones (under dux's
-/// worktrees root) into wire-safe entries. External worktrees and the project
-/// checkout are excluded — they are not part of the managed-adoption flow (the
-/// TUI offers external worktrees through its separate fork path). Each managed
-/// entry is marked adoptable when it has no live agent; otherwise the reason
-/// ("Already has an agent.") is surfaced so the client can show it disabled.
-///
-/// Runs in `spawn_blocking`: `list_worktrees` shells to git. Returns a
-/// user-facing error string when the git listing fails.
-fn classify_managed_worktrees(
-    project: &dux_core::model::Project,
-    paths: &dux_core::config::DuxPaths,
-    sessions: &[dux_core::model::AgentSession],
-) -> Result<Vec<crate::protocol::ProjectWorktreeEntryView>, String> {
-    let worktrees = dux_core::git::list_worktrees(std::path::Path::new(&project.path))
-        .map_err(|e| format!("{e:#}"))?;
-    let entries =
-        dux_core::project_browser::classify_project_worktrees(project, paths, sessions, worktrees)
-            .into_iter()
-            .filter(|entry| entry.is_managed_by_dux && !entry.is_project_checkout)
-            .map(|entry| crate::protocol::ProjectWorktreeEntryView {
-                worktree_path: entry.path.to_string_lossy().to_string(),
-                branch_name: entry.branch_name,
-                adoptable: entry.is_selectable,
-                reason: if entry.is_selectable {
-                    None
-                } else {
-                    Some("Already has an agent.".to_string())
-                },
-            })
-            .collect();
-    Ok(entries)
-}
-
-/// Pre-flight branch inspection for a candidate project path, mirroring the
-/// TUI's `add_project`: it runs `current_branch` then `branch_warning_kind`
-/// before deciding whether to show the non-default-branch warning. Both are
-/// bounded git plumbing reads with no working-tree writes, so this runs off the
-/// async reactor in `spawn_blocking` (the `browse_dir` precedent). `branch_warning_kind`
-/// is a pure path-based read, so no engine state is needed — the path isn't a
-/// registered project yet.
-async fn inspect_project_path(path: String) -> ServerMessage {
-    let echo = path.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let repo = std::path::Path::new(&path);
-        let branch = dux_core::git::current_branch(repo).map_err(|e| format!("{e:#}"))?;
-        let warning = dux_core::git::branch_warning_kind(repo, &branch).map(|kind| match kind {
-            dux_core::worker::BranchWarningKind::Known { default_branch } => {
-                BranchWarningView::Known { default_branch }
-            }
-            dux_core::worker::BranchWarningKind::Heuristic => BranchWarningView::Heuristic,
-        });
-        Ok::<_, String>((branch, warning))
-    })
-    .await;
-    match result {
-        Ok(Ok((branch, warning))) => ServerMessage::ProjectPathInspection {
-            path: echo,
-            current_branch: Some(branch),
-            warning,
-            error: None,
-        },
-        Ok(Err(e)) => ServerMessage::ProjectPathInspection {
-            path: echo,
-            current_branch: None,
-            warning: None,
-            error: Some(e),
-        },
-        Err(e) => ServerMessage::ProjectPathInspection {
-            path: echo,
-            current_branch: None,
-            warning: None,
-            error: Some(format!("inspection task failed: {e}")),
-        },
-    }
 }
 
 #[cfg(test)]
@@ -1390,6 +1849,219 @@ mod tests {
         );
     }
 
+    /// The real `GET /api/v1/sessions/:id/changes` read and the `/ws/events`
+    /// upgrade are both in the gated group: unauthenticated → 401, before reaching
+    /// the handler (the changed-files compute / the WS upgrade).
+    #[tokio::test]
+    async fn changes_and_events_routes_require_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let changes = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sessions/s1/changes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            changes.status(),
+            StatusCode::UNAUTHORIZED,
+            "the changed-files read must reject an unauthenticated request"
+        );
+
+        // The bootstrap read is in the same gated group: unauthenticated → 401.
+        let bootstrap = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/bootstrap")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bootstrap.status(),
+            StatusCode::UNAUTHORIZED,
+            "the bootstrap read must reject an unauthenticated request"
+        );
+
+        // The spine reads are in the same gated group: unauthenticated → 401.
+        for uri in [
+            "/api/v1/spine",
+            "/api/v1/projects",
+            "/api/v1/sessions",
+            "/api/v1/sessions/s1",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "the spine read {uri} must reject an unauthenticated request"
+            );
+        }
+
+        // A plain GET to /ws/events (no Upgrade headers) still passes through the
+        // gate first, which 401s before the WS upgrade is attempted.
+        let events = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ws/events")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            events.status(),
+            StatusCode::UNAUTHORIZED,
+            "the /ws/events upgrade must reject an unauthenticated request"
+        );
+
+        // The nested per-PTY sockets are in the same gated group: a plain GET (no
+        // Upgrade headers) still passes through the gate first, which 401s before
+        // any path validation or WS upgrade is attempted.
+        for uri in ["/ws/sessions/s1/pty", "/ws/sessions/s1/terminals/t1/pty"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "the PTY socket {uri} must reject an unauthenticated request"
+            );
+        }
+    }
+
+    async fn patch_project_provider(
+        app: &Router,
+        provider: &str,
+    ) -> axum::http::Response<axum::body::Body> {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/projects/p1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(format!(
+                        "{{\"provider\":\"{provider}\"}}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A project PATCH that sets an UNCONFIGURED provider is rejected up front with
+    /// 400 — before any sub-command dispatches — so a bad provider cannot partially
+    /// apply after the other fields. A CONFIGURED provider is accepted (200),
+    /// proving the guard rejects only the invalid case.
+    #[tokio::test]
+    async fn project_patch_rejects_unconfigured_provider_up_front() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let app = router(handle); // auth disabled → the gate passes through.
+
+        let bad = patch_project_provider(&app, "frobnicate").await;
+        assert_eq!(
+            bad.status(),
+            StatusCode::BAD_REQUEST,
+            "an unconfigured provider must be rejected up front"
+        );
+        let body = axum::body::to_bytes(bad.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let msg = String::from_utf8_lossy(&body);
+        assert!(
+            msg.contains("frobnicate") && msg.contains("not configured"),
+            "the 400 body should name the bad provider: {msg}"
+        );
+
+        let ok = patch_project_provider(&app, "claude").await;
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "a configured provider must be accepted"
+        );
+    }
+
+    /// The session PATCH applies the same up-front provider guard: for a resolvable
+    /// session, an unconfigured provider is rejected with 400 before the
+    /// rename/auto-reopen sub-commands run, so a bad provider cannot land after an
+    /// earlier field already committed. An unknown session still 404s (never a
+    /// silent partial apply).
+    #[tokio::test]
+    async fn session_patch_rejects_unconfigured_provider_up_front() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let app = router(handle); // auth disabled → the gate passes through.
+
+        // Resolvable session `s1`, unconfigured provider → rejected up front (400),
+        // before the title/auto-reopen sub-commands could run.
+        let bad = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/sessions/s1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        "{\"title\":\"renamed\",\"provider\":\"frobnicate\"}",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bad.status(),
+            StatusCode::BAD_REQUEST,
+            "an unconfigured provider must be rejected up front, before the rename runs"
+        );
+
+        // An unknown session 404s rather than silently applying a partial change.
+        let missing = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/sessions/does-not-exist")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("{\"provider\":\"frobnicate\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            missing.status(),
+            StatusCode::NOT_FOUND,
+            "an unknown session must 404, never apply a partial change"
+        );
+    }
+
     /// A real git-mutation route is inside the gated group: unauthenticated →
     /// 401, before any git work runs.
     #[tokio::test]
@@ -1404,7 +2076,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/git/stage")
+                    .uri("/api/v1/git/stage")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"session_id":"s1","path":"a.txt"}"#,
@@ -1430,7 +2102,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/git/stage")
+                    .uri("/api/v1/git/stage")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"session_id":"does-not-exist","path":"a.txt"}"#,
@@ -1457,7 +2129,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/file/read")
+                    .uri("/api/v1/file/read")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"session_id":"s1","path":"a.txt"}"#,
@@ -1483,7 +2155,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/file/write")
+                    .uri("/api/v1/file/write")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"session_id":"does-not-exist","path":"a.txt","content":"x"}"#,
@@ -1494,6 +2166,511 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Boot a headless engine handle whose store holds one project (`p1`) and one
+    /// session (`s1`), so the spine reads return non-empty bodies. The git/worktree
+    /// paths need not exist — the spine projection reads in-memory engine state, not
+    /// the filesystem.
+    fn seeded_engine_handle(tmp: &std::path::Path) -> crate::engine_actor::EngineHandle {
+        use dux_core::config::{DuxPaths, ProjectConfig};
+        use dux_core::storage::SessionStore;
+
+        let root = tmp.to_path_buf();
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            let now = chrono::Utc::now();
+            store
+                .upsert_session(&dux_core::model::AgentSession {
+                    id: "s1".to_string(),
+                    project_id: "p1".to_string(),
+                    project_path: None,
+                    provider: dux_core::model::ProviderKind::new("claude"),
+                    source_branch: "main".to_string(),
+                    branch_name: "feat".to_string(),
+                    worktree_path: root.to_string_lossy().into_owned(),
+                    title: None,
+                    started_providers: Vec::new(),
+                    desired_running: true,
+                    auto_reopen_enabled: false,
+                    status: dux_core::model::SessionStatus::Detached,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        handle
+    }
+
+    /// `GET /api/v1/spine` returns the projects, sessions, and sidebar projection
+    /// (auth off → the gate passes). Proves the spine read serves the same spine
+    /// the ViewModel used to carry.
+    #[tokio::test]
+    async fn spine_route_returns_projects_sessions_and_sidebar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/spine")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("projects").is_some(), "spine carries projects");
+        assert!(json.get("sessions").is_some(), "spine carries sessions");
+        assert!(json.get("sidebar").is_some(), "spine carries sidebar");
+        assert_eq!(json["projects"][0]["id"], "p1");
+        assert_eq!(json["sessions"][0]["id"], "s1");
+    }
+
+    /// `GET /api/v1/sessions/:id` is 200 for a known session and 404 for an unknown
+    /// one (auth off → the gate passes).
+    #[tokio::test]
+    async fn session_route_is_200_for_known_and_404_for_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let known = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sessions/s1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(known.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(known.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["id"], "s1");
+
+        let unknown = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sessions/does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Helper: issue a request through the real router and return the status.
+    async fn oneshot_status(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(b) => {
+                builder = builder.header("content-type", "application/json");
+                axum::body::Body::from(b.to_string())
+            }
+            None => axum::body::Body::empty(),
+        };
+        app.clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Every Phase-4 session/project action route is in the gated group: an
+    /// unauthenticated request 401s before the handler runs. Extends the gate
+    /// regression to the new write verbs (and the `/api/v1` git/file aliases).
+    #[tokio::test]
+    async fn rest_action_routes_require_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let hash = dux_core::auth::hash_password("pw").unwrap();
+        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            (
+                "POST",
+                "/api/v1/sessions",
+                Some(r#"{"kind":"new","project_id":"p1"}"#),
+            ),
+            ("DELETE", "/api/v1/sessions/s1", None),
+            ("PATCH", "/api/v1/sessions/s1", Some(r#"{"title":"x"}"#)),
+            ("POST", "/api/v1/sessions/s1/reconnect", Some("{}")),
+            (
+                "POST",
+                "/api/v1/sessions/reorder",
+                Some(r#"{"project_id":"p1","session_ids":[]}"#),
+            ),
+            ("POST", "/api/v1/sessions/s1/commit-message", None),
+            ("GET", "/api/v1/sessions/s1/commit-message", None),
+            ("POST", "/api/v1/projects", Some(r#"{"path":"/x"}"#)),
+            ("DELETE", "/api/v1/projects/p1", None),
+            ("PATCH", "/api/v1/projects/p1", Some("{}")),
+            (
+                "POST",
+                "/api/v1/projects/reorder",
+                Some(r#"{"project_ids":[]}"#),
+            ),
+            ("POST", "/api/v1/projects/p1/pull", None),
+            ("POST", "/api/v1/projects/p1/checkout-default", None),
+            // The /api/v1 git/file aliases are gated too.
+            (
+                "POST",
+                "/api/v1/git/stage",
+                Some(r#"{"session_id":"s1","path":"a"}"#),
+            ),
+            (
+                "POST",
+                "/api/v1/file/read",
+                Some(r#"{"session_id":"s1","path":"a"}"#),
+            ),
+            // The Phase-5 companion-terminal verbs are gated too.
+            ("POST", "/api/v1/sessions/s1/terminals", None),
+            ("DELETE", "/api/v1/sessions/s1/terminals/t1", None),
+        ];
+        for (method, uri, body) in cases {
+            assert_eq!(
+                oneshot_status(&app, method, uri, *body).await,
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must 401 without a session"
+            );
+        }
+    }
+
+    /// The body-keyed project git endpoints (`/api/v1/git/pull-project` and
+    /// `/api/v1/git/checkout-default`) were removed in favor of the path-keyed
+    /// `/api/v1/projects/:id/{pull,checkout-default}` actions, so they must no
+    /// longer reach the git handler — like any unregistered `/api/v1/git/*` path,
+    /// they now fall through to the SPA static fallback.
+    #[tokio::test]
+    async fn removed_project_git_routes_are_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        // A path under /api/v1/git that was never a route hits the SPA fallback.
+        // The removed project endpoints must now behave identically.
+        let fallback = oneshot_status(
+            &app,
+            "POST",
+            "/api/v1/git/definitely-not-a-route",
+            Some("{}"),
+        )
+        .await;
+        for uri in ["/api/v1/git/pull-project", "/api/v1/git/checkout-default"] {
+            assert_eq!(
+                oneshot_status(&app, "POST", uri, Some(r#"{"project_id":"p1"}"#)).await,
+                fallback,
+                "{uri} should no longer reach a handler (replaced by /api/v1/projects/:id/...)"
+            );
+        }
+
+        // Contrast: a surviving git route still reaches its handler (an unknown
+        // session resolves there), so it does NOT match the fallback status —
+        // proving the equality above is route removal, not a blanket fallthrough
+        // of everything under /api/v1/git.
+        assert_ne!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/git/push",
+                Some(r#"{"session_id":"nope"}"#)
+            )
+            .await,
+            fallback,
+            "the surviving push route must still reach the git handler"
+        );
+    }
+
+    /// With auth off, the session action routes resolve an unknown session id to
+    /// 404 (they resolve the worktree before dispatching any work).
+    #[tokio::test]
+    async fn session_actions_unknown_session_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("DELETE", "/api/v1/sessions/nope", None),
+            ("PATCH", "/api/v1/sessions/nope", Some(r#"{"title":"x"}"#)),
+            ("POST", "/api/v1/sessions/nope/reconnect", Some("{}")),
+            ("POST", "/api/v1/sessions/nope/commit-message", None),
+            ("GET", "/api/v1/sessions/nope/commit-message", None),
+            // Companion-terminal verbs resolve the session first → 404 when unknown.
+            ("POST", "/api/v1/sessions/nope/terminals", None),
+            ("DELETE", "/api/v1/sessions/nope/terminals/t1", None),
+        ];
+        for (method, uri, body) in cases {
+            assert_eq!(
+                oneshot_status(&app, method, uri, *body).await,
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must 404 for an unknown session"
+            );
+        }
+    }
+
+    /// With auth off, the project action routes resolve an unknown project id to
+    /// 404 (they check existence before dispatching).
+    #[tokio::test]
+    async fn project_actions_unknown_project_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("DELETE", "/api/v1/projects/nope", None),
+            (
+                "PATCH",
+                "/api/v1/projects/nope",
+                Some(r#"{"provider":"claude"}"#),
+            ),
+            ("POST", "/api/v1/projects/nope/pull", None),
+            ("POST", "/api/v1/projects/nope/checkout-default", None),
+        ];
+        for (method, uri, body) in cases {
+            assert_eq!(
+                oneshot_status(&app, method, uri, *body).await,
+                StatusCode::NOT_FOUND,
+                "{method} {uri} must 404 for an unknown project"
+            );
+        }
+    }
+
+    /// Bad input on the create routes is a clean 400: a malformed create body and
+    /// an unknown project both reject before any worker spawns.
+    #[tokio::test]
+    async fn create_routes_reject_bad_input_with_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        // Malformed discriminator → 400.
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/sessions",
+                Some(r#"{"kind":"bogus"}"#)
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+        );
+        // Unknown project → 400 (wire bails before dispatch).
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/sessions",
+                Some(r#"{"kind":"new","project_id":"nope"}"#)
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+        );
+        // Add project with a non-repo path → 400.
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/projects",
+                Some(r#"{"path":"/definitely/not/a/repo"}"#)
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
+    /// The `/api/v1` git/file routes reach their handlers: an unknown session
+    /// resolves to 404 (auth off so the gate passes). The legacy unversioned
+    /// `/api/git/*` and `/api/file/*` paths were removed at cutover, so they no
+    /// longer reach the git/file handler (they fall through to the SPA fallback,
+    /// which never returns the handler's 404).
+    #[tokio::test]
+    async fn v1_git_and_file_routes_reach_handlers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/git/stage",
+                Some(r#"{"session_id":"nope","path":"a.txt"}"#)
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "the v1 git route must reach the git handler and 404 the unknown session"
+        );
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/file/read",
+                Some(r#"{"session_id":"nope","path":"a.txt"}"#)
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "the v1 file route must reach the file handler and 404 the unknown session"
+        );
+        // The retired legacy paths no longer reach the handler (no 404 from it).
+        assert_ne!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/git/stage",
+                Some(r#"{"session_id":"nope","path":"a.txt"}"#)
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "the legacy /api/git/* alias must be gone"
+        );
+    }
+
+    /// `GET /api/v1/sessions/:id/commit-message` is 404 when nothing has been
+    /// generated for a (known) session, and the literal `/reorder` segment does not
+    /// collide with `:id` (a reorder with an empty list against the seeded project
+    /// is accepted — 200 — not routed into the `:id` handler).
+    #[tokio::test]
+    async fn commit_message_get_404_and_reorder_does_not_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        // No message generated for the seeded session yet → 404.
+        assert_eq!(
+            oneshot_status(&app, "GET", "/api/v1/sessions/s1/commit-message", None).await,
+            StatusCode::NOT_FOUND,
+        );
+        // `/reorder` is its own route, not `:id`. The seeded project p1 has exactly
+        // session s1, so reordering to [s1] is accepted (200).
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/sessions/reorder",
+                Some(r#"{"project_id":"p1","session_ids":["s1"]}"#)
+            )
+            .await,
+            StatusCode::OK,
+        );
+    }
+
+    /// The commit-message forwarder maps a `CommitMessageEvent` onto a per-session
+    /// `session.commit_message` event on the bus (the contract the frontend
+    /// subscribes to for `GET /api/v1/sessions/:id/commit-message`).
+    #[tokio::test]
+    async fn commit_message_forwarder_emits_event_on_the_bus() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe();
+        let (tx, commit_rx) =
+            tokio::sync::broadcast::channel::<crate::engine_actor::CommitMessageEvent>(8);
+        let _handle = spawn_commit_message_forwarder(commit_rx, Arc::clone(&bus));
+
+        tx.send(crate::engine_actor::CommitMessageEvent {
+            session_id: "s1".to_string(),
+            message: "msg".to_string(),
+        })
+        .unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event delivered")
+            .expect("bus open");
+        assert_eq!(
+            ev,
+            Event::Resource {
+                event: "session.commit_message".to_string(),
+                id: Some("s1".to_string()),
+                rev: None,
+            }
+        );
+    }
+
+    /// The spine-change forwarder maps each [`SpineChange`] onto the matching coarse
+    /// event on the bus: a sessions change emits `sessions.changed`, a projects
+    /// change emits `projects.changed`. This is the "a change emits X on the bus"
+    /// contract the frontend subscribes to.
+    #[tokio::test]
+    async fn spine_forwarder_emits_coarse_events_on_the_bus() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe();
+        let (tx, spine_rx) = tokio::sync::broadcast::channel::<SpineChange>(8);
+        let _handle = spawn_spine_changed_forwarder(spine_rx, Arc::clone(&bus));
+
+        // A sessions change → `sessions.changed`.
+        tx.send(SpineChange::Sessions).unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event delivered")
+            .expect("bus open");
+        assert_eq!(
+            ev,
+            Event::Resource {
+                event: "sessions.changed".to_string(),
+                id: None,
+                rev: None,
+            }
+        );
+
+        // A projects change → `projects.changed`.
+        tx.send(SpineChange::Projects).unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event delivered")
+            .expect("bus open");
+        assert_eq!(
+            ev,
+            Event::Resource {
+                event: "projects.changed".to_string(),
+                id: None,
+                rev: None,
+            }
+        );
     }
 
     /// The access middleware logs a request's method, path, and final status when
@@ -1623,216 +2800,276 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    fn run_git(cwd: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    // --- status_events (on-connect snapshot) unit tests ---
 
-    fn init_repo(dir: &std::path::Path, branch: &str) {
-        run_git(dir, &["init", "-b", branch]);
-        run_git(dir, &["config", "user.name", "test"]);
-        run_git(dir, &["config", "user.email", "t@t"]);
-        run_git(dir, &["commit", "--allow-empty", "-m", "init"]);
-    }
-
-    #[tokio::test]
-    async fn inspect_project_path_on_default_branch_has_no_warning() {
-        let repo = tempfile::tempdir().unwrap();
-        init_repo(repo.path(), "main");
-
-        let msg = inspect_project_path(repo.path().to_string_lossy().into_owned()).await;
-        match msg {
-            ServerMessage::ProjectPathInspection {
-                current_branch,
-                warning,
-                error,
-                ..
-            } => {
-                assert_eq!(error, None);
-                assert_eq!(current_branch.as_deref(), Some("main"));
-                assert_eq!(warning, None);
-            }
-            other => panic!("expected ProjectPathInspection, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn inspect_project_path_heuristic_when_no_origin_head() {
-        // `git init` repos lack refs/remotes/origin/HEAD, so a non-main/master
-        // branch yields the Heuristic warning.
-        let repo = tempfile::tempdir().unwrap();
-        init_repo(repo.path(), "develop");
-
-        let msg = inspect_project_path(repo.path().to_string_lossy().into_owned()).await;
-        match msg {
-            ServerMessage::ProjectPathInspection {
-                current_branch,
-                warning,
-                error,
-                ..
-            } => {
-                assert_eq!(error, None);
-                assert_eq!(current_branch.as_deref(), Some("develop"));
-                assert_eq!(warning, Some(BranchWarningView::Heuristic));
-            }
-            other => panic!("expected ProjectPathInspection, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn inspect_project_path_known_default_when_origin_head_resolves() {
-        // A clone gets refs/remotes/origin/HEAD pointing at the origin default,
-        // so checking out a different branch yields the Known warning naming it.
-        let origin = tempfile::tempdir().unwrap();
-        init_repo(origin.path(), "main");
-
-        let clone_dir = tempfile::tempdir().unwrap();
-        let clone_path = clone_dir.path().join("work");
-        run_git(
-            clone_dir.path(),
-            &[
-                "clone",
-                origin.path().to_string_lossy().as_ref(),
-                clone_path.to_string_lossy().as_ref(),
-            ],
-        );
-        run_git(&clone_path, &["switch", "-c", "feature/x"]);
-
-        let msg = inspect_project_path(clone_path.to_string_lossy().into_owned()).await;
-        match msg {
-            ServerMessage::ProjectPathInspection {
-                current_branch,
-                warning,
-                error,
-                ..
-            } => {
-                assert_eq!(error, None);
-                assert_eq!(current_branch.as_deref(), Some("feature/x"));
-                assert_eq!(
-                    warning,
-                    Some(BranchWarningView::Known {
-                        default_branch: "main".to_string(),
-                    })
-                );
-            }
-            other => panic!("expected ProjectPathInspection, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn inspect_project_path_non_repo_reports_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let msg = inspect_project_path(dir.path().to_string_lossy().into_owned()).await;
-        match msg {
-            ServerMessage::ProjectPathInspection {
-                current_branch,
-                warning,
-                error,
-                ..
-            } => {
-                assert!(error.is_some(), "expected an error for a non-repo path");
-                assert_eq!(current_branch, None);
-                assert_eq!(warning, None);
-            }
-            other => panic!("expected ProjectPathInspection, got {other:?}"),
-        }
-    }
-
-    // --- status_frames unit tests ---
-
-    /// An empty snapshot produces no frames.
+    /// An empty snapshot produces no events.
     #[test]
-    fn status_frames_empty_snapshot_is_empty() {
-        assert!(status_frames(&[]).is_empty());
+    fn status_events_empty_snapshot_is_empty() {
+        assert!(status_events(&[], "conn").is_empty());
     }
 
-    /// A snapshot with one open entry produces one `Status` frame with the
-    /// correct key, tone, and message.
+    /// A snapshot with one open entry produces one status event with the correct
+    /// key, tone, message, and a serialized `status` envelope.
     #[test]
-    fn status_frames_single_entry_maps_to_one_frame() {
+    fn status_events_single_entry_maps_to_one_event() {
         let snapshot = vec![KeyedWireStatus {
             key: Some("pull".into()),
             tone: "busy".into(),
             message: "Pulling\u{2026}".into(),
+            scope: StatusScope::All,
         }];
-        let frames = status_frames(&snapshot);
-        assert_eq!(frames.len(), 1);
-        match &frames[0] {
-            ServerMessage::Status { key, tone, message } => {
-                assert_eq!(key.as_deref(), Some("pull"));
-                assert_eq!(tone, "busy");
-                assert_eq!(message, "Pulling\u{2026}");
-            }
-            other => panic!("expected Status frame, got {other:?}"),
-        }
+        let events = status_events(&snapshot, "conn");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "status");
+        assert_eq!(events[0].key.as_deref(), Some("pull"));
+        assert_eq!(events[0].tone, "busy");
+        assert_eq!(events[0].message, "Pulling\u{2026}");
+        // The serialized shape is `{event,key,tone,message,scope}`.
+        let json = serde_json::to_string(&events[0]).unwrap();
+        assert_eq!(
+            json,
+            r#"{"event":"status","key":"pull","tone":"busy","message":"Pulling…","scope":"all"}"#
+        );
     }
 
-    /// A multi-entry snapshot produces one frame per entry, in order.
+    /// A multi-entry snapshot produces one event per entry, in order.
     #[test]
-    fn status_frames_multi_entry_produces_n_frames() {
+    fn status_events_multi_entry_produces_n_events() {
         let snapshot = vec![
             KeyedWireStatus {
                 key: Some("pull".into()),
                 tone: "busy".into(),
                 message: "Pulling\u{2026}".into(),
+                scope: StatusScope::All,
             },
             KeyedWireStatus {
                 key: Some("acme".into()),
                 tone: "info".into(),
                 message: "Certificate renewed.".into(),
+                scope: StatusScope::All,
             },
             KeyedWireStatus {
                 key: None,
                 tone: "warning".into(),
                 message: "Worktree dirty.".into(),
+                scope: StatusScope::All,
             },
         ];
-        let frames = status_frames(&snapshot);
-        assert_eq!(frames.len(), 3, "one frame per open status entry");
-        // Verify keys are threaded through in order.
-        let keys: Vec<Option<&str>> = frames
-            .iter()
-            .map(|f| match f {
-                ServerMessage::Status { key, .. } => key.as_deref(),
-                other => panic!("expected Status, got {other:?}"),
-            })
-            .collect();
+        let events = status_events(&snapshot, "conn");
+        assert_eq!(events.len(), 3, "one event per open status entry");
+        let keys: Vec<Option<&str>> = events.iter().map(|e| e.key.as_deref()).collect();
         assert_eq!(keys, vec![Some("pull"), Some("acme"), None]);
     }
 
     /// An entry with an empty message is filtered out (nothing to show).
     #[test]
-    fn status_frames_empty_message_is_filtered() {
+    fn status_events_empty_message_is_filtered() {
         let snapshot = vec![
             KeyedWireStatus {
                 key: Some("op".into()),
                 tone: "info".into(),
                 message: String::new(),
+                scope: StatusScope::All,
             },
             KeyedWireStatus {
                 key: Some("other".into()),
                 tone: "busy".into(),
                 message: "Working\u{2026}".into(),
+                scope: StatusScope::All,
             },
         ];
-        let frames = status_frames(&snapshot);
+        let events = status_events(&snapshot, "conn");
         assert_eq!(
-            frames.len(),
+            events.len(),
             1,
             "empty-message entries must be filtered out"
         );
-        match &frames[0] {
-            ServerMessage::Status { key, .. } => assert_eq!(key.as_deref(), Some("other")),
-            other => panic!("expected Status, got {other:?}"),
+        assert_eq!(events[0].key.as_deref(), Some("other"));
+    }
+
+    /// A status-clear event serializes to the `{event:"status_cleared", key}` shape.
+    #[test]
+    fn status_cleared_event_serializes() {
+        let ev = WireStatusClearedEvent {
+            event: "status_cleared",
+            key: Some("pull".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"event":"status_cleared","key":"pull"}"#
+        );
+        // A `None` key (anonymous slot) omits the field.
+        let anon = WireStatusClearedEvent {
+            event: "status_cleared",
+            key: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&anon).unwrap(),
+            r#"{"event":"status_cleared"}"#
+        );
+    }
+
+    /// The `connected` handshake serializes to `{event:"connected", id}`.
+    #[test]
+    fn connected_event_serializes() {
+        let ev = WireEvent {
+            event: "connected".to_string(),
+            id: Some("abc-123".into()),
+            rev: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&ev).unwrap(),
+            r#"{"event":"connected","id":"abc-123"}"#
+        );
+    }
+
+    // --- status scope filtering ---
+
+    #[test]
+    fn scope_delivers_all_reaches_every_connection() {
+        assert!(scope_delivers(&StatusScope::All, "A"));
+        assert!(scope_delivers(&StatusScope::All, "B"));
+    }
+
+    #[test]
+    fn scope_delivers_connection_matches_only_its_own_id() {
+        let scope = StatusScope::Connection("A".to_string());
+        assert!(scope_delivers(&scope, "A"));
+        assert!(!scope_delivers(&scope, "B"));
+    }
+
+    /// The on-connect snapshot drops another connection's in-progress `Busy`: a
+    /// client joining mid-operation must NOT inherit a ghost spinner. An `All`
+    /// status in the same snapshot still reaches it.
+    #[test]
+    fn status_events_filters_other_connections_busy_from_snapshot() {
+        let snapshot = vec![
+            KeyedWireStatus {
+                key: Some("push".into()),
+                tone: "busy".into(),
+                message: "Pushing\u{2026}".into(),
+                scope: StatusScope::Connection("A".into()),
+            },
+            KeyedWireStatus {
+                key: Some("acme".into()),
+                tone: "info".into(),
+                message: "Certificate renewed.".into(),
+                scope: StatusScope::All,
+            },
+        ];
+        // Connection B joins: it sees only the `All` status, not A's busy.
+        let events = status_events(&snapshot, "B");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key.as_deref(), Some("acme"));
+        // Connection A sees both (its own busy + the broadcast).
+        assert_eq!(status_events(&snapshot, "A").len(), 2);
+    }
+
+    /// An older peer's / the TUI's `WireStatus` JSON with no `scope` field
+    /// deserializes to `All`, so it still reaches every connection.
+    #[test]
+    fn wire_status_without_scope_defaults_to_all() {
+        let json = r#"{"tone":"info","message":"Saved."}"#;
+        let ws: dux_core::wire::WireStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(ws.scope, StatusScope::All);
+        assert!(scope_delivers(&ws.scope, "any-connection"));
+    }
+
+    // --- bootstrap route ---
+
+    /// With auth off the gate passes; `GET /api/v1/bootstrap` returns 200 with a
+    /// JSON object carrying EXACTLY the build-/config-static fields the frontend
+    /// expects (the 11 fields moved off the per-tick ViewModel).
+    #[tokio::test]
+    async fn bootstrap_route_returns_expected_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/bootstrap")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let obj = json.as_object().expect("bootstrap must be a JSON object");
+        for field in [
+            "available_providers",
+            "macros",
+            "palette_commands",
+            "welcome_tips",
+            "dux_version",
+            "randomize_agent_names_by_default",
+            "gh_available",
+            "pr_banner_position",
+            "agent_scrollback_lines",
+            "show_changes_pane",
+            "global_env",
+        ] {
+            assert!(
+                obj.contains_key(field),
+                "bootstrap JSON must carry `{field}`: {json}"
+            );
         }
+        // The volatile spine must NOT leak into bootstrap.
+        assert!(!obj.contains_key("projects"), "bootstrap is config-static");
+        assert!(!obj.contains_key("sessions"), "bootstrap is config-static");
+    }
+
+    // --- config.changed forwarder ---
+
+    /// The forwarder turns one engine reload signal into a coarse `config.changed`
+    /// event on the bus (no id/rev). Deterministic: drives the broadcast directly.
+    #[tokio::test]
+    async fn config_changed_forwarder_emits_on_reload_signal() {
+        let (tx, rx) = tokio::sync::broadcast::channel::<()>(8);
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe();
+        let _h = spawn_config_changed_forwarder(rx, Arc::clone(&bus));
+
+        tx.send(()).unwrap();
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), bus_rx.recv())
+            .await
+            .expect("config.changed should be emitted within the timeout")
+            .expect("bus recv");
+        assert_eq!(ev, config_changed_event());
+    }
+
+    /// End-to-end: a REAL config reload through the engine actor fires the reload
+    /// broadcast, which the forwarder turns into `config.changed` on the bus. This
+    /// is the chain a `config`-subscribed client relies on to refetch bootstrap.
+    #[tokio::test]
+    async fn real_config_reload_emits_config_changed_on_the_bus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe();
+        let _h =
+            spawn_config_changed_forwarder(handle.subscribe_config_reloads(), Arc::clone(&bus));
+
+        // Drive a real reload (read-only re-load of config.toml; defaults when
+        // absent). The actor completes it on a later tick and fires the reload
+        // broadcast, which the forwarder converts to `config.changed`.
+        handle
+            .apply_wire(dux_core::wire::WireCommand::ReloadConfig {})
+            .await
+            .expect("reload command");
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), bus_rx.recv())
+            .await
+            .expect("a config reload must emit config.changed")
+            .expect("bus recv");
+        assert_eq!(ev, config_changed_event());
     }
 }

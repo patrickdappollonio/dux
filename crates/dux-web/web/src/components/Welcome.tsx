@@ -45,7 +45,7 @@ function TipText({ tip }: { tip: string }) {
 }
 
 export function Welcome() {
-  const tips = useDux().viewModel?.welcome_tips ?? []
+  const tips = useDux().bootstrap?.welcome_tips ?? []
   // Pick a stable random fraction once per visit to the welcome screen (the
   // component remounts whenever the center pane returns to the idle state).
   // Storing the fraction — not an index — keeps the choice stable across

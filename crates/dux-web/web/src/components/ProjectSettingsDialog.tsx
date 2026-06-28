@@ -19,7 +19,8 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { envToText, parseEnv } from "@/lib/env"
-import { closeProjectSettings, socket, useDux } from "@/lib/store"
+import { closeProjectSettings, updateProjectSettings, useDux } from "@/lib/store"
+import type { PatchProjectBody } from "@/lib/projectsApi"
 import type { ProjectView } from "@/lib/types"
 
 // The form body is mounted only while the dialog is open and a project resolves.
@@ -46,41 +47,38 @@ function ProjectSettingsForm({
   const [startup, setStartup] = useState(() => project.startup_command ?? "")
   const [envText, setEnvText] = useState(() => envToText(project.env))
 
-  function handleSave() {
+  async function handleSave() {
+    // Build one tri-state PATCH body: include only the fields that changed (the
+    // server leaves an omitted field untouched), with `null` clearing a scalar
+    // back to the inherited default. `updateProjectSettings` no-ops on an empty
+    // patch, so saving with nothing changed sends no request.
+    const patch: PatchProjectBody = {}
+
     const newProvider = provider === "" ? null : provider
     if (newProvider !== (project.explicit_default_provider ?? null)) {
-      socket.sendCommand("update_project_provider", {
-        project_id: project.id,
-        provider: newProvider,
-      })
+      patch.provider = newProvider
     }
 
     const newAutoReopen =
       autoReopen === "inherit" ? null : autoReopen === "on" ? true : false
     if (newAutoReopen !== (project.auto_reopen_agents ?? null)) {
-      socket.sendCommand("update_project_auto_reopen", {
-        project_id: project.id,
-        auto_reopen_agents: newAutoReopen,
-      })
+      patch.auto_reopen_agents = newAutoReopen
     }
 
     const newStartup = startup.trim() === "" ? null : startup
     if (newStartup !== (project.startup_command ?? null)) {
-      socket.sendCommand("update_project_startup_command", {
-        project_id: project.id,
-        startup_command: newStartup,
-      })
+      patch.startup_command = newStartup
     }
 
     const env = parseEnv(envText)
     if (JSON.stringify(env) !== JSON.stringify(project.env)) {
-      socket.sendCommand("update_project_env", {
-        project_id: project.id,
-        env,
-      })
+      patch.env = env
     }
 
-    closeProjectSettings()
+    // Close only once the PATCH succeeds. The PATCH is not atomic across its
+    // independent fields, so on a rejection we keep the dialog open (the error is
+    // toasted) rather than dismissing it over a partially-applied change.
+    if (await updateProjectSettings(project.id, patch)) closeProjectSettings()
   }
 
   return (
@@ -163,9 +161,9 @@ function ProjectSettingsForm({
 }
 
 export function ProjectSettingsDialog() {
-  const { viewModel, projectSettingsTarget } = useDux()
+  const { spine, bootstrap, projectSettingsTarget } = useDux()
   const open = projectSettingsTarget !== null
-  const project = viewModel?.projects.find(
+  const project = spine?.projects.find(
     (p) => p.id === projectSettingsTarget,
   )
 
@@ -179,7 +177,7 @@ export function ProjectSettingsDialog() {
       {open && project && (
         <ProjectSettingsForm
           project={project}
-          providers={viewModel?.available_providers ?? []}
+          providers={bootstrap?.available_providers ?? []}
         />
       )}
     </Dialog>

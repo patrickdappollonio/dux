@@ -8,7 +8,7 @@ import {
 
 // `store` reads `location`, `localStorage`, and registers a `popstate` listener
 // at module load (the test env is node, not a DOM), AND now fires a boot
-// `/api/me` fetch and constructs a `DuxSocket` (which references `WebSocket`).
+// `/api/me` fetch and constructs an `EventsSocket` (which references `WebSocket`).
 // Stub the minimum surface so the import succeeds; the boot fetch is steered to
 // a 401 so the store settles in the "anonymous" phase, the clean starting point
 // for the login() transition tests below.
@@ -45,9 +45,9 @@ const fetchMock = vi.fn(async () => {
   return makeResponse(next) as unknown as Response
 })
 
-// A no-op WebSocket stand-in: DuxSocket only constructs one when `.connect()` is
-// called, and login()/the boot path may call connect(); we never assert on the
-// socket here, only on auth state, so a constructible stub suffices.
+// A no-op WebSocket stand-in: the EventsSocket only constructs one when
+// `.connect()` is called, and login()/the boot path may call connect(); we never
+// assert on the socket here, only on auth state, so a constructible stub suffices.
 class FakeWebSocket {
   onopen: (() => void) | null = null
   onclose: (() => void) | null = null
@@ -243,7 +243,6 @@ describe("store logout()", () => {
     await mod.logout()
 
     const snap = mod.getSnapshot()
-    expect(snap.viewModel).toBeNull()
     expect(snap.selectedTarget).toBeNull()
     expect(snap.selectedSessionId).toBeNull()
     expect(snap.commitTarget).toBeNull()

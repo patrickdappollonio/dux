@@ -36,18 +36,18 @@ export function CreateAgentDialog() {
     createAgentRandomize,
     createAgentNamePending,
     createAgentPrInput,
-    viewModel,
+    spine,
   } = useDux()
   const open = createAgentTarget !== null
   const isFork = createAgentTarget?.kind === "fork"
   const isPr = createAgentTarget?.kind === "pr"
   const project =
     createAgentTarget?.kind === "new" || createAgentTarget?.kind === "pr"
-      ? viewModel?.projects.find((p) => p.id === createAgentTarget.projectId)
+      ? spine?.projects.find((p) => p.id === createAgentTarget.projectId)
       : undefined
   const forkSession =
     createAgentTarget?.kind === "fork"
-      ? viewModel?.sessions.find((s) => s.id === createAgentTarget.sessionId)
+      ? spine?.sessions.find((s) => s.id === createAgentTarget.sessionId)
       : undefined
   const projectName = project?.name ?? "project"
   const sourceLabel = forkSession?.title || forkSession?.branch_name || "agent"

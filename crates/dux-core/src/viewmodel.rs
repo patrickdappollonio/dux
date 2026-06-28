@@ -6,29 +6,46 @@
 use serde::Serialize;
 
 use crate::engine::Engine;
-use crate::model::{AgentSession, ChangedFile, PrInfo, PrState, Project, ProjectBranchStatus};
+use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus};
 
-/// The full chrome snapshot a web client needs to draw projects, sessions, and
-/// the changed-files lists.
+/// The projects/sessions/sidebar "spine" a web client reads via `GET /api/v1/spine`
+/// (and the thin per-resource reads `GET /api/v1/projects`, `GET /api/v1/sessions`,
+/// `GET /api/v1/sessions/:id`). Refetched when a coarse `projects.changed` or
+/// `sessions.changed` event fires. Changed files are served separately via
+/// `GET /api/v1/sessions/:id/changes` (signaled by `session.changes`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ViewModel {
+pub struct SpineView {
     pub projects: Vec<ProjectView>,
     pub sessions: Vec<SessionView>,
     /// Core-computed sidebar grouping (projects + sessions, with orphaned
     /// sessions surfaced) so both surfaces render an identical tree without
     /// re-deriving grouping at the interface.
     pub sidebar: crate::sidebar::SidebarModel,
-    pub changed_files: ChangedFilesView,
-    /// Global environment variables from `[env]` in `config.toml`, applied to
-    /// every spawned provider/terminal. Surfaced so a client can pre-fill an
-    /// edit dialog.
-    pub global_env: std::collections::BTreeMap<String, String>,
+}
+
+/// The build-/config-static snapshot a web client fetches ONCE on load via
+/// `GET /api/v1/bootstrap`. These fields change only on a config reload, which
+/// signals the client to refetch with a `config.changed` event (see
+/// [`Engine::bootstrap`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BootstrapView {
     /// Configured provider command names, sorted. Surfaced so a client can
     /// populate a per-project default-provider picker.
     pub available_providers: Vec<String>,
-    /// Web-surface welcome-screen tips, from the shared `dux_core::welcome`
-    /// list. Static content; the watch channel coalesces identical frames so
-    /// this does not cause churn.
+    /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
+    /// The web surfaces these two ways: the terminal-pane quick-picker filters
+    /// by the focused target's surface and runs one via `RunMacro`, and the
+    /// macro-editor dialog lists/edits them (which is why `text` is exposed —
+    /// the web session is authenticated). A config reload that changes `[macros]`
+    /// rebuilds this, delivered by a `config.changed` refetch.
+    pub macros: Vec<MacroView>,
+    /// Surface-aware command-palette commands that the web should render as a
+    /// global "Commands" group, in canonical registry order. Derived from
+    /// `dux_core::palette` (the `Web`/`Both` subset). Each entry's `id` is the
+    /// dashed command name; the web's `paletteRegistry` maps it to a store
+    /// handler. Static for a given build.
+    pub palette_commands: Vec<PaletteCommandView>,
+    /// Web-surface welcome-screen tips, from the shared `dux_core::welcome` list.
     pub welcome_tips: Vec<String>,
     /// Mirrors the binary's display version ('vX.Y.Z' or 'development'); the web shows it in the sidebar brand block.
     pub dux_version: String,
@@ -56,24 +73,19 @@ pub struct ViewModel {
     /// overrides it per session. Older servers omit it, so the web treats a
     /// missing value as `true`.
     pub show_changes_pane: bool,
-    /// Surface-aware command-palette commands that the web should render as a
-    /// global "Commands" group, in canonical registry order. Derived from
-    /// `dux_core::palette` (the `Web`/`Both` subset). Each entry's `id` is the
-    /// dashed command name; the web's `paletteRegistry` maps it to a store
-    /// handler. Static for a given build — the watch channel coalesces identical
-    /// frames, so this does not cause churn.
-    pub palette_commands: Vec<PaletteCommandView>,
-    /// Text macros from `[macros]` in `config.toml`, in config (IndexMap) order.
-    /// The web surfaces these two ways: the terminal-pane quick-picker filters
-    /// by the focused target's surface and runs one via `RunMacro`, and the
-    /// macro-editor dialog lists/edits them (which is why `text` is exposed —
-    /// the web session is authenticated). A config reload that changes `[macros]`
-    /// rebuilds this, so the coalesced ViewModel watch pushes the new list.
-    pub macros: Vec<MacroView>,
+    /// Global environment variables from `[env]` in `config.toml`, applied to
+    /// every spawned provider/terminal. Surfaced so a client can pre-fill an
+    /// edit dialog.
+    pub global_env: std::collections::BTreeMap<String, String>,
+    /// Mirrors `config.ui.status_clear_seconds`. The web honors it for toast
+    /// auto-dismiss: an info/success toast clears this many seconds after it
+    /// arrives (0 disables auto-clear, matching the TUI's tone-aware policy).
+    /// Warning/error toasts ignore it and persist until replaced.
+    pub status_clear_seconds: u16,
 }
 
 /// A single text macro projected for web clients, from
-/// `dux_core::config::MacroEntry`. Order in [`ViewModel::macros`] matches the
+/// `dux_core::config::MacroEntry`. Order in [`BootstrapView::macros`] matches the
 /// config `IndexMap`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MacroView {
@@ -143,10 +155,10 @@ pub struct SessionView {
     /// Whether the agent is actively streaming output right now (PTY data within
     /// [`crate::engine::AGENT_STREAMING_WINDOW`]). This is a *hysteresis boolean*,
     /// not a timestamp: it stays `true` for the whole window after the latest
-    /// byte and flips back to `false` only once the window lapses. Because the
-    /// ViewModel watch channel coalesces identical frames (`send_if_modified`),
-    /// a steadily streaming agent produces a stable `working: true` and pushes
-    /// nothing until a transition (idle→working or working→idle) occurs.
+    /// byte and flips back to `false` only once the window lapses. Coarse
+    /// `sessions.changed` events coalesce, so a steadily streaming agent produces
+    /// a stable `working: true` until a transition (idle→working or
+    /// working→idle) occurs.
     pub working: bool,
     /// Session creation time as an RFC 3339 / ISO 8601 string. Exposed so the
     /// web client can compute the same sort orders the TUI offers
@@ -170,8 +182,8 @@ pub struct TerminalView {
     /// from [`crate::model::CompanionTerminal::foreground_cmd`], which the engine
     /// refreshes at most every ~2s
     /// ([`crate::engine::FOREGROUND_REFRESH_INTERVAL`]) — so this field changes
-    /// slowly and the coalesced ViewModel watch stays calm. The web UI shows
-    /// this as the terminal's title when present, falling back to `label`.
+    /// slowly and the coarse `sessions.changed` signal stays calm. The web UI
+    /// shows this as the terminal's title when present, falling back to `label`.
     pub foreground_cmd: Option<String>,
 }
 
@@ -184,17 +196,8 @@ pub struct PrView {
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
-pub struct ChangedFilesView {
-    pub staged: Vec<ChangedFileView>,
-    pub unstaged: Vec<ChangedFileView>,
-    /// The session id these lists belong to (the currently watched worktree), or
-    /// `None` when nothing is watched. A web client renders these lists only when
-    /// this matches its locally selected session — otherwise it shows a loading
-    /// state rather than another session's files (cross-tab safety).
-    pub watched_session_id: Option<String>,
-}
-
+/// A single changed file projected for web clients (used by the per-session
+/// changed-files REST read `GET /api/v1/sessions/:id/changes`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ChangedFileView {
     pub status: String,
@@ -275,18 +278,6 @@ impl PrView {
     }
 }
 
-impl ChangedFileView {
-    fn from_file(f: &ChangedFile) -> Self {
-        Self {
-            status: f.status.clone(),
-            path: f.path.clone(),
-            additions: f.additions,
-            deletions: f.deletions,
-            binary: f.binary,
-        }
-    }
-}
-
 impl MacroView {
     fn from_entry(name: &str, entry: &crate::config::MacroEntry) -> Self {
         Self {
@@ -298,12 +289,13 @@ impl MacroView {
 }
 
 impl Engine {
-    /// Project current engine state into a serializable snapshot for web clients.
-    pub fn view_model(&self) -> ViewModel {
-        let mut available_providers: Vec<String> =
-            self.config.providers.commands.keys().cloned().collect();
-        available_providers.sort();
-        ViewModel {
+    /// Project the projects/sessions/sidebar spine served via `GET /api/v1/spine`
+    /// (and the thin per-resource reads). This is the exact projection logic the
+    /// [`Engine::view_model`] used to inline for those three fields; it was factored
+    /// out so the REST read and the change-detection that emits
+    /// `projects.changed`/`sessions.changed` share one source of truth.
+    pub fn spine(&self) -> SpineView {
+        SpineView {
             projects: self
                 .projects
                 .iter()
@@ -312,54 +304,80 @@ impl Engine {
             sessions: self
                 .sessions
                 .iter()
-                .map(|s| {
-                    let mut terminals: Vec<TerminalView> = self
-                        .companion_terminals
-                        .iter()
-                        .filter(|(_, t)| t.session_id == s.id)
-                        .map(|(id, t)| TerminalView {
-                            id: id.clone(),
-                            label: t.label.clone(),
-                            has_output: t.client.has_output(),
-                            foreground_cmd: t.foreground_cmd.clone(),
-                        })
-                        .collect();
-                    terminals.sort_by(|a, b| a.id.cmp(&b.id));
-                    let has_output = self
-                        .providers
-                        .get(&s.id)
-                        .map(|p| p.has_output())
-                        .unwrap_or(false);
-                    let working = self.is_agent_streaming(&s.id);
-                    SessionView::from_session(
-                        s,
-                        self.pr_statuses.get(&s.id),
-                        terminals,
-                        has_output,
-                        working,
-                    )
-                })
+                .map(|s| self.project_session(s))
                 .collect(),
             sidebar: crate::sidebar::build_sidebar(
                 &self.projects,
                 &self.sessions,
                 self.config.ui.empty_project_separator_min_projects,
             ),
-            changed_files: ChangedFilesView {
-                staged: self
-                    .staged_files
-                    .iter()
-                    .map(ChangedFileView::from_file)
-                    .collect(),
-                unstaged: self
-                    .unstaged_files
-                    .iter()
-                    .map(ChangedFileView::from_file)
-                    .collect(),
-                watched_session_id: self.watched_session_id.clone(),
-            },
-            global_env: self.config.env.clone(),
+        }
+    }
+
+    /// Project a single session into its [`SessionView`], looking up its companion
+    /// terminals, PR status, output, and streaming flag exactly as [`Engine::spine`]
+    /// does. Factored out so the per-session REST read (`GET /api/v1/sessions/:id`)
+    /// can project ONLY the requested session instead of building the whole spine.
+    fn project_session(&self, s: &AgentSession) -> SessionView {
+        let mut terminals: Vec<TerminalView> = self
+            .companion_terminals
+            .iter()
+            .filter(|(_, t)| t.session_id == s.id)
+            .map(|(id, t)| TerminalView {
+                id: id.clone(),
+                label: t.label.clone(),
+                has_output: t.client.has_output(),
+                foreground_cmd: t.foreground_cmd.clone(),
+            })
+            .collect();
+        terminals.sort_by(|a, b| a.id.cmp(&b.id));
+        let has_output = self
+            .providers
+            .get(&s.id)
+            .map(|p| p.has_output())
+            .unwrap_or(false);
+        let working = self.is_agent_streaming(&s.id);
+        SessionView::from_session(
+            s,
+            self.pr_statuses.get(&s.id),
+            terminals,
+            has_output,
+            working,
+        )
+    }
+
+    /// Project ONLY the session with `id` into a [`SessionView`], or `None` if no
+    /// such session exists. Serves `GET /api/v1/sessions/:id` without building the
+    /// whole projects/sessions/sidebar spine just to find one session.
+    pub fn session_view(&self, id: &str) -> Option<SessionView> {
+        self.sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| self.project_session(s))
+    }
+
+    /// Project the build-/config-static snapshot served once via
+    /// `GET /api/v1/bootstrap`. Delivered as a one-shot REST read invalidated by
+    /// `config.changed`.
+    pub fn bootstrap(&self) -> BootstrapView {
+        let mut available_providers: Vec<String> =
+            self.config.providers.commands.keys().cloned().collect();
+        available_providers.sort();
+        BootstrapView {
             available_providers,
+            macros: self
+                .config
+                .macros
+                .entries
+                .iter()
+                .map(|(name, entry)| MacroView::from_entry(name, entry))
+                .collect(),
+            palette_commands: crate::palette::web_palette_commands()
+                .map(|c| PaletteCommandView {
+                    id: c.name,
+                    description: c.description,
+                })
+                .collect(),
             welcome_tips: crate::welcome::web_tips(),
             dux_version: crate::display_version().to_string(),
             randomize_agent_names_by_default: self
@@ -368,21 +386,10 @@ impl Engine {
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
-            show_changes_pane: self.config.ui.show_changes_pane,
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
-            palette_commands: crate::palette::web_palette_commands()
-                .map(|c| PaletteCommandView {
-                    id: c.name,
-                    description: c.description,
-                })
-                .collect(),
-            macros: self
-                .config
-                .macros
-                .entries
-                .iter()
-                .map(|(name, entry)| MacroView::from_entry(name, entry))
-                .collect(),
+            show_changes_pane: self.config.ui.show_changes_pane,
+            global_env: self.config.env.clone(),
+            status_clear_seconds: self.config.ui.status_clear_seconds,
         }
     }
 }
@@ -395,38 +402,32 @@ mod tests {
     #[test]
     fn dux_version_is_projected() {
         let (engine, _tmp) = test_engine();
-        assert!(!engine.view_model().dux_version.is_empty());
+        assert!(!engine.bootstrap().dux_version.is_empty());
     }
 
     #[test]
-    fn projects_sessions_and_changed_files_are_projected() {
+    fn projects_and_sessions_are_projected_on_the_spine() {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
-        engine.staged_files.push(ChangedFile {
-            status: "M".to_string(),
-            path: "src/lib.rs".to_string(),
-            additions: 3,
-            deletions: 1,
-            binary: false,
-        });
 
-        let vm = engine.view_model();
+        // Projects and sessions live on the spine projection.
+        let spine = engine.spine();
+        assert_eq!(spine.projects.len(), 1);
+        assert_eq!(spine.projects[0].id, "p1");
+        assert_eq!(spine.projects[0].default_provider, "claude");
+        assert_eq!(spine.projects[0].branch_status, "leading");
+        assert_eq!(spine.sessions.len(), 1);
+        assert_eq!(spine.sessions[0].id, "s1");
+        assert_eq!(spine.sessions[0].branch_name, "feature");
+        assert_eq!(spine.sessions[0].status, "detached");
+    }
 
-        assert_eq!(vm.projects.len(), 1);
-        assert_eq!(vm.projects[0].id, "p1");
-        assert_eq!(vm.projects[0].default_provider, "claude");
-        assert_eq!(vm.projects[0].branch_status, "leading");
-        assert_eq!(vm.sessions.len(), 1);
-        assert_eq!(vm.sessions[0].id, "s1");
-        assert_eq!(vm.sessions[0].branch_name, "feature");
-        assert_eq!(vm.sessions[0].status, "detached");
-        assert_eq!(vm.changed_files.staged.len(), 1);
-        assert_eq!(vm.changed_files.staged[0].path, "src/lib.rs");
-        assert_eq!(vm.changed_files.staged[0].additions, 3);
-        assert_eq!(vm.changed_files.unstaged.len(), 0);
+    #[test]
+    fn welcome_tips_are_projected_on_bootstrap() {
+        let (engine, _tmp) = test_engine();
         assert!(
-            !vm.welcome_tips.is_empty(),
+            !engine.bootstrap().welcome_tips.is_empty(),
             "welcome_tips should carry the shared web tips"
         );
     }
@@ -434,18 +435,18 @@ mod tests {
     #[test]
     fn palette_commands_project_web_subset_in_registry_order() {
         let (engine, _tmp) = test_engine();
-        let vm = engine.view_model();
+        let boot = engine.bootstrap();
 
         // The projected ids equal the Web/Both subset of the core registry, in
         // canonical registry order.
         let expected: Vec<&str> = crate::palette::web_palette_commands()
             .map(|c| c.name)
             .collect();
-        let actual: Vec<&str> = vm.palette_commands.iter().map(|c| c.id).collect();
+        let actual: Vec<&str> = boot.palette_commands.iter().map(|c| c.id).collect();
         assert_eq!(actual, expected);
 
         // Descriptions are carried verbatim from the registry.
-        for (view, cmd) in vm
+        for (view, cmd) in boot
             .palette_commands
             .iter()
             .zip(crate::palette::web_palette_commands())
@@ -492,21 +493,21 @@ mod tests {
             },
         );
 
-        let vm = engine.view_model();
-        let names: Vec<&str> = vm.macros.iter().map(|m| m.name.as_str()).collect();
+        let boot = engine.bootstrap();
+        let names: Vec<&str> = boot.macros.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["zebra", "alpha", "beta"]);
-        assert_eq!(vm.macros[0].text, "z text");
+        assert_eq!(boot.macros[0].text, "z text");
         // Surface serializes with the lowercase config serde casing.
-        assert_eq!(vm.macros[0].surface, "agent");
-        assert_eq!(vm.macros[1].surface, "terminal");
-        assert_eq!(vm.macros[2].surface, "both");
+        assert_eq!(boot.macros[0].surface, "agent");
+        assert_eq!(boot.macros[1].surface, "terminal");
+        assert_eq!(boot.macros[2].surface, "both");
     }
 
     #[test]
     fn macros_reflect_a_config_reload() {
         use crate::config::{MacroEntry, MacroSurface};
         let (mut engine, _tmp) = test_engine();
-        assert!(engine.view_model().macros.is_empty());
+        assert!(engine.bootstrap().macros.is_empty());
 
         // Simulate a config reload that introduces a new macro.
         let mut new_config = engine.config.clone();
@@ -521,11 +522,11 @@ mod tests {
             .apply_reloaded_config(new_config)
             .expect("apply reloaded config");
 
-        let vm = engine.view_model();
-        assert_eq!(vm.macros.len(), 1);
-        assert_eq!(vm.macros[0].name, "fresh");
-        assert_eq!(vm.macros[0].text, "reloaded");
-        assert_eq!(vm.macros[0].surface, "both");
+        let boot = engine.bootstrap();
+        assert_eq!(boot.macros.len(), 1);
+        assert_eq!(boot.macros[0].name, "fresh");
+        assert_eq!(boot.macros[0].text, "reloaded");
+        assert_eq!(boot.macros[0].surface, "both");
     }
 
     #[test]
@@ -540,7 +541,7 @@ mod tests {
         project.env.insert("KEY".to_string(), "value".to_string());
         engine.projects.push(project);
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         let p = &vm.projects[0];
         assert_eq!(p.explicit_default_provider.as_deref(), Some("codex"));
@@ -554,7 +555,7 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         let p = &vm.projects[0];
         assert!(p.explicit_default_provider.is_none());
@@ -582,7 +583,7 @@ mod tests {
         without.created_at = None;
         engine.projects.push(without);
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         assert_eq!(vm.projects[0].leading_branch.as_deref(), Some("trunk"));
         assert_eq!(vm.projects[0].created_at, added.to_rfc3339());
@@ -610,7 +611,7 @@ mod tests {
             },
         );
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         let pr = vm.sessions[0]
             .pr
@@ -628,7 +629,7 @@ mod tests {
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         assert!(vm.sessions[0].pr.is_none());
     }
@@ -648,7 +649,7 @@ mod tests {
         session.updated_at = updated;
         engine.sessions.push(session);
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         assert_eq!(vm.sessions[0].created_at, created.to_rfc3339());
         assert_eq!(vm.sessions[0].updated_at, updated.to_rfc3339());
@@ -660,7 +661,7 @@ mod tests {
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         assert!(
             !vm.sessions[0].working,
@@ -681,7 +682,7 @@ mod tests {
         // a child process in a unit test.
         engine.pty_activity.insert("s1".to_string(), Instant::now());
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         assert!(
             vm.sessions[0].working,
@@ -708,7 +709,7 @@ mod tests {
             .create_companion_terminal("s1")
             .expect("create companion terminal");
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
         let terminals = &vm.sessions[0].terminals;
         assert_eq!(terminals.len(), 1);
         assert_eq!(terminals[0].id, terminal_id);
@@ -744,7 +745,7 @@ mod tests {
             .expect("terminal exists")
             .foreground_cmd = Some("npm".to_string());
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
         assert_eq!(
             vm.sessions[0].terminals[0].foreground_cmd.as_deref(),
             Some("npm"),
@@ -758,7 +759,7 @@ mod tests {
             .expect("terminal exists")
             .foreground_cmd = None;
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
         assert_eq!(
             vm.sessions[0].terminals[0].foreground_cmd, None,
             "a None foreground_cmd must project as null"
@@ -771,7 +772,7 @@ mod tests {
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
 
-        let vm = engine.view_model();
+        let vm = engine.spine();
 
         assert!(!vm.sessions[0].has_output);
     }
@@ -806,7 +807,7 @@ mod tests {
         engine.providers.insert("s1".to_string(), client);
 
         // Before any output, the session is not ready.
-        assert!(!engine.view_model().sessions[0].has_output);
+        assert!(!engine.spine().sessions[0].has_output);
 
         engine
             .providers
@@ -818,7 +819,7 @@ mod tests {
         // Poll for up to ~2s while the reader thread processes the echo.
         let mut became_ready = false;
         for _ in 0..40 {
-            if engine.view_model().sessions[0].has_output {
+            if engine.spine().sessions[0].has_output {
                 became_ready = true;
                 break;
             }
@@ -836,9 +837,9 @@ mod tests {
             .env
             .insert("FOO".to_string(), "bar".to_string());
 
-        let vm = engine.view_model();
+        let boot = engine.bootstrap();
 
-        assert_eq!(vm.global_env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(boot.global_env.get("FOO").map(String::as_str), Some("bar"));
     }
 
     #[test]
@@ -846,10 +847,10 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
 
         // Defaults to false out of the box.
-        assert!(!engine.view_model().randomize_agent_names_by_default);
+        assert!(!engine.bootstrap().randomize_agent_names_by_default);
 
         engine.config.defaults.enable_randomized_pet_name_by_default = true;
-        assert!(engine.view_model().randomize_agent_names_by_default);
+        assert!(engine.bootstrap().randomize_agent_names_by_default);
     }
 
     #[test]
@@ -857,7 +858,21 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
 
         engine.config.ui.agent_scrollback_lines = 4242;
-        assert_eq!(engine.view_model().agent_scrollback_lines, 4242);
+        assert_eq!(engine.bootstrap().agent_scrollback_lines, 4242);
+    }
+
+    #[test]
+    fn status_clear_seconds_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Default ships at 6 seconds.
+        assert_eq!(engine.bootstrap().status_clear_seconds, 6);
+
+        engine.config.ui.status_clear_seconds = 0;
+        assert_eq!(engine.bootstrap().status_clear_seconds, 0);
+
+        engine.config.ui.status_clear_seconds = 42;
+        assert_eq!(engine.bootstrap().status_clear_seconds, 42);
     }
 
     #[test]
@@ -865,39 +880,50 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
 
         // Out of the box: integration off, gh status unknown -> unavailable.
-        assert!(!engine.view_model().gh_available);
+        assert!(!engine.bootstrap().gh_available);
 
         // Integration on but gh not yet confirmed available -> still false.
         engine.github_integration_enabled = true;
-        assert!(!engine.view_model().gh_available);
+        assert!(!engine.bootstrap().gh_available);
 
         // Integration on AND gh available -> true.
         engine.gh_status = crate::model::GhStatus::Available;
-        assert!(engine.view_model().gh_available);
+        assert!(engine.bootstrap().gh_available);
 
         // gh present but integration disabled -> false (the TUI gating).
         engine.github_integration_enabled = false;
-        assert!(!engine.view_model().gh_available);
+        assert!(!engine.bootstrap().gh_available);
     }
 
     #[test]
     fn available_providers_lists_configured_defaults_sorted() {
         let (engine, _tmp) = test_engine();
 
-        let vm = engine.view_model();
+        let boot = engine.bootstrap();
 
         // A default Config configures these four providers.
         for provider in ["claude", "codex", "copilot", "opencode"] {
             assert!(
-                vm.available_providers.iter().any(|p| p == provider),
+                boot.available_providers.iter().any(|p| p == provider),
                 "available_providers should contain {provider}: {:?}",
-                vm.available_providers
+                boot.available_providers
             );
         }
         // The list is sorted.
-        let mut sorted = vm.available_providers.clone();
+        let mut sorted = boot.available_providers.clone();
         sorted.sort();
-        assert_eq!(vm.available_providers, sorted);
+        assert_eq!(boot.available_providers, sorted);
+    }
+
+    #[test]
+    fn show_changes_pane_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Default ships visible.
+        assert!(engine.bootstrap().show_changes_pane);
+
+        engine.config.ui.show_changes_pane = false;
+        assert!(!engine.bootstrap().show_changes_pane);
     }
 
     #[test]
@@ -905,19 +931,43 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
 
         // The default config ships with the banner at the bottom.
-        assert_eq!(engine.view_model().pr_banner_position, "bottom");
+        assert_eq!(engine.bootstrap().pr_banner_position, "bottom");
 
         // An explicit "top" preference projects verbatim so the web client can
         // mirror the TUI's placement.
         engine.config.ui.pr_banner_position = "top".to_string();
-        assert_eq!(engine.view_model().pr_banner_position, "top");
+        assert_eq!(engine.bootstrap().pr_banner_position, "top");
     }
 
     #[test]
-    fn view_model_serializes_to_json() {
+    fn bootstrap_serializes_to_json_with_expected_fields() {
+        let (engine, _tmp) = test_engine();
+        let json = serde_json::to_string(&engine.bootstrap()).expect("serialize");
+        for field in [
+            "available_providers",
+            "macros",
+            "palette_commands",
+            "welcome_tips",
+            "dux_version",
+            "randomize_agent_names_by_default",
+            "gh_available",
+            "pr_banner_position",
+            "agent_scrollback_lines",
+            "show_changes_pane",
+            "global_env",
+        ] {
+            assert!(
+                json.contains(&format!("\"{field}\"")),
+                "bootstrap JSON must carry {field}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn spine_serializes_to_json() {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
-        let vm = engine.view_model();
+        let vm = engine.spine();
         let json = serde_json::to_string(&vm).expect("serialize");
         assert!(json.contains("\"id\":\"p1\""), "json: {json}");
         assert!(

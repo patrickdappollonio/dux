@@ -33,14 +33,14 @@ function InfoRow({
 // Read-only "Project info…" modal. Pure presentation of existing ViewModel data:
 // no wire commands, no git reads. Works identically on desktop and mobile.
 export function ProjectInfoDialog() {
-  const { projectInfoTarget, viewModel } = useDux()
+  const { projectInfoTarget, spine } = useDux()
 
   // Derive the project from the ViewModel so a project removed while the dialog
   // is open closes it gracefully via the effect below, mirroring the terminal
   // confirmation dialog's vanished-target handling.
   let project: ProjectView | undefined
-  if (projectInfoTarget && viewModel) {
-    project = viewModel.projects.find((p) => p.id === projectInfoTarget)
+  if (projectInfoTarget && spine) {
+    project = spine.projects.find((p) => p.id === projectInfoTarget)
   }
 
   // If the target was set but no longer exists in the ViewModel, the project was
@@ -60,9 +60,9 @@ export function ProjectInfoDialog() {
   // Compute the body only when a project resolves so the hooks above still run
   // unconditionally on every render.
   let body: React.ReactNode = null
-  if (project && viewModel) {
+  if (project && spine) {
     const branch = projectBranchDisplay(project)
-    const counts = projectLiveCounts(project.id, viewModel.sessions)
+    const counts = projectLiveCounts(project.id, spine.sessions)
     const envCount = Object.keys(project.env).length
     const providerExplicit = project.explicit_default_provider !== null
     body = (

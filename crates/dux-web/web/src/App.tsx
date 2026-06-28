@@ -56,10 +56,10 @@ import { terminalTitle } from "@/lib/terminals"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
 function InsetHeader() {
-  const { viewModel, selectedSessionId, selectedTarget, auth } = useDux()
-  const session = viewModel?.sessions.find((s) => s.id === selectedSessionId)
+  const { spine, selectedSessionId, selectedTarget, auth } = useDux()
+  const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
-    ? viewModel?.projects.find((p) => p.id === session.project_id)
+    ? spine?.projects.find((p) => p.id === session.project_id)
     : undefined
   // When a companion terminal is focused, surface it as a third crumb. The crumb
   // text follows the TUI precedence (foreground command if running, else label).
@@ -151,7 +151,7 @@ function InsetHeader() {
 }
 
 function TerminalArea() {
-  const { viewModel, selectedSessionId, selectedTarget, terminalEpoch } =
+  const { spine, bootstrap, selectedSessionId, selectedTarget, terminalEpoch } =
     useDux()
 
   // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
@@ -166,8 +166,8 @@ function TerminalArea() {
   // session's PR across surfaces). Placement honours the same config the TUI
   // does: "bottom" puts the lane below the terminal, anything else above.
   const pr =
-    viewModel?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
-  const bannerAtBottom = viewModel?.pr_banner_position === "bottom"
+    spine?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
+  const bannerAtBottom = bootstrap?.pr_banner_position === "bottom"
 
   // For an agent the streamed id is the session id; for a terminal it is the
   // terminal id. Key by that id so switching remounts the terminal cleanly.
@@ -207,6 +207,7 @@ function TerminalArea() {
               key={paneKey}
               kind={selectedTarget.kind}
               id={targetId}
+              sessionId={selectedTarget.sessionId}
             />
           </Suspense>
         </ChunkBoundary>
@@ -246,7 +247,7 @@ function GlobalOverlays() {
 function DesktopShell() {
   const dux = useDux()
   const { sidebarWidth } = dux
-  // The Changes pane honours config.ui.show_changes_pane (via the ViewModel) and
+  // The Changes pane honours config.ui.show_changes_pane (via the bootstrap document) and
   // the per-session palette/menu toggle. When hidden, the terminal panel takes
   // the full width and the handle + panel are unmounted (no leftover sliver).
   const showChanges = changesPaneVisible(dux)

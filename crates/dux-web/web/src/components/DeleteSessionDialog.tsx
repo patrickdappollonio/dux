@@ -11,11 +11,11 @@ import {
 import { closeDelete, deleteSession, useDux } from "@/lib/store"
 
 export function DeleteSessionDialog() {
-  const { deleteTarget, viewModel } = useDux()
+  const { deleteTarget, spine } = useDux()
   const [deleteWorktree, setDeleteWorktree] = useState(false)
 
   const isOpen = deleteTarget !== null
-  const session = viewModel?.sessions.find((s) => s.id === deleteTarget)
+  const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const name = session?.title || session?.branch_name
 
   function handleConfirm() {

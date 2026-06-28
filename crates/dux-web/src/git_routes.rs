@@ -1,11 +1,11 @@
 //! HTTP endpoints for mutating git operations: stage, unstage, discard, commit,
-//! push, pull, and checkout-default.
+//! push, and pull. Project-scoped git actions (source-checkout refresh and
+//! checkout-default) live in [`crate::project_actions`].
 //!
 //! These are request/response so the web UI gets real completion + errors and
-//! can drive per-action loading state. The WebSocket stays the channel for LIVE
-//! changed-files broadcasts (after a mutation each handler asks the engine to
-//! recompute, and the coalesced ViewModel watch pushes the new state to every
-//! connected client).
+//! can drive per-action loading state. After a mutation each handler invalidates
+//! the changed-files cache, which emits a `session.changes` event on `/ws/events`
+//! so subscribed clients refetch `GET /api/v1/sessions/:id/changes`.
 //!
 //! Safety: every handler runs git OFF the engine actor thread AND off the async
 //! reactor (`spawn_blocking`), so a slow/locked repo never stalls other clients.
@@ -23,13 +23,14 @@ use std::path::{Path, PathBuf};
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
 };
 use dux_core::wire::WireCommand;
 use serde::Deserialize;
 
+use crate::rest_common::scope_from_headers;
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -49,22 +50,21 @@ struct SessionOp {
     session_id: String,
 }
 
-#[derive(Deserialize)]
-struct ProjectOp {
-    project_id: String,
-}
-
-/// The gated git-mutation routes, merged into the authenticated sub-router.
+/// The gated git-mutation routes, merged into the authenticated sub-router. These
+/// are body-keyed (`session_id` in the POST body) and live under the versioned
+/// `/api/v1/git/*` prefix. The unversioned `/api/git/*` aliases were removed at
+/// cutover (Phase 6). Project-scoped git actions (refresh the source checkout and
+/// switch it to the default branch) live in [`crate::project_actions`] under the
+/// path-keyed `/api/v1/projects/:id/{pull,checkout-default}` routes.
 pub fn routes() -> Router<AppState> {
+    let prefix = "/api/v1/git";
     Router::new()
-        .route("/api/git/stage", post(stage))
-        .route("/api/git/unstage", post(unstage))
-        .route("/api/git/discard", post(discard))
-        .route("/api/git/commit", post(commit))
-        .route("/api/git/push", post(push))
-        .route("/api/git/pull", post(pull))
-        .route("/api/git/pull-project", post(pull_project))
-        .route("/api/git/checkout-default", post(checkout_default))
+        .route(&format!("{prefix}/stage"), post(stage))
+        .route(&format!("{prefix}/unstage"), post(unstage))
+        .route(&format!("{prefix}/discard"), post(discard))
+        .route(&format!("{prefix}/commit"), post(commit))
+        .route(&format!("{prefix}/push"), post(push))
+        .route(&format!("{prefix}/pull"), post(pull))
 }
 
 pub(crate) async fn resolve_worktree(
@@ -134,6 +134,7 @@ async fn unstage(State(state): State<AppState>, Json(op): Json<FileOp>) -> Respo
 }
 
 async fn discard(State(state): State<AppState>, Json(op): Json<FileOp>) -> Response {
+    let session_id = op.session_id.clone();
     let worktree = match resolve_worktree(&state, op.session_id).await {
         Ok(w) => w,
         Err(r) => return r,
@@ -167,6 +168,7 @@ async fn discard(State(state): State<AppState>, Json(op): Json<FileOp>) -> Respo
     state
         .engine
         .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    state.changes.invalidate(session_id);
     StatusCode::OK.into_response()
 }
 
@@ -174,7 +176,7 @@ async fn file_op<F>(state: AppState, session_id: String, path: String, op: F) ->
 where
     F: FnOnce(PathBuf, String) -> anyhow::Result<()> + Send + 'static,
 {
-    let worktree = match resolve_worktree(&state, session_id).await {
+    let worktree = match resolve_worktree(&state, session_id.clone()).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -188,6 +190,10 @@ where
     state
         .engine
         .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    // Refresh the REST changed-files cache (new path) immediately too, emitting
+    // `session.changes` so subscribed `/ws/events` clients re-GET without waiting
+    // for the poll interval.
+    state.changes.invalidate(session_id);
     StatusCode::OK.into_response()
 }
 
@@ -197,6 +203,7 @@ async fn commit(State(state): State<AppState>, Json(op): Json<CommitOp>) -> Resp
     if op.message.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "commit message is empty").into_response();
     }
+    let session_id = op.session_id.clone();
     let worktree = match resolve_worktree(&state, op.session_id).await {
         Ok(w) => w,
         Err(r) => return r,
@@ -209,57 +216,49 @@ async fn commit(State(state): State<AppState>, Json(op): Json<CommitOp>) -> Resp
     state
         .engine
         .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    state.changes.invalidate(session_id);
     StatusCode::OK.into_response()
 }
 
-// push / pull / pull-project / checkout-default are async, worker-based engine
-// operations with stateful guards (in-flight dedup, the source-checkout dirty-
-// tree refusal, leading-branch resolution, path-missing checks) and busy/done
-// status. Rather than re-run raw git and lose all of that, these endpoints
-// TRIGGER the existing engine command via `apply_wire` (which spawns the worker
-// off the actor thread). A 200 means "accepted"; the busy/completion status
-// flows to clients over the WebSocket status broadcast, exactly as before.
+// push / pull are async, worker-based engine operations with stateful guards
+// (in-flight dedup, leading-branch resolution) and busy/done status. Rather than
+// re-run raw git and lose all of that, these endpoints TRIGGER the existing engine
+// command via `apply_wire` (which spawns the worker off the actor thread). A 200
+// means "accepted"; the busy/completion status flows to the originating client as
+// `status` events on `/ws/events` (scoped via the `X-Connection-Id` header).
 
-async fn push(State(state): State<AppState>, Json(op): Json<SessionOp>) -> Response {
+async fn push(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(op): Json<SessionOp>,
+) -> Response {
     apply_wire_response(
         state
             .engine
-            .apply_wire(WireCommand::Push {
-                session_id: op.session_id,
-            })
+            .apply_wire_scoped(
+                WireCommand::Push {
+                    session_id: op.session_id,
+                },
+                scope_from_headers(&headers),
+            )
             .await,
     )
 }
 
-async fn pull(State(state): State<AppState>, Json(op): Json<SessionOp>) -> Response {
+async fn pull(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(op): Json<SessionOp>,
+) -> Response {
     apply_wire_response(
         state
             .engine
-            .apply_wire(WireCommand::Pull {
-                session_id: op.session_id,
-            })
-            .await,
-    )
-}
-
-async fn pull_project(State(state): State<AppState>, Json(op): Json<ProjectOp>) -> Response {
-    apply_wire_response(
-        state
-            .engine
-            .apply_wire(WireCommand::PullProject {
-                project_id: op.project_id,
-            })
-            .await,
-    )
-}
-
-async fn checkout_default(State(state): State<AppState>, Json(op): Json<ProjectOp>) -> Response {
-    apply_wire_response(
-        state
-            .engine
-            .apply_wire(WireCommand::CheckoutProjectDefaultBranch {
-                project_id: op.project_id,
-            })
+            .apply_wire_scoped(
+                WireCommand::Pull {
+                    session_id: op.session_id,
+                },
+                scope_from_headers(&headers),
+            )
             .await,
     )
 }

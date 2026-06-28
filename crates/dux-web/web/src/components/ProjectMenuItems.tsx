@@ -38,9 +38,9 @@ import {
  * the server also rejects the command in that state).
  */
 export function ProjectMenuItems({ id }: { id: string }) {
-  const { viewModel } = useDux()
-  const ghAvailable = viewModel?.gh_available ?? false
-  const orphaned = !viewModel?.projects.some((p) => p.id === id)
+  const { spine, bootstrap } = useDux()
+  const ghAvailable = bootstrap?.gh_available ?? false
+  const orphaned = !spine?.projects.some((p) => p.id === id)
 
   return (
     <>

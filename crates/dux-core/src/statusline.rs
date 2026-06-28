@@ -1,5 +1,29 @@
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
+
+/// Audience for a status update. `All` (the default) broadcasts to every
+/// connected client exactly as statuses behaved before scoping existed;
+/// `Connection(id)` restricts delivery to the single web connection whose
+/// command originated the operation, so one client's operation toasts
+/// (push/commit/launch) stop appearing on every other client.
+///
+/// Carried from a status's creation all the way to the wire ([`WireStatus`]
+/// in `wire.rs`). The TUI ignores it entirely (it has a single status line and
+/// a single user); only the web's per-connection status forwarder filters on
+/// it. Engine-internal / spontaneous statuses (agent crash, branch move, config
+/// reload) and TUI-minted statuses default to `All`.
+///
+/// [`WireStatus`]: crate::wire::WireStatus
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusScope {
+    /// Broadcast to every client (the default, and every pre-scoping status).
+    #[default]
+    All,
+    /// Deliver only to the web connection with this server-assigned id.
+    Connection(String),
+}
 
 /// Shared timeout for upgrading stale `Busy` entries to `Warning`. Used by
 /// both the TUI tick and the web engine actor so the behaviour is identical on
@@ -75,6 +99,10 @@ pub struct KeyedStatus {
     pub key: Option<String>,
     pub tone: StatusTone,
     pub message: String,
+    /// Delivery audience for this status. Defaults to [`StatusScope::All`]; the
+    /// web actor sets it from the originating connection so per-connection
+    /// filtering can suppress other clients' operation toasts.
+    pub scope: StatusScope,
     pub generation: Generation,
     /// Wall-clock time when this status was last set. Used for auto-clear and
     /// busy-timeout decisions in `tick`.
@@ -90,6 +118,10 @@ pub struct KeyedWireStatus {
     pub key: Option<String>,
     pub tone: String, // StatusTone::as_wire()
     pub message: String,
+    /// Delivery audience, carried so the on-connect status snapshot can be
+    /// filtered per connection (a mid-operation joiner must not receive another
+    /// connection's in-progress `Busy`). Defaults to [`StatusScope::All`].
+    pub scope: StatusScope,
 }
 
 /// What `tick` changed, so the web actor can broadcast precise StatusCleared /
@@ -161,6 +193,21 @@ impl KeyedStatusController {
         tone: StatusTone,
         message: impl Into<String>,
     ) -> Generation {
+        self.set_scoped(now, key, tone, message, StatusScope::All)
+    }
+
+    /// Like [`set`](Self::set) but records the status's delivery [`StatusScope`].
+    /// `set` delegates here with [`StatusScope::All`], so TUI call sites (which
+    /// ignore scope) need no change; the web actor calls this with the
+    /// originating connection's scope so the snapshot can be filtered.
+    pub fn set_scoped(
+        &mut self,
+        now: Instant,
+        key: Option<String>,
+        tone: StatusTone,
+        message: impl Into<String>,
+        scope: StatusScope,
+    ) -> Generation {
         let generation = Generation(self.next_gen);
         let seq = self.next_seq;
         self.next_gen += 1;
@@ -170,6 +217,7 @@ impl KeyedStatusController {
             key: key.clone(),
             tone,
             message: message.into(),
+            scope,
             generation,
             since: now,
             seq,
@@ -259,6 +307,7 @@ impl KeyedStatusController {
                 key: None,
                 tone: StatusTone::Warning.as_wire().to_string(),
                 message: "timed out — check dux.log".to_string(),
+                scope: anon.scope.clone(),
             });
         }
 
@@ -309,6 +358,7 @@ impl KeyedStatusController {
                     key: Some(key.clone()),
                     tone: StatusTone::Warning.as_wire().to_string(),
                     message: entry.message.clone(),
+                    scope: entry.scope.clone(),
                 });
             }
         }
@@ -325,6 +375,7 @@ impl KeyedStatusController {
                 key: None,
                 tone: anon.tone.as_wire().to_string(),
                 message: anon.message.clone(),
+                scope: anon.scope.clone(),
             });
         }
         for entry in self.entries.values() {
@@ -332,6 +383,7 @@ impl KeyedStatusController {
                 key: Some(entry.key.clone().unwrap_or_default()),
                 tone: entry.tone.as_wire().to_string(),
                 message: entry.message.clone(),
+                scope: entry.scope.clone(),
             });
         }
         out
@@ -363,6 +415,7 @@ impl KeyedStatusController {
             key: winner.key.clone(),
             tone: winner.tone.as_wire().to_string(),
             message: winner.message.clone(),
+            scope: winner.scope.clone(),
         })
     }
 

@@ -137,6 +137,16 @@ pub struct Engine {
     /// [`Engine::set_watched_session`].
     pub watched_session_id: Option<String>,
     pub has_active_processes: Arc<AtomicBool>,
+    /// The audience for statuses minted while processing the CURRENT command.
+    /// Transient, never persisted: the single-threaded engine actor sets it to
+    /// the originating connection's [`StatusScope`] before processing a web
+    /// `ApplyWire` and resets it to [`StatusScope::All`] afterwards. The command
+    /// mint sites (the synchronous outcome, `op.pending_status()`, `spawn_status_op`,
+    /// and `spawn_command_worker`'s busy) stamp `scope = current_origin` so a web
+    /// operation's toasts reach only that connection. Defaults to `All`, which is
+    /// the TUI's permanent value (it never sets an origin), so TUI behaviour is
+    /// unchanged.
+    pub current_origin: crate::statusline::StatusScope,
     /// Set of currently-running operations. See `InFlightKey` for the
     /// allowed variants. Inserted by `mark_in_flight` before spawning a
     /// worker; cleared by `clear_in_flight` when the worker's completion
@@ -262,6 +272,27 @@ pub struct Engine {
     /// `drive_web_launch_followup` against a [`WebLaunchOutcome`]. Empty for the
     /// TUI, which keeps its own op in the App layer.
     pub pending_web_launch_ops: HashMap<String, HandlerStatusOp<WebLaunchOutcome>>,
+
+    /// The opaque create-op id minted by the MOST RECENT synchronous
+    /// `DispatchCreateAgentRequest` dispatch within the current `apply_wire`
+    /// call, surfaced to the caller as [`crate::wire::WireCommandOutcome::created_op_id`].
+    /// `apply_wire` clears this to `None` before dispatching and reads (takes) it
+    /// after, so the value reflects exactly this command's create — the engine
+    /// actor is single-threaded, so there is no cross-command race. It lets a REST
+    /// create handler correlate ITS exact new session via
+    /// [`Engine::created_session_for_op`] instead of a racy "first id not in the
+    /// pre-snapshot" set-difference (which could return a concurrent create's
+    /// session). `None` for every non-create command and for the from-PR create
+    /// (whose create op is minted later, inside the PR-lookup followup).
+    pub last_created_op_id: Option<String>,
+
+    /// Maps a create op's opaque id to the session it produced (and when), filled
+    /// in the launch-ready Create branch once the worker-minted session lands. A
+    /// REST create handler holding the op id (from `WireCommandOutcome.created_op_id`)
+    /// resolves its exact session here. Bounded: pruned on every insert of entries
+    /// past [`CREATED_SESSION_TTL`] or whose session no longer exists, so a
+    /// long-running server cannot accumulate stale entries.
+    pub created_session_by_op: HashMap<String, (String, Instant)>,
 }
 
 /// Handler-computed outcome for a create-agent op (see
@@ -401,6 +432,12 @@ pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250)
 /// "periodic refreshes use wall-clock time" design tenet.
 pub const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long an entry in [`Engine::created_session_by_op`] stays addressable by a
+/// REST create handler before it is pruned. Comfortably longer than the longest
+/// create-await window (the from-PR path waits up to 60s) so a slow create still
+/// resolves, but short enough that the map self-trims on a long-running server.
+pub const CREATED_SESSION_TTL: Duration = Duration::from_secs(120);
+
 /// Rewrite an absolute path under the user's home directory to the portable
 /// `$HOME/...` form so config.toml stays machine-independent (the tenet:
 /// "Project config is portable desired state"). Paths outside `$HOME`, or when
@@ -455,6 +492,36 @@ impl Engine {
     /// Clear an in-flight key after a worker's completion event arrives.
     pub fn clear_in_flight(&mut self, key: &InFlightKey) {
         self.in_flight.remove(key);
+    }
+
+    /// Record that the create op `op_id` produced session `session_id` (stamped
+    /// now), so a REST create handler holding the op id (returned in
+    /// `WireCommandOutcome.created_op_id`) can resolve ITS exact session via
+    /// [`Engine::created_session_for_op`] rather than a racy set-difference.
+    /// Prunes on insert: entries past [`CREATED_SESSION_TTL`] or whose session no
+    /// longer exists are dropped, so the map stays bounded on a long-running
+    /// server.
+    pub fn record_created_session(&mut self, op_id: String, session_id: String) {
+        let now = Instant::now();
+        // Bind disjoint field borrows so the retain closure can read `sessions`
+        // while the map is borrowed mutably.
+        let sessions = &self.sessions;
+        let map = &mut self.created_session_by_op;
+        map.retain(|_, (sid, at)| {
+            now.saturating_duration_since(*at) < CREATED_SESSION_TTL
+                && sessions.iter().any(|s| &s.id == sid)
+        });
+        map.insert(op_id, (session_id, now));
+    }
+
+    /// The session id produced by create op `op_id`, if it has landed and is still
+    /// within [`CREATED_SESSION_TTL`]. `None` while the create is still in flight
+    /// or after the entry has expired.
+    pub fn created_session_for_op(&self, op_id: &str) -> Option<String> {
+        let now = Instant::now();
+        self.created_session_by_op.get(op_id).and_then(|(sid, at)| {
+            (now.saturating_duration_since(*at) < CREATED_SESSION_TTL).then(|| sid.clone())
+        })
     }
 
     /// Whether `cmd`'s handler must be deferred while a `ReloadConfig` barrier is
