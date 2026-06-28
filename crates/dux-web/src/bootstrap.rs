@@ -100,6 +100,8 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pending_delete_ops_web: HashMap::new(),
         pending_create_ops: HashMap::new(),
         pending_web_launch_ops: HashMap::new(),
+        last_created_op_id: None,
+        created_session_by_op: HashMap::new(),
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),
@@ -116,6 +118,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        current_origin: dux_core::statusline::StatusScope::All,
         in_flight: InFlightSet::new(),
         pr_last_checked: HashMap::new(),
         changed_files_poller_started: AtomicBool::new(false),
@@ -165,12 +168,12 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_engine_yields_empty_view_model_on_fresh_store() {
+    fn bootstrap_engine_yields_empty_spine_on_fresh_store() {
         let (_tmp, paths) = temp_paths();
         let engine = bootstrap_engine(&paths).expect("bootstrap");
-        let vm = engine.view_model();
-        assert!(vm.projects.is_empty());
-        assert!(vm.sessions.is_empty());
+        let spine = engine.spine();
+        assert!(spine.projects.is_empty());
+        assert!(spine.sessions.is_empty());
     }
 
     #[test]
@@ -195,15 +198,15 @@ mod tests {
         drop(store);
 
         let engine = bootstrap_engine(&paths).expect("bootstrap");
-        let vm = engine.view_model();
+        let spine = engine.spine();
 
         assert!(
-            !vm.projects.is_empty(),
-            "ViewModel should include projects from the store"
+            !spine.projects.is_empty(),
+            "the spine should include projects from the store"
         );
         assert!(
-            vm.projects.iter().any(|p| p.id == seeded_id),
-            "seeded project id should appear in the ViewModel"
+            spine.projects.iter().any(|p| p.id == seeded_id),
+            "seeded project id should appear in the spine"
         );
     }
 }

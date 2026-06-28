@@ -19,10 +19,10 @@ import {
 // action generically. Mirrors the TUI's checkout flow, which moves HEAD in the
 // shared source checkout — hence the confirmation here.
 export function CheckoutDefaultBranchDialog() {
-  const { checkoutDefaultBranchTarget, viewModel } = useDux()
+  const { checkoutDefaultBranchTarget, spine } = useDux()
 
   const isOpen = checkoutDefaultBranchTarget !== null
-  const project = viewModel?.projects.find(
+  const project = spine?.projects.find(
     (p) => p.id === checkoutDefaultBranchTarget,
   )
   const name = project?.name ?? "this project"

@@ -480,8 +480,8 @@ impl Engine {
                 // launch-failed handlers from a `CreateLaunchOutcome`). The
                 // resolver reproduces the create wording byte-for-byte for both
                 // surfaces.
-                let op = crate::engine::status_op(busy_message).resolve_in_handler(
-                    |o: &crate::engine::CreateLaunchOutcome| {
+                let op = crate::engine::status_op(busy_message)
+                    .resolve_in_handler(|o: &crate::engine::CreateLaunchOutcome| {
                         use crate::engine::{CreateLaunchOutcome, Final};
                         match o {
                             CreateLaunchOutcome::Committed { status_message } => {
@@ -500,9 +500,19 @@ impl Engine {
                                 Final::error(message.clone())
                             }
                         }
-                    },
-                );
+                    })
+                    // Stamp the originating connection so the busy, every progress
+                    // re-emit, and the eventual final reach only it (the followups
+                    // resolve in later ticks, after `current_origin` was reset).
+                    .with_scope(self.current_origin.clone());
                 let op_id = op.id().to_string();
+                // Surface this create's op id to a synchronous `apply_wire` caller
+                // (a REST create handler), which reads it from
+                // `WireCommandOutcome.created_op_id` to correlate ITS exact new
+                // session via `created_session_for_op` once the worker mints it.
+                // Cleared at the top of every `apply_wire`, so it never leaks into
+                // an unrelated command's outcome.
+                self.last_created_op_id = Some(op_id.clone());
                 let op_id_for_job = op_id.clone();
                 let op_id_panic = op_id.clone();
                 let pending = op.pending_status();
@@ -704,6 +714,11 @@ impl Engine {
                 };
                 let pending = op.pending_status();
                 let panic_key = op.key().to_string();
+                // Capture the command origin BEFORE the worker spawns: by the
+                // time the deferred final lands, `current_origin` has been reset.
+                // `All` for the TUI/tests, so behaviour is unchanged there.
+                let origin = self.current_origin.clone();
+                let origin_for_panic = origin.clone();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: format!("pull:{repo_key}"),
@@ -719,7 +734,8 @@ impl Engine {
                             status: crate::engine::ResolvedFinal::error(
                                 panic_key,
                                 format!("Pull worker panicked: {reason}"),
-                            ),
+                            )
+                            .with_scope(origin_for_panic.clone()),
                         })),
                     },
                     move |tx| {
@@ -752,7 +768,7 @@ impl Engine {
                         };
                         // Resolve the tri-state op where the typed result is in
                         // scope; the message rides back with the domain result.
-                        let status = op.resolve(&result);
+                        let status = op.resolve(&result).with_scope(origin.clone());
                         let _ = tx.send(WorkerEvent::PullCompleted {
                             repo_path: repo_key,
                             target,
@@ -935,6 +951,11 @@ impl Engine {
                 // panic path can't reach `op` (it's consumed/lost on a panic) so
                 // it synthesises a keyed error from this id instead.
                 let op_id = op.key().to_string();
+                // Capture the command origin BEFORE the worker thread spawns: the
+                // deferred final must carry it because `current_origin` is reset by
+                // the time the worker reports back. `All` for the TUI/tests.
+                let origin = self.current_origin.clone();
+                let origin_for_panic = origin.clone();
                 let pending = op.pending_status();
                 // A second sender clone reserved for the panic handler. `tx`
                 // is moved into `run`, which is wrapped in `catch_unwind`; if
@@ -961,7 +982,9 @@ impl Engine {
                             Ok(d) if d.trim().is_empty() => {
                                 let error = "No staged changes to summarize. Stage files first."
                                     .to_string();
-                                let resolved = op.resolve(&Err::<(), String>(error.clone()));
+                                let resolved = op
+                                    .resolve(&Err::<(), String>(error.clone()))
+                                    .with_scope(origin.clone());
                                 let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
                                     resolved,
                                 });
@@ -974,7 +997,9 @@ impl Engine {
                             Ok(d) => d,
                             Err(e) => {
                                 let error = format!("Failed to read the staged diff: {e}");
-                                let resolved = op.resolve(&Err::<(), String>(error.clone()));
+                                let resolved = op
+                                    .resolve(&Err::<(), String>(error.clone()))
+                                    .with_scope(origin.clone());
                                 let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
                                     resolved,
                                 });
@@ -988,7 +1013,8 @@ impl Engine {
                         let prompt = format!("{prompt_prefix}\n\n{diff_text}");
                         match prov.run_oneshot(&prompt, &worktree) {
                             Ok(message) => {
-                                let resolved = op.resolve(&Ok::<(), String>(()));
+                                let resolved =
+                                    op.resolve(&Ok::<(), String>(())).with_scope(origin.clone());
                                 let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
                                     resolved,
                                 });
@@ -1000,7 +1026,9 @@ impl Engine {
                             }
                             Err(e) => {
                                 let error = e.to_string();
-                                let resolved = op.resolve(&Err::<(), String>(error.clone()));
+                                let resolved = op
+                                    .resolve(&Err::<(), String>(error.clone()))
+                                    .with_scope(origin.clone());
                                 let _ = tx.send(crate::worker::WorkerEvent::StatusOpCompleted {
                                     resolved,
                                 });
@@ -1026,7 +1054,8 @@ impl Engine {
                             format!(
                                 "Couldn't generate a commit message: Worker panicked: {reason}"
                             ),
-                        );
+                        )
+                        .with_scope(origin_for_panic.clone());
                         let _ = tx_panic
                             .send(crate::worker::WorkerEvent::StatusOpCompleted { resolved });
                         let _ = tx_panic.send(crate::worker::WorkerEvent::CommitMessageFailed {
@@ -2059,52 +2088,36 @@ mod tests {
     }
 
     #[test]
-    fn view_model_changed_files_empty_before_watch_populated_after_drain() {
+    fn changed_files_empty_before_watch_populated_after_drain() {
         let repo = watch_test_repo();
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(session_in_repo("s1", repo.path()));
 
-        // Before the watch the ViewModel carries empty lists and no watched id —
+        // Before the watch the engine carries empty lists and no watched id —
         // exactly what the web saw (the pane showed nothing).
-        let before = engine.view_model();
-        assert!(before.changed_files.staged.is_empty());
-        assert!(before.changed_files.unstaged.is_empty());
-        assert!(before.changed_files.watched_session_id.is_none());
+        assert!(engine.staged_files.is_empty());
+        assert!(engine.unstaged_files.is_empty());
+        assert!(engine.watched_session_id.is_none());
 
         // The command arms the watch (id visible immediately) but population is
-        // now async: the ViewModel shows the watched id with EMPTY lists until
-        // the worker event drains.
+        // now async: the watched id is set with EMPTY lists until the worker
+        // event drains.
         engine
             .apply(Command::WatchChangedFiles {
                 session_id: Some("s1".to_string()),
             })
             .expect("apply");
-        let armed = engine.view_model();
-        assert_eq!(
-            armed.changed_files.watched_session_id.as_deref(),
-            Some("s1")
-        );
-        assert!(armed.changed_files.staged.is_empty());
-        assert!(armed.changed_files.unstaged.is_empty());
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
+        assert!(engine.staged_files.is_empty());
+        assert!(engine.unstaged_files.is_empty());
 
         // After the worker lands the lists are populated and still tagged.
         drain_changed_files_refresh(&mut engine);
-        let after = engine.view_model();
-        assert_eq!(
-            after.changed_files.watched_session_id.as_deref(),
-            Some("s1")
-        );
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
+        assert!(engine.staged_files.iter().any(|f| f.path == "staged.txt"));
         assert!(
-            after
-                .changed_files
-                .staged
-                .iter()
-                .any(|f| f.path == "staged.txt")
-        );
-        assert!(
-            after
-                .changed_files
-                .unstaged
+            engine
+                .unstaged_files
                 .iter()
                 .any(|f| f.path == "unstaged.txt")
         );

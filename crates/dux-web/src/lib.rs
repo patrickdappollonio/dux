@@ -28,14 +28,31 @@
 
 pub mod auth;
 pub mod bootstrap;
+pub mod bootstrap_routes;
+pub mod browse_routes;
+pub mod changes;
+pub mod changes_routes;
+pub mod config_routes;
 pub mod console;
 pub mod engine_actor;
+pub mod event_bus;
 pub mod file_routes;
 pub mod git_routes;
-pub mod protocol;
+pub mod project_actions;
+pub mod project_reads;
+pub mod rest_common;
 pub mod server;
+pub mod session_actions;
+pub mod spine_routes;
+pub mod terminal_actions;
 pub mod tls;
 pub mod web_assets;
+
+/// Crate-wide test helpers shared by the per-module route test suites (a single
+/// headless engine handle + a gated router builder), so each REST route module
+/// can exercise its handlers without duplicating the bootstrap recipe.
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1055,17 +1072,23 @@ pub fn serve_with_engine(
     // cheap `Arc`-backed service; the store is an `Arc`). The flip is plain HTTP
     // by type, so no Secure cookie. The periodic expired-session sweep prunes the
     // shared store and stops when the shutdown watch flips on teardown.
-    let (app, sweep_store) = server::build_app(
-        handle.clone(),
-        Arc::clone(&auth),
-        axum::Router::new(),
-        RouterParams::plain_http()
-            // The capture console keeps the access log OFF (it is never wanted in
-            // the panel, and access() never reaches emit() to be captured anyway)
-            // while WS/auth handlers feed lifecycle events into the Activity ring.
-            .with_console(console.clone(), false)
-            .with_max_websocket_connections(engine.config.server.max_websocket_connections),
-    );
+    // `build_app` constructs the `ChangesService`, which spawns its supervised
+    // poller via `tokio::spawn` — that needs an entered runtime, and the flip is
+    // not yet inside `block_on` here, so enter the runtime for the build.
+    let (app, sweep_store) = {
+        let _guard = runtime.enter();
+        server::build_app(
+            handle.clone(),
+            Arc::clone(&auth),
+            axum::Router::new(),
+            RouterParams::plain_http()
+                // The capture console keeps the access log OFF (it is never wanted
+                // in the panel, and access() never reaches emit() to be captured
+                // anyway) while WS/auth handlers feed lifecycle events into the ring.
+                .with_console(console.clone(), false)
+                .with_max_websocket_connections(engine.config.server.max_websocket_connections),
+        )
+    };
     let sweep_task = {
         let _guard = runtime.enter();
         tls::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx)

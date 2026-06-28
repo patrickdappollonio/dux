@@ -33,11 +33,11 @@ function pathTail(path: string): string {
 // Mounted only while the dialog is open so its local select/name state resets on
 // each open — no set-state-in-effect needed (matching AddProjectDialog).
 function AttachWorktreeBody({ projectId }: { projectId: string }) {
-  const { attachWorktreeEntries, attachWorktreeLoading, viewModel } = useDux()
+  const { attachWorktreeEntries, attachWorktreeLoading, spine } = useDux()
   const [selected, setSelected] = useState<string | null>(null)
   const [name, setName] = useState("")
 
-  const project = viewModel?.projects.find((p) => p.id === projectId)
+  const project = spine?.projects.find((p) => p.id === projectId)
   const projectName = project?.name ?? "project"
   const adoptable = attachWorktreeEntries.filter((e) => e.adoptable)
   const attached = attachWorktreeEntries.filter((e) => !e.adoptable)

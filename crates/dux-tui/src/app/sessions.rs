@@ -3102,6 +3102,7 @@ mod tests {
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             watched_session_id: None,
+            current_origin: Default::default(),
             has_active_processes: Arc::new(AtomicBool::new(false)),
             in_flight: std::collections::HashSet::new(),
             pr_last_checked: std::collections::HashMap::new(),
@@ -3117,6 +3118,8 @@ mod tests {
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
+            last_created_op_id: None,
+            created_session_by_op: std::collections::HashMap::new(),
         };
         let mut app = App {
             engine,
@@ -3290,6 +3293,7 @@ mod tests {
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             watched_session_id: None,
+            current_origin: Default::default(),
             has_active_processes: Arc::new(AtomicBool::new(false)),
             in_flight: std::collections::HashSet::new(),
             pr_last_checked: std::collections::HashMap::new(),
@@ -3305,6 +3309,8 @@ mod tests {
             pending_delete_ops_web: std::collections::HashMap::new(),
             pending_create_ops: std::collections::HashMap::new(),
             pending_web_launch_ops: std::collections::HashMap::new(),
+            last_created_op_id: None,
+            created_session_by_op: std::collections::HashMap::new(),
         }
     }
 

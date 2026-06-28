@@ -19,7 +19,7 @@ export interface PartitionedProjects {
 }
 
 // Project GROUPING is owned by dux_core (`dux_core::sidebar`, surfaced as
-// `viewModel.sidebar`): which sessions belong to which project, which ids are
+// `spine.sidebar`): which sessions belong to which project, which ids are
 // orphaned (a session whose project record was removed), the display names, and
 // whether the agent-less projects are split below a separator. This function
 // only PROJECTS that core model into the shape the components render — it makes

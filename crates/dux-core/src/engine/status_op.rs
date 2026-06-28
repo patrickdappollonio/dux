@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::StatusUpdate;
-use crate::statusline::StatusTone;
+use crate::statusline::{StatusScope, StatusTone};
 
 /// Process-global source of opaque status ids. Monotonic only so each op gets a
 /// distinct correlation handle; the value carries no meaning and consumers never
@@ -70,6 +70,14 @@ impl Final {
 pub struct ResolvedFinal {
     pub key: String,
     pub outcome: Final,
+    /// Delivery audience captured at dispatch time (before the worker thread
+    /// spawned, while `Engine::current_origin` was still set). Defaults to
+    /// [`StatusScope::All`]; the deferred-op mint sites set it so a push/pull/
+    /// commit-message final reaches only the originating connection. Copied
+    /// onto the emitted [`StatusUpdate`] in [`Self::into_reaction`] (by the time
+    /// the worker completes, `current_origin` has been reset, so the scope must
+    /// travel here rather than be re-read).
+    pub scope: StatusScope,
 }
 
 impl ResolvedFinal {
@@ -77,6 +85,7 @@ impl ResolvedFinal {
         Self {
             key: key.into(),
             outcome,
+            scope: StatusScope::All,
         }
     }
 
@@ -86,7 +95,15 @@ impl ResolvedFinal {
         Self {
             key: key.into(),
             outcome: Final::error(text),
+            scope: StatusScope::All,
         }
+    }
+
+    /// Attach a delivery [`StatusScope`] (builder form). Used by the deferred-op
+    /// mint sites to carry `current_origin` across the worker channel.
+    pub fn with_scope(mut self, scope: StatusScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Translate the carried outcome into the engine reaction that applies it.
@@ -97,6 +114,7 @@ impl ResolvedFinal {
                 tone,
                 message: text,
                 key: Some(self.key),
+                scope: self.scope,
             }),
             Final::Clear => EventReaction::ClearStatus(self.key),
         }
@@ -147,6 +165,7 @@ impl NeedsSuccess {
             key: self.key,
             pending: self.pending,
             resolver: Box::new(f),
+            scope: StatusScope::All,
         }
     }
 }
@@ -159,6 +178,13 @@ pub struct HandlerStatusOp<O> {
     key: String,
     pending: String,
     resolver: Box<dyn FnOnce(&O) -> Final + Send>,
+    /// Delivery audience captured at dispatch time (from `Engine::current_origin`).
+    /// Defaults to [`StatusScope::All`]; the deferred-op dispatch sites stamp it so
+    /// the pending busy, every `progress` re-emit, AND the eventual `resolve` final
+    /// reach only the originating connection. The busy and finals for these ops are
+    /// emitted in LATER ticks (worker-completion followups) when `current_origin`
+    /// has been reset, so the scope must live on the op rather than be re-read.
+    scope: StatusScope,
 }
 
 impl<O> HandlerStatusOp<O> {
@@ -166,9 +192,26 @@ impl<O> HandlerStatusOp<O> {
         &self.key
     }
 
+    /// The carried delivery [`StatusScope`]. Followup drivers that dispatch a
+    /// further command read this to re-set `Engine::current_origin` before the
+    /// nested dispatch mints its own busy.
+    pub fn scope(&self) -> &StatusScope {
+        &self.scope
+    }
+
+    /// Attach a delivery [`StatusScope`] (builder form). Stamped by the deferred-op
+    /// dispatch sites with `Engine::current_origin` so the op's busy/progress/final
+    /// stay scoped to the originating connection.
+    pub fn with_scope(mut self, scope: StatusScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
     /// The keyed [`StatusTone::Busy`] to show while the operation runs.
     pub fn pending_status(&self) -> StatusUpdate {
-        StatusUpdate::busy(self.pending.clone()).with_key(self.key.clone())
+        StatusUpdate::busy(self.pending.clone())
+            .with_key(self.key.clone())
+            .with_scope(self.scope.clone())
     }
 
     /// An UPDATED keyed busy on the same id, for operations that report progress
@@ -176,13 +219,16 @@ impl<O> HandlerStatusOp<O> {
     /// session…"). Does not consume the op — the eventual [`Self::resolve`] still
     /// replaces it. Replaces the old hand-keyed progress re-emit.
     pub fn progress(&self, message: impl Into<String>) -> StatusUpdate {
-        StatusUpdate::busy(message).with_key(self.key.clone())
+        StatusUpdate::busy(message)
+            .with_key(self.key.clone())
+            .with_scope(self.scope.clone())
     }
 
     /// Run the resolver against the handler-computed outcome, returning the
-    /// keyed final.
+    /// keyed final (carrying the op's delivery scope).
     pub fn resolve(self, outcome: &O) -> ResolvedFinal {
-        ResolvedFinal::new(self.key, (self.resolver)(outcome))
+        let outcome = (self.resolver)(outcome);
+        ResolvedFinal::new(self.key, outcome).with_scope(self.scope)
     }
 }
 

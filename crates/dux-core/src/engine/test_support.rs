@@ -69,6 +69,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
         watched_session_id: None,
         has_active_processes: Arc::new(AtomicBool::new(false)),
+        current_origin: crate::statusline::StatusScope::All,
         in_flight: HashSet::new(),
         pr_last_checked: HashMap::new(),
         changed_files_poller_started: AtomicBool::new(false),
@@ -83,6 +84,8 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         pending_delete_ops_web: HashMap::new(),
         pending_create_ops: HashMap::new(),
         pending_web_launch_ops: HashMap::new(),
+        last_created_op_id: None,
+        created_session_by_op: HashMap::new(),
     };
     (engine, tmp)
 }

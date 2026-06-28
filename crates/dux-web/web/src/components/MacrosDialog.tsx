@@ -46,6 +46,10 @@ const SURFACE_LABEL: Record<MacroSurface, string> = {
 // from the store draft via a lazy initializer — no set-state-in-effect. The
 // whole list is edited locally; Save sends it wholesale via `update_macros`.
 function MacrosEditor({ initial }: { initial: MacroView[] }) {
+  // The bootstrap document holds the authoritative macro list. Until it loads,
+  // the draft was seeded empty, so a wholesale save would wipe the server's
+  // macros — disable Save in that window (the store also refuses it defensively).
+  const { bootstrap } = useDux()
   const [macros, setMacros] = useState<MacroView[]>(() =>
     initial.map((m) => ({ ...m })),
   )
@@ -181,7 +185,7 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
         </Button>
         <Button
           onClick={() => saveMacros(macros)}
-          disabled={validationError !== null}
+          disabled={validationError !== null || bootstrap === null}
         >
           Save
         </Button>

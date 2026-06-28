@@ -50,5 +50,5 @@ export function markdownAssetUrl(
 ): string | null {
   const rel = resolveWorktreeRelative(filePath, src)
   if (rel === null) return null
-  return `/api/file/raw?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(rel)}`
+  return `/api/v1/file/raw?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(rel)}`
 }

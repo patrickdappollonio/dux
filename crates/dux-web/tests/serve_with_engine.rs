@@ -95,10 +95,11 @@ fn build_engine() -> (Engine, tempfile::TempDir) {
     (engine, tmp)
 }
 
-/// A ws client connects and receives a `view_model` frame, then a programmatic
-/// `ReturnToTui` tick stops serving: the engine comes back (proved by the
-/// returned `ServerExit::ReturnToTui` and a surviving in-memory terminal), and
-/// the port can be re-bound (the server is actually down and released it).
+/// A ws client connects to `/ws/events` and receives the `connected` handshake
+/// frame, then a programmatic `ReturnToTui` tick stops serving: the engine comes
+/// back (proved by the returned `ServerExit::ReturnToTui` and a surviving
+/// in-memory terminal), and the port can be re-bound (the server is actually down
+/// and released it).
 #[tokio::test]
 async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     let (mut engine, _tmp) = build_engine();
@@ -156,22 +157,23 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
         result_tx.send((exit, survived)).unwrap();
     });
 
-    // Connect a ws client and confirm a view_model frame arrives.
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    // Connect a ws client to `/ws/events` and confirm the `connected` handshake
+    // frame arrives — proof the socket is live. All data (the session spine, its
+    // `s1` id) now rides the REST `/api/v1/spine` read.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("connect");
-    let mut saw_view_model = false;
+    let mut saw_connected = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline && !saw_view_model {
+    while tokio::time::Instant::now() < deadline && !saw_connected {
         if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
             && let Ok(t) = m.into_text()
-            && t.contains("\"type\":\"view_model\"")
-            && t.contains("\"id\":\"s1\"")
+            && t.contains("\"event\":\"connected\"")
         {
-            saw_view_model = true;
+            saw_connected = true;
         }
     }
-    assert!(saw_view_model, "never received a view_model frame");
+    assert!(saw_connected, "never received a connected frame");
 
     // Ask the status-screen tick to flip back to the TUI.
     stop.store(true, Ordering::SeqCst);
@@ -244,7 +246,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
         result_tx.send((exit, exited)).unwrap();
     });
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/events"))
         .await
         .expect("connect");
     let _ = tokio::time::timeout(Duration::from_secs(3), ws.next()).await;
@@ -312,17 +314,16 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
         result_tx.send((exit, alive)).unwrap();
     });
 
-    // Subscribe to the companion terminal and prove the forwarder is live by
-    // writing input and awaiting the `cat` echo as a binary frame.
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("connect");
-    let _ = ws.next().await; // initial view_model
-    ws.send(Message::Text(format!(
-        r#"{{"type":"subscribe_terminal","terminal_id":"{terminal_id}"}}"#
-    )))
+    // Attach to the companion terminal's nested PTY socket and prove the forwarder
+    // is live by writing input and awaiting the `cat` echo as a binary frame. The
+    // socket IS the subscription (no subscribe frame); the server replays a repaint
+    // first, then streams live bytes.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/sessions/s1/terminals/{terminal_id}/pty"
+    ))
     .await
-    .expect("send subscribe_terminal");
+    .expect("connect");
+    let _ = ws.next().await; // initial repaint (binary)
     ws.send(Message::Binary(b"dux-flip-marker\n".to_vec()))
         .await
         .expect("send pty input");

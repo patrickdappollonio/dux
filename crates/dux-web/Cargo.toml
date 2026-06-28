@@ -11,6 +11,8 @@ serde_json.workspace = true
 tokio.workspace = true
 axum.workspace = true
 futures-util.workspace = true
+# Server-assigned random per-connection ids for status-toast scoping on /ws.
+uuid.workspace = true
 # Wall-clock `HH:MM:SS` timestamps for the vite-style server console (console.rs).
 chrono.workspace = true
 tower-sessions.workspace = true

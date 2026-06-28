@@ -19,7 +19,7 @@ use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
 };
 use crate::startup::StartupCommandLatestLog;
-use crate::statusline::StatusTone;
+use crate::statusline::{StatusScope, StatusTone};
 use crate::storage::StoredPr;
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchKind, AgentLaunchReadyData, BranchWarningKind, BrowserEntry,
@@ -38,6 +38,11 @@ pub struct StatusUpdate {
     /// `WireStatus::key` by `WireStatus::from_update` so the web layer can
     /// dismiss the matching toast when the final status arrives.
     pub key: Option<String>,
+    /// Delivery audience. Defaults to [`StatusScope::All`] (broadcast, the
+    /// pre-scoping behaviour). Stamped from `Engine::current_origin` at the
+    /// command mint sites so a web operation's toasts reach only the
+    /// originating connection. The TUI ignores it.
+    pub scope: StatusScope,
 }
 
 impl StatusUpdate {
@@ -46,6 +51,7 @@ impl StatusUpdate {
             tone: StatusTone::Info,
             message: message.into(),
             key: None,
+            scope: StatusScope::All,
         }
     }
     /// SEALED: a `Busy` status may only be born from a [`StatusOp`] (its
@@ -59,6 +65,7 @@ impl StatusUpdate {
             tone: StatusTone::Busy,
             message: message.into(),
             key: None,
+            scope: StatusScope::All,
         }
     }
     #[allow(dead_code)]
@@ -67,6 +74,7 @@ impl StatusUpdate {
             tone: StatusTone::Warning,
             message: message.into(),
             key: None,
+            scope: StatusScope::All,
         }
     }
     pub fn error(message: impl Into<String>) -> Self {
@@ -74,6 +82,7 @@ impl StatusUpdate {
             tone: StatusTone::Error,
             message: message.into(),
             key: None,
+            scope: StatusScope::All,
         }
     }
 
@@ -86,6 +95,7 @@ impl StatusUpdate {
             tone,
             message: message.into(),
             key: Some(key.into()),
+            scope: StatusScope::All,
         }
     }
 
@@ -93,6 +103,13 @@ impl StatusUpdate {
     /// start from one of the tone helpers and then chain `.with_key(k)`.
     pub fn with_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    /// Set this update's delivery [`StatusScope`] (builder form). Used by the
+    /// engine mint sites to stamp `current_origin` onto a freshly-minted status.
+    pub fn with_scope(mut self, scope: StatusScope) -> Self {
+        self.scope = scope;
         self
     }
 }
@@ -701,6 +718,10 @@ impl Engine {
                 self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
             self.providers.insert(session.id.clone(), client);
             self.sessions.insert(0, session.clone());
+            // Correlate this create op with the session it just produced so a REST
+            // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
+            // resolves its exact session without a racy set-difference scan.
+            self.record_created_session(status_op_id.clone(), session.id.clone());
             self.mark_session_provider_started(&session.id);
             if request.resume {
                 self.resume_fallback_candidates
@@ -2565,6 +2586,43 @@ mod tests {
         // "Creating a new agent…" loading toast in place, and the op is consumed.
         assert_eq!(status.key.as_deref(), Some(op_id.as_str()));
         assert!(engine.pending_create_ops.is_empty());
+    }
+
+    #[test]
+    fn created_session_correlation_resolves_and_prunes() {
+        use std::time::{Duration, Instant};
+
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        engine.sessions.push(sample_session("s2", "p1", "feat2"));
+
+        // Recording an op→session pair makes it resolvable by op id.
+        engine.record_created_session("op-1".to_string(), "s1".to_string());
+        assert_eq!(
+            engine.created_session_for_op("op-1"),
+            Some("s1".to_string())
+        );
+        assert_eq!(engine.created_session_for_op("missing"), None);
+
+        // An entry whose session no longer exists is pruned on the next insert,
+        // so the map cannot accumulate dead entries on a long-running server.
+        engine.record_created_session("op-ghost".to_string(), "gone".to_string());
+        engine.record_created_session("op-2".to_string(), "s2".to_string());
+        assert_eq!(engine.created_session_for_op("op-ghost"), None);
+        assert_eq!(
+            engine.created_session_for_op("op-2"),
+            Some("s2".to_string())
+        );
+
+        // An entry past the TTL reads as absent even before its prune.
+        engine.created_session_by_op.insert(
+            "op-stale".to_string(),
+            (
+                "s1".to_string(),
+                Instant::now() - (crate::engine::CREATED_SESSION_TTL + Duration::from_secs(1)),
+            ),
+        );
+        assert_eq!(engine.created_session_for_op("op-stale"), None);
     }
 
     #[test]

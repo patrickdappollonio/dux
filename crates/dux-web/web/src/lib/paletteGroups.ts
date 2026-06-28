@@ -5,8 +5,8 @@
 // the per-id handler. Grouping, by contrast, is a pure WEB-presentation concern
 // (the TUI palette lists flat in keybinding order), so it lives here rather than
 // bloating every core registry row with a web-only label. Each web command id
-// maps to a group heading; `groupPaletteCommands` buckets the ViewModel's
-// `palette_commands` into those groups in registry order. The handler-coverage
+// maps to a group heading; `groupPaletteCommands` buckets the bootstrap
+// document's `palette_commands` into those groups in registry order. The handler-coverage
 // test pins that every web command id has a group, so a new Web/Both command
 // can't ship ungrouped.
 
@@ -48,7 +48,7 @@ export function paletteGroupFor(id: string): PaletteGroup | null {
   return GROUP_BY_ID[id] ?? null
 }
 
-// Bucket the ViewModel's `palette_commands` into app-menu groups, preserving the
+// Bucket the bootstrap document's `palette_commands` into app-menu groups, preserving the
 // registry's canonical order within each group and dropping the empty groups.
 // `id in PALETTE_HANDLERS` filtering still happens in CommandPalette; this only
 // arranges the entries that survive that filter.

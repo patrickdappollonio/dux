@@ -65,17 +65,17 @@ export const fileApi = {
   // out server-side). Editing is NOT limited to this set — any path inside the
   // worktree can be read/written/created (the server enforces containment).
   list: (sessionId: string) =>
-    postFile<{ files: string[]; truncated?: boolean }>("/api/file/list", {
+    postFile<{ files: string[]; truncated?: boolean }>("/api/v1/file/list", {
       session_id: sessionId,
     }),
   read: (sessionId: string, path: string) =>
-    postFile<WorktreeFile>("/api/file/read", { session_id: sessionId, path }),
+    postFile<WorktreeFile>("/api/v1/file/read", { session_id: sessionId, path }),
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
   // diff view. The server resolves both sides and the binary flag.
   diff: (sessionId: string, path: string) =>
-    postFile<FileDiffContents>("/api/file/diff", { session_id: sessionId, path }),
+    postFile<FileDiffContents>("/api/v1/file/diff", { session_id: sessionId, path }),
   write: (sessionId: string, path: string, content: string) =>
-    postFileNoContent("/api/file/write", {
+    postFileNoContent("/api/v1/file/write", {
       session_id: sessionId,
       path,
       content,
@@ -86,7 +86,7 @@ export const fileApi = {
   // one and errors if it isn't installed. Only useful when the server is the
   // user's own machine — the UI gates this to local-access URLs.
   openInEditor: (sessionId: string, path: string, editor: string) =>
-    postFile<{ editor: string }>("/api/file/open-in-editor", {
+    postFile<{ editor: string }>("/api/v1/file/open-in-editor", {
       session_id: sessionId,
       path,
       editor,

@@ -8,7 +8,9 @@ import {
   MousePointerClick,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
+  TriangleAlert,
   Undo2,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -37,6 +39,7 @@ import {
 } from "@/components/ui/collapsible"
 import {
   Empty,
+  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyMedia,
@@ -45,15 +48,12 @@ import {
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
-import {
-  fileStatusMeta,
-  filterChangedFiles,
-  shouldShowChangedFiles,
-} from "@/lib/changedFiles"
+import { fileStatusMeta, filterChangedFiles } from "@/lib/changedFiles"
 import {
   openCommit,
   openDiscard,
   openEditor,
+  refreshChanges,
   toggleChangesPane,
   useDux,
 } from "@/lib/store"
@@ -236,7 +236,7 @@ function FileGroup({ heading, files, total, filtering, action, sessionId, onOpen
 }
 
 export function ChangedFiles() {
-  const { viewModel, selectedSessionId } = useDux()
+  const { changes, selectedSessionId } = useDux()
   // The hide-pane action is desktop-only: the mobile hub reaches Changes through
   // its own nav, so there's no panel to hide there.
   const isMobile = useIsMobile()
@@ -267,13 +267,16 @@ export function ChangedFiles() {
     )
   }
 
-  // The changed-files lists are GLOBAL engine state tagged with the session they
-  // belong to. Only trust them when they match this client's selection; until
-  // the server's watch catches up (selection just changed, or a reconnect is
-  // re-establishing it) show a loading state rather than another session's files.
-  const watchedSessionId = viewModel?.changed_files.watched_session_id ?? null
-  const ready = shouldShowChangedFiles(watchedSessionId, selectedSessionId)
-  if (!ready) {
+  // Read the changed-files slice only when it belongs to THIS client's selection
+  // (the slice tracks one session at a time). The slice's phase replaces the old
+  // global-watch readiness check: a real request is in flight, an error
+  // self-heals on the next event, and there is no cross-client clobber.
+  const slice = changes.sessionId === selectedSessionId ? changes : null
+  const phase = slice?.phase ?? "loading"
+
+  // Loading window: a fetch is in flight (or the slice hasn't caught up to the
+  // just-changed selection). Show a spinner, never another session's files.
+  if (phase === "loading" || phase === "idle") {
     return (
       <Empty className="h-full border-0">
         <EmptyHeader>
@@ -287,11 +290,36 @@ export function ChangedFiles() {
     )
   }
 
-  const changed = viewModel?.changed_files ?? {
-    staged: [],
-    unstaged: [],
-    watched_session_id: null,
+  // The fetch failed (git lock/rebase 409, a server error, or the network). Show
+  // an explicit error with a Refresh affordance. The poller's recovery event
+  // also self-heals this without a click.
+  if (phase === "error") {
+    return (
+      <Empty className="h-full border-0">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <TriangleAlert />
+          </EmptyMedia>
+          <EmptyTitle>Couldn't load changes</EmptyTitle>
+          <EmptyDescription>
+            {slice?.error ?? "The changed files couldn't be loaded."}
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button
+            variant="outline"
+            onClick={() => refreshChanges()}
+            className="max-md:min-h-11"
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+        </EmptyContent>
+      </Empty>
+    )
   }
+
+  const changed = { staged: slice?.staged ?? [], unstaged: slice?.unstaged ?? [] }
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
 
   const filtering = query.trim() !== ""

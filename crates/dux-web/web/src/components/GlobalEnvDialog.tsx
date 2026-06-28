@@ -50,7 +50,7 @@ function GlobalEnvForm({ env }: { env: Record<string, string> }) {
 }
 
 export function GlobalEnvDialog() {
-  const { viewModel, globalEnvOpen } = useDux()
+  const { bootstrap, globalEnvOpen } = useDux()
 
   return (
     <Dialog
@@ -59,7 +59,7 @@ export function GlobalEnvDialog() {
         if (!o) closeGlobalEnv()
       }}
     >
-      {globalEnvOpen && <GlobalEnvForm env={viewModel?.global_env ?? {}} />}
+      {globalEnvOpen && <GlobalEnvForm env={bootstrap?.global_env ?? {}} />}
     </Dialog>
   )
 }

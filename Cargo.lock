@@ -969,6 +969,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tower",
  "tower-sessions",
+ "uuid",
 ]
 
 [[package]]

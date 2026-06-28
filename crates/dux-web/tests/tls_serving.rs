@@ -399,7 +399,7 @@ async fn ws_upgrade_works_over_tls() {
     let server = boot_tls(vec![user_entry("alice", "secret-pw")]).await;
     let c = https_client(&server);
 
-    // Log in to get a session cookie (gated /ws needs it).
+    // Log in to get a session cookie (the gated /ws/events upgrade needs it).
     let login = c
         .post(format!("{}/api/login", base_https(&server)))
         .json(&serde_json::json!({"username":"alice","password":"secret-pw"}))
@@ -412,7 +412,7 @@ async fn ws_upgrade_works_over_tls() {
     // Connect wss:// to the loopback IP (cert has the 127.0.0.1 IP SAN, so no DNS
     // is needed), spoofing Host + Origin to dux.test so the allowlist and the
     // same-origin WS check both pass.
-    let url = format!("wss://127.0.0.1:{}/ws", server.https_addr.port());
+    let url = format!("wss://127.0.0.1:{}/ws/events", server.https_addr.port());
     let mut req = url.into_client_request().unwrap();
     req.headers_mut()
         .insert("host", TEST_DOMAIN.parse().unwrap());
@@ -427,8 +427,8 @@ async fn ws_upgrade_works_over_tls() {
             .expect("authenticated wss upgrade should succeed over TLS");
 
     assert!(
-        wait_for_view_model(&mut ws).await,
-        "the WS over TLS must stream a view_model frame"
+        wait_for_connected(&mut ws).await,
+        "the WS over TLS must send the connected handshake frame"
     );
     let _ = ws.close(None).await;
 }
@@ -602,12 +602,12 @@ async fn per_ip_rate_limit_still_keyed_by_connect_info_under_axum_server() {
 type ClientWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn wait_for_view_model(ws: &mut ClientWs) -> bool {
+async fn wait_for_connected(ws: &mut ClientWs) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await
             && let Ok(t) = m.into_text()
-            && t.contains("\"type\":\"view_model\"")
+            && t.contains("\"event\":\"connected\"")
         {
             return true;
         }

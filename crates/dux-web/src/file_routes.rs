@@ -19,8 +19,8 @@
 //! clients in the UI and is a harmless no-op when spawned on a headless server.
 //!
 //! All routes are auth-gated and run the file I/O OFF the async reactor
-//! (`spawn_blocking`). After a write, the engine recomputes changed files so the
-//! new state reaches every connected client over the WebSocket ViewModel.
+//! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
+//! `session.changes` event reaches subscribed clients on `/ws/events`.
 
 use axum::{
     Json, Router,
@@ -93,15 +93,19 @@ struct OpenedEditor {
     editor: String,
 }
 
-/// The gated editor file routes, merged into the authenticated sub-router.
+/// The gated editor file routes, merged into the authenticated sub-router. These
+/// are body/query-keyed (`session_id` in the body/query) and live under the
+/// versioned `/api/v1/file/*` prefix. The unversioned `/api/file/*` aliases were
+/// removed at cutover (Phase 6).
 pub fn routes() -> Router<AppState> {
+    let prefix = "/api/v1/file";
     Router::new()
-        .route("/api/file/list", post(list_files))
-        .route("/api/file/read", post(read_file))
-        .route("/api/file/diff", post(diff_contents))
-        .route("/api/file/raw", get(read_raw))
-        .route("/api/file/write", post(write_file))
-        .route("/api/file/open-in-editor", post(open_in_editor))
+        .route(&format!("{prefix}/list"), post(list_files))
+        .route(&format!("{prefix}/read"), post(read_file))
+        .route(&format!("{prefix}/diff"), post(diff_contents))
+        .route(&format!("{prefix}/raw"), get(read_raw))
+        .route(&format!("{prefix}/write"), post(write_file))
+        .route(&format!("{prefix}/open-in-editor"), post(open_in_editor))
 }
 
 async fn list_files(State(state): State<AppState>, Json(op): Json<SessionOp>) -> Response {
@@ -307,6 +311,7 @@ fn mime_for_path(path: &str) -> &'static str {
 }
 
 async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> Response {
+    let session_id = op.session_id.clone();
     let worktree = match resolve_worktree(&state, op.session_id).await {
         Ok(w) => w,
         Err(r) => return r,
@@ -334,6 +339,9 @@ async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> R
     state
         .engine
         .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    // Refresh the REST changed-files cache too so subscribed `/ws/events` clients
+    // re-GET the editor's new state immediately.
+    state.changes.invalidate(session_id);
     StatusCode::OK.into_response()
 }
 

@@ -46,16 +46,16 @@ export function MacroPopover({
   // convention because the trigger floats over a live terminal the user drives.
   finalFocus?: () => HTMLElement | null
 }) {
-  const { viewModel } = useDux()
+  const { bootstrap } = useDux()
   const [open, setOpen] = useState(false)
 
-  const allMacros = viewModel?.macros ?? []
+  const allMacros = bootstrap?.macros ?? []
   const macros = macrosForTarget(allMacros, target)
-  const targetId =
-    target.kind === "terminal" ? target.terminalId : target.sessionId
 
   function handleRun(name: string) {
-    runMacro(targetId, name)
+    // Phase 5: the macro's payload is written to the focused PTY socket (the
+    // `target` this picker is filtered for), resolved by name in the store.
+    runMacro(name)
     setOpen(false)
   }
 

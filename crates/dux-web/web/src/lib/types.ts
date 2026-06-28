@@ -1,9 +1,11 @@
 // TypeScript types mirroring the dux web server contract.
 //
-// These shapes must stay in sync with the Rust `ViewModel`, `ServerMessage`,
-// and `ClientMessage` definitions on the server side. Server -> client text
-// frames are `ServerMessage`; binary frames are raw PTY output bytes. Client
-// -> server text frames are `ClientMessage`; binary frames are raw PTY input.
+// These shapes must stay in sync with the Rust view/event definitions on the
+// server side. Since Phase 6 the legacy `/ws` control socket is gone: every
+// data read/mutation is a REST `/api/v1/*` call and every server push (resource
+// changes plus status/connection control frames) rides `/ws/events`. PTY byte
+// I/O rides the dedicated per-PTY sockets (`/ws/sessions/:id/pty` and
+// `/ws/sessions/:id/terminals/:tid/pty`) — see `lib/ptySocket.ts`.
 
 export type SessionStatus = "active" | "detached" | "exited"
 
@@ -13,10 +15,10 @@ export type SessionStatus = "active" | "detached" | "exited"
 export type MacroSurface = "agent" | "terminal" | "both"
 
 // A single text macro projected from the server's `[macros]` config, mirroring
-// the Rust `MacroView`. Order in `ViewModel.macros` matches the config order.
-// `text` is exposed (the web session is authenticated) so the editor dialog can
-// show and edit it; the terminal-pane popover runs one via the `run_macro`
-// command, which resolves the text + the newline transform engine-side.
+// the Rust `MacroView`. Order matches the config order. `text` is exposed (the
+// web session is authenticated) so the editor dialog can show/edit it and the
+// terminal-pane popover can write it straight to the focused PTY socket (Phase 5
+// applies the newline transform client-side; see `runMacro`/`macroPayloadBytes`).
 export interface MacroView {
   name: string
   text: string
@@ -149,48 +151,18 @@ export interface SidebarModel {
   agentless_start: number | null
 }
 
+// The broadcast ViewModel is now a residual frame carrying ONLY `changed_files`.
+// The eleven build-static / config-derived fields (providers, macros, palette
+// commands, welcome tips, version, randomize default, gh availability, PR banner
+// position, scrollback, changes-pane default, global env) moved to
+// `GET /api/v1/bootstrap` (`bootstrapApi.ts`, invalidated by `config.changed`),
+// and the projects/sessions/sidebar fields moved to `GET /api/v1/spine`
+// (`spineApi.ts`, invalidated by `projects.changed`/`sessions.changed`) — neither
+// belonged on a per-change broadcast. The changed-files data itself is owned by
+// the store's `changes` slice (`GET /api/v1/sessions/:id/changes`); this field
+// remains on the type only to mirror the residual wire frame.
 export interface ViewModel {
-  projects: ProjectView[]
-  sessions: SessionView[]
-  /** Core-computed sidebar grouping (projects + sessions, orphans surfaced) so
-   * both surfaces render an identical tree without re-deriving grouping. */
-  sidebar: SidebarModel
   changed_files: ChangedFiles
-  global_env: Record<string, string>
-  available_providers: string[]
-  welcome_tips: string[]
-  /** Mirrors the binary's display version ('vX.Y.Z' or 'development'); shown in the sidebar brand block. */
-  dux_version: string
-  randomize_agent_names_by_default: boolean
-  /** Whether the new-agent-from-PR flow is available (GitHub integration on +
-   * `gh` installed and authenticated). The "From PR" mode is disabled with a
-   * quiet explanation when false. */
-  gh_available: boolean
-  /** Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop places
-   * the PR banner lane above the terminal when "top" and below when "bottom".
-   * Mobile ignores this and always renders the banner on top. */
-  pr_banner_position: "top" | "bottom"
-  /** Mirrors `config.ui.agent_scrollback_lines`. Each xterm.js instance is
-   * sized to this so the reconnect repaint's replayed history isn't trimmed by
-   * xterm's 1000-line default. */
-  agent_scrollback_lines: number
-  /** Mirrors `config.ui.show_changes_pane`. Desktop hides the right-hand
-   * Changes pane when false; toggling persists it (the store keeps an optimistic
-   * override until this confirms). Current servers ALWAYS send it — the `?` is
-   * only forward-compat for a pre-feature server, where the store treats a
-   * missing value as `true`. */
-  show_changes_pane?: boolean
-  /** Surface-aware command-palette commands the web renders as a global
-   * "Commands" group, in canonical registry order. Derived from the Rust
-   * `dux_core::palette` (the Web/Both subset). Each `id` is the dashed command
-   * name; `paletteRegistry` maps it to a store handler. */
-  palette_commands: PaletteCommandView[]
-  /** Text macros from `[macros]` in `config.toml`, in config order. The
-   * terminal-pane popover filters these by the focused target's surface and
-   * runs one via the `run_macro` command; the macro-editor dialog lists/edits
-   * them. Required, but `store.onViewModel` normalizes a missing key to `[]`
-   * (an older snapshot predating the field) so this is always a real array. */
-  macros: MacroView[]
 }
 
 export interface PaletteCommandView {
@@ -200,77 +172,62 @@ export interface PaletteCommandView {
   description: string
 }
 
-export interface CommandStatus {
-  // Correlation key, when the engine emitted a keyed status. A keyed busy from a
-  // command reply MUST adopt this as its sonner id so the matching-key async
-  // final (or status_cleared) dismisses exactly this toast. `null`/absent = the
-  // anonymous slot. The server serializes `WireStatus.key` (skipped when None).
-  key?: string | null
-  tone: string
-  message: string
-}
-
-// Server -> client JSON text frames, tagged by `type`.
-export type ServerMessage =
-  | { type: "view_model"; data: ViewModel }
-  | { type: "command_result"; status: CommandStatus | null; error: string | null }
-  | { type: "subscribed"; session_id: string }
-  | { type: "terminal_created"; session_id: string; terminal_id: string }
-  | { type: "error"; message: string }
-  | { type: "status"; key?: string; tone: string; message: string }
-  | { type: "status_cleared"; key?: string }
-  | { type: "commit_message"; session_id: string; message: string }
-  | {
-      type: "commit_message_snapshot"
-      session_id: string
-      message: string
-    }
-  | {
-      type: "dir_entries"
-      path: string
-      entries: DirEntryView[]
-      error: string | null
-    }
-  | { type: "agent_name"; name: string }
-  | {
-      type: "project_worktrees"
-      project_id: string
-      entries: ProjectWorktreeEntryView[]
-      error: string | null
-    }
-  | {
-      type: "project_path_inspection"
-      path: string
-      current_branch: string | null
-      warning: BranchWarningView | null
-      error: string | null
-    }
-
-// Argument shapes for the macro `command` frames (sent via `socket.sendCommand`,
-// which wraps them in `{ type: "command", command, args }`). They mirror the
-// Rust `WireCommand::RunMacro` / `WireCommand::UpdateMacros` payloads. The
-// server is authoritative: it resolves `run_macro`'s text + surface gate +
-// newline transform engine-side, and validates `update_macros` (empty/duplicate
-// names, empty text, unknown surface) before persisting wholesale.
-export interface RunMacroArgs {
-  target_id: string
-  name: string
-}
-
-export interface UpdateMacrosArgs {
-  entries: MacroView[]
-}
-
-// Client -> server JSON text frames, tagged by `type`.
-export type ClientMessage =
-  | { type: "command"; command: string; args: Record<string, unknown> }
-  | { type: "subscribe"; session_id: string }
-  | { type: "subscribe_terminal"; terminal_id: string }
-  | { type: "create_terminal"; session_id: string }
-  | { type: "resize"; session_id: string; rows: number; cols: number }
-  | { type: "browse_dir"; path: string | null }
-  | { type: "generate_agent_name" }
-  | { type: "list_project_worktrees"; project_id: string }
-  | { type: "inspect_project_path"; path: string }
-
 export type ConnState = "connecting" | "open" | "closed" | "failed"
+
+// --- /ws/events channel ----------------------------------------------------
+//
+// Since Phase 6 the ONLY JSON socket (the legacy `/ws` is gone). The client
+// manages a per-connection interest set; the server pushes resource-change
+// notifications plus the control frames the old `/ws` used to carry. Every frame
+// is a flat object discriminated by `event`.
+
+// Server -> client resource-change frame. `event` is the resource discriminator
+// (e.g. "session.changes"); `id` scopes it to one resource (the session id);
+// `rev` is the monotonic per-session revision the client compares against its
+// last-applied rev. Lag catch-up arrives as an ordinary `session.changes`
+// written directly to this connection, so the same handler covers it.
+export interface ResourceEvent {
+  event: string
+  id?: string
+  rev?: number
+}
+
+// Server -> client `/ws/events` frame. A single flat shape (the server emits a
+// flat JSON object) discriminated by `event`:
+//   - resource changes: `session.changes` (id+rev), `projects.changed`,
+//     `sessions.changed`, `config.changed`, `session.commit_message` (id)
+//     (terminal add/remove/relabel folds into `sessions.changed`; there is no
+//     separate `terminals.changed` frame);
+//   - control frames migrated off the retired `/ws`: `connected` (id = the
+//     per-connection id echoed via `X-Connection-Id`), `status`
+//     (key?/tone/message, plus a server-side `scope` the client ignores), and
+//     `status_cleared` (key?).
+// Fields beyond `event` are optional so one handler can switch on `event` and
+// read only the fields that frame carries.
+export interface EventsServerMessage {
+  event: string
+  /** Resource id (`session.changes`/`session.commit_message`)
+   *  OR the per-connection id (`connected`). */
+  id?: string
+  /** Monotonic per-session revision (`session.changes`). */
+  rev?: number
+  /** Status correlation key (`status`/`status_cleared`); null/absent = the
+   *  anonymous slot. */
+  key?: string | null
+  /** Status tone (`status`): "busy" | "info" | "warning" | "error". */
+  tone?: string
+  /** Status message (`status`). */
+  message?: string
+  /** Server-side status scope (`status`); already scope-filtered by the server,
+   *  so the client ignores it. */
+  scope?: string
+}
+
+// Client -> server interest frames. Topics are opaque strings: coarse app-wide
+// topics ("sessions", "projects", "config") and fine per-resource topics
+// ("session:<id>:changes"). The server accepts both keys in one frame, so this
+// is a single shape with optional `subscribe`/`unsubscribe` arrays.
+export interface EventsClientMessage {
+  subscribe?: string[]
+  unsubscribe?: string[]
+}

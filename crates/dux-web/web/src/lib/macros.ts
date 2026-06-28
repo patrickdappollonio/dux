@@ -1,11 +1,39 @@
 // Pure, unit-tested helpers for the web macro surfaces (the terminal-pane
-// popover quick-picker and the macro-editor dialog). The byte transform and the
-// authoritative surface gate live in `dux_core` and run engine-side when a macro
-// is sent via the `run_macro` command — these helpers only drive the CLIENT'S
-// presentation and give fast feedback that mirrors the server's rules.
+// popover quick-picker and the macro-editor dialog). The surface gate mirrors
+// `dux_core`'s rules for fast client-side feedback. Since Phase 5 the web sends a
+// macro by writing its payload straight to the focused PTY socket (no server-side
+// `run_macro` command), so the byte transform `macroPayloadBytes` is mirrored
+// here from `dux_core::macros::macro_payload_bytes` — see its doc comment.
 
 import type { MacroSurface, MacroView } from "@/lib/types"
 import type { SelectedTarget } from "@/lib/store"
+
+// Build the byte payload for a macro send. Newlines are translated to Alt+Enter
+// (ESC followed by CR) so a multi-line macro is entered as a single multi-line
+// prompt rather than submitting at each newline; `\r\n`, `\n`, and bare `\r` are
+// all handled. An EXACT port of `dux_core::macros::macro_payload_bytes` (operating
+// on UTF-8 bytes, so multi-byte glyphs pass through untouched) — the web now owns
+// this transform because it writes the payload directly to the PTY socket.
+export function macroPayloadBytes(text: string): Uint8Array {
+  const ALT_ENTER = [0x1b, 0x0d] // ESC, CR
+  const bytes = new TextEncoder().encode(text)
+  const out: number[] = []
+  let i = 0
+  while (i < bytes.length) {
+    const b = bytes[i]
+    if (b === 0x0d && bytes[i + 1] === 0x0a) {
+      out.push(...ALT_ENTER)
+      i += 2
+    } else if (b === 0x0a || b === 0x0d) {
+      out.push(...ALT_ENTER)
+      i += 1
+    } else {
+      out.push(b)
+      i += 1
+    }
+  }
+  return new Uint8Array(out)
+}
 
 // Whether a macro of `macroSurface` is available on a target of `targetKind`.
 // Mirrors `dux_core::macros::macro_matches_surface` exactly: "both" is available

@@ -75,6 +75,7 @@ use crate::engine::{
     WorktreeRemoval,
 };
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
+use crate::statusline::StatusScope;
 use crate::worker::{
     AgentLaunchKind, CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction,
     PullTarget,
@@ -386,15 +387,26 @@ pub struct WireMacroEntry {
 }
 
 /// A status-line update in wire-safe form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Now also `Deserialize` so the serde `scope` default can be exercised (and so
+/// a peer/older client's status JSON without a `scope` field round-trips to
+/// [`StatusScope::All`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireStatus {
     /// "info" | "busy" | "warning" | "error"
     pub tone: String,
     pub message: String,
     /// `None` = an unkeyed transient (anonymous slot). `Some` = a keyed op whose
     /// later success/error/clear carries the same key so the surfaces correlate.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Delivery audience for per-connection status filtering. Defaults to
+    /// [`StatusScope::All`] (broadcast) when absent from the wire, so older
+    /// peers / the TUI stay unaffected. The web's per-connection status
+    /// forwarder delivers a status only when its scope is `All` or matches the
+    /// connection's own id.
+    #[serde(default)]
+    pub scope: StatusScope,
 }
 
 impl WireStatus {
@@ -404,6 +416,7 @@ impl WireStatus {
             tone: tone.into(),
             message: message.into(),
             key: None,
+            scope: StatusScope::All,
         }
     }
 
@@ -417,6 +430,7 @@ impl WireStatus {
             tone: tone.into(),
             message: message.into(),
             key: Some(key.into()),
+            scope: StatusScope::All,
         }
     }
 
@@ -426,11 +440,18 @@ impl WireStatus {
         self
     }
 
+    /// Builder that sets the delivery [`StatusScope`] on an existing status.
+    pub fn with_scope(mut self, scope: StatusScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
     fn from_update(update: &StatusUpdate) -> Self {
         Self {
             tone: update.tone.as_wire().to_string(),
             message: update.message.clone(),
             key: update.key.clone(),
+            scope: update.scope.clone(),
         }
     }
 }
@@ -440,6 +461,15 @@ impl WireStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct WireCommandOutcome {
     pub status: Option<WireStatus>,
+    /// The opaque create-op id, set ONLY for a synchronous create dispatch
+    /// (`CreateAgent` / `ForkSession` / `CreateAgentFromWorktree`). A REST create
+    /// handler resolves its exact new session by polling
+    /// [`Engine::created_session_for_op`] with this id, instead of a racy
+    /// "first id not in the pre-snapshot" set-difference that could return a
+    /// concurrent create's session. `None` for every other command and for the
+    /// from-PR create (its op is minted later, inside the PR-lookup followup).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_op_id: Option<String>,
 }
 
 /// Statuses produced by a web `drive_*_followup`, plus any keyed busies the
@@ -577,6 +607,27 @@ pub fn discard_classify(worktree_path: &std::path::Path, path: &str) -> anyhow::
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
+        // Stamp the synchronous command-result status with the current command
+        // origin (set by the engine actor around `ApplyWire`). For the TUI and
+        // every test, `current_origin` is `All`, so the status is unchanged.
+        // Deferred busies/finals stamp themselves at their own mint sites (they
+        // capture `current_origin` before their worker spawns), so they are not
+        // re-stamped here.
+        // Clear the create-op correlation slot before dispatch so the value we
+        // read back reflects only THIS command's create (the engine actor is
+        // single-threaded, so no concurrent command can set it in between).
+        self.last_created_op_id = None;
+        let mut outcome = self.apply_wire_inner(command)?;
+        if let Some(status) = outcome.status.as_mut() {
+            status.scope = self.current_origin.clone();
+        }
+        // Surface the create op id (set by a synchronous `DispatchCreateAgentRequest`
+        // dispatch) so the REST create handler can correlate its exact new session.
+        outcome.created_op_id = self.last_created_op_id.take();
+        Ok(outcome)
+    }
+
+    fn apply_wire_inner(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
         // Rename and Reconnect need `&mut self` and don't map cleanly onto a
         // single `Command`, so they're handled directly here rather than via
         // `wire_to_command`/`apply`.
@@ -585,22 +636,28 @@ impl Engine {
                 let status = self.rename_session(&session_id, &title)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
                 });
             }
             WireCommand::ReconnectSession { session_id, force } => {
                 let status = self.reconnect_session(&session_id, force)?;
-                return Ok(WireCommandOutcome { status });
+                return Ok(WireCommandOutcome {
+                    status,
+                    created_op_id: None,
+                });
             }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
                 });
             }
             WireCommand::AddProjectCheckoutDefault { path, name } => {
                 let status = self.add_project_checkout_default(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
                 });
             }
             WireCommand::ChangeAgentProvider {
@@ -610,6 +667,7 @@ impl Engine {
                 let status = self.change_agent_provider_wire(&session_id, &provider)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
                 });
             }
             WireCommand::CreateAgentFromPr {
@@ -620,12 +678,14 @@ impl Engine {
                 let status = self.create_agent_from_pr(&project_id, &pr, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
                 });
             }
             WireCommand::SetChangesPaneVisible { visible } => {
                 let status = self.set_changes_pane_visible(visible);
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
                 });
             }
             WireCommand::AddProject { .. } => {
@@ -649,7 +709,10 @@ impl Engine {
                     },
                     _ => wire_status_from_reaction(&reaction),
                 };
-                return Ok(WireCommandOutcome { status });
+                return Ok(WireCommandOutcome {
+                    status,
+                    created_op_id: None,
+                });
             }
             _ => {}
         }
@@ -659,7 +722,10 @@ impl Engine {
         if status.is_none() {
             status = self.drive_delete_followup(&reaction).into_iter().next();
         }
-        Ok(WireCommandOutcome { status })
+        Ok(WireCommandOutcome {
+            status,
+            created_op_id: None,
+        })
     }
 
     /// Persist the Changes (git) pane's visibility to `config.toml`
@@ -955,9 +1021,11 @@ impl Engine {
                     // reports back (in `drive_web_launch_followup`). The web
                     // counterpart to the TUI's `App.pending_reconnect_ops`. Stashed
                     // by session id (the launch completion carries the session).
-                    let op = crate::engine::status_op(busy).resolve_in_handler(
-                        |o: &crate::engine::WebLaunchOutcome| web_launch_final(o),
-                    );
+                    let op = crate::engine::status_op(busy)
+                        .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| {
+                            web_launch_final(o)
+                        })
+                        .with_scope(self.current_origin.clone());
                     let pending = WireStatus::from_update(&op.pending_status());
                     self.pending_web_launch_ops
                         .insert(session_id.to_string(), op);
@@ -1043,6 +1111,7 @@ impl Engine {
                 }
             },
         );
+        let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
         let pending = WireStatus::from_update(&op.pending_status());
         self.pending_web_checkout_ops.insert(op_id.clone(), op);
@@ -1119,6 +1188,7 @@ impl Engine {
                 }
             },
         );
+        let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
         let pending = WireStatus::from_update(&op.pending_status());
         self.pending_web_add_project_ops.insert(op_id.clone(), op);
@@ -1224,6 +1294,7 @@ impl Engine {
                 }
             },
         );
+        let op = op.with_scope(self.current_origin.clone());
         let op_id = op.id().to_string();
         let pending = WireStatus::from_update(&op.pending_status());
         self.pending_web_pr_lookup_ops.insert(op_id.clone(), op);
@@ -1286,6 +1357,17 @@ impl Engine {
                     custom_name,
                     use_existing_branch: false,
                 };
+                // The nested create dispatch mints its own busy from
+                // `current_origin`, but by now (a worker-completion tick) it has
+                // been reset to `All`. Re-set it to the PR-lookup op's captured
+                // scope so the handed-off create busy/final stay scoped to the
+                // originating connection, then restore `All` (mirroring ApplyWire).
+                let origin = status_op_id
+                    .as_ref()
+                    .and_then(|id| self.pending_web_pr_lookup_ops.get(id))
+                    .map(|op| op.scope().clone())
+                    .unwrap_or(crate::statusline::StatusScope::All);
+                self.current_origin = origin;
                 let statuses = match self.apply(Command::DispatchCreateAgentRequest {
                     request: Box::new(request),
                     busy_message: busy_message.clone(),
@@ -1297,6 +1379,7 @@ impl Engine {
                         format!("Failed to create an agent from PR #{}: {e:#}", pr.number),
                     )],
                 };
+                self.current_origin = crate::statusline::StatusScope::All;
                 // The lookup busy hands off to the create dispatch's busy (emitted
                 // above, keyed by the shared create op's opaque id), so resolve the
                 // PR-lookup op to a CLEAR so the `Resolving PR…` spinner is
@@ -1384,6 +1467,16 @@ impl Engine {
                 // pre-StatusOp behavior. When `status_op_id` is Some (always, for
                 // the web), we ALSO resolve the add-project op so its busy is
                 // replaced by the keyed final instead of being separately cleared.
+                // The inline persist can mint a status from `current_origin`;
+                // re-set it to the add-project op's captured scope (reset to `All`
+                // by the worker tick) so any minted status stays scoped to the
+                // originating connection, then restore `All` afterward.
+                let origin = status_op_id
+                    .as_ref()
+                    .and_then(|id| self.pending_web_add_project_ops.get(id))
+                    .map(|op| op.scope().clone())
+                    .unwrap_or(crate::statusline::StatusScope::All);
+                self.current_origin = origin;
                 let statuses = match self.apply(Command::PersistProject {
                     action: Box::new(ProjectPersistenceAction::Add {
                         project,
@@ -1406,6 +1499,7 @@ impl Engine {
                         ),
                     )],
                 };
+                self.current_origin = crate::statusline::StatusScope::All;
 
                 // Resolve the add-project op against the same outcome the
                 // `statuses` carry, keying the final to the op's id so it replaces
@@ -1520,6 +1614,7 @@ impl Engine {
                                 }
                             },
                         );
+                        let op = op.with_scope(self.current_origin.clone());
                         let pending = WireStatus::from_update(&op.pending_status());
                         self.pending_delete_ops_web
                             .insert(view.session_id.clone(), op);
@@ -2246,6 +2341,27 @@ mod tests {
     use crate::statusline::StatusTone;
     use crate::worker::WorkerEvent;
     use std::path::Path;
+
+    #[test]
+    fn wire_status_without_scope_field_deserializes_to_all() {
+        // An older peer / the TUI emits a status JSON with no `scope` key; the
+        // `#[serde(default)]` must fill in `StatusScope::All` (broadcast) so the
+        // status still reaches every client exactly as before scoping existed.
+        let json = r#"{"tone":"info","message":"Committed."}"#;
+        let status: WireStatus = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(status.scope, StatusScope::All);
+        assert_eq!(status.tone, "info");
+        assert_eq!(status.message, "Committed.");
+        assert_eq!(status.key, None);
+
+        // A scoped status round-trips through serde to the right connection.
+        let scoped = WireStatus::new("busy", "Pushing…")
+            .with_scope(StatusScope::Connection("conn-7".to_string()));
+        let round: WireStatus =
+            serde_json::from_str(&serde_json::to_string(&scoped).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(round.scope, StatusScope::Connection("conn-7".to_string()));
+    }
 
     #[test]
     fn wire_command_deserializes_from_json_envelope() {
@@ -3148,6 +3264,41 @@ mod tests {
     }
 
     #[test]
+    fn create_agent_surfaces_created_op_id_for_correlation() {
+        // A synchronous create dispatch returns its create op id in the outcome so
+        // a REST handler can correlate ITS exact new session race-free (rather than
+        // a set-difference that could pick a concurrent create's session). The op
+        // id is also the key under which the create op is registered.
+        let repo = init_repo_with_commit();
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", &repo.path().to_string_lossy());
+        engine.projects.push(project);
+
+        let outcome = engine
+            .apply_wire(WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: "my-agent".to_string(),
+            })
+            .expect("dispatch create");
+
+        let op_id = outcome
+            .created_op_id
+            .expect("a synchronous create must surface its op id");
+        assert!(op_id.starts_with("op-"), "got {op_id:?}");
+        assert!(
+            engine.pending_create_ops.contains_key(&op_id),
+            "the create op must be registered under the surfaced id"
+        );
+
+        // A non-create command surfaces no create op id, so the handler never
+        // mistakes a plain command's outcome for a create to correlate.
+        let other = engine
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: true })
+            .expect("toggle changes pane");
+        assert_eq!(other.created_op_id, None);
+    }
+
+    #[test]
     fn create_agent_from_pr_busy_is_keyed() {
         // When gh is available and the project exists, the synchronous busy
         // returned by `CreateAgentFromPr` must carry `pr-lookup:{project_id}`.
@@ -3738,7 +3889,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_wire_watch_changed_files_populates_view_model() {
+    fn apply_wire_watch_changed_files_populates_engine_state() {
         // `init_repo` leaves `a.txt` untracked (no commit), so it shows up as an
         // unstaged change once the worktree is watched.
         let repo = init_repo();
@@ -3748,25 +3899,21 @@ mod tests {
         engine.sessions.push(session);
 
         // Empty before the watch (the regression).
-        assert!(engine.view_model().changed_files.unstaged.is_empty());
+        assert!(engine.unstaged_files.is_empty());
 
         let outcome = engine
             .apply_wire(WireCommand::WatchChangedFiles {
                 session_id: Some("s1".to_string()),
             })
             .expect("apply_wire");
-        // No synchronous status — the ViewModel broadcast is the feedback.
+        // No synchronous status — the changed-files event is the feedback.
         assert!(outcome.status.is_none());
 
         // The watch is armed immediately, but the changed-files compute now runs
         // OFF the engine actor thread: the lists are empty until the one-shot
         // worker's ChangedFilesReady event drains (as the actor loop does).
-        let armed = engine.view_model();
-        assert_eq!(
-            armed.changed_files.watched_session_id.as_deref(),
-            Some("s1")
-        );
-        assert!(armed.changed_files.unstaged.is_empty());
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
+        assert!(engine.unstaged_files.is_empty());
 
         let event = engine
             .worker_rx
@@ -3774,12 +3921,11 @@ mod tests {
             .expect("ChangedFilesReady");
         engine.process_worker_event(event);
 
-        let vm = engine.view_model();
-        assert_eq!(vm.changed_files.watched_session_id.as_deref(), Some("s1"));
+        assert_eq!(engine.watched_session_id.as_deref(), Some("s1"));
         assert!(
-            vm.changed_files.unstaged.iter().any(|f| f.path == "a.txt"),
+            engine.unstaged_files.iter().any(|f| f.path == "a.txt"),
             "unstaged should contain a.txt: {:?}",
-            vm.changed_files.unstaged
+            engine.unstaged_files
         );
     }
 
@@ -3802,17 +3948,16 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("ChangedFilesReady");
         engine.process_worker_event(event);
-        assert!(!engine.view_model().changed_files.unstaged.is_empty());
+        assert!(!engine.unstaged_files.is_empty());
 
         // Clearing is synchronous: `set_watched_session(None)` empties the lists
-        // on the actor thread (no worker), so the ViewModel reflects it at once.
+        // on the actor thread (no worker), so the engine state reflects it at once.
         engine
             .apply_wire(WireCommand::WatchChangedFiles { session_id: None })
             .expect("apply_wire");
 
-        let vm = engine.view_model();
-        assert!(vm.changed_files.watched_session_id.is_none());
-        assert!(vm.changed_files.unstaged.is_empty());
+        assert!(engine.watched_session_id.is_none());
+        assert!(engine.unstaged_files.is_empty());
     }
 
     /// Stage a file in `repo` so `git diff --cached` has content.

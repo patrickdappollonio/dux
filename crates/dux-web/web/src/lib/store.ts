@@ -3,6 +3,8 @@ import { toast } from "sonner"
 
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
+import { projectsApi, type PatchProjectBody } from "./projectsApi"
+import { sessionsApi, SessionsApiError } from "./sessionsApi"
 import {
   type AuthState,
   type MeBody,
@@ -14,14 +16,28 @@ import {
 } from "./auth"
 import { ordersMatch } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
-import { DuxSocket } from "./ws"
+import { EventsSocket } from "./eventsSocket"
+import { getActivePtySocket } from "./ptySocket"
+import { macroPayloadBytes } from "./macros"
+import { terminalsApi } from "./terminalsApi"
+import { browseApi } from "./browseApi"
+import { configApi } from "./configApi"
+import { setConnectionId } from "./connection"
+import {
+  ChangesFetchError,
+  fetchChanges,
+  type SessionChangesResponse,
+} from "./changesApi"
+import { type Bootstrap, fetchBootstrap } from "./bootstrapApi"
+import { type Spine, fetchSpine } from "./spineApi"
 import type {
   BranchWarningView,
+  ChangedFileView,
   ConnState,
   DirEntryView,
+  EventsServerMessage,
   MacroView,
   ProjectWorktreeEntryView,
-  ViewModel,
 } from "./types"
 
 // The currently-streamed target: either an agent session or one of its
@@ -65,14 +81,57 @@ export interface PendingSessionOrder {
   ids: string[]
 }
 
+// The changed-files request state machine for the SELECTED session. This is the
+// single source of truth for changed-files data across the app (the changes
+// pane, commit dialog, discard dialog, mobile badge, and editor markers all read
+// it), fed by `GET /api/v1/sessions/:id/changes` and invalidated by
+// `session.changes` events over `/ws/events`.
+//
+//   - `idle`    nothing selected (or the slice was cleared, e.g. a 404).
+//   - `loading` a fetch is in flight for `sessionId`.
+//   - `loaded`  `staged`/`unstaged` are current for `sessionId` at `rev`.
+//   - `error`   the last fetch failed; `error` carries why. Self-heals on the
+//               next `session.changes` event (which always refetches in this
+//               state, side-stepping the `rev > undefined` trap).
+//
+// `sessionId` is the session these lists belong to; consumers only trust the
+// slice when it equals their own session id. `rev` is the monotonic per-session
+// revision of the applied data; a response or event with an older `rev` is
+// dropped (out-of-order / lost-race protection).
+export type ChangesPhase = "idle" | "loading" | "loaded" | "error"
+
+export interface ChangesSlice {
+  sessionId: string | null
+  phase: ChangesPhase
+  rev: number
+  staged: ChangedFileView[]
+  unstaged: ChangedFileView[]
+  error: string | null
+}
+
 // A tiny external store backed by `useSyncExternalStore`. A single module-level
-// `DuxSocket` instance feeds it: ViewModel updates, connection state, and
-// command/error results (surfaced as sonner toasts). The PTY byte stream is
-// NOT kept in React state — the terminal attaches to `socket.onPtyBytes`
-// directly.
+// `EventsSocket` (`/ws/events`) feeds it: resource-change events plus the
+// connection id and status frames (surfaced as sonner toasts). Every action is a
+// REST `/api/v1/*` call. The PTY byte stream is NOT kept in React state nor on
+// this socket — each focused terminal attaches to its own dedicated `PtySocket`
+// (`lib/ptySocket.ts`).
 
 export interface DuxState {
-  viewModel: ViewModel | null
+  // The workspace "spine" from `GET /api/v1/spine`: projects, sessions, and the
+  // core-computed sidebar grouping. These three fields used to ride the broadcast
+  // `ViewModel`; they now live here, fetched once after auth resolves (alongside
+  // the bootstrap document) and re-fetched on a `projects.changed` /
+  // `sessions.changed` event or an events-socket reconnect. `null` until the
+  // first fetch lands — every consumer falls back to empty lists so nothing
+  // crashes in that pre-load window.
+  spine: Spine | null
+  // The build-static / config-derived document from `GET /api/v1/bootstrap`
+  // (providers, macros, palette commands, welcome tips, version, UI flags,
+  // global env). Fetched once after auth resolves and re-fetched on a
+  // `config.changed` event. `null` until the first fetch lands — every consumer
+  // falls back to a sensible default (empty list / true / the scrollback
+  // default) so nothing crashes in that pre-load window.
+  bootstrap: Bootstrap | null
   conn: ConnState
   // The login/auth-state machine. Starts "checking" while the boot `/api/me`
   // round-trip is in flight; resolves to "disabled" (auth off — today's UX),
@@ -177,7 +236,7 @@ export interface DuxState {
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
-  // map, mirroring the TUI editor). Seeded from `viewModel.macros` on open so
+  // map, mirroring the TUI editor). Seeded from `bootstrap.macros` on open so
   // there is no set-state-in-effect. Empty draft when closed.
   macrosDialogOpen: boolean
   macrosDraft: MacroView[]
@@ -185,7 +244,7 @@ export interface DuxState {
   // ignores it. Only the mobile UI advances it past "home".
   mobileScreen: MobileScreen
   // Optimistic drag-and-drop ordering overlays (see `applyPendingOrders`). Each
-  // is set the moment a drag ends and cleared once the server's next ViewModel
+  // is set the moment a drag ends and cleared once the server's next spine
   // confirms the new order (or an error status arrives). Null when no reorder is
   // in flight, which is the overwhelmingly common case.
   pendingSessionOrder: PendingSessionOrder | null
@@ -193,17 +252,26 @@ export interface DuxState {
   // While an agent-create THIS client initiated is in flight, holds the session
   // ids that already existed when we submitted, plus the project the new agent
   // will land in. Agent creation is an async server job whose only completion
-  // signal is a broadcast ViewModel (no per-client reply, no request/echo
+  // signal is a `sessions.changed` event + spine refetch (no per-client reply, no request/echo
   // correlation), so we recognize "our" new agent as the session id that appears
   // in `projectId` and wasn't in `knownIds`, then focus it — mirroring the TUI,
   // which jumps selection to a freshly created agent when its launch completes.
   // Only the client that armed this reacts, so other connected clients aren't
   // yanked off whatever they're viewing. Null when no create is awaiting focus.
   // See `armCreateFocus` and `focusNewlyCreatedSession`.
-  pendingCreateFocus: { knownIds: string[]; projectId: string } | null
+  // `armedAt` (epoch ms) bounds the token's lifetime: a create that never lands
+  // (the dispatch failed silently server-side, or the agent took absurdly long)
+  // would otherwise leave the token armed forever, ready to mis-focus the next
+  // unrelated session that happens to appear in `projectId`. See
+  // `CREATE_FOCUS_TTL_MS` and `focusNewlyCreatedSession`.
+  pendingCreateFocus: {
+    knownIds: string[]
+    projectId: string
+    armedAt: number
+  } | null
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
-  // follows the persisted config (`viewModel.show_changes_pane`); the palette and
+  // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
   // the Changes actions menu set an explicit bool for instant feedback. The
   // toggle persists to config via the server; this clears once the broadcast
   // confirms (or on command error / disconnect, which roll it back).
@@ -219,6 +287,10 @@ export interface DuxState {
     initialPath: string | null
     initialMode: EditorViewMode
   } | null
+  // Changed-files state for the selected session (see `ChangesSlice`). The single
+  // source for changed-files data — replaces the global `viewModel.changed_files`
+  // broadcast, which a second client could clobber.
+  changes: ChangesSlice
 }
 
 // Which view the code editor opens in (and toggles between): the editable Monaco
@@ -241,8 +313,47 @@ function loadSidebarWidth(): string {
 // Drop the orphaned key so it can't linger or be misread by a future feature.
 localStorage.removeItem("dux:show-diff-line-numbers")
 
+// The `/ws/events` topic for one session's changed files.
+function changesTopic(sessionId: string): string {
+  return `session:${sessionId}:changes`
+}
+
+// The `/ws/events` topic for one session's generated commit message. The server
+// gates LIVE `session.commit_message` delivery on this exact subscription, so the
+// commit dialog must subscribe while open or a message generated mid-connection
+// is dropped and the dialog's spinner hangs forever.
+function commitMessageTopic(sessionId: string): string {
+  return `session:${sessionId}:commit-message`
+}
+
+// A cleared changed-files slice (nothing selected, no data).
+function emptyChanges(): ChangesSlice {
+  return {
+    sessionId: null,
+    phase: "idle",
+    rev: 0,
+    staged: [],
+    unstaged: [],
+    error: null,
+  }
+}
+
+// A fresh slice for `sessionId` entering its loading window. `rev: 0` so the
+// first successful response (rev >= 1 from the server) always applies.
+function loadingChanges(sessionId: string): ChangesSlice {
+  return {
+    sessionId,
+    phase: "loading",
+    rev: 0,
+    staged: [],
+    unstaged: [],
+    error: null,
+  }
+}
+
 let state: DuxState = {
-  viewModel: null,
+  spine: null,
+  bootstrap: null,
   conn: "connecting",
   auth: { phase: "checking", username: null, error: null, pending: false },
   selectedTarget: null,
@@ -285,6 +396,7 @@ let state: DuxState = {
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
+  changes: emptyChanges(),
 }
 
 const listeners = new Set<() => void>()
@@ -312,81 +424,348 @@ export function getSnapshot(): DuxState {
   return state
 }
 
-// The single socket instance for the whole app. Exported so components that
-// talk to the PTY (terminal) or issue commands (palette) can use it directly.
-export const socket = new DuxSocket(`ws://${location.host}/ws`)
+// Derive the WebSocket scheme from the page protocol so an HTTPS deployment uses
+// `wss://` (a hardcoded `ws://` would be blocked as mixed content under HTTPS).
+const wsScheme = location.protocol === "https:" ? "wss:" : "ws:"
 
-socket.onViewModel = (vm) => {
-  // Normalize at the boundary: `macros` is the newest ViewModel field, so an
-  // older server snapshot that predates it arrives with the key absent. Default
-  // it to `[]` here (the parse site) so the typed-required `viewModel.macros` is
-  // a real array for every consumer — making the types.ts "defaults to []"
-  // claim structurally true rather than relying on each read site to guard.
-  const normalized: ViewModel = { ...vm, macros: vm.macros ?? [] }
+// The single JSON socket for the whole app (`/ws/events`), separate from the
+// per-PTY byte sockets (`lib/ptySocket.ts`). Since the Phase 6 cutover it carries
+// EVERYTHING the retired `/ws`/`DuxSocket` used to: resource-change events
+// (changed files, spine, config, commit-message) AND the control frames
+// (`connected` id, `status`/`status_cleared` toasts). It also owns the
+// connection-state UX (the status-bar indicator + auth recovery). Exported so
+// tests can drive its callbacks / inspect its interest set; connected/closed on
+// boot/login/logout.
+export const eventsSocket = new EventsSocket(
+  `${wsScheme}//${location.host}/ws/events`,
+)
+
+// App-wide coarse topics, subscribed once at module load. They are added to the
+// interest set immediately (sent on the first open, re-sent on every reconnect).
+// Phase 1 has no GET tied to these — they exist so later phases can refresh
+// projects/sessions/config off the same channel without a new subscribe site.
+eventsSocket.subscribe(["sessions", "projects", "config"])
+
+// A `session.changes` event invalidates one session's changed files. Refetch
+// when it is the selected session AND (the slice is in error — always re-fetch
+// to self-heal, since the error path has no usable rev) OR the event's rev is at
+// least the applied rev. Lag catch-up arrives as the same event, so this one
+// handler covers it.
+eventsSocket.onEvent = (ev: EventsServerMessage) => {
+  // The per-connection id, delivered as the FIRST `/ws/events` frame (and re-sent
+  // on every reconnect). Record it so the REST clients can stamp it as
+  // `X-Connection-Id` and the server scopes their status toasts back to us.
+  if (ev.event === "connected") {
+    if (typeof ev.id === "string") setConnectionId(ev.id)
+    return
+  }
+  // Engine status toasts, migrated off the retired `/ws`. The server already
+  // scope-filtered, so the `scope` field is ignored client-side. An error-toned
+  // async status also voids any in-flight create-focus (the create likely failed)
+  // and unwinds any optimistic reorder overlay — mirroring the old `onStatus`.
+  if (ev.event === "status") {
+    if (ev.tone === "error") setState({ ...clearPendingClientIntent() })
+    showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "")
+    return
+  }
+  // Dismiss the toast whose id matches the cleared key (anonymous slot when null).
+  if (ev.event === "status_cleared") {
+    toast.dismiss(ev.key ?? ANON_TOAST_ID)
+    return
+  }
+  // A new generated commit message is ready for one session. Refetch it over REST
+  // and, if it matches the open commit dialog's target, fill the draft. The
+  // on-connect snapshot is delivered the same way (a `session.commit_message` per
+  // session with a pending message), so this one handler covers both.
+  if (ev.event === "session.commit_message") {
+    if (typeof ev.id === "string") loadCommitMessage(ev.id)
+    return
+  }
+  // A `config.changed` event invalidates the bootstrap document (the server's
+  // config was edited/reloaded). Re-GET it so providers, macros, UI flags, etc.
+  // reflect the new config without a reconnect. The `config` coarse topic is
+  // subscribed at module load, so this fires for every client.
+  if (ev.event === "config.changed") {
+    loadBootstrap()
+    return
+  }
+  // A `projects.changed` / `sessions.changed` event invalidates the workspace
+  // spine (a project/session was added, removed, reordered, renamed, changed
+  // status, etc.). Re-GET it so the sidebar, session lists, and selection logic
+  // reflect the new state. The `projects`/`sessions` coarse topics are subscribed
+  // at module load, so this fires for every client. The applied spine drives the
+  // focus/prune/reorder reconciliation (see `applySpine`).
+  if (ev.event === "projects.changed" || ev.event === "sessions.changed") {
+    loadSpine()
+    return
+  }
+  if (ev.event !== "session.changes") return
+  const id = ev.id
+  if (id === undefined || id !== state.selectedSessionId) return
+  // A missing `rev` (the server's Lagged catch-up for a cold session carries
+  // none) is a force-refetch: we can't compare it, so we must NOT let
+  // `undefined >= rev` short-circuit to false and skip the refetch.
+  const rev = ev.rev
+  if (
+    state.changes.phase === "error" ||
+    rev === undefined ||
+    rev >= state.changes.rev
+  ) {
+    loadChanges(id)
+  }
+}
+
+// The connect-driver (bootAuth / login) kicks off the very first bootstrap+spine
+// load alongside `eventsSocket.connect()`, so the first `onOpen` that follows
+// must NOT re-fetch them or it would duplicate that initial load. Each driver
+// sets this flag right before connecting; the first `onOpen` consumes it. Every
+// later (RE-connect) open leaves it false and so always retries — crucially, even
+// when the FIRST load FAILED: keying the retry off `state.bootstrap !== null`
+// (the old guard) stranded a failed first fetch as null forever, so every
+// reconnect skipped it and the app stayed empty with no recovery path.
+let skipNextEventsOnOpenLoad = false
+
+// After a (re)connect the socket has re-sent the whole interest set; re-fetch so
+// anything missed while disconnected is recovered (an event that arrived during
+// the outage is gone otherwise). The `config` coarse topic is always subscribed,
+// so refetch the bootstrap document too — a `config.changed` missed during the
+// outage would otherwise leave stale providers/macros/UI flags until the next
+// config edit. The selected session's changes are also recovered when one is set.
+eventsSocket.onOpen = () => {
+  // A genuine successful open clears the auth-recheck storm guard (see
+  // `recheckAuthAfterFailure` / `MAX_AUTH_RECONNECT_CYCLES`): the socket is
+  // healthy again, so a future failure starts the bounded cadence fresh.
+  authReconnectCycles = 0
+  if (skipNextEventsOnOpenLoad) {
+    // First open after a boot/login load: skip the duplicate fetch this once.
+    skipNextEventsOnOpenLoad = false
+  } else {
+    // A reconnect (or an open the driver did not pre-load for): re-fetch both so
+    // anything missed during the outage — or a load that failed on first boot —
+    // recovers. Concurrent loads are safe: spine is seq-guarded and bootstrap
+    // apply is idempotent.
+    loadBootstrap()
+    loadSpine()
+  }
+  const id = state.selectedSessionId
+  if (id === null) return
+  setState({ changes: loadingChanges(id) })
+  loadChanges(id)
+}
+
+// Move the changed-files subscription from one session to another. A null side
+// means "no session" (clear/select-nothing). A no-op when unchanged.
+function switchChangesSubscription(
+  prev: string | null,
+  next: string | null,
+): void {
+  if (prev === next) return
+  if (prev !== null) eventsSocket.unsubscribe([changesTopic(prev)])
+  if (next !== null) eventsSocket.subscribe([changesTopic(next)])
+}
+
+// Fire a changed-files fetch for `sessionId` and route the outcome through the
+// guarded apply/error handlers. Errors are caught here so a failed fetch can
+// never surface as an unhandled rejection.
+function loadChanges(sessionId: string): void {
+  fetchChanges(sessionId)
+    .then((resp) => applyChangesResponse(sessionId, resp))
+    .catch((err) => applyChangesError(sessionId, err))
+}
+
+// Apply a fetch response, dropping it when it lost a race. Two guards:
+//   1. the requested session must still be selected AND own the slice (a fast
+//      session switch already moved on); and
+//   2. the response `rev` must be >= the applied `rev` (an older, out-of-order
+//      response must not overwrite newer data).
+function applyChangesResponse(
+  sessionId: string,
+  resp: SessionChangesResponse,
+): void {
+  if (state.selectedSessionId !== sessionId) return
+  if (state.changes.sessionId !== sessionId) return
+  if (resp.rev < state.changes.rev) return
   setState({
-    viewModel: normalized,
-    // Retire each optimistic order overlay once the server's order matches it;
-    // until then keep showing the overlay so the row doesn't snap back during
-    // the round-trip. A stale (non-matching) overlay is kept — a later ViewModel
-    // confirming our reorder will clear it; an error status clears it outright.
-    pendingSessionOrder: reconcilePendingSessionOrder(vm, state.pendingSessionOrder),
-    pendingProjectOrder: reconcilePendingProjectOrder(vm, state.pendingProjectOrder),
-    // Drop the optimistic Changes-pane override once the server confirms: when
-    // its persisted value matches the override, OR when the server omits the
-    // field entirely (a pre-feature server that can't persist it — otherwise the
-    // override would strand). Keeps config as the source of truth and honors
-    // another client's toggle.
+    changes: {
+      sessionId,
+      phase: "loaded",
+      rev: resp.rev,
+      staged: resp.staged,
+      unstaged: resp.unstaged,
+      error: null,
+    },
+  })
+}
+
+// Apply a failed fetch. A 404 means the session is gone — clear the slice (the
+// next spine's `pruneSelectionIfGone` clears the selection). Anything else
+// (409 git lock, 5xx, network) lands in `error` so the pane shows a Refresh
+// affordance; the poller's eventual recovery event self-heals it. Same staleness
+// guards as the success path so a late failure can't clobber a newer state.
+function applyChangesError(sessionId: string, err: unknown): void {
+  if (state.selectedSessionId !== sessionId) return
+  if (state.changes.sessionId !== sessionId) return
+  if (err instanceof ChangesFetchError && err.status === 404) {
+    setState({ changes: emptyChanges() })
+    return
+  }
+  // Only the fetch that opened the current loading window may flip the slice to
+  // error. A late failure that lost the race to a successful concurrent fetch
+  // (e.g. a slow 409 arriving after a newer 200 already loaded the pane) must
+  // not turn a loaded pane into an error pane. The next `session.changes` event
+  // still self-heals an error state regardless.
+  if (state.changes.phase !== "loading") return
+  const message =
+    err instanceof Error ? err.message : "Could not load changed files."
+  setState({
+    changes: { ...state.changes, sessionId, phase: "error", error: message },
+  })
+}
+
+// Re-fetch the selected session's changes (the changes pane's Refresh button).
+// No-op when nothing is selected.
+export function refreshChanges(): void {
+  const id = state.selectedSessionId
+  if (id === null) return
+  setState({ changes: loadingChanges(id) })
+  loadChanges(id)
+}
+
+// Fetch the bootstrap document and fold it into state. Errors are swallowed: on
+// first boot the slice stays `null` (consumers fall back to defaults) and a
+// later `config.changed` event or a reconnect retries; on a refetch the last
+// good bootstrap is kept rather than blanking the UI. Never surfaces as an
+// unhandled rejection.
+function loadBootstrap(): void {
+  fetchBootstrap()
+    .then((b) => applyBootstrap(b))
+    .catch((err) => {
+      // Keep the previous bootstrap (null on first boot); a config.changed event
+      // or reconnect will retry. Warn so a persistently-failing fetch (e.g. a
+      // first boot that stays empty) is visible in the console rather than silent.
+      console.warn("[dux] bootstrap fetch failed; will retry on reconnect", err)
+    })
+}
+
+// Apply a freshly fetched bootstrap. Also reconciles the optimistic Changes-pane
+// override the same way the broadcast ViewModel used to: the toggle persists to
+// config, the server emits `config.changed`, the refetched bootstrap carries the
+// confirmed `show_changes_pane`, and the override is dropped once it matches so
+// config becomes the single source of truth across every client.
+function applyBootstrap(b: Bootstrap): void {
+  setState({
+    bootstrap: b,
     changesPaneOverride:
       state.changesPaneOverride !== null &&
-      (vm.show_changes_pane === undefined ||
-        state.changesPaneOverride === vm.show_changes_pane)
+      state.changesPaneOverride === b.show_changes_pane
         ? null
         : state.changesPaneOverride,
   })
-  // If an agent THIS client just created has now appeared, jump focus to it
-  // (see `focusNewlyCreatedSession`). Run before the prune below: this only ever
-  // selects a session present in `vm`, so the prune leaves it alone.
-  focusNewlyCreatedSession(vm)
-  // If the focused target vanished (an agent session was removed, or a
-  // companion terminal exited and was pruned server-side), drop the selection
-  // so the center pane shows the empty state instead of a dead terminal.
-  pruneSelectionIfGone(vm)
 }
 
-// Drop the pending session-order overlay once the incoming ViewModel's session
+// Monotonic sequence for spine loads. Two rapid `sessions.changed`/
+// `projects.changed` events fire concurrent `fetchSpine()`s; without a guard an
+// older response resolving last would overwrite a newer spine (observable as a
+// focus-then-prune-clear flicker on agent create). Each `loadSpine` captures the
+// seq it bumped to; `applySpine` discards a result once a newer load has started.
+// Mirrors the `applyChangesResponse` rev-guard, but with a client-side counter
+// (the spine read has no server rev).
+let loadSpineSeq = 0
+
+// Fetch the workspace spine and fold it into state. Errors are swallowed: on
+// first boot the slice stays `null` (consumers fall back to empty lists) and a
+// later `projects.changed`/`sessions.changed` event or a reconnect retries; on a
+// refetch the last good spine is kept rather than blanking the sidebar. Never
+// surfaces as an unhandled rejection.
+function loadSpine(): void {
+  const seq = ++loadSpineSeq
+  fetchSpine()
+    .then((s) => applySpine(s, seq))
+    .catch((err) => {
+      // Keep the previous spine (null on first boot); an event or reconnect will
+      // retry. Warn so a persistently-failing fetch (e.g. a first boot that stays
+      // empty) is visible in the console rather than silent.
+      console.warn("[dux] spine fetch failed; will retry on reconnect", err)
+    })
+}
+
+// Apply a freshly fetched spine. This is the single place the projects/sessions/
+// sidebar data lands, and it drives the same client-view reconciliation the
+// broadcast ViewModel used to:
+//   - retire the optimistic reorder overlays once the server's order matches;
+//   - auto-focus an agent THIS client just created, the instant it appears;
+//   - prune the selection when its target session/terminal has vanished.
+// Order mirrors the legacy `onViewModel`: set the slice (with reconciled overlays)
+// first, then focus (which only ever selects a session present in the spine, so
+// the prune below leaves it alone), then prune.
+//
+// `seq` is the `loadSpineSeq` value the originating `loadSpine` captured; discard
+// this (now-stale) result if a newer load has since started, so a slow older
+// response can never overwrite a fresher spine (and re-run focus/prune against
+// outdated data).
+function applySpine(spine: Spine, seq: number): void {
+  if (seq < loadSpineSeq) return
+  setState({
+    spine,
+    pendingSessionOrder: reconcilePendingSessionOrder(spine, state.pendingSessionOrder),
+    pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
+  })
+  // Restore a boot-time deep-link before focus/prune: it selects only a session
+  // present in this spine (so prune leaves it alone), and it is a one-shot that
+  // self-clears, so it never fights a create-focus or a later refetch.
+  restoreDeepLink(spine)
+  focusNewlyCreatedSession(spine)
+  pruneSelectionIfGone(spine)
+}
+
+// The per-connection id now arrives as the `connected` event on `/ws/events`
+// (see `eventsSocket.onEvent` above), which calls `setConnectionId`. The REST
+// clients stamp it as `X-Connection-Id` so the server scopes their toasts back
+// to this client.
+
+// The broadcast ViewModel now carries ONLY `changed_files` (a residual frame);
+// projects/sessions/sidebar moved to `GET /api/v1/spine` and the changed-files
+// data is owned by the `changes` slice over REST. Nothing reads the residual
+// frame anymore, so we deliberately do NOT install an `onViewModel` handler:
+// storing it on every frame only triggered spurious re-renders. The
+// focus/prune/reorder reconciliation runs on the spine apply path (`applySpine`),
+// and changed files flow through the `changes` slice. The frame is removed at
+// cutover (Phase 6); until then it is simply ignored (the socket default no-op).
+
+// Drop the pending session-order overlay once the incoming spine's session
 // order for that project already equals the overlay; otherwise keep it.
 function reconcilePendingSessionOrder(
-  vm: ViewModel,
+  spine: Spine,
   pending: PendingSessionOrder | null,
 ): PendingSessionOrder | null {
   if (!pending) return null
-  const serverIds = vm.sessions
+  const serverIds = spine.sessions
     .filter((s) => s.project_id === pending.projectId)
     .map((s) => s.id)
   return ordersMatch(serverIds, pending.ids) ? null : pending
 }
 
-// Drop the pending project-order overlay once the incoming ViewModel's project
+// Drop the pending project-order overlay once the incoming spine's project
 // order already equals the overlay; otherwise keep it.
 function reconcilePendingProjectOrder(
-  vm: ViewModel,
+  spine: Spine,
   pending: string[] | null,
 ): string[] | null {
   if (!pending) return null
-  const serverIds = vm.projects.map((p) => p.id)
+  const serverIds = spine.projects.map((p) => p.id)
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
-// Clear the selection when its target no longer exists in the latest ViewModel.
+// Clear the selection when its target no longer exists in the latest spine.
 // Agents persist after exiting (their session stays, marked detached), so they
 // only vanish on deletion; terminals are removed outright when their PTY exits.
-function pruneSelectionIfGone(vm: ViewModel): void {
+function pruneSelectionIfGone(spine: Spine): void {
   const target = state.selectedTarget
   if (!target) return
   const stillExists =
     target.kind === "agent"
-      ? vm.sessions.some((s) => s.id === target.sessionId)
-      : vm.sessions.some((s) =>
+      ? spine.sessions.some((s) => s.id === target.sessionId)
+      : spine.sessions.some((s) =>
           s.terminals.some((t) => t.id === target.terminalId),
         )
   if (!stillExists) {
@@ -399,7 +778,7 @@ function pruneSelectionIfGone(vm: ViewModel): void {
 }
 
 // Snapshot the session ids that exist right now and arm auto-focus for an agent
-// THIS client is creating, so the next ViewModel carrying a new id in `projectId`
+// THIS client is creating, so the next spine carrying a new id in `projectId`
 // is recognized as our new agent and focused (see `focusNewlyCreatedSession`).
 // Call this immediately before dispatching an agent-create command; it is wired
 // into `submitNameDialog` (new/fork/from-PR) and `attachWorktree`. Re-arming
@@ -407,32 +786,46 @@ function pruneSelectionIfGone(vm: ViewModel): void {
 // one whose agent never arrived. Always pass the project the new agent will land
 // in — the match is project-scoped, so a caller that cannot resolve the project
 // must skip arming rather than pass a placeholder.
+// How long an armed create-focus token stays live before it self-expires. Set
+// comfortably above the longest server-side create window (the from-PR create
+// awaits up to 60s — see `FROM_PR_CREATE_AWAIT_TIMEOUT`) so a legitimate slow
+// create still auto-focuses, but bounded so a create that never lands cannot keep
+// a stale token armed to grab a later, unrelated session.
+const CREATE_FOCUS_TTL_MS = 90_000
+
 function armCreateFocus(projectId: string): void {
-  const knownIds = (state.viewModel?.sessions ?? []).map((s) => s.id)
-  setState({ pendingCreateFocus: { knownIds, projectId } })
+  const knownIds = (state.spine?.sessions ?? []).map((s) => s.id)
+  setState({ pendingCreateFocus: { knownIds, projectId, armedAt: Date.now() } })
 }
 
 // Focus the agent THIS client just created, the instant it shows up. With a
-// pending-focus token armed (`armCreateFocus`), scan the incoming ViewModel for a
+// pending-focus token armed (`armCreateFocus`), scan the incoming spine for a
 // session that wasn't known at submit time and lives in the expected project,
 // select it (which points the changed-files watch at it; the focused TerminalPane
 // subscribes its PTY on mount), and disarm. No-op — and cheap — when nothing is
 // pending, the overwhelmingly common case. Other clients never armed a token, so
 // they don't react: focus moves only on the client that initiated the create.
-function focusNewlyCreatedSession(vm: ViewModel): void {
+function focusNewlyCreatedSession(spine: Spine): void {
   const pending = state.pendingCreateFocus
   if (!pending) return
+  // Expire a stale token rather than letting it focus an unrelated session that
+  // appears long after the create it was armed for (a silently-failed create, or
+  // one that never completed). Disarm and bail.
+  if (Date.now() - pending.armedAt > CREATE_FOCUS_TTL_MS) {
+    setState({ pendingCreateFocus: null })
+    return
+  }
   const known = new Set(pending.knownIds)
-  const created = vm.sessions.find(
+  const created = spine.sessions.find(
     (s) => !known.has(s.id) && s.project_id === pending.projectId,
   )
   if (!created) return
-  // Consume the token before selecting so a later ViewModel can't re-fire.
+  // Consume the token before selecting so a later spine can't re-fire.
   setState({ pendingCreateFocus: null })
   selectSession(created.id)
 }
 
-socket.onConn = (conn) => {
+eventsSocket.onConn = (conn) => {
   // A connection break invalidates any in-flight optimistic reorder: the
   // command (or its rejection) may have been lost, and after the reconnect
   // nothing would ever reconcile a non-matching overlay — leaving the UI
@@ -444,16 +837,16 @@ socket.onConn = (conn) => {
   const patch =
     conn === "closed" || conn === "failed" ? clearPendingClientIntent() : {}
   setState({ conn, ...patch })
-  // Re-establish the server-side changed-files watch on every (re)connect. The
-  // watch is server state that a dropped connection discards, so a reconnect
-  // would otherwise leave the pane empty until the next manual selection. This
-  // mirrors how the focused terminal re-attaches after a reconnect — it re-issues
-  // its `subscribe` so the new server-side provider streams again.
-  if (conn === "open" && state.selectedSessionId !== null) {
-    socket.sendCommand("watch_changed_files", {
-      session_id: state.selectedSessionId,
-    })
-  }
+  // Clear the per-connection id on a drop. It belongs to the now-dead socket; a
+  // REST action fired during the reconnect window must NOT stamp it as
+  // `X-Connection-Id`, or the server would scope that action's status toasts to a
+  // connection that no longer exists and the user would never see them. A null id
+  // falls back to scope `All` (broadcast) — visible to this client once it
+  // reconnects, the safe default. The next `connected` frame re-issues a fresh id.
+  if (conn === "closed" || conn === "failed") setConnectionId(null)
+  // Changed files no longer ride this socket: the `/ws/events` channel owns the
+  // per-session subscription and re-establishes it on its own reconnect (see
+  // `eventsSocket.onOpen`, which also refetches). There is nothing to re-arm here.
   // When the socket gives up (the reconnect loop exhausted its attempts) while
   // we believe we're authed, the cause may be a session that expired or was
   // revoked server-side: the gated `/ws` upgrade now 401s, which the browser
@@ -467,47 +860,56 @@ socket.onConn = (conn) => {
   }
 }
 
+// Bound the authed reconnect loop. Each terminal "failed" while authed triggers
+// `recheckAuthAfterFailure`, which (for any non-401 result) auto-restarts the
+// socket via `connect()` — and `connect()` resets the socket's own attempt
+// counter. If the WS UPGRADE keeps failing for a NON-auth reason (a proxy that
+// drops the `Upgrade` header, a TLS problem), that is an unbounded storm:
+// 4 attempts → failed → recheck → connect → reset → repeat, hammering the
+// server forever. Cap the consecutive auto-restarts; past the cap we stop
+// auto-connecting and leave the app "failed" with the manual Reconnect
+// affordance (which always works — it calls `connect()` directly). A genuine
+// successful open resets the counter (see `eventsSocket.onOpen`).
+const MAX_AUTH_RECONNECT_CYCLES = 3
+let authReconnectCycles = 0
+
 // After the WS reconnect loop fails while authed, re-verify the session. A 401
 // means the session is gone (expired/revoked): drop to the login screen. Any
 // other outcome (still authed, or the probe itself failed) is treated as a
 // transient network problem and left as "failed" so the Reconnect affordance
-// stands. Never connects the socket here — that happens on a fresh login.
+// stands. Never connects the socket here beyond the bounded auto-restart above —
+// the manual Reconnect button always works regardless.
 async function recheckAuthAfterFailure(): Promise<void> {
   try {
     const resp = await fetch("/api/me", { credentials: "same-origin" })
     if (resp.status === 401) {
+      // The session is gone — stop the events channel too (it shares the auth
+      // gate and would otherwise keep retrying a 401 upgrade).
+      eventsSocket.close()
       setState({
         auth: { phase: "anonymous", username: null, error: null, pending: false },
       })
+    } else {
+      // Still authed: a genuine network blip, not a logout. The events socket
+      // exhausted its own reconnect budget alongside the PTY socket, so restart
+      // it (connect() resets closedByUser/attempts/delay, safe on an exhausted
+      // socket) — otherwise changed-files invalidations would stay dead until
+      // the user manually reconnects. BUT bound the auto-restarts: a persistent
+      // non-auth upgrade failure would otherwise loop forever. Past the cap we
+      // stop auto-connecting and leave "failed" in place for a manual Reconnect.
+      authReconnectCycles += 1
+      if (authReconnectCycles > MAX_AUTH_RECONNECT_CYCLES) return
+      eventsSocket.connect()
     }
   } catch {
     // Probe failed too — keep "failed"; this was a network problem, not a logout.
   }
 }
 
-// Engine command results (direct command/reorder responses) route to sonner
-// toasts via showStatusToast. Toasts are the sole web surface for engine-driven
-// status; keyed toasts use the status key as the sonner id so a later
-// success/clear dismisses exactly the right entry. A `status_cleared` event
-// on the WS channel calls toast.dismiss(key) for the same reason.
-socket.onCommandResult = (status, error) => {
-  if (error) {
-    // A rejected reorder (stale/partial id set) comes back as an error here;
-    // drop any optimistic overlay so the UI reverts to the server's order.
-    toast.error(error, { duration: Infinity })
-    setState({ ...clearPendingClientIntent() })
-  } else if (status) {
-    // Honor the status key so a keyed command-reply busy (e.g. the async
-    // worktree-removal delete) adopts its key as the toast id and is dismissed
-    // by the matching-key async final. An unkeyed status keeps the anon slot.
-    showStatusToast(status.key, status.tone, status.message)
-  }
-}
-
-socket.onError = (message) => {
-  toast.error(message, { duration: Infinity })
-  setState({ ...clearPendingClientIntent() })
-}
+// Since Phase 6 there is no `command_result`/`error` frame: every action is a
+// REST verb whose failure rejects its promise (the caller toasts it and rolls
+// back optimistic state), and every keyed busy/success/clear arrives as a
+// `status`/`status_cleared` event over `/ws/events` (see `eventsSocket.onEvent`).
 
 // Reset both optimistic order overlays. Returned as a patch so callers can fold
 // it into a single `setState`. Used on every error path so a rejected reorder
@@ -550,7 +952,14 @@ function showStatusToast(
 ): void {
   if (!message) return
   const id = key ?? ANON_TOAST_ID // no key → stable anonymous-slot id
-  const duration = tone === "info" ? 6000 : Infinity
+  // Info/success toasts auto-clear after the configured window
+  // (`config.ui.status_clear_seconds`, default 6); 0 disables auto-clear so they
+  // stay sticky like a warning/error. Busy/warning/error never auto-dismiss
+  // (their final state replaces them). A missing bootstrap (pre-load) falls back
+  // to the 6s default.
+  const secs = state.bootstrap?.status_clear_seconds ?? 6
+  const infoDuration = secs === 0 ? Infinity : secs * 1000
+  const duration = tone === "info" ? infoDuration : Infinity
   const opts = { id, duration }
   if (tone === "error") toast.error(message, opts)
   else if (tone === "warning") toast.warning(message, opts)
@@ -558,99 +967,31 @@ function showStatusToast(
   else toast.success(message, opts) // info/success
 }
 
-// Asynchronous status/lifecycle events (background push/pull completing, an
-// agent launch finishing or failing, a PTY exiting). Route to a sonner toast
-// keyed by the engine key. The status line was removed in T14; toasts are the
-// sole web surface.
-socket.onStatus = (key, tone, message) => {
-  // An error-toned async status also voids any in-flight create-focus (the
-  // create likely just failed) and unwinds any optimistic reorder overlay.
-  if (tone === "error") setState({ ...clearPendingClientIntent() })
-  showStatusToast(key, tone, message)
-}
-
-// Dismiss the toast whose id matches the cleared key. A null/undefined key
-// means the anonymous slot — dismiss via the stable ANON_TOAST_ID.
-socket.onStatusCleared = (key) => {
-  toast.dismiss(key ?? ANON_TOAST_ID)
-}
-
-// A freshly created terminal auto-focuses so the user lands on it immediately.
-socket.onTerminalCreated = (sessionId, terminalId) => {
-  selectTerminal(terminalId, sessionId)
-}
-
-socket.onCommitMessage = (sessionId, message) => {
-  // The generated message is broadcast to every client and tagged with the
-  // session it was generated for. Apply it ONLY when it matches the open
-  // dialog's target; otherwise drop it (the dialog was closed or switched to a
-  // different session) so one session's message never clobbers another's draft.
-  if (state.commitTarget === sessionId) {
-    setState({ commitDraft: message })
-  }
-}
-
-socket.onCommitMessageSnapshot = (sessionId, message) => {
-  // The connect snapshot re-delivers the LAST generated message so a reconnect
-  // during a commit flow still fills the draft. Apply it conservatively: only
-  // when this session's dialog is open AND the draft is still empty, so a stale
-  // snapshot never clobbers an in-progress edit (or fills a dialog the user
-  // never asked to generate into). The live `onCommitMessage` path handles the
-  // normal case where the client stayed connected through generation.
-  if (state.commitTarget === sessionId && state.commitDraft === "") {
-    setState({ commitDraft: message })
-  }
-}
-
-socket.onDirEntries = (path, entries, error) => {
-  setState({ browsePath: path, browseEntries: error ? [] : entries, browseLoading: false })
-  if (error) toast.error(error)
-}
-
-// The managed-worktree listing reply for the attach dialog. Ignore a stale
-// reply if the dialog closed (or switched projects) before it arrived, so a
-// late frame can never repopulate a closed dialog.
-socket.onProjectWorktrees = (projectId, entries, error) => {
-  if (state.attachWorktreeTarget !== projectId) return
-  setState({ attachWorktreeEntries: error ? [] : entries, attachWorktreeLoading: false })
-  if (error) toast.error(error)
-}
-
-// A freshly generated pet name for the new-agent dialog. The TUI fills the input
-// with the generated name (that fill IS the preview) and remembers it so a later
-// uncheck can tell "still the generated name" from "user-edited". We mirror that:
-// fill the draft and stash the name. Ignored if the dialog closed or the user
-// unchecked the box before the reply landed (a stale reply must not refill).
-socket.onAgentName = (name) => {
-  if (state.createAgentTarget !== null && state.createAgentRandomize) {
-    setState({
-      createAgentDraft: name,
-      createAgentGeneratedName: name,
-      createAgentNamePending: false,
+// Fetch the latest generated commit message for a session (triggered by a
+// `session.commit_message` event) and fill the open commit dialog's draft when
+// it matches. Applied ONLY when the dialog targets this session AND the draft is
+// still empty: that mirrors the old live+snapshot behavior in one rule — the
+// live case has an empty draft (the user just asked to generate), and the
+// on-connect snapshot must never clobber an in-progress edit or fill a dialog the
+// user never asked to generate into. A 404 (nothing generated) and any other
+// error are dropped silently — this is a passive enrichment, not a user action.
+function loadCommitMessage(sessionId: string): void {
+  if (state.commitTarget !== sessionId || state.commitDraft !== "") return
+  sessionsApi
+    .commitMessage(sessionId)
+    .then((body) => {
+      if (state.commitTarget === sessionId && state.commitDraft === "") {
+        setState({ commitDraft: body.message })
+      }
     })
-  }
+    .catch(() => {
+      // No message yet (404) or a transient error — leave the draft empty.
+    })
 }
 
-// The add-project branch pre-flight reply. Ignore a stale reply whose path no
-// longer matches the pending inspection (the user picked a different repo, or
-// the dialog closed) so a late frame can never repopulate a closed/changed
-// selection — same staleness guard as `onProjectWorktrees`.
-socket.onProjectPathInspection = (path, currentBranch, warning, error) => {
-  if (state.projectPathInspection?.path !== path) return
-  setState({
-    projectPathInspection: {
-      path,
-      currentBranch,
-      warning,
-      error,
-      loading: false,
-    },
-  })
-}
-
-// Boot the auth-state machine, THEN connect the socket (the reordering vs. the
-// previous module-load `socket.connect()`). With auth on and no session, the
-// gated `/ws` upgrade 401s; a blind boot connect would just burn the reconnect
+// Boot the auth-state machine, THEN connect the events socket. With auth on and
+// no session, the gated `/ws/events` upgrade 401s; a blind boot connect would
+// just burn the reconnect
 // loop down to "failed" before the user ever logs in. So we first ask `/api/me`
 // who we are:
 //   - auth disabled OR a valid session → set the phase, THEN connect (today's UX
@@ -695,7 +1036,16 @@ async function bootAuth(): Promise<void> {
     const { phase, username } = phaseFromMe(resp.status, body)
     setState({ auth: { phase, username, error: null, pending: false } })
     if (phase === "disabled" || phase === "authed") {
-      socket.connect()
+      // This driver owns the initial load below, so the first `onOpen` must not
+      // duplicate it (every later reconnect still retries — see the flag's docs).
+      skipNextEventsOnOpenLoad = true
+      eventsSocket.connect()
+      // Fetch the build-static bootstrap document alongside the initial connect.
+      // It is invalidated thereafter by `config.changed` over `/ws/events`.
+      loadBootstrap()
+      // Fetch the workspace spine (projects/sessions/sidebar) too. Invalidated
+      // thereafter by `projects.changed`/`sessions.changed` over `/ws/events`.
+      loadSpine()
     }
   } catch {
     // Network failure: show the honest unreachable state and schedule a retry.
@@ -752,7 +1102,15 @@ export async function login(username: string, password: string): Promise<void> {
       setState({
         auth: { phase: "authed", username: name, error: null, pending: false },
       })
-      socket.connect()
+      // This driver owns the initial load below; the first `onOpen` skips it (see
+      // the flag's docs) while later reconnects still retry.
+      skipNextEventsOnOpenLoad = true
+      eventsSocket.connect()
+      // Fetch the bootstrap document and the workspace spine for this freshly
+      // authed session, mirroring the boot path (after auth resolves, alongside
+      // the connect).
+      loadBootstrap()
+      loadSpine()
       return
     }
     const retryAfter =
@@ -784,7 +1142,10 @@ export async function login(username: string, password: string): Promise<void> {
 // folded in explicitly here so it is never left dangling either.
 function clearSessionScopedState(): Partial<DuxState> {
   return {
-    viewModel: null,
+    // The spine (projects/sessions/sidebar) is workspace data — clear it so the
+    // next login never flashes the previous session's sidebar before its first
+    // fetch lands.
+    spine: null,
     selectedTarget: null,
     selectedSessionId: null,
     editorTarget: null,
@@ -824,18 +1185,34 @@ function clearSessionScopedState(): Partial<DuxState> {
     // Any in-flight create-focus intent dies with the session, so a create
     // submitted before logout never yanks focus into the next login's workspace.
     pendingCreateFocus: null,
+    // The changed-files slice is session-scoped data — clear it so the next
+    // login never flashes the previous user's changes.
+    changes: emptyChanges(),
   }
 }
 
 // Log out: tell the server to destroy the session, deliberately disconnect the
-// socket (suppressing the reconnect loop — `socket.close()` sets the
+// events socket (suppressing the reconnect loop — `eventsSocket.close()` sets the
 // closed-by-user flag), wipe all session-scoped state (so nothing from this user
 // leaks into the next login — see `clearSessionScopedState`), and drop to the
 // login screen. The server call is best-effort: even if it fails we still tear
 // down the client-side session view, since the cookie is HttpOnly and the gate
 // re-checks every request anyway.
 export async function logout(): Promise<void> {
-  socket.close()
+  // Drop the selected session's fine topic from the interest set before closing
+  // so a later login doesn't re-subscribe a stale session on reconnect (coarse
+  // topics persist). The unsubscribe only mutates the set here (socket closing).
+  const prevSession = state.selectedSessionId
+  if (prevSession !== null) {
+    eventsSocket.unsubscribe([changesTopic(prevSession)])
+  }
+  // Drop an open commit dialog's commit-message subscription too, so a later
+  // login doesn't re-subscribe a stale session's topic on reconnect.
+  const prevCommit = state.commitTarget
+  if (prevCommit !== null) {
+    eventsSocket.unsubscribe([commitMessageTopic(prevCommit)])
+  }
+  eventsSocket.close()
   try {
     await fetch("/api/logout", { method: "POST", credentials: "same-origin" })
   } catch {
@@ -890,49 +1267,165 @@ export function useDux(): DuxState {
   return useSyncExternalStore(subscribe, getSnapshot)
 }
 
+// --- Deep-linking (a tiny hash router) ------------------------------------
+//
+// The selected target is mirrored into `location.hash` so a tab can be bookmarked
+// /shared/reloaded back to the same agent (and, when one is focused, terminal):
+//   #/agent/<sessionId>
+//   #/agent/<sessionId>/terminal/<terminalId>
+// Session ids are stable (a reload restores the agent); terminal ids are
+// ephemeral (a reload that finds the session but not the terminal falls back to
+// the agent; one that finds neither ignores the link). The hash is written with
+// `history.replaceState` so it never adds a back-stack entry (that would fight
+// the mobile spoke/back-button model, which uses `pushState`/`go`).
+
+// Parse a deep-link hash into a target, or null when it is absent/malformed.
+function parseSelectionHash(hash: string): SelectedTarget | null {
+  const m = hash.match(/^#\/agent\/([^/]+)(?:\/terminal\/([^/]+))?$/)
+  if (!m) return null
+  // `decodeURIComponent` throws a URIError on malformed percent-encoding (e.g.
+  // `#/agent/%ZZ`). This runs at module init, so an unguarded throw would blank
+  // the whole app. Treat any decode failure as no/invalid deep link.
+  try {
+    const sessionId = decodeURIComponent(m[1])
+    if (!sessionId) return null
+    if (m[2]) {
+      const terminalId = decodeURIComponent(m[2])
+      if (!terminalId) return null
+      return { kind: "terminal", terminalId, sessionId }
+    }
+    return { kind: "agent", sessionId }
+  } catch {
+    return null
+  }
+}
+
+// The hash for a target (or the bare path when nothing is selected).
+function selectionHash(target: SelectedTarget | null): string {
+  if (!target) return ""
+  const base = `#/agent/${encodeURIComponent(target.sessionId)}`
+  return target.kind === "terminal"
+    ? `${base}/terminal/${encodeURIComponent(target.terminalId)}`
+    : base
+}
+
+// Mirror the current selection into the URL hash without growing the back stack.
+// Defensive: in non-browser test environments `history.replaceState` / a real
+// `location` may be absent, so this no-ops there.
+function writeSelectionHash(): void {
+  if (typeof history === "undefined" || typeof history.replaceState !== "function") {
+    return
+  }
+  const next = selectionHash(state.selectedTarget)
+  const current = typeof location !== "undefined" ? location.hash ?? "" : ""
+  if (current === next) return
+  // An empty target hash collapses to the bare path so the URL doesn't keep a
+  // dangling "#"; otherwise replace just the hash, preserving path + query.
+  const base =
+    typeof location !== "undefined"
+      ? (location.pathname ?? "") + (location.search ?? "")
+      : ""
+  history.replaceState(history.state, "", next === "" ? base : next)
+}
+
+// The deep-link parsed from the URL at module load, restored once the first spine
+// lands (a target can't be resolved until the session list exists). One-shot:
+// consumed (and cleared) on the first `applySpine` so later spine refetches don't
+// re-yank a user who has since navigated away.
+let pendingDeepLink: SelectedTarget | null =
+  typeof location !== "undefined"
+    ? parseSelectionHash(location.hash ?? "")
+    : null
+
+// Restore the boot-time deep-link against the first spine. Resolve the session in
+// the spine; restore the terminal when it still exists, else fall back to the
+// session; ignore the link entirely when the session is gone.
+function restoreDeepLink(spine: Spine): void {
+  const link = pendingDeepLink
+  if (!link) return
+  pendingDeepLink = null // one-shot, whatever the outcome
+  const session = spine.sessions.find((s) => s.id === link.sessionId)
+  if (!session) return // session id gone — ignore the link
+  if (link.kind === "terminal") {
+    const stillThere = session.terminals.some((t) => t.id === link.terminalId)
+    if (stillThere) {
+      selectTerminal(link.terminalId, link.sessionId)
+      return
+    }
+    // Terminal id gone — fall back to the owning agent.
+  }
+  selectSession(link.sessionId)
+}
+
 // Select an agent session as the streamed target. Signature kept stable so
 // existing callers continue to work unchanged.
 export function selectSession(id: string | null): void {
+  const prev = state.selectedSessionId
   if (id === null) {
     // Clear the target FIRST so any synchronous re-render shows the fallback,
     // THEN collapse the mobile spoke so the back stack matches the screen. This
     // is the out-of-band clear path (e.g. an agent exit) — see
     // `unwindMobileSpoke`. Desktop stays on "home", so the unwind no-ops there.
-    setState({ selectedTarget: null, selectedSessionId: null })
-    // Tell the server to stop watching any worktree (a null id clears the global
-    // changed-files watch). Without this the poller keeps reading the previously
-    // selected session's worktree.
-    socket.sendCommand("watch_changed_files", { session_id: null })
+    setState({
+      selectedTarget: null,
+      selectedSessionId: null,
+      changes: emptyChanges(),
+    })
+    // Drop the previous session's changed-files subscription; there is no global
+    // watch to clear, so the cross-client clobber is gone by construction.
+    switchChangesSubscription(prev, null)
+    writeSelectionHash()
     unwindMobileSpoke()
     return
   }
   setState({
     selectedTarget: { kind: "agent", sessionId: id },
     selectedSessionId: id,
+    // Re-selecting the same session keeps its loaded data; a real switch enters
+    // the loading window so the pane shows a spinner, not the previous session's
+    // files.
+    changes: prev === id ? state.changes : loadingChanges(id),
   })
-  // Point the server-side changed-files watch at this session's worktree. The
-  // engine's changed-files state is global and only set by whoever asks, so the
-  // web must send this on selection (otherwise the pane stays empty — the TUI
-  // was the only thing that ever set it).
-  socket.sendCommand("watch_changed_files", { session_id: id })
+  // Move the per-session changed-files subscription, THEN fetch — subscribing
+  // before the GET means an invalidation that races the fetch is never missed.
+  switchChangesSubscription(prev, id)
+  writeSelectionHash()
+  if (prev !== id) loadChanges(id)
 }
 
 // Select one of a session's companion terminals as the streamed target. The
 // owning session id is retained so session-scoped UI keeps resolving.
 export function selectTerminal(terminalId: string, sessionId: string): void {
+  const prev = state.selectedSessionId
   setState({
     selectedTarget: { kind: "terminal", terminalId, sessionId },
     selectedSessionId: sessionId,
+    // Switching from the agent to one of its own terminals keeps the same
+    // session's loaded changes; only a different session enters loading.
+    changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
   })
-  // The watched worktree is the SESSION's, so watch the parent session even when
-  // a companion terminal is the streamed target.
-  socket.sendCommand("watch_changed_files", { session_id: sessionId })
+  // The changed files belong to the SESSION, so subscribe/fetch the parent
+  // session even when a companion terminal is the streamed target.
+  switchChangesSubscription(prev, sessionId)
+  writeSelectionHash()
+  if (prev !== sessionId) loadChanges(sessionId)
 }
 
-// Ask the server to spawn a new companion terminal for a session. The server
-// replies with `terminal_created`, which auto-focuses it via `onTerminalCreated`.
+// Spawn a new companion terminal for a session via REST (Phase 5). The 201 reply
+// carries the new terminal id, so we focus it immediately — opening its PTY
+// socket (`TerminalPane`) — rather than waiting for a `terminal_created` frame.
+// The terminal also lands in the spine via the `sessions.changed` refetch, which
+// fills in its label/status; focusing first is safe because the PTY socket only
+// needs the ids the create returned. A failure surfaces as a toast.
 export function createTerminal(sessionId: string): void {
-  socket.createTerminal(sessionId)
+  terminalsApi
+    .create(sessionId)
+    .then((created) => selectTerminal(created.terminal_id, sessionId))
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not create the terminal.",
+      ),
+    )
 }
 
 // Open the close-terminal confirmation dialog for a companion terminal. The TUI
@@ -946,11 +1439,24 @@ export function closeDeleteTerminal(): void {
   setState({ deleteTerminalTarget: null })
 }
 
-// Ask the server to close (delete) a companion terminal. It is removed from the
-// ViewModel; if it was the focused target, the selection clears via the
-// ViewModel-prune in `onViewModel`.
+// Close (delete) a companion terminal via REST (Phase 5). The endpoint is nested
+// under the owning session, so resolve the parent session id from the spine; a
+// terminal that already vanished (no owner) is a no-op. The terminal is removed
+// from the workspace spine, and if it was the focused target the selection clears
+// via the spine prune in `applySpine` (driven by the `sessions.changed` refetch).
+// A failure surfaces as a toast.
 export function deleteTerminal(terminalId: string): void {
-  socket.sendCommand("delete_terminal", { terminal_id: terminalId })
+  const sessionId = state.spine?.sessions.find((s) =>
+    s.terminals.some((t) => t.id === terminalId),
+  )?.id
+  if (sessionId === undefined) return
+  terminalsApi
+    .remove(sessionId, terminalId)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not close the terminal.",
+      ),
+    )
 }
 
 // Open the discard-confirmation dialog for an unstaged file. The TUI confirms
@@ -975,10 +1481,24 @@ export function discardFile(sessionId: string, path: string): void {
 }
 
 export function openCommit(sessionId: string): void {
+  // Subscribe to this session's commit-message topic BEFORE opening so a message
+  // generated while connected is delivered live (the server gates live delivery
+  // on exactly this subscription). If a dialog was already open for a different
+  // session (reopened without an explicit close), drop its stale subscription.
+  const prev = state.commitTarget
+  if (prev !== null && prev !== sessionId) {
+    eventsSocket.unsubscribe([commitMessageTopic(prev)])
+  }
+  eventsSocket.subscribe([commitMessageTopic(sessionId)])
   setState({ commitTarget: sessionId, commitDraft: "" })
 }
 
 export function closeCommit(): void {
+  // Drop the commit-message subscription for the session the dialog targeted so
+  // we don't keep an open interest (and re-subscribe it on reconnect) once the
+  // dialog is closed.
+  const prev = state.commitTarget
+  if (prev !== null) eventsSocket.unsubscribe([commitMessageTopic(prev)])
   setState({ commitTarget: null, commitDraft: "" })
 }
 
@@ -987,7 +1507,18 @@ export function setCommitDraft(text: string): void {
 }
 
 export function generateCommitMessage(sessionId: string): void {
-  socket.sendCommand("generate_commit_message", { session_id: sessionId })
+  // Only the trigger is REST. The generated message arrives asynchronously as a
+  // `session.commit_message` event on `/ws/events` (the open commit dialog is
+  // subscribed to its topic via `openCommit`); `loadCommitMessage` then GETs it
+  // and fills the draft. A 4xx/5xx from the trigger has no async status, so
+  // surface it as a toast here.
+  sessionsApi
+    .generateCommitMessage(sessionId)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not generate a commit message.",
+      ),
+    )
 }
 
 // Open the code-editor overlay for a session. Selecting the session first points
@@ -1019,16 +1550,17 @@ export function closeDelete(): void {
 // Ask the server to delete an agent session. `deleteWorktree` opts into the
 // destructive removal of the git worktree on disk (default off in the UI).
 export function deleteSession(sessionId: string, deleteWorktree: boolean): void {
-  socket.sendCommand("delete_session", {
-    session_id: sessionId,
-    delete_worktree: deleteWorktree,
-  })
+  sessionsApi
+    .remove(sessionId, deleteWorktree)
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not delete the session."),
+    )
 }
 
 // Open the rename dialog for a session, pre-filling the current custom title
 // (empty when none, so the placeholder shows the branch name).
 export function openRename(sessionId: string): void {
-  const session = state.viewModel?.sessions.find((s) => s.id === sessionId)
+  const session = state.spine?.sessions.find((s) => s.id === sessionId)
   setState({ renameTarget: sessionId, renameDraft: session?.title ?? "" })
 }
 
@@ -1044,17 +1576,29 @@ export function setRenameDraft(raw: string): void {
 }
 
 // Ask the server to set a session's display title. An empty title clears it
-// back to the branch name; a non-empty title is validated server-side.
-export function renameSession(sessionId: string, title: string): void {
-  socket.sendCommand("rename_session", { session_id: sessionId, title })
+// back to the branch name; a non-empty title is validated server-side. Resolves
+// `true` on success, `false` (after toasting) on failure, so the rename dialog can
+// stay open and preserve the user's input when the PATCH is rejected.
+export async function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<boolean> {
+  try {
+    await sessionsApi.patch(sessionId, { title })
+    return true
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Could not rename the session.")
+    return false
+  }
 }
 
-// Submit the rename dialog and close it.
-export function submitRename(): void {
+// Submit the rename dialog, closing it only once the PATCH succeeds. On failure
+// the dialog stays open (the error is toasted) so the user does not lose the name
+// they typed and can retry or cancel.
+export async function submitRename(): Promise<void> {
   const id = state.renameTarget
   if (!id) return
-  renameSession(id, state.renameDraft.trim())
-  closeRename()
+  if (await renameSession(id, state.renameDraft.trim())) closeRename()
 }
 
 // Open the change-provider dialog for a session. The dialog pre-selects the
@@ -1067,15 +1611,51 @@ export function closeChangeProvider(): void {
   setState({ changeProviderTarget: null })
 }
 
-// Ask the server to swap which provider a session uses. The server validates
-// the provider against the configured list, persists it for the next launch,
-// and reports the outcome (swapped / already-uses-it / still-running) on the
-// status stream — nothing to do here but fire the command.
-export function changeAgentProvider(sessionId: string, provider: string): void {
-  socket.sendCommand("change_agent_provider", {
-    session_id: sessionId,
-    provider,
-  })
+// Whether `provider` is in the bootstrap document's configured provider list. The
+// server re-validates authoritatively, but checking here first avoids firing a
+// PATCH that the server will reject — important for the multi-field project PATCH,
+// where a bad provider rejected mid-sequence would leave earlier fields (rename,
+// auto-reopen) already committed (the PATCH is not atomic across independent
+// fields). Empty list (pre-bootstrap) treats every provider as unconfigured.
+function providerIsConfigured(provider: string): boolean {
+  return (state.bootstrap?.available_providers ?? []).includes(provider)
+}
+
+// Ask the server to swap which provider a session uses. The provider is validated
+// against the configured list up front (the server re-validates), persisted for
+// the next launch, with the outcome (swapped / already-uses-it / still-running)
+// reported on the status stream. Resolves `true` on success, `false` (after
+// toasting) on a rejected/invalid provider so the dialog can stay open.
+export async function changeAgentProvider(
+  sessionId: string,
+  provider: string,
+): Promise<boolean> {
+  if (!providerIsConfigured(provider)) {
+    toast.error(`Provider "${provider}" is not configured.`)
+    return false
+  }
+  try {
+    await sessionsApi.patch(sessionId, { provider })
+    return true
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Could not change the provider.")
+    return false
+  }
+}
+
+// Toggle a session's auto-reopen preference (PATCH `auto_reopen`). Shared by the
+// desktop sidebar and the mobile session menu so the two surfaces never drift.
+export function toggleSessionAutoReopen(
+  sessionId: string,
+  enabled: boolean,
+): void {
+  sessionsApi
+    .patch(sessionId, { auto_reopen: enabled })
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not update auto-reopen.",
+      ),
+    )
 }
 
 // Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
@@ -1086,7 +1666,13 @@ export function changeAgentProvider(sessionId: string, provider: string): void {
 // dead, so even an already-focused pane must re-issue `subscribe`. The server
 // defers that subscribe until the freshly launched provider comes up.
 export function reconnectSession(sessionId: string, force: boolean): void {
-  socket.sendCommand("reconnect_session", { session_id: sessionId, force })
+  sessionsApi
+    .reconnect(sessionId, force)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not reconnect the session.",
+      ),
+    )
   setState({
     selectedTarget: { kind: "agent", sessionId },
     selectedSessionId: sessionId,
@@ -1103,7 +1689,13 @@ export function closeGlobalEnv(): void {
 }
 
 export function saveGlobalEnv(env: Record<string, string>): void {
-  socket.sendCommand("persist_global_env", { env })
+  configApi
+    .persistGlobalEnv(env)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not save the global environment.",
+      ),
+    )
 }
 
 export function openProjectSettings(projectId: string): void {
@@ -1122,9 +1714,33 @@ export function closeProjectInfo(): void {
   setState({ projectInfoTarget: null })
 }
 
+// Browse a directory for the add-project picker over REST (replaces the retired
+// `/ws` `browse_dir` → `dir_entries` round-trip). A null path starts at $HOME.
+// The reply is ignored once the dialog has closed so a late response can't
+// repopulate a closed picker.
+function runBrowse(path: string | null): void {
+  browseApi
+    .browse(path)
+    .then((res) => {
+      if (!state.addProjectOpen) return
+      setState({
+        browsePath: res.path,
+        browseEntries: res.entries,
+        browseLoading: false,
+      })
+    })
+    .catch((e) => {
+      if (!state.addProjectOpen) return
+      setState({ browseEntries: [], browseLoading: false })
+      toast.error(
+        e instanceof Error ? e.message : "Could not browse the directory.",
+      )
+    })
+}
+
 export function openAddProject(): void {
   setState({ addProjectOpen: true, browseLoading: true, browseEntries: [] })
-  socket.browseDir(null) // start at $HOME
+  runBrowse(null) // start at $HOME
 }
 
 export function closeAddProject(): void {
@@ -1135,7 +1751,7 @@ export function browseDir(path: string | null): void {
   // Navigating away abandons any pending/resolved branch inspection so a late
   // reply for the old selection can't resurface in the new directory.
   setState({ browseLoading: true, projectPathInspection: null })
-  socket.browseDir(path)
+  runBrowse(path)
 }
 
 // Fire the branch pre-flight for a selected git repo, mirroring the TUI's
@@ -1153,7 +1769,36 @@ export function inspectProjectPath(path: string): void {
       loading: true,
     },
   })
-  socket.inspectProjectPath(path)
+  // Resolve over REST (replaces the retired `/ws` `inspect_project_path` reply).
+  // Ignore a stale reply whose path no longer matches the pending inspection (the
+  // user picked a different repo, or the dialog closed) so a late frame can never
+  // repopulate a closed/changed selection.
+  projectsApi
+    .inspectPath(path)
+    .then((res) => {
+      if (state.projectPathInspection?.path !== path) return
+      setState({
+        projectPathInspection: {
+          path,
+          currentBranch: res.current_branch,
+          warning: res.warning,
+          error: null,
+          loading: false,
+        },
+      })
+    })
+    .catch((e) => {
+      if (state.projectPathInspection?.path !== path) return
+      setState({
+        projectPathInspection: {
+          path,
+          currentBranch: null,
+          warning: null,
+          error: e instanceof Error ? e.message : "Could not inspect the path.",
+          loading: false,
+        },
+      })
+    })
 }
 
 // Drop any pending/resolved inspection (e.g. the user deselected the repo).
@@ -1162,7 +1807,11 @@ export function clearProjectInspection(): void {
 }
 
 export function addProject(path: string, name: string): void {
-  socket.sendCommand("add_project", { path, name })
+  projectsApi
+    .create({ path, name })
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+    )
 }
 
 // Check out the repo's default branch first, then add it — the TUI's
@@ -1170,7 +1819,11 @@ export function addProject(path: string, name: string): void {
 // re-validates and rejects otherwise). The switch + add run server-side through
 // the worker chain; the status stream reports the outcome.
 export function addProjectCheckoutDefault(path: string, name: string): void {
-  socket.sendCommand("add_project_checkout_default", { path, name })
+  projectsApi
+    .create({ path, name, checkout_default: true })
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+    )
 }
 
 export function openRemoveProject(projectId: string): void {
@@ -1182,7 +1835,43 @@ export function closeRemoveProject(): void {
 }
 
 export function removeProject(projectId: string): void {
-  socket.sendCommand("remove_project", { project_id: projectId })
+  projectsApi
+    .remove(projectId)
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not remove the project."),
+    )
+}
+
+// Update a project's settings (provider / auto-reopen / startup-command / env)
+// in one tri-state PATCH. The caller (ProjectSettingsDialog) includes only the
+// fields that changed; an omitted field is left untouched, `null` clears it.
+export async function updateProjectSettings(
+  projectId: string,
+  patch: PatchProjectBody,
+): Promise<boolean> {
+  // Empty patch (nothing changed) is a successful no-op — let the dialog close.
+  if (Object.keys(patch).length === 0) return true
+  // Validate a provider SET (a non-null provider) up front: the PATCH dispatches
+  // its fields as independent wire sub-commands with no rollback, so a provider the
+  // server rejects mid-sequence would leave the earlier fields already committed.
+  // Catching it here (and the backend's matching up-front check) keeps a bad
+  // provider from partially applying. `null` clears the provider and needs no check.
+  if (
+    patch.provider != null &&
+    !providerIsConfigured(patch.provider)
+  ) {
+    toast.error(`Provider "${patch.provider}" is not configured.`)
+    return false
+  }
+  try {
+    await projectsApi.patch(projectId, patch)
+    return true
+  } catch (e) {
+    toast.error(
+      e instanceof Error ? e.message : "Could not update project settings.",
+    )
+    return false
+  }
 }
 
 // Refresh a project's source checkout from remote (the TUI's
@@ -1190,8 +1879,8 @@ export function removeProject(projectId: string): void {
 // against its source checkout, and reports busy/success/failure on the status
 // stream — nothing to do here but fire the command.
 export function pullProject(projectId: string): void {
-  git
-    .pullProject(projectId)
+  projectsApi
+    .pull(projectId)
     .catch((e) => toast.error(e instanceof Error ? e.message : "pull failed"))
 }
 
@@ -1211,7 +1900,7 @@ export function closeCheckoutDefaultBranch(): void {
 // server reports the outcome (switched / already on it / can't determine) on
 // the command result, so there is nothing to do here but fire the command.
 export function checkoutDefaultBranch(projectId: string): void {
-  git
+  projectsApi
     .checkoutDefault(projectId)
     .catch((e) =>
       toast.error(e instanceof Error ? e.message : "checkout failed")
@@ -1229,7 +1918,25 @@ export function openAttachWorktree(projectId: string): void {
     attachWorktreeEntries: [],
     attachWorktreeLoading: true,
   })
-  socket.listProjectWorktrees(projectId)
+  // Fetch the managed-worktree listing over REST (replaces the retired `/ws`
+  // `list_project_worktrees` → `project_worktrees` reply). Ignore a stale reply
+  // if the dialog closed (or switched projects) before it arrived.
+  projectsApi
+    .worktrees(projectId)
+    .then((res) => {
+      if (state.attachWorktreeTarget !== projectId) return
+      setState({
+        attachWorktreeEntries: res.entries,
+        attachWorktreeLoading: false,
+      })
+    })
+    .catch((e) => {
+      if (state.attachWorktreeTarget !== projectId) return
+      setState({ attachWorktreeEntries: [], attachWorktreeLoading: false })
+      toast.error(
+        e instanceof Error ? e.message : "Could not list the worktrees.",
+      )
+    })
 }
 
 export function closeAttachWorktree(): void {
@@ -1250,11 +1957,9 @@ export function attachWorktree(
   name: string,
 ): void {
   armCreateFocus(projectId)
-  socket.sendCommand("create_agent_from_worktree", {
-    project_id: projectId,
-    worktree_path: worktreePath,
-    name,
-  })
+  sessionsApi
+    .create({ kind: "from_worktree", project_id: projectId, worktree_path: worktreePath, name })
+    .catch((e) => toastCreateError(e, "Could not attach the worktree."))
 }
 
 // Open the new-agent dialog. The checkbox starts checked when
@@ -1291,10 +1996,36 @@ export function openCreateAgentFromPr(projectId: string): void {
 // lookup, so PR mode opens blank and the server's head-branch fallback applies.
 // Runs in the click handler that opens the dialog — never an effect — so there
 // is no set-state-in-effect.
+// Request a fresh pet name for the new-agent dialog over REST (replaces the
+// retired `/ws` `generate_agent_name` → `agent_name` reply). The TUI fills the
+// input with the generated name (that fill IS the preview) and remembers it so a
+// later uncheck can tell "still the generated name" from "user-edited". We mirror
+// that: fill the draft and stash the name. Ignored if the dialog closed or the
+// user unchecked the box before the reply landed (a stale reply must not refill).
+// A failure stops the spinner so the user can type a name by hand.
+function requestAgentName(): void {
+  browseApi
+    .agentName()
+    .then((res) => {
+      if (state.createAgentTarget !== null && state.createAgentRandomize) {
+        setState({
+          createAgentDraft: res.name,
+          createAgentGeneratedName: res.name,
+          createAgentNamePending: false,
+        })
+      }
+    })
+    .catch(() => {
+      if (state.createAgentTarget !== null) {
+        setState({ createAgentNamePending: false })
+      }
+    })
+}
+
 function openNameDialog(target: CreateAgentTarget): void {
   const randomize =
     target.kind !== "pr" &&
-    (state.viewModel?.randomize_agent_names_by_default ?? false)
+    (state.bootstrap?.randomize_agent_names_by_default ?? false)
   setState({
     createAgentTarget: target,
     createAgentDraft: "",
@@ -1303,7 +2034,7 @@ function openNameDialog(target: CreateAgentTarget): void {
     createAgentNamePending: randomize,
     createAgentPrInput: "",
   })
-  if (randomize) socket.generateAgentName()
+  if (randomize) requestAgentName()
 }
 
 export function closeCreateAgent(): void {
@@ -1340,7 +2071,7 @@ export function setCreateAgentDraft(raw: string): void {
 export function toggleCreateAgentRandomize(): void {
   if (!state.createAgentRandomize) {
     setState({ createAgentRandomize: true, createAgentNamePending: true })
-    socket.generateAgentName()
+    requestAgentName()
   } else {
     const keepText = state.createAgentDraft !== state.createAgentGeneratedName
     setState({
@@ -1354,18 +2085,34 @@ export function toggleCreateAgentRandomize(): void {
   }
 }
 
+// Surface a create-action REST error as a toast, EXCEPT a 409 Conflict. A 409
+// means the engine's in-flight create guard refused: it returns an `Ok`
+// error-toned status that the engine ALSO broadcasts over `/ws` (scoped to this
+// connection) and that the REST handler maps to 409. Toasting the 409 here would
+// double up — the user would see two identical toasts for one refusal. The `/ws`
+// status stream is the single surface for that case; every other status still
+// toasts. Network failures (`status === 0`) and all other codes are surfaced.
+function toastCreateError(e: unknown, fallback: string): void {
+  if (e instanceof SessionsApiError && e.status === 409) return
+  toast.error(e instanceof Error ? e.message : fallback)
+}
+
 // Ask the server to create a new agent in a project. An empty name lets the
 // server auto-generate a branch name (the equivalent outcome to the TUI's
 // generate-a-pet-name path). With the checkbox checked the input is effectively
 // never empty, so the empty path is the unchecked-and-blank case.
 export function createAgent(projectId: string, name: string): void {
-  socket.sendCommand("create_agent", { project_id: projectId, name })
+  sessionsApi
+    .create({ kind: "new", project_id: projectId, name })
+    .catch((e) => toastCreateError(e, "Could not create the agent."))
 }
 
 // Ask the server to fork an existing session into a fresh branched worktree.
 // Unlike create, a fork requires a non-empty name (the server rejects empty).
 export function forkAgent(sessionId: string, name: string): void {
-  socket.sendCommand("fork_session", { session_id: sessionId, name })
+  sessionsApi
+    .create({ kind: "fork", session_id: sessionId, name })
+    .catch((e) => toastCreateError(e, "Could not fork the session."))
 }
 
 // Ask the server to create an agent checked out on a GitHub PR's head branch.
@@ -1374,11 +2121,9 @@ export function forkAgent(sessionId: string, name: string): void {
 // TUI prompt default. The lookup+create runs asynchronously: the command returns
 // a busy status synchronously and the outcome arrives on the status stream.
 export function createAgentFromPr(projectId: string, pr: string, name: string): void {
-  socket.sendCommand("create_agent_from_pr", {
-    project_id: projectId,
-    pr,
-    name,
-  })
+  sessionsApi
+    .create({ kind: "from_pr", project_id: projectId, pr, name })
+    .catch((e) => toastCreateError(e, "Could not create the agent from the PR."))
 }
 
 // Submit the name dialog: dispatch create, fork, or create-from-PR based on the
@@ -1395,7 +2140,7 @@ export function submitNameDialog(name: string): void {
     // focus diff is scoped to that project. If the source vanished from the
     // ViewModel, skip auto-focus rather than arming an unscoped token that could
     // grab any project's next new session.
-    const projectId = state.viewModel?.sessions.find(
+    const projectId = state.spine?.sessions.find(
       (s) => s.id === target.sessionId,
     )?.project_id
     if (projectId) armCreateFocus(projectId)
@@ -1410,13 +2155,22 @@ export function submitNameDialog(name: string): void {
 // Optimistically reorder a project's sessions, then tell the server. `orderedIds`
 // MUST be the complete ordered set of that project's session ids — the server
 // validates it as a strict permutation and rejects partial/stale sets. The
-// overlay clears when the next ViewModel confirms the order (or on error).
+// overlay clears when the next spine confirms the order (or on error).
 export function reorderSessions(projectId: string, orderedIds: string[]): void {
   setState({ pendingSessionOrder: { projectId, ids: orderedIds } })
-  socket.sendCommand("reorder_sessions", {
-    project_id: projectId,
-    session_ids: orderedIds,
-  })
+  sessionsApi
+    .reorder(projectId, orderedIds)
+    .catch((e) => {
+      // A rejected reorder will never be reconciled by a spine (the server never
+      // persisted this order), so the optimistic overlay would otherwise linger
+      // forever — leaving the sidebar showing an order the server doesn't have and
+      // compounding on the next drag. Clear the order overlays so the UI snaps back
+      // to the authoritative spine order, then surface the failure.
+      setState(clearPendingOrders())
+      toast.error(
+        e instanceof Error ? e.message : "Could not reorder the sessions.",
+      )
+    })
 }
 
 // Sort every project's sessions by the chosen key, mirroring the TUI palette
@@ -1429,13 +2183,13 @@ export function reorderSessions(projectId: string, orderedIds: string[]): void {
 // We deliberately DON'T set the optimistic `pendingSessionOrder` overlay here.
 // That overlay holds a single project; a sort touches N projects, so an overlay
 // could only cover one of them and would leave the rest snapping anyway. The
-// ViewModel echo arrives within tens of milliseconds, so the brief reflow is
+// spine echo arrives within tens of milliseconds, so the brief reflow is
 // acceptable and keeps the single-project drag overlay invariant untouched.
 // Projects with fewer than two sessions are skipped — sorting them is a no-op
 // that would only churn the wire.
 export function sortAgents(by: SortKey): void {
-  const sessions = state.viewModel?.sessions ?? []
-  const projects = state.viewModel?.projects ?? []
+  const sessions = state.spine?.sessions ?? []
+  const projects = state.spine?.projects ?? []
   // A sort supersedes any in-flight drag: drop its overlay up front, or a
   // superseded drag order would linger on screen until something else clears
   // it (the overlay only retires on match/error/disconnect).
@@ -1444,40 +2198,66 @@ export function sortAgents(by: SortKey): void {
     const projectSessions = sessions.filter((s) => s.project_id === project.id)
     if (projectSessions.length < 2) continue
     const orderedIds = sortedSessionIds(projectSessions, by)
-    socket.sendCommand("reorder_sessions", {
-      project_id: project.id,
-      session_ids: orderedIds,
-    })
+    sessionsApi
+      .reorder(project.id, orderedIds)
+      .catch((e) =>
+        toast.error(
+          e instanceof Error ? e.message : "Could not reorder the sessions.",
+        ),
+      )
   }
 }
 
 // Optimistically reorder the projects, then tell the server. `orderedIds` MUST
 // be the complete ordered set of ALL project ids (both with and without agents);
 // the server validates it as a strict permutation. The overlay clears when the
-// next ViewModel confirms the order (or on error).
+// next spine confirms the order (or on error).
 export function reorderProjects(orderedIds: string[]): void {
   setState({ pendingProjectOrder: orderedIds })
-  socket.sendCommand("reorder_projects", { project_ids: orderedIds })
+  projectsApi
+    .reorder(orderedIds)
+    .catch((e) => {
+      // As with sessions: a rejected reorder is never reconciled by a spine, so
+      // the optimistic overlay would persist indefinitely. Clear it back to the
+      // authoritative order before surfacing the error.
+      setState(clearPendingOrders())
+      toast.error(
+        e instanceof Error ? e.message : "Could not reorder the projects.",
+      )
+    })
 }
 
 export function setPaletteOpen(open: boolean): void {
   setState({ paletteOpen: open })
 }
 
-// Run a macro by name against a target (an agent session id or a companion
-// terminal id). The engine resolves the macro's text, enforces the surface gate,
-// applies the newline transform, and writes to the target's PTY — the web only
-// names the target + macro. The verbose `Sent macro "<name>".` confirmation
-// rides the existing status lane (toast), so there is nothing to do here.
-export function runMacro(targetId: string, name: string): void {
-  socket.sendCommand("run_macro", { target_id: targetId, name })
+// Run a macro by name on the focused PTY. Since Phase 5 the web no longer sends a
+// server-side `run_macro` command: it resolves the macro's text from the bootstrap
+// document, applies the newline→Alt+Enter transform (`macroPayloadBytes`, an exact
+// port of the engine's), and writes the payload straight to the active PTY socket
+// as stdin — the same socket the focused terminal pane drives. The macro picker is
+// already filtered to the focused surface, so the active socket IS the macro's
+// target. No-op if the macro is unknown or no terminal is focused (no active
+// socket). The text is pasted WITHOUT a trailing submit, mirroring the TUI: the
+// user reviews it in the prompt and presses Enter to send.
+export function runMacro(name: string): void {
+  const macro = (state.bootstrap?.macros ?? []).find((m) => m.name === name)
+  if (!macro) return
+  // Defensive: only inject when a terminal is actually focused. During a focus
+  // switch the outgoing pane may not have cleared its registration yet; without
+  // a selected target the active socket is stale, and writing to it would paste
+  // the macro into the wrong (just-detached) PTY.
+  if (state.selectedTarget === null) return
+  const pty = getActivePtySocket()
+  if (pty === null) return
+  pty.sendInput(macroPayloadBytes(macro.text))
 }
 
-// Open the macro-editor dialog, seeding the draft from the current ViewModel
+// Open the macro-editor dialog, seeding the draft from the current bootstrap
 // macros (a fresh copy so edits don't mutate the shared model). Runs in the
 // click/palette handler that opens the dialog — never an effect.
 export function openMacrosDialog(): void {
-  const macros = state.viewModel?.macros ?? []
+  const macros = state.bootstrap?.macros ?? []
   setState({
     macrosDialogOpen: true,
     macrosDraft: macros.map((m) => ({ ...m })),
@@ -1490,11 +2270,23 @@ export function closeMacrosDialog(): void {
 
 // Persist the draft wholesale via `update_macros`. The server validates
 // (empty/duplicate names, empty text, unknown surface) and reports the outcome
-// on the status lane; a config reload refreshes `viewModel.macros`. The dialog
-// closes optimistically — a rejection surfaces as an error toast, and reopening
-// re-seeds from the (unchanged) ViewModel.
+// on the status lane; a config reload emits `config.changed`, refetching
+// `bootstrap.macros`. The dialog closes optimistically — a rejection surfaces as
+// an error toast, and reopening re-seeds from the (unchanged) bootstrap.
 export function saveMacros(macros: MacroView[]): void {
-  socket.sendCommand("update_macros", { entries: macros })
+  // `update_macros` is a WHOLESALE replace of the entire `[macros]` map. Before
+  // the bootstrap document has loaded, `openMacrosDialog` seeded an EMPTY draft,
+  // so saving would wipe the server's macros. Refuse until we hold the
+  // authoritative list (the Save button is also disabled in this window).
+  if (state.bootstrap === null) {
+    toast.error("Macros aren't loaded yet. Try again in a moment.")
+    return
+  }
+  configApi
+    .updateMacros(macros)
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not save the macros."),
+    )
   closeMacrosDialog()
 }
 
@@ -1520,7 +2312,10 @@ export function mobileNavigate(screen: MobileScreen): void {
 }
 
 export function reconnect(): void {
-  socket.reconnect()
+  // The events socket gives up after MAX_RECONNECT_ATTEMPTS and signals "failed";
+  // a manual reconnect restarts it. connect() resets closedByUser/attempts/delay,
+  // so it is safe to call on an exhausted socket.
+  eventsSocket.connect()
 }
 
 // Update the expanded sidebar width during a drag. Pass `persist` on release to
@@ -1533,20 +2328,29 @@ export function setSidebarWidth(width: string, persist = false): void {
 }
 
 // The Changes pane's effective visibility (desktop): the per-session override if
-// set, else the config default the ViewModel carries, else visible. Older
-// servers omit `show_changes_pane`, so a missing value reads as visible.
+// set, else the config default from the bootstrap document, else visible (the
+// pre-load window before the first bootstrap fetch lands).
 export function changesPaneVisible(s: DuxState): boolean {
-  return s.changesPaneOverride ?? s.viewModel?.show_changes_pane ?? true
+  return s.changesPaneOverride ?? s.bootstrap?.show_changes_pane ?? true
 }
 
 // Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
 // Changes actions menu) and persist the choice. The override is set
 // optimistically for an instant response; the server writes
-// config.ui.show_changes_pane and the next ViewModel broadcast confirms it, at
-// which point onViewModel drops the override so config is the single source of
-// truth across every connected client.
+// config.ui.show_changes_pane and emits `config.changed`, the refetched bootstrap
+// document carries the confirmed value, and `applyBootstrap` drops the override
+// so config is the single source of truth across every connected client.
 export function toggleChangesPane(): void {
   const next = !changesPaneVisible(state)
   setState({ changesPaneOverride: next })
-  socket.sendCommand("set_changes_pane_visible", { visible: next })
+  configApi
+    .setChangesPaneVisible(next)
+    .catch((e) => {
+      // Roll the optimistic override back so the pane doesn't strand in the
+      // toggled state when the persist fails.
+      setState({ changesPaneOverride: null })
+      toast.error(
+        e instanceof Error ? e.message : "Could not toggle the Changes pane.",
+      )
+    })
 }

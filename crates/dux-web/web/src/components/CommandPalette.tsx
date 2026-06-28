@@ -13,7 +13,7 @@ import { groupPaletteCommands } from "@/lib/paletteGroups"
 import { PALETTE_HANDLERS } from "@/lib/paletteRegistry"
 
 export function CommandPalette() {
-  const { paletteOpen, viewModel, auth } = useDux()
+  const { paletteOpen, bootstrap, auth } = useDux()
 
   // Global ⌘K / Ctrl-K handler.
   useEffect(() => {
@@ -50,7 +50,7 @@ export function CommandPalette() {
   // ViewModel projects the Web/Both subset (id + description, canonical order);
   // we render each entry whose id has a web handler, bucketed into app-menu
   // groups (Configuration / View / Projects) for the menu-like feel.
-  const paletteCommands = (viewModel?.palette_commands ?? []).filter(
+  const paletteCommands = (bootstrap?.palette_commands ?? []).filter(
     (cmd) => cmd.id in PALETTE_HANDLERS
   )
   const commandGroups = groupPaletteCommands(paletteCommands)

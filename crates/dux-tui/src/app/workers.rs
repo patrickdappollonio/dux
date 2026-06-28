@@ -266,7 +266,9 @@ impl App {
     pub(super) fn apply_reaction(&mut self, reaction: EventReaction) {
         match reaction {
             EventReaction::Nothing => {}
-            EventReaction::Status(StatusUpdate { tone, message, key }) => {
+            EventReaction::Status(StatusUpdate {
+                tone, message, key, ..
+            }) => {
                 // When a `StatusUpdate` carries a key (keyed operation), write it
                 // into the named slot so `most_recent_tui` can pick it up.
                 // Unkeyed updates (`key == None`) write the anonymous slot.

@@ -2,9 +2,8 @@
 //! through `EngineHandle`: requests over a BOUNDED tokio mpsc (so the handle is
 //! `Send + Sync` for use as axum state, and a misbehaving/flooding client cannot grow
 //! the queue without limit — see [`REQ_CHANNEL_CAPACITY`]), the engine thread polling it
-//! with `try_recv` on a tick (so it also drains worker events and refreshes the ViewModel
-//! watch); replies over tokio oneshots; the latest ViewModel JSON over a tokio watch
-//! channel.
+//! with `try_recv` on a tick (so it also drains worker events and fires the
+//! coarse spine-change/status/commit signals); replies over tokio oneshots.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -15,7 +14,9 @@ use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
 use dux_core::pty::PtyClient;
-use dux_core::statusline::{Generation, KeyedStatusController, KeyedWireStatus, StatusTone};
+use dux_core::statusline::{
+    Generation, KeyedStatusController, KeyedWireStatus, StatusScope, StatusTone,
+};
 use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -35,11 +36,33 @@ pub struct CommitMessageEvent {
     pub message: String,
 }
 
+/// Which half of the projects/sessions spine changed since the last tick. The
+/// engine loop fingerprints the projected spine each tick and fires the matching
+/// variant; the web layer's forwarder turns it into a coarse `projects.changed` /
+/// `sessions.changed` event so subscribed clients refetch `/api/v1/spine` (or the
+/// thin per-resource read).
+///
+/// A single coarse signal per side is intentional for Phase 3: the sessions side
+/// also covers session lifecycle/status, the `working` hysteresis flag, and the
+/// per-session terminal list (they all live in the sessions/sidebar projection).
+/// The spec's finer `session.status` / `session.working` / `terminals.changed`
+/// split is an optional later optimization and is deliberately NOT implemented here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpineChange {
+    Projects,
+    Sessions,
+}
+
 /// One unit of work for the engine thread.
 pub enum EngineRequest {
     ApplyWire(
         WireCommand,
         oneshot::Sender<Result<WireCommandOutcome, String>>,
+        /// Audience for any statuses this command mints. The actor sets
+        /// `engine.current_origin` to this for the duration of `apply_wire` and
+        /// resets it to [`StatusScope::All`] after, so a web operation's toasts
+        /// reach only the originating connection. `All` is the broadcast default.
+        StatusScope,
     ),
     /// A status from a non-engine producer (the ACME certificate-lifecycle task)
     /// to broadcast through the shared status controller so it auto-clears and
@@ -52,9 +75,48 @@ pub enum EngineRequest {
     SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
     /// Create a companion terminal for a session, replying `(terminal_id, label)`.
     CreateTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+    /// Resolve the owning session id of a companion terminal (instant lookup), or
+    /// `None` when the terminal id is unknown. Lets the nested PTY socket and the
+    /// terminal REST routes enforce that a `:tid` belongs to its path `:id` before
+    /// subscribing to or deleting it (the legacy `SubscribeTerminal`/`DeleteTerminal`
+    /// path looks terminals up by id alone and does not check session ownership).
+    TerminalSession(String, oneshot::Sender<Option<String>>),
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Snapshot the build-/config-static bootstrap projection (providers, macros,
+    /// palette commands, welcome tips, version, `ui.*` flags, gh availability,
+    /// global env) served by `GET /api/v1/bootstrap`. Instant clone off engine
+    /// state; refetched by the client on a `config.changed` event.
+    Bootstrap(oneshot::Sender<dux_core::viewmodel::BootstrapView>),
+    /// Snapshot the projects/sessions/sidebar spine served by the thin
+    /// per-resource reads (`/api/v1/projects`, `/api/v1/sessions`). Instant clone
+    /// off engine state; refetched by the client on a `projects.changed` /
+    /// `sessions.changed` event. The hot whole-spine read (`GET /api/v1/spine`)
+    /// instead uses [`EngineRequest::SpineJson`] (the loop's cached serialization).
+    Spine(oneshot::Sender<dux_core::viewmodel::SpineView>),
+    /// The pre-serialized whole-spine JSON for `GET /api/v1/spine`, served from the
+    /// loop's cache (rebuilt only when the spine actually changes) instead of
+    /// re-projecting + re-serializing on every client request. Handled inline in
+    /// the loop because the cache is loop-local state.
+    SpineJson(oneshot::Sender<String>),
+    /// Project ONLY the requested session for `GET /api/v1/sessions/:id` instead of
+    /// building the whole spine to find one session. `None` when the id is unknown
+    /// (the handler returns 404).
+    Session(
+        String,
+        oneshot::Sender<Option<dux_core::viewmodel::SessionView>>,
+    ),
+    /// Resolve the session id produced by a create op (the opaque id returned in
+    /// `WireCommandOutcome.created_op_id`). Lets the REST create handler poll for
+    /// ITS exact new session instead of a racy set-difference. `None` while the
+    /// create is still in flight or the entry has expired.
+    CreatedSessionForOp(String, oneshot::Sender<Option<String>>),
+    /// Bump and return the next monotonic changed-files revision for a session
+    /// (one actor round-trip over the engine's single SQLite connection). The
+    /// `ChangesService` calls this at each detected change; the counter is
+    /// persisted, so it never resets across restarts.
+    NextChangesRev(String, oneshot::Sender<u64>),
     /// The configured preferred editor name (`config.editor.default`, e.g.
     /// "cursor"/"vscode"/"zed"). Instant clone; the detect + launch I/O for the
     /// "open in editor" action runs off-thread in the server handler.
@@ -62,8 +124,8 @@ pub enum EngineRequest {
     /// Ask the engine to recompute the changed-files lists for a worktree (after
     /// an HTTP git mutation ran the git op off-thread). Fire-and-forget: the
     /// engine spawns its off-thread refresh worker, whose result flows back
-    /// through the normal `ChangedFilesReady` path and the coalesced ViewModel
-    /// watch — so every connected client sees the new state over the socket.
+    /// through the normal `ChangedFilesReady` path; the refreshed lists are then
+    /// served by the REST changed-files read.
     RefreshChangedFiles(String),
     /// Snapshot the inputs needed to classify a project's managed worktrees:
     /// the project, the dux paths, and the current sessions. Instant clones off
@@ -100,6 +162,15 @@ fn pty_for<'a>(engine: &'a Engine, id: &str) -> Option<&'a PtyClient> {
 
 const TICK: Duration = Duration::from_millis(50);
 
+/// Run the spine fingerprint/cache check every Nth tick rather than every tick,
+/// so idle serialization cost drops ~5x (one projection+serialize per ~250ms
+/// instead of per 50ms). Time-based transitions — notably the `working` idle flip
+/// when an agent stops streaming — are still detected within this window, and
+/// every real mutation still fires its coarse event within ~250ms. A per-mutation
+/// version counter would let the check run only on actual changes, but that is
+/// far more invasive and drift-prone; this throttle is the safe mitigation.
+const SPINE_CHECK_TICK_INTERVAL: u64 = 5;
+
 /// Per-iteration control for [`run_engine_loop`]. Checked once at the top of
 /// every outer loop iteration: `Continue` runs another tick, `Exit` stops the
 /// loop and returns the engine to the caller. The in-process flip's status
@@ -116,12 +187,28 @@ pub enum LoopControl {
 /// and run the same loop body.
 pub(crate) struct ActorLoopEnds {
     req_rx: mpsc::Receiver<EngineRequest>,
-    vm_tx: watch::Sender<String>,
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
-    commit_snapshot_tx: watch::Sender<Option<(CommitMessageEvent, Instant)>>,
+    /// Per-session connect snapshot of the last generated commit message, keyed by
+    /// session id. A map (not a single global slot) so a message generated for one
+    /// session can never evict another's: two open commit dialogs, or a rapid
+    /// session switch, each keep their own draft. Each entry is stamped with the
+    /// `Instant` it was generated so [`COMMIT_SNAPSHOT_TTL`] bounds staleness.
+    commit_snapshot_tx:
+        watch::Sender<std::collections::HashMap<String, (CommitMessageEvent, Instant)>>,
+    /// Fires `()` once per successful config reload so the web layer can emit a
+    /// `config.changed` event on its event bus (clients then refetch
+    /// `/api/v1/bootstrap`). Broadcast — the web forwarder is the only listener,
+    /// but a broadcast keeps the send a cheap fire-and-forget with no receiver.
+    config_reload_tx: broadcast::Sender<()>,
+    /// Fires a [`SpineChange`] whenever the projected projects-portion or
+    /// sessions+sidebar-portion of the spine changes, so the web layer emits a
+    /// coarse `projects.changed` / `sessions.changed` event (clients then refetch
+    /// `/api/v1/spine`). Broadcast — the web forwarder is the only listener, but a
+    /// broadcast keeps the send a cheap fire-and-forget with no receiver.
+    spine_change_tx: broadcast::Sender<SpineChange>,
     /// Shared with the caller-facing [`EngineHandle`] and every PTY forwarder.
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
@@ -236,16 +323,17 @@ const REQ_CHANNEL_CAPACITY: usize = 1024;
 /// opened commit dialog. See [`EngineHandle::commit_message_snapshot`].
 const COMMIT_SNAPSHOT_TTL: Duration = Duration::from_secs(90);
 
-/// Return the snapshot's message only if it is younger than `ttl`. Pure (takes
-/// `now`) so the TTL boundary is unit-testable without sleeping. Uses a saturating
-/// age so a clock that appears to go backwards yields age 0 (treated as fresh)
-/// rather than panicking.
+/// Return a single snapshot entry's message only if it is younger than `ttl`.
+/// Pure (takes `now`) so the TTL boundary is unit-testable without sleeping. Uses
+/// a saturating age so a clock that appears to go backwards yields age 0 (treated
+/// as fresh) rather than panicking. Takes `Option<&entry>` so a `HashMap::get`
+/// result feeds straight in.
 fn fresh_commit_snapshot(
-    slot: &Option<(CommitMessageEvent, Instant)>,
+    slot: Option<&(CommitMessageEvent, Instant)>,
     ttl: Duration,
     now: Instant,
 ) -> Option<CommitMessageEvent> {
-    slot.as_ref().and_then(|(event, generated_at)| {
+    slot.and_then(|(event, generated_at)| {
         (now.saturating_duration_since(*generated_at) < ttl).then(|| event.clone())
     })
 }
@@ -266,7 +354,6 @@ pub(crate) fn build_actor_channels_with_auth(
     auth_reload: Option<AuthReloadContext>,
 ) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::channel::<EngineRequest>(REQ_CHANNEL_CAPACITY);
-    let (vm_tx, vm_rx) = watch::channel(view_model_json(engine));
     // Status uses THREE channels driven from one place (the StatusEmitter):
     //  - `status_tx` (broadcast) delivers every status LIVE, so a transient
     //    pending flash ("Pulling…", "Launching…") is never coalesced away.
@@ -288,28 +375,42 @@ pub(crate) fn build_actor_channels_with_auth(
     // only delivered while it is younger than `COMMIT_SNAPSHOT_TTL`, so an old,
     // already-used message never pre-fills a freshly opened dialog. Live delivery
     // stays on `commit_msg_tx` (broadcast).
-    let (commit_snapshot_tx, commit_snapshot_rx) =
-        watch::channel::<Option<(CommitMessageEvent, Instant)>>(None);
+    let (commit_snapshot_tx, commit_snapshot_rx) = watch::channel::<
+        std::collections::HashMap<String, (CommitMessageEvent, Instant)>,
+    >(std::collections::HashMap::new());
+    // Config-reload notifier: the loop fires `()` on each successful reload and the
+    // web layer's forwarder turns it into a `config.changed` event. A small buffer
+    // is plenty — reloads are rare and the forwarder drains promptly.
+    let (config_reload_tx, _config_reload_rx) = broadcast::channel::<()>(8);
+    // Spine-change notifier: the loop fingerprints the spine each tick and fires a
+    // `SpineChange` per changed side; the web forwarder turns it into a coarse
+    // `projects.changed` / `sessions.changed` event. A small buffer is plenty — the
+    // forwarder drains promptly and a `Lagged` recovery just re-emits both coarse
+    // signals (idempotent refetches).
+    let (spine_change_tx, _spine_change_rx) = broadcast::channel::<SpineChange>(64);
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     (
         EngineHandle {
             req_tx,
-            view_model_rx: vm_rx,
             status_tx: status_tx.clone(),
             status_clear_tx: status_clear_tx.clone(),
             status_snapshot_rx,
             commit_msg_tx: commit_msg_tx.clone(),
             commit_snapshot_rx,
+            config_reload_tx: config_reload_tx.clone(),
+            spine_change_tx: spine_change_tx.clone(),
             shutdown_flag: Arc::clone(&shutdown_flag),
+            has_active_processes: Arc::clone(&engine.has_active_processes),
         },
         ActorLoopEnds {
             req_rx,
-            vm_tx,
             status_tx,
             status_clear_tx,
             status_snapshot_tx,
             commit_msg_tx,
             commit_snapshot_tx,
+            config_reload_tx,
+            spine_change_tx,
             shutdown_flag,
             auth_reload,
         },
@@ -346,12 +447,21 @@ struct PendingSubscribe {
 #[derive(Clone)]
 pub struct EngineHandle {
     req_tx: mpsc::Sender<EngineRequest>,
-    view_model_rx: watch::Receiver<String>,
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
     commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
-    commit_snapshot_rx: watch::Receiver<Option<(CommitMessageEvent, Instant)>>,
+    commit_snapshot_rx:
+        watch::Receiver<std::collections::HashMap<String, (CommitMessageEvent, Instant)>>,
+    /// Notifies on each successful config reload (see [`ActorLoopEnds`]). The web
+    /// layer subscribes via [`EngineHandle::subscribe_config_reloads`] and re-emits
+    /// a `config.changed` event so clients refetch `/api/v1/bootstrap`.
+    config_reload_tx: broadcast::Sender<()>,
+    /// Notifies on each projects/sessions spine change (see [`ActorLoopEnds`]). The
+    /// web layer subscribes via [`EngineHandle::subscribe_spine_changes`] and
+    /// re-emits a coarse `projects.changed` / `sessions.changed` event so clients
+    /// refetch `/api/v1/spine`.
+    spine_change_tx: broadcast::Sender<SpineChange>,
     /// Tripped when the server is tearing down (ReturnToTui, QuitProcess, or a
     /// `Shutdown` request). PTY forwarders poll it so their blocking
     /// `recv_timeout` loop exits promptly even when the engine — and therefore
@@ -359,6 +469,11 @@ pub struct EngineHandle {
     /// across the flip. Without this, a forwarder parked on a never-disconnecting
     /// channel would wedge the tokio blocking pool and hang the runtime teardown.
     shutdown_flag: Arc<AtomicBool>,
+    /// Shared clone of the engine's `has_active_processes` flag, so the
+    /// changed-files poller can read whether any agent PTY is live with a local
+    /// atomic load (deciding its 2s-vs-10s cadence) instead of an actor
+    /// round-trip. The engine writes it; the handle only reads it.
+    has_active_processes: Arc<AtomicBool>,
 }
 
 // Axum state must be `Send + Sync`; prove the handle satisfies that here so a future
@@ -370,10 +485,6 @@ const _: fn() = || {
 };
 
 impl EngineHandle {
-    pub fn view_model_json(&self) -> String {
-        self.view_model_rx.borrow().clone()
-    }
-
     /// The teardown flag PTY forwarders poll. Cloned into each forwarder so a
     /// blocking `recv_timeout` loop can break within one timeout window once the
     /// server starts winding down, even though the underlying `PtyClient`'s
@@ -384,17 +495,13 @@ impl EngineHandle {
         Arc::clone(&self.shutdown_flag)
     }
 
-    pub fn subscribe_view_model(&self) -> watch::Receiver<String> {
-        self.view_model_rx.clone()
-    }
-
     pub fn subscribe_status(&self) -> broadcast::Receiver<WireStatus> {
         self.status_tx.subscribe()
     }
 
     /// Subscribe to the clear broadcast. Each item is the key that was removed:
-    /// `None` = the anonymous slot cleared, `Some(key)` = a named keyed op.
-    /// Task 7's WS forwarder converts each into a `ServerMessage::StatusCleared`.
+    /// `None` = the anonymous slot cleared, `Some(key)` = a named keyed op. The
+    /// `/ws/events` socket converts each into a `status_cleared` event.
     pub fn subscribe_status_clears(&self) -> broadcast::Receiver<Option<String>> {
         self.status_clear_tx.subscribe()
     }
@@ -404,8 +511,7 @@ impl EngineHandle {
     /// a `Status` frame so it sees all active toasts immediately — e.g. a
     /// "Launching agent…" Busy that hasn't resolved yet — instead of a blank
     /// line until the next live update. An empty `Vec` means nothing is showing.
-    /// Mirrors `view_model_json` for the ViewModel and `commit_message_snapshot`
-    /// for the commit lane.
+    /// Mirrors `commit_message_snapshots` for the commit lane.
     pub fn status_snapshot(&self) -> Vec<KeyedWireStatus> {
         self.status_snapshot_rx.borrow().clone()
     }
@@ -426,16 +532,21 @@ impl EngineHandle {
     /// `StatusEmitter`. A no-op if the engine loop has already exited.
     pub fn emit_status(&self, status: WireStatus) {
         // `try_send` (not `send().await`): this is sync fire-and-forget, called
-        // from the ACME task. On a full channel the status is dropped — only under
-        // extreme overload — but a certificate-lifecycle status going missing is
-        // worth a breadcrumb, so log the Full case. A Closed channel means the
-        // engine is already gone (normal shutdown), so that case stays silent.
+        // from non-engine producers (the ACME certificate-lifecycle task, the
+        // changed-files `ChangesService`). On a full channel the status is dropped
+        // — only under extreme overload — but a dropped status is worth a
+        // breadcrumb, so log the Full case with the status's tone/key so the
+        // operator can tell WHICH producer's update went missing. A Closed channel
+        // means the engine is already gone (normal shutdown), so it stays silent.
+        let tone = status.tone.clone();
+        let key = status.key.clone();
         if let Err(mpsc::error::TrySendError::Full(_)) =
             self.req_tx.try_send(EngineRequest::EmitStatus(status))
         {
-            dux_core::logger::warn(
-                "engine request channel full: dropped an ACME/lifecycle status update",
-            );
+            dux_core::logger::warn(&format!(
+                "engine request channel full: dropped a non-engine status update \
+                 (tone={tone}, key={key:?})"
+            ));
         }
     }
 
@@ -443,27 +554,93 @@ impl EngineHandle {
         self.commit_msg_tx.subscribe()
     }
 
-    /// The last generated commit message, or `None` if none has been produced OR
-    /// the last one is older than [`COMMIT_SNAPSHOT_TTL`]. A client connecting
-    /// after generation completed — or in the connect/subscribe gap — sends this
-    /// once so a reconnect during a commit flow still fills the draft. The TTL
+    /// The last generated commit message for ONE session, or `None` if none has
+    /// been produced for it OR the last one is older than [`COMMIT_SNAPSHOT_TTL`].
+    /// Backs `GET /api/v1/sessions/:id/commit-message`. The per-session map means a
+    /// later message for a DIFFERENT session can never evict this one. The TTL
     /// bounds staleness so an old, already-used message never pre-fills a freshly
-    /// opened dialog. Mirrors `status_snapshot` for the commit lane.
-    pub fn commit_message_snapshot(&self) -> Option<CommitMessageEvent> {
+    /// opened dialog.
+    pub fn commit_message_for(&self, session_id: &str) -> Option<CommitMessageEvent> {
         fresh_commit_snapshot(
-            &self.commit_snapshot_rx.borrow(),
+            self.commit_snapshot_rx.borrow().get(session_id),
             COMMIT_SNAPSHOT_TTL,
             Instant::now(),
         )
     }
 
+    /// Every fresh per-session commit-message snapshot. A client connecting after
+    /// generation completed — or in the connect/subscribe gap — reads these once so
+    /// a reconnect during a commit flow still fills each session's draft. Stale
+    /// entries (older than [`COMMIT_SNAPSHOT_TTL`]) are filtered out. Mirrors
+    /// `status_snapshot` for the commit lane, now one entry per session.
+    pub fn commit_message_snapshots(&self) -> Vec<CommitMessageEvent> {
+        let now = Instant::now();
+        self.commit_snapshot_rx
+            .borrow()
+            .values()
+            .filter_map(|entry| fresh_commit_snapshot(Some(entry), COMMIT_SNAPSHOT_TTL, now))
+            .collect()
+    }
+
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
+        self.apply_wire_scoped(command, StatusScope::All).await
+    }
+
+    /// Like [`apply_wire`](Self::apply_wire) but tags the command with the
+    /// originating connection's [`StatusScope`], so any statuses it mints (the
+    /// synchronous outcome, deferred busies/finals, worker busies) are delivered
+    /// only to that connection. `apply_wire` delegates here with
+    /// [`StatusScope::All`] (broadcast), so existing callers are unchanged.
+    pub async fn apply_wire_scoped(
+        &self,
+        command: WireCommand,
+        origin: StatusScope,
+    ) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::ApplyWire(command, tx))
+            .send(EngineRequest::ApplyWire(command, tx, origin))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    /// Bump and return the next monotonic changed-files revision for `session_id`
+    /// (one actor round-trip). The counter is persisted in SQLite, so it never
+    /// resets across restarts. Returns `0` only if the engine thread is gone.
+    pub async fn next_changes_rev(&self, session_id: String) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let sid = session_id.clone();
+        if self
+            .req_tx
+            .send(EngineRequest::NextChangesRev(session_id, tx))
+            .await
+            .is_err()
+        {
+            // The engine thread is gone (shutdown). Returning the 0 fallback is
+            // safe (the client's `rev >=` apply guard treats it as redundant), but
+            // log it so a spurious non-advancing rev is explainable.
+            dux_core::logger::warn(&format!(
+                "next_changes_rev for session {sid}: engine thread gone; using rev 0 fallback"
+            ));
+            return 0;
+        }
+        match rx.await {
+            Ok(rev) => rev,
+            Err(_) => {
+                dux_core::logger::warn(&format!(
+                    "next_changes_rev for session {sid}: engine reply dropped; using rev 0 fallback"
+                ));
+                0
+            }
+        }
+    }
+
+    /// Whether any agent PTY is currently live, read as a local atomic load (no
+    /// actor round-trip). The changed-files poller uses this to pick its cadence
+    /// (2s when an agent is active, else 10s).
+    pub fn has_active_processes(&self) -> bool {
+        self.has_active_processes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn subscribe_pty(&self, session_id: String) -> Result<PtySubscription, String> {
@@ -511,6 +688,23 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
+    /// The session id that owns companion terminal `terminal_id`, or `None` when the
+    /// terminal is unknown or the engine thread is gone. The nested terminal PTY
+    /// socket and the `DELETE .../terminals/:tid` route use this to enforce that the
+    /// terminal belongs to the path's session before acting on it.
+    pub async fn terminal_session(&self, terminal_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::TerminalSession(terminal_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
     /// Gracefully wind down the engine: SIGTERM the agent/terminal children so
     /// CLIs can save state for a later resume, then stop the engine thread.
     /// Errors are ignored — if the thread is already gone, shutdown has already
@@ -535,6 +729,95 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// Snapshot the build-/config-static bootstrap projection for
+    /// `GET /api/v1/bootstrap`. `None` if the engine is gone (the handler then
+    /// returns 503), distinguishing a dead engine from a real empty payload.
+    pub async fn bootstrap(&self) -> Option<dux_core::viewmodel::BootstrapView> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::Bootstrap(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Snapshot the projects/sessions/sidebar spine for `GET /api/v1/spine` and the
+    /// thin per-resource reads. `None` if the engine is gone (the handler then
+    /// returns 503), distinguishing a dead engine from a real empty payload.
+    pub async fn spine(&self) -> Option<dux_core::viewmodel::SpineView> {
+        let (tx, rx) = oneshot::channel();
+        if self.req_tx.send(EngineRequest::Spine(tx)).await.is_err() {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// The pre-serialized whole-spine JSON for `GET /api/v1/spine`, served from the
+    /// loop's cache. `None` if the engine is gone (the handler then returns 503),
+    /// distinguishing a dead engine from a real payload.
+    pub async fn spine_json(&self) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::SpineJson(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Project ONLY the session with `id` for `GET /api/v1/sessions/:id`. The outer
+    /// `Option` is `None` if the engine is gone (503); the inner `None` means the
+    /// session id is unknown (404).
+    pub async fn session(&self, id: String) -> Option<Option<dux_core::viewmodel::SessionView>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::Session(id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Resolve the session id produced by create op `op_id` (returned in
+    /// `WireCommandOutcome.created_op_id`). `None` while the create is still in
+    /// flight, the entry has expired, or the engine thread is gone.
+    pub async fn created_session_for_op(&self, op_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::CreatedSessionForOp(op_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Subscribe to config-reload notifications. The web layer forwards each into a
+    /// `config.changed` event on its event bus so subscribed clients refetch
+    /// `/api/v1/bootstrap`.
+    pub fn subscribe_config_reloads(&self) -> broadcast::Receiver<()> {
+        self.config_reload_tx.subscribe()
+    }
+
+    /// Subscribe to projects/sessions spine-change notifications. The web layer
+    /// forwards each into a coarse `projects.changed` / `sessions.changed` event on
+    /// its event bus so subscribed clients refetch `/api/v1/spine`.
+    pub fn subscribe_spine_changes(&self) -> broadcast::Receiver<SpineChange> {
+        self.spine_change_tx.subscribe()
+    }
+
     /// The configured preferred editor name for the "open in editor" action
     /// (`config.editor.default`). Empty if the engine is gone — the handler then
     /// falls back to the first detected editor.
@@ -552,8 +835,8 @@ impl EngineHandle {
     }
 
     /// Fire-and-forget: ask the engine to recompute changed-files for `worktree`
-    /// (after an HTTP git mutation). The refreshed lists reach clients via the
-    /// ViewModel watch; nothing to await here.
+    /// (after an HTTP git mutation). The refreshed lists are served by the REST
+    /// changed-files read; nothing to await here.
     pub fn refresh_changed_files(&self, worktree: String) {
         // `try_send`: a dropped refresh under overload self-heals — the periodic
         // changed-files poller recomputes the lists on its next pass regardless.
@@ -643,12 +926,13 @@ pub(crate) fn run_engine_loop(
 ) -> Engine {
     let ActorLoopEnds {
         mut req_rx,
-        vm_tx,
         status_tx: thread_status_tx,
         status_clear_tx,
         status_snapshot_tx,
         commit_msg_tx: thread_commit_tx,
         commit_snapshot_tx,
+        config_reload_tx,
+        spine_change_tx,
         shutdown_flag,
         auth_reload,
     } = ends;
@@ -670,6 +954,20 @@ pub(crate) fn run_engine_loop(
     );
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
+    // Last-seen fingerprints of the two spine halves, so a coarse
+    // `projects.changed` / `sessions.changed` event fires only when the projection
+    // actually changes (not every idle tick). Initialized from the current state so
+    // the first tick does not emit a spurious change for an unchanged spine.
+    let (mut prev_projects_fp, mut prev_sessions_fp) = spine_fingerprints(&engine);
+    // Cache of the whole-spine JSON served to `GET /api/v1/spine`. Rebuilt only
+    // when a fingerprint check detects a real change (below), so per-client reads
+    // clone the cached string instead of re-projecting + re-serializing the spine.
+    // Seeded now so a request before the first change still serves a valid body.
+    let mut spine_json_cache =
+        serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+    // Tick counter for throttling the spine fingerprint/cache check (see
+    // SPINE_CHECK_TICK_INTERVAL) so it runs ~every 250ms rather than every tick.
+    let mut tick_count: u64 = 0;
     loop {
         // Caller-driven exit (the flip's status screen asked to stop). Checked
         // before any work so an exit takes effect on the next tick. PTYs are
@@ -773,8 +1071,25 @@ pub(crate) fn run_engine_loop(
                 };
                 // Update the connect snapshot BEFORE the live broadcast so a
                 // client subscribing in the gap sees a consistent watch value.
-                // The Instant stamps generation time for the snapshot TTL.
-                let _ = commit_snapshot_tx.send(Some((event.clone(), Instant::now())));
+                // The Instant stamps generation time for the snapshot TTL. Keyed by
+                // session id so a second session's message can't evict this one.
+                //
+                // Prune on insert so the map stays bounded on a long-running
+                // server: drop entries past the TTL (their reads already return
+                // `None`) and entries whose session no longer exists (deleted
+                // agents would otherwise linger until their TTL elapsed). The
+                // `engine` borrow gives the live session set; the entry we are
+                // about to add is re-inserted after, so it survives this pass.
+                let now = Instant::now();
+                let live: std::collections::HashSet<&str> =
+                    engine.sessions.iter().map(|s| s.id.as_str()).collect();
+                commit_snapshot_tx.send_modify(|map| {
+                    map.retain(|sid, (_, at)| {
+                        now.saturating_duration_since(*at) < COMMIT_SNAPSHOT_TTL
+                            && live.contains(sid.as_str())
+                    });
+                    map.insert(event.session_id.clone(), (event.clone(), now));
+                });
                 let _ = thread_commit_tx.send(event);
             }
 
@@ -804,6 +1119,12 @@ pub(crate) fn run_engine_loop(
                     server_rebind_settings_changed(&engine.config.server, &config.server);
                 match engine.apply_reloaded_config(*config) {
                     Ok(()) => {
+                        // Signal the web layer that config-static state changed so
+                        // it emits a `config.changed` event and clients refetch
+                        // `/api/v1/bootstrap`. Fire-and-forget: an `Err` only means
+                        // no forwarder is listening (e.g. the TUI flip), which is
+                        // fine.
+                        let _ = config_reload_tx.send(());
                         // Rebuild the login gate's shared snapshot from the
                         // freshly-applied `[auth]` users so credential changes
                         // (add/remove/change password via config or the TUI
@@ -883,19 +1204,19 @@ pub(crate) fn run_engine_loop(
 
         // Consume each provider's received-data flag once per tick and stamp
         // the engine's activity map, so bytes that arrived this tick count
-        // toward the `working` projection in the ViewModel refresh below. This
-        // is the single poll site for the web surface (the TUI run loop is the
-        // single poll site for the other surface; the two never run at once).
+        // toward the `working` projection in the spine read below. This is the
+        // single poll site for the web surface (the TUI run loop is the single
+        // poll site for the other surface; the two never run at once).
         engine.poll_pty_activity();
 
-        // Refresh companion-terminal foreground commands so the ViewModel's
+        // Refresh companion-terminal foreground commands so the spine's
         // `foreground_cmd` tracks what's running. The engine throttles this by
         // wall-clock (~2s), so calling it every tick is cheap.
         engine.refresh_terminal_foregrounds();
 
         // Reap agent/terminal PTYs whose child process exited so they stop
-        // lingering in `providers`/`companion_terminals` and disappear from
-        // the ViewModel, broadcasting a status for each so web clients learn.
+        // lingering in `providers`/`companion_terminals` and disappear from the
+        // spine, broadcasting a status for each so web clients learn.
         for pruned in engine.prune_exited_ptys() {
             let status = match pruned.kind {
                 PrunedPtyKind::Agent => {
@@ -937,23 +1258,44 @@ pub(crate) fn run_engine_loop(
             }
         });
 
-        // Only notify ViewModel subscribers when the projection actually changed,
-        // so idle ticks don't wake every WS client ~20x/second.
-        let json = view_model_json(&engine);
-        vm_tx.send_if_modified(|current| {
-            if *current != json {
-                *current = json;
-                true
-            } else {
-                false
+        // The projects/sessions/sidebar spine is signaled via coarse events.
+        // Fingerprint each half and emit only the
+        // changed side(s). A failed send means no web forwarder is listening (e.g.
+        // the TUI flip), which is fine. Throttled to every Nth tick (see
+        // SPINE_CHECK_TICK_INTERVAL) so idle serialization cost drops ~5x; every
+        // real change still fires its coarse event within the throttle window.
+        tick_count = tick_count.wrapping_add(1);
+        if tick_count.is_multiple_of(SPINE_CHECK_TICK_INTERVAL) {
+            let (projects_fp, sessions_fp) = spine_fingerprints(&engine);
+            let mut spine_changed = false;
+            if projects_fp != prev_projects_fp {
+                prev_projects_fp = projects_fp;
+                let _ = spine_change_tx.send(SpineChange::Projects);
+                spine_changed = true;
             }
-        });
+            if sessions_fp != prev_sessions_fp {
+                prev_sessions_fp = sessions_fp;
+                let _ = spine_change_tx.send(SpineChange::Sessions);
+                spine_changed = true;
+            }
+            // Refresh the cached `GET /api/v1/spine` JSON only when a half actually
+            // changed, so the common case (no change) skips the full serialization.
+            if spine_changed {
+                spine_json_cache =
+                    serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+            }
+        }
 
         let mut disconnected = false;
         loop {
             match req_rx.try_recv() {
                 Ok(EngineRequest::SubscribePty(session_id, reply)) => {
                     handle_subscribe(&mut engine, &mut pending, session_id, reply);
+                }
+                Ok(EngineRequest::SpineJson(reply)) => {
+                    // Serve the loop-local cache (handled here, not in
+                    // `handle_request`, which has no access to it).
+                    let _ = reply.send(spine_json_cache.clone());
                 }
                 Ok(EngineRequest::Shutdown(reply)) => {
                     // Trip the teardown flag first so any PTY forwarders exit
@@ -1031,11 +1373,12 @@ impl StatusEmitter {
         status: WireStatus,
     ) -> Result<usize, broadcast::error::SendError<WireStatus>> {
         let tone = StatusTone::from_wire(&status.tone);
-        let generation = self.controller.set(
+        let generation = self.controller.set_scoped(
             Instant::now(),
             status.key.clone(),
             tone,
             status.message.as_str(),
+            status.scope.clone(),
         );
         if let Some(ref k) = status.key {
             self.generations.insert(k.clone(), generation);
@@ -1075,19 +1418,40 @@ impl StatusEmitter {
                 key: up.key,
                 tone: up.tone,
                 message: up.message,
+                scope: up.scope,
             });
         }
     }
 }
 
-fn view_model_json(engine: &Engine) -> String {
-    serde_json::to_string(&engine.view_model()).unwrap_or_else(|_| "{}".to_string())
+/// Fingerprint the two halves of the projected spine as `(projects, sessions)`
+/// JSON strings, for the loop's coarse change detection.
+///
+/// The sidebar is deliberately EXCLUDED from both fingerprints: it is fully
+/// DERIVED from projects + sessions, so every sidebar input change is already
+/// captured by one of the two halves — a project name/`path_missing` change moves
+/// the projects fingerprint, and a session `project_id`/order/orphan transition
+/// moves the sessions fingerprint. Folding the sidebar (which embeds project
+/// fields) into the sessions half instead made a PROJECT-only change spuriously
+/// fire `sessions.changed`. Since the client refetches the whole `/spine` on
+/// either event, the sidebar still re-fetches correctly on whichever side fired.
+fn spine_fingerprints(engine: &Engine) -> (String, String) {
+    let spine = engine.spine();
+    let projects = serde_json::to_string(&spine.projects).unwrap_or_else(|_| "[]".to_string());
+    let sessions = serde_json::to_string(&spine.sessions).unwrap_or_else(|_| "[]".to_string());
+    (projects, sessions)
 }
 
 fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut StatusEmitter) {
     match req {
-        EngineRequest::ApplyWire(cmd, reply) => {
+        EngineRequest::ApplyWire(cmd, reply, origin) => {
+            // Tag every status this command mints with the originating
+            // connection. The engine reads `current_origin` at each mint site
+            // (the synchronous outcome, deferred busies/finals, worker busies);
+            // reset to `All` after so a later spontaneous status still broadcasts.
+            engine.current_origin = origin;
             let res = engine.apply_wire(cmd).map_err(|e| e.to_string());
+            engine.current_origin = StatusScope::All;
             // ALSO route the synchronous command-result status through the shared
             // controller — broadcast to EVERY client and auto-cleared on the same
             // policy as engine statuses — instead of leaving it only on the
@@ -1139,6 +1503,13 @@ fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut Statu
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
         }
+        EngineRequest::TerminalSession(terminal_id, reply) => {
+            let owner = engine
+                .companion_terminals
+                .get(&terminal_id)
+                .map(|t| t.session_id.clone());
+            let _ = reply.send(owner);
+        }
         EngineRequest::SessionWorktree(session_id, reply) => {
             let worktree = engine
                 .sessions
@@ -1146,6 +1517,36 @@ fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut Statu
                 .find(|s| s.id == session_id)
                 .map(|s| s.worktree_path.clone());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::Bootstrap(reply) => {
+            let _ = reply.send(engine.bootstrap());
+        }
+        EngineRequest::Spine(reply) => {
+            let _ = reply.send(engine.spine());
+        }
+        // SpineJson is handled inline in the loop (it serves the loop-local cache).
+        EngineRequest::SpineJson(_) => unreachable!("SpineJson handled in the loop"),
+        EngineRequest::Session(id, reply) => {
+            let _ = reply.send(engine.session_view(&id));
+        }
+        EngineRequest::CreatedSessionForOp(op_id, reply) => {
+            let _ = reply.send(engine.created_session_for_op(&op_id));
+        }
+        EngineRequest::NextChangesRev(session_id, reply) => {
+            // Single chokepoint over the engine's SQLite connection. On a DB
+            // error fall back to 0 (a non-advancing rev), which the client's
+            // `rev >=` apply guard treats as a redundant refetch rather than a
+            // crash; the error is logged for diagnosis.
+            let rev = engine
+                .session_store
+                .next_changes_rev(&session_id)
+                .unwrap_or_else(|e| {
+                    dux_core::logger::error(&format!(
+                        "next_changes_rev failed for session {session_id}: {e}"
+                    ));
+                    0
+                });
+            let _ = reply.send(rev);
         }
         EngineRequest::EditorDefault(reply) => {
             let _ = reply.send(engine.config.editor.default.clone());
@@ -1278,7 +1679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_wire_toggle_reflects_in_view_model() {
+    async fn apply_wire_toggle_reflects_in_spine_and_emits_sessions_change() {
         let (_tmp, paths) = temp_paths();
         {
             let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
@@ -1294,6 +1695,10 @@ mod tests {
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         let (handle, _join) = spawn_engine_thread(engine);
 
+        // Subscribe to spine changes BEFORE the mutation so we observe the loop's
+        // fingerprint detection fire `SpineChange::Sessions`.
+        let mut spine_rx = handle.subscribe_spine_changes();
+
         let outcome = handle
             .apply_wire(WireCommand::ToggleAgentAutoReopen {
                 session_id: "s1".to_string(),
@@ -1303,19 +1708,34 @@ mod tests {
             .expect("apply");
         assert!(outcome.status.is_some());
 
-        let mut rx = handle.subscribe_view_model();
+        // The session toggle changes the sessions half of the spine, so the loop
+        // emits `SpineChange::Sessions`.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            let json = rx.borrow_and_update().clone();
-            if json.contains("\"id\":\"s1\"") && json.contains("\"auto_reopen_enabled\":true") {
-                break;
+        let saw_sessions = loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), spine_rx.recv()).await
+            {
+                Ok(Ok(SpineChange::Sessions)) => break true,
+                Ok(Ok(SpineChange::Projects)) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break false,
+                Ok(Err(_)) | Err(_) => {}
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "view model never reflected toggle: {json}"
-            );
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), rx.changed()).await;
-        }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+        };
+        assert!(saw_sessions, "toggle must fire SpineChange::Sessions");
+
+        // The spine read now reflects the toggle.
+        let spine = handle.spine().await.expect("spine");
+        let session = spine
+            .sessions
+            .iter()
+            .find(|s| s.id == "s1")
+            .expect("session s1 present");
+        assert!(
+            session.auto_reopen_enabled,
+            "the spine must reflect the auto-reopen toggle"
+        );
     }
 
     #[tokio::test]
@@ -1394,18 +1814,18 @@ mod tests {
             message: "a generated commit message".to_string(),
         };
         // Fresh (age 0) → delivered.
-        let fresh = Some((event.clone(), now));
-        assert!(fresh_commit_snapshot(&fresh, COMMIT_SNAPSHOT_TTL, now).is_some());
+        let fresh = (event.clone(), now);
+        assert!(fresh_commit_snapshot(Some(&fresh), COMMIT_SNAPSHOT_TTL, now).is_some());
         // Just inside the TTL → still delivered.
-        let inside = Some((event.clone(), now));
+        let inside = (event.clone(), now);
         let near_edge = now + COMMIT_SNAPSHOT_TTL - Duration::from_secs(1);
-        assert!(fresh_commit_snapshot(&inside, COMMIT_SNAPSHOT_TTL, near_edge).is_some());
+        assert!(fresh_commit_snapshot(Some(&inside), COMMIT_SNAPSHOT_TTL, near_edge).is_some());
         // Older than the TTL → dropped, so it can't pre-fill a fresh dialog.
-        let stale = Some((event, now));
+        let stale = (event, now);
         let past_edge = now + COMMIT_SNAPSHOT_TTL + Duration::from_secs(1);
-        assert!(fresh_commit_snapshot(&stale, COMMIT_SNAPSHOT_TTL, past_edge).is_none());
+        assert!(fresh_commit_snapshot(Some(&stale), COMMIT_SNAPSHOT_TTL, past_edge).is_none());
         // No snapshot at all → None.
-        assert!(fresh_commit_snapshot(&None, COMMIT_SNAPSHOT_TTL, now).is_none());
+        assert!(fresh_commit_snapshot(None, COMMIT_SNAPSHOT_TTL, now).is_none());
     }
 
     #[tokio::test]
@@ -1415,6 +1835,21 @@ mod tests {
         // AND the live broadcast (so an already-connected client gets it at once).
         // Mirrors the status snapshot/broadcast split.
         let (_tmp, paths) = temp_paths();
+        // Seed s1 and s2 as real sessions so the on-insert prune (which drops
+        // entries whose session is no longer in the engine) keeps both snapshots.
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            for id in ["s1", "s2"] {
+                store
+                    .upsert_session(&sample_session(
+                        id,
+                        "p1",
+                        "feat",
+                        paths.root.to_string_lossy().as_ref(),
+                    ))
+                    .unwrap();
+            }
+        }
         let engine = bootstrap_engine(&paths).expect("bootstrap");
         // Clone the worker sender before the engine moves into its thread so the
         // test can inject the event the one-shot commit run would normally post.
@@ -1422,7 +1857,8 @@ mod tests {
         let (handle, _join) = spawn_engine_thread(engine);
 
         // Nothing generated yet → the connect snapshot is empty.
-        assert!(handle.commit_message_snapshot().is_none());
+        assert!(handle.commit_message_for("s1").is_none());
+        assert!(handle.commit_message_snapshots().is_empty());
 
         // Subscribe to the live broadcast before injecting so we prove live
         // delivery, not just the snapshot (a regression dropping the broadcast send
@@ -1464,10 +1900,93 @@ mod tests {
         // is guaranteed present once the broadcast has been observed) for a client
         // that connects after generation.
         let snap = handle
-            .commit_message_snapshot()
+            .commit_message_for("s1")
             .expect("snapshot holds the generated message");
         assert_eq!(snap.session_id, "s1");
         assert_eq!(snap.message, "a generated commit message");
+        // A DIFFERENT session's message must not evict this one (per-session map).
+        worker_tx
+            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
+                session_id: "s2".to_string(),
+                message: "another session's message".to_string(),
+            })
+            .expect("inject second worker event");
+        // Wait for s2 to land, then confirm s1 is still present and distinct.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while handle.commit_message_for("s2").is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            handle.commit_message_for("s1").map(|e| e.message),
+            Some("a generated commit message".to_string()),
+            "s2's generated message must not evict s1's snapshot"
+        );
+        assert_eq!(
+            handle.commit_message_for("s2").map(|e| e.message),
+            Some("another session's message".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_snapshot_prunes_dead_session_entries_on_insert() {
+        // The per-session commit-message snapshot prunes on every insert so it
+        // cannot grow unbounded on a long-running server: an entry whose session is
+        // no longer in the engine is dropped when the next message lands.
+        let (_tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_session(&sample_session(
+                    "live",
+                    "p1",
+                    "feat",
+                    paths.root.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let worker_tx = engine.worker_tx.clone();
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        // A message for a session NOT in the engine still lands (the actor doesn't
+        // validate the id), standing in for an entry left behind by a since-deleted
+        // session.
+        worker_tx
+            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
+                session_id: "ghost".to_string(),
+                message: "stale".to_string(),
+            })
+            .expect("inject ghost event");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while handle.commit_message_for("ghost").is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            handle.commit_message_for("ghost").is_some(),
+            "the ghost entry should land before the pruning insert"
+        );
+
+        // The next message (for a live session) prunes the dead "ghost" entry.
+        worker_tx
+            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
+                session_id: "live".to_string(),
+                message: "fresh".to_string(),
+            })
+            .expect("inject live event");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while handle.commit_message_for("live").is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            handle.commit_message_for("ghost").is_none(),
+            "the dead-session entry must be pruned when the next message is inserted"
+        );
+        assert_eq!(
+            handle.commit_message_for("live").map(|e| e.message),
+            Some("fresh".to_string()),
+            "a live session's freshly inserted message survives the prune"
+        );
     }
 
     #[tokio::test]
