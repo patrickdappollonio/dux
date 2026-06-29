@@ -62,21 +62,19 @@ describe("terminalTitle", () => {
     expect(terminalTitle(term({ foreground_cmd: null }))).toBe("Terminal 1")
   })
 
-  it("shows the TUI left-pane composite when a command is running", () => {
-    // Mirrors render.rs ~691-702: "{cmd} · {label}" so the running process is
-    // prominent while the terminal's stable identity stays visible.
-    expect(terminalTitle(term({ foreground_cmd: "vim" }))).toBe(
-      "vim · Terminal 1",
-    )
+  it("shows just the running app name when a command is running", () => {
+    // When an app is in the foreground the app name IS the terminal's identity,
+    // so we surface it alone rather than composing "{cmd} · {label}". The
+    // stable "Terminal N" label returns as soon as the app exits and the shell
+    // is idle again.
+    expect(terminalTitle(term({ foreground_cmd: "vim" }))).toBe("vim")
   })
 
   it("falls back to just the label when the command normalizes to empty", () => {
     expect(terminalTitle(term({ foreground_cmd: "   " }))).toBe("Terminal 1")
   })
 
-  it("normalizes the command inside the composite", () => {
-    expect(terminalTitle(term({ foreground_cmd: "  TERM htop  " }))).toBe(
-      "htop · Terminal 1",
-    )
+  it("normalizes the running app name", () => {
+    expect(terminalTitle(term({ foreground_cmd: "  TERM htop  " }))).toBe("htop")
   })
 })

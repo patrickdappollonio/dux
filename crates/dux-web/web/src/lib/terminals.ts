@@ -21,12 +21,12 @@ export function terminalForeground(t: TerminalView): string | null {
   return cmd.trim().length > 0 ? cmd : null
 }
 
-// The terminal's display title, mirroring the TUI's LEFT PANE composite
-// (crates/dux-tui/src/app/render.rs:~691-702): when a command is running the
-// row reads "{cmd} · {label}" so the running process is prominent while the
-// terminal's stable identity stays visible; idle terminals show just the
-// label.
+// The terminal's display title. When an app is running in the foreground its
+// command name IS the terminal's identity, so we surface it alone ("vim",
+// "htop") rather than composing "{cmd} · {label}". The running app is what the
+// user cares about, and the redundant "Terminal N" suffix only adds noise.
+// Idle terminals (shell in the foreground) show the stable "Terminal N" label,
+// which returns the moment the app exits.
 export function terminalTitle(t: TerminalView): string {
-  const cmd = terminalForeground(t)
-  return cmd ? `${cmd} · ${t.label}` : t.label
+  return terminalForeground(t) ?? t.label
 }
