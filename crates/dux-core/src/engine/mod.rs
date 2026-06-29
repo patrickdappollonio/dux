@@ -18,7 +18,7 @@ pub(crate) mod test_support;
 pub use command::Command;
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
-    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, AuthUserFinalOutcome,
+    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
     DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction,
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
@@ -198,22 +198,6 @@ pub struct Engine {
     /// at most once per [`FOREGROUND_REFRESH_INTERVAL`]. `None` until the first
     /// refresh runs. Wall-clock (not tick counts) per the design tenet.
     pub last_foreground_refresh: Option<Instant>,
-    /// A `WorkerEvent::AuthUsersPersisted` that arrived while a config-reload
-    /// barrier was open (`reloading == true`). The worker has already hashed and
-    /// persisted the user to bcrypt (the expensive part is done); only the
-    /// config.toml write + in-memory adoption are deferred here.
-    ///
-    /// Tuple fields: `(users, status_message, warn, status_op_id)`. Replayed
-    /// (write + in-memory update) when `ConfigReloadReady` closes the barrier,
-    /// AFTER the reloaded config is applied, so the user-initiated update wins
-    /// over the on-disk reloaded value. Stored as `Option` — `Some` only while a
-    /// reload is in flight AND an auth-users event arrived during that window.
-    /// Multiple arrivals within a single reload window are folded: the LAST one
-    /// wins, matching the semantics of multiple eager config writes (each
-    /// replaces the previous). `status_op_id` correlates the deferred final to
-    /// the TUI `HandlerStatusOp` minted at the add dispatch site, so the replay
-    /// resolves the right op (it rode in on `AuthUsersPersisted`).
-    pub pending_auth_users: Option<(Vec<String>, String, bool, Option<String>)>,
 
     /// Web-side `HandlerStatusOp`s awaiting completion, keyed by the op's opaque
     /// id. These three ops run entirely server-side (the web actor drives them);

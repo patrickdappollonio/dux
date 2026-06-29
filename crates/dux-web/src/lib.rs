@@ -4,21 +4,18 @@
 //! ## Entry points
 //!
 //! - [`run_server`] — the `dux server` CLI path. Boots the engine on its own
-//!   thread, builds the login gate's shared auth snapshot once from config, and
-//!   serves axum on a self-built tokio runtime until SIGINT/SIGTERM.
+//!   thread and serves axum on a self-built tokio runtime until SIGINT/SIGTERM.
 //! - [`serve_with_engine`] — the in-process TUI↔server flip. Serves the web UI
 //!   over an EXISTING live engine (PTYs intact) on the caller's thread, returning
 //!   the engine when serving stops so the TUI can resume around the same agents.
 //!
 //! ## Major pieces
 //!
-//! - [`auth`] — the session-backed login gate: bcrypt verification (in
-//!   `dux-core`), the per-IP login backoff, and the [`auth::SharedAuth`] snapshot
-//!   that a config reload rebuilds live.
-//! - [`server`] — the axum router (open vs gated routes, the gate middleware, the
-//!   same-origin WebSocket check) and the `/ws` bridge to the engine.
+//! - [`server`] — the axum router (all routes plain; dux is trusted-local with no
+//!   login gate) and the same-origin WebSocket check, plus the `/ws` bridge to the
+//!   engine.
 //! - [`engine_actor`] — the `EngineHandle` and the request/drain loop that owns
-//!   the `!Send` engine on its thread, plus the auth-reload hook.
+//!   the `!Send` engine on its thread.
 //!
 //! ## Dependency isolation
 //!
@@ -26,7 +23,6 @@
 //! the `dep-isolation` CI job, which runs `cargo tree -p dux-web` and fails if
 //! any TUI-only crate appears.
 
-pub mod auth;
 pub mod bootstrap;
 pub mod bootstrap_routes;
 pub mod browse_routes;
@@ -65,27 +61,13 @@ use axum::serve::ListenerExt;
 use dux_core::config::{DuxPaths, PlanAddr, ServerPlan};
 use dux_core::engine::Engine;
 
-use crate::console::{Banner, Console, ListenerRow, LoginRow};
+use crate::console::{Banner, Console, ListenerRow};
 use crate::engine_actor::LoopControl;
-use crate::host_guard::SESSION_SWEEP_PERIOD;
 use crate::server::RouterParams;
 
 /// Boot the engine on its own thread and serve the web UI on every address in
 /// the plan (one axum task per listener, sharing the router/state). Blocking
 /// entry — builds its own tokio runtime.
-///
-/// The auth-reload context's downgrade rule is keyed on `host_only`, computed in
-/// [`run_plain_http`] from the addresses that ACTUALLY bound using `is_loopback()`
-/// ONLY — NO Tailscale allowance. This is deliberately stricter than the startup
-/// bind gate's "local" classification (which treats a Tailscale bind as local). A
-/// Tailscale-bound server is reachable by other people's devices on the tailnet,
-/// so it is NOT host-only and a running gate must never silently downgrade to open
-/// on it. See [`auth::AuthState::rebuild`] for the full distinction.
-///
-/// `disable_auth` mirrors the `dux server --disable-auth` flag: with it set the
-/// login gate is off even when `[auth]` users exist. The gate's shared auth
-/// snapshot is built ONCE here from the engine's loaded config users, handed to
-/// both the engine actor (so a config reload rebuilds it live) and the router.
 ///
 /// `version` is the dux crate version the binary passes in (`CARGO_PKG_VERSION`)
 /// for the console banner header.
@@ -94,15 +76,8 @@ use crate::server::RouterParams;
 /// engine's loaded `[server] color`/`access_log` and threaded into the serve
 /// paths. The TUI flip ([`serve_with_engine`]) NEVER constructs a real console —
 /// it keeps its themed status screen and must not print to stdout.
-pub fn run_server(
-    paths: DuxPaths,
-    plan: ServerPlan,
-    disable_auth: bool,
-    version: String,
-) -> Result<()> {
-    match plan {
-        ServerPlan::PlainHttp { addrs } => run_plain_http(paths, addrs, disable_auth, version),
-    }
+pub fn run_server(paths: DuxPaths, plan: ServerPlan, version: String) -> Result<()> {
+    run_plain_http(paths, plan.addrs, version)
 }
 
 /// Build the `dux server` console from the engine's loaded config: detect color
@@ -138,10 +113,10 @@ fn tailscale_bind_warning(addr: SocketAddr, err: &std::io::Error) -> String {
 }
 
 /// A successfully bound listener paired with its requested address (so the URL
-/// list and `host_only` are computed from what ACTUALLY bound, not what was
-/// requested). `required` is the [`PlanAddr`] tag, retained so the post-bind
-/// banner can label a best-effort leg (the LOCAL MODE Tailscale address) as
-/// "Tailscale" and a required non-loopback leg as a plain public address.
+/// list is computed from what ACTUALLY bound, not what was requested).
+/// `required` is the [`PlanAddr`] tag, retained so the post-bind banner can label
+/// a best-effort leg (the LOCAL MODE Tailscale address) as "Tailscale" and a
+/// required non-loopback leg as a plain public address.
 #[derive(Debug)]
 struct BoundListener {
     addr: SocketAddr,
@@ -151,9 +126,9 @@ struct BoundListener {
 
 /// Bind every [`PlanAddr`], honoring its required/best-effort tag.
 ///
-/// - REQUIRED (loopback, every explicit `listen_addrs` entry): a bind failure is
-///   FATAL — it logs a `logger::error` with the failing address and returns the
-///   error (with address context) so the serve aborts. This is the
+/// - REQUIRED (the configured `host:port` or an explicit `--bind`): a bind
+///   failure is FATAL — it logs a `logger::error` with the failing address and
+///   returns the error (with address context) so the serve aborts. This is the
 ///   explicit-failure tenet: the operator named this address.
 /// - BEST-EFFORT (the Tailscale leg of LOCAL MODE): a bind failure logs a WARN
 ///   naming the address, the cause, and both remedies, collects the SAME text in
@@ -208,12 +183,11 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 }
 
 /// The plain-HTTP serve path: one axum task per listener (loopback, Tailscale,
-/// LAN, or proxy-fronted), sharing the router/state, plus the periodic
-/// expired-session sweep. Shutdown rides the [`ServeShutdown`] watch lane: a
-/// SIGINT/SIGTERM trips the watch, and the FIRST listener to die records its
-/// error and trips the watch too, so the siblings get a graceful shutdown and the
-/// error propagates (genuine first-error wind-down — no longer a no-abort JoinSet
-/// wait). The single sweep rides the same lane.
+/// LAN, or proxy-fronted), sharing the router/state. Shutdown rides the
+/// [`ServeShutdown`] watch lane: a SIGINT/SIGTERM trips the watch, and the FIRST
+/// listener to die records its error and trips the watch too, so the siblings get
+/// a graceful shutdown and the error propagates (genuine first-error wind-down —
+/// no longer a no-abort JoinSet wait).
 ///
 /// A BEST-EFFORT (Tailscale) address whose bind fails (a third-party process
 /// already holds it) does NOT abort the serve: it warns loudly to `dux.log` and
@@ -223,26 +197,20 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 /// so a startup broadcast would reach zero receivers. `dux.log` and the CLI
 /// startup banner (which flags a best-effort leg) are the delivery surfaces for
 /// the `dux server` path; the TUI palette flip delivers through its own status
-/// line, unchanged. `host_only` is computed from the addresses that ACTUALLY
-/// bound, so a dropped Tailscale leg leaves a loopback-only (host-only) server.
+/// line, unchanged.
 /// Build the plain-HTTP startup banner from the BOUND legs (each an
 /// `(addr, required)` pair). Each leg is labeled by what it is:
 /// - loopback → "Local (loopback)"
 /// - a best-effort (LOCAL MODE Tailscale) leg → "Tailscale"
-/// - a required non-loopback leg (an explicit `listen_addrs` public/LAN entry) →
+/// - a required non-loopback leg (an explicit `--bind` public/LAN entry) →
 ///   "Listen"
 ///
-/// The login row is green ("login enabled — N user(s)"), a loud red disabled
-/// warning, or — with zero valid users — a "No login required" row whose tone is
-/// derived from the legs' reachability (see [`login_row`]/[`reachability`]).
 /// Best-effort bind degradations (a busy Tailscale address) become ⚠ rows. Pure
 /// (over `(SocketAddr, bool)` pairs, not the live listeners) so it is
 /// unit-testable without binding sockets.
 fn plain_http_banner(
     version: &str,
     bound: &[(SocketAddr, bool)],
-    disable_auth: bool,
-    user_count: usize,
     bind_warnings: &[String],
 ) -> Banner {
     let listeners = bound
@@ -264,17 +232,20 @@ fn plain_http_banner(
     Banner {
         version: version.to_string(),
         mode: "plain HTTP".to_string(),
-        login: login_row(disable_auth, reachability(bound), user_count),
         warnings: bind_warnings.to_vec(),
         listeners,
     }
 }
 
 /// How far the server can be reached, classified from the BOUND legs (each an
-/// `(addr, required)` pair where `required` is true for explicit `listen_addrs`
+/// `(addr, required)` pair where `required` is true for explicit `--bind`
 /// public/LAN entries and false for best-effort Tailscale local-mode legs).
 /// Worst-wins: any required non-loopback leg makes it `Public`; otherwise any
 /// best-effort non-loopback leg makes it `Tailscale`; otherwise `LoopbackOnly`.
+///
+/// Retained for the post-bind safety note a later task surfaces from the bound
+/// reachability; not yet wired into the banner.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reachability {
     /// Every bound leg is genuine loopback — nothing off-host can reach it.
@@ -282,11 +253,12 @@ enum Reachability {
     /// A best-effort (Tailscale local-mode) non-loopback leg is bound, and no
     /// public/LAN leg is.
     Tailscale,
-    /// A required non-loopback leg (an explicit `listen_addrs` public/LAN entry)
+    /// A required non-loopback leg (an explicit `--bind` public/LAN entry)
     /// is bound.
     Public,
 }
 
+#[allow(dead_code)]
 fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
     let mut result = Reachability::LoopbackOnly;
     for (addr, required) in bound {
@@ -301,51 +273,11 @@ fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
     result
 }
 
-/// The banner's login-state row. `--disable-auth` is a loud red warning; an
-/// enabled gate (≥1 valid user) is green with the count.
-///
-/// Zero valid users means the gate is OFF (per `auth::auth_enabled`) WITHOUT
-/// `--disable-auth` — the truthful row is "No login required", never an enabled
-/// 0-user row (the old behavior, which lied about a protecting gate). Its tone
-/// tracks reachability: a loopback-only bind is the calm local-dev case; a
-/// non-loopback leg is a warning, stronger for a public/LAN leg than for a
-/// best-effort Tailscale one.
-fn login_row(disable_auth: bool, reach: Reachability, user_count: usize) -> LoginRow {
-    if disable_auth {
-        LoginRow::Disabled
-    } else if user_count == 0 {
-        match reach {
-            Reachability::LoopbackOnly => LoginRow::NoLoginRequired {
-                reachable: false,
-                public: false,
-            },
-            Reachability::Tailscale => LoginRow::NoLoginRequired {
-                reachable: true,
-                public: false,
-            },
-            Reachability::Public => LoginRow::NoLoginRequired {
-                reachable: true,
-                public: true,
-            },
-        }
-    } else {
-        LoginRow::Enabled { count: user_count }
-    }
-}
-
-fn run_plain_http(
-    paths: DuxPaths,
-    addrs: Vec<PlanAddr>,
-    disable_auth: bool,
-    version: String,
-) -> Result<()> {
+fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Result<()> {
     let engine = bootstrap::bootstrap_engine(&paths)?;
-    let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
     // Build the vite-style CLI console (color from [server] color) + the access-log
-    // toggle, and capture the login-state inputs for the post-bind banner BEFORE
-    // the engine moves into the actor thread.
+    // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
-    let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
     // Capture the connection cap before the engine moves into the actor thread.
     let max_ws_connections = engine.config.server.max_websocket_connections;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -359,58 +291,30 @@ fn run_plain_http(
         // the post-bind banner as ⚠ rows (and are already in dux.log).
         let (bound, bind_warnings) = bind_plan_addrs(&addrs).await?;
 
-        // host-only ⇔ EVERY *bound* listener is genuine loopback. A Tailscale (or
-        // public) address that bound makes the server reachable off-host, so the
-        // downgrade rule must refuse a live gate-disable there. Computed from what
-        // bound so a dropped Tailscale leg correctly leaves a host-only server.
-        let host_only = bound.iter().all(|b| b.addr.ip().is_loopback());
-
         // Post-bind banner: built from what ACTUALLY bound, so it shows truth (no
         // pre-bind hedging). Replaces main.rs's pre-bind URL println. Project the
         // bound listeners into (addr, required) pairs for the pure banner builder.
         let banner_legs: Vec<(SocketAddr, bool)> =
             bound.iter().map(|b| (b.addr, b.required)).collect();
-        console.banner(&plain_http_banner(
-            &version,
-            &banner_legs,
-            disable_auth,
-            user_count,
-            &bind_warnings,
-        ));
+        console.banner(&plain_http_banner(&version, &banner_legs, &bind_warnings));
 
         // Spawn the engine on its own std thread (it runs the synchronous engine
-        // loop, not a tokio task) now that `host_only` is known from the BOUND
-        // addresses. The shared auth `Arc` goes to both the actor (live reload
-        // refresh) and the router (login/gate reads); the console reaches the
-        // reload arm so a live reload echoes on the terminal.
-        let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
-            engine,
-            engine_actor::AuthReloadContext {
-                shared: Arc::clone(&auth),
-                disable_auth,
-                host_only,
-                console: console.clone(),
-            },
-        );
+        // loop, not a tokio task).
+        let (handle, _join) = engine_actor::spawn_engine_thread(engine);
 
         // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
-        // failure flips its watch, every serve task awaits it, and the sweep rides
-        // the same lane so it exits with the server rather than lingering.
-        let (shutdown, sweep_shutdown_rx) = ServeShutdown::new();
-        // Build ONE app + store, clone the router across listeners (it is a cheap
-        // `Arc`-backed service). The store is shared (an `Arc`), so the single
-        // sweep prunes the same map every listener serves. The console + access-log
-        // toggle ride into the router so WS/auth handlers and the access middleware
-        // emit to the terminal.
-        let (app, store) = server::build_app(
+        // failure flips its watch and every serve task awaits it.
+        let shutdown = ServeShutdown::new();
+        // Build ONE app, clone the router across listeners (it is a cheap
+        // `Arc`-backed service). The console + access-log toggle ride into the
+        // router so the WS handlers and the access middleware emit to the terminal.
+        let app = server::build_app(
             handle.clone(),
-            Arc::clone(&auth),
             axum::Router::new(),
             RouterParams::plain_http()
                 .with_console(console.clone(), access_log)
                 .with_max_websocket_connections(max_ws_connections),
         );
-        let sweep = host_guard::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
 
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
         // down gracefully (the same trigger a first-listener failure uses).
@@ -472,11 +376,9 @@ fn run_plain_http(
                 ));
             }
         }
-        // Stop the sweep, then SIGTERM the agents (they save state for a later
-        // resume), mark their sessions Detached, then exit; Drop hard-kills any
-        // straggler.
+        // SIGTERM the agents (they save state for a later resume), mark their
+        // sessions Detached, then exit; Drop hard-kills any straggler.
         shutdown.trigger();
-        let _ = sweep.await;
         handle.shutdown().await;
         match shutdown.take_error() {
             Some(e) => Err(e),
@@ -541,16 +443,13 @@ struct ServeShutdown {
 }
 
 impl ServeShutdown {
-    fn new() -> (Self, tokio::sync::watch::Receiver<bool>) {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        (
-            Self {
-                failed: Arc::new(AtomicBool::new(false)),
-                error: Arc::new(std::sync::Mutex::new(None)),
-                shutdown_tx,
-            },
-            shutdown_rx,
-        )
+    fn new() -> Self {
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        Self {
+            failed: Arc::new(AtomicBool::new(false)),
+            error: Arc::new(std::sync::Mutex::new(None)),
+            shutdown_tx,
+        }
     }
 
     /// A fresh receiver on the shutdown lane (one per serve task).
@@ -611,24 +510,6 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     }
 }
 
-/// Classify a set of live std listeners for the auth-reload DOWNGRADE rule.
-///
-/// Returns `true` (host-only) only when EVERY listener's local address is
-/// genuine loopback. A Tailscale (or any non-loopback) listener makes the server
-/// reachable off-host, so it returns `false` and the live gate cannot silently
-/// downgrade to open there. This is intentionally STRICTER than the startup bind
-/// gate's "local" classification, which treats a Tailscale bind as local — see
-/// [`auth::AuthState::rebuild`]. A listener whose local address cannot be read is
-/// treated as NOT loopback (fail closed: never accidentally classify an unknown
-/// listener as host-only).
-fn resolve_host_only(listeners: &[std::net::TcpListener]) -> bool {
-    listeners.iter().all(|l| {
-        l.local_addr()
-            .map(|a| a.ip().is_loopback())
-            .unwrap_or(false)
-    })
-}
-
 /// Serve the web UI over an EXISTING engine on the CALLER's thread, returning
 /// the engine when serving stops. This is the in-process TUI↔server flip's
 /// entry point: the TUI hands its live `Engine` (PTYs running, owned on the main
@@ -657,34 +538,7 @@ pub fn serve_with_engine(
     // writes NOTHING to stdout — but it captures every lifecycle event into the
     // shared ring that drives the status screen's Activity panel.
     let console = Console::capture(activity);
-    // The flip never disables auth (there is no TUI `--disable-auth` path), and
-    // the flip preset's engine config typically has no `[auth]` users, so the
-    // gate is off and the UX is unchanged. Building the snapshot from the live
-    // engine config still means a user added to config + reload-config turns the
-    // gate on mid-flip. The same `Arc` is threaded into both the actor (live
-    // reload) and the router.
-    let auth = auth::shared_auth(&engine.config.auth.users, false);
-    // The downgrade rule is keyed on `host_only`, computed from the ACTUAL
-    // listeners: TRUE only when EVERY listener is genuine loopback. The flip's
-    // `local_addrs` may include the machine's Tailscale address — and although
-    // the startup bind gate treats that as "local", the downgrade rule must NOT:
-    // a Tailscale bind is reachable by other devices on the shared tailnet, so a
-    // running gate must never silently open there. A loopback-only flip stays
-    // host-only (a reload that removes the last user is allowed); a flip that
-    // bound the Tailscale address flips host_only false (such a reload is
-    // refused). `resolve_host_only` centralises the per-listener classification.
-    let host_only = resolve_host_only(&listeners);
-    let (handle, ends) = engine_actor::build_actor_channels_with_auth(
-        &engine,
-        Some(engine_actor::AuthReloadContext {
-            shared: Arc::clone(&auth),
-            disable_auth: false,
-            host_only,
-            // The capture console writes nothing to stdout (the status screen
-            // owns the terminal) but records reload events into the Activity ring.
-            console: console.clone(),
-        }),
-    );
+    let (handle, ends) = engine_actor::build_actor_channels(&engine);
     engine_actor::spawn_global_workers(&mut engine);
 
     // Grab the teardown flag before the handle moves into the router. We trip it
@@ -739,37 +593,30 @@ pub fn serve_with_engine(
     // `record_failure`. The control closure polls `is_failed()` so a listener
     // death also breaks the engine loop, and `take_error()` surfaces the death to
     // the caller.
-    let (shutdown, sweep_shutdown_rx) = ServeShutdown::new();
+    let shutdown = ServeShutdown::new();
     // Set by the signal task; polled by the control closure so a SIGINT/SIGTERM
     // received while serving breaks the engine loop too (not just axum). Distinct
     // from the failure flag because a signal means QuitProcess, a failure means
     // ReturnToTui-with-error.
     let signal_quit = Arc::new(AtomicBool::new(false));
 
-    // Build ONE app + session store, shared across listeners (the router is a
-    // cheap `Arc`-backed service; the store is an `Arc`). The flip is plain HTTP
-    // by type, so no Secure cookie. The periodic expired-session sweep prunes the
-    // shared store and stops when the shutdown watch flips on teardown.
-    // `build_app` constructs the `ChangesService`, which spawns its supervised
-    // poller via `tokio::spawn` — that needs an entered runtime, and the flip is
-    // not yet inside `block_on` here, so enter the runtime for the build.
-    let (app, sweep_store) = {
+    // Build ONE app, shared across listeners (the router is a cheap `Arc`-backed
+    // service). `build_app` constructs the `ChangesService`, which spawns its
+    // supervised poller via `tokio::spawn` — that needs an entered runtime, and
+    // the flip is not yet inside `block_on` here, so enter the runtime for the
+    // build.
+    let app = {
         let _guard = runtime.enter();
         server::build_app(
             handle.clone(),
-            Arc::clone(&auth),
             axum::Router::new(),
             RouterParams::plain_http()
                 // The capture console keeps the access log OFF (it is never wanted
                 // in the panel, and access() never reaches emit() to be captured
-                // anyway) while WS/auth handlers feed lifecycle events into the ring.
+                // anyway) while the WS handlers feed lifecycle events into the ring.
                 .with_console(console.clone(), false)
                 .with_max_websocket_connections(engine.config.server.max_websocket_connections),
         )
-    };
-    let sweep_task = {
-        let _guard = runtime.enter();
-        host_guard::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx)
     };
 
     // One axum serve task per listener, all sharing the same router/state and the
@@ -858,15 +705,13 @@ pub fn serve_with_engine(
 
     // Trigger graceful axum shutdown and wait (bounded) for ALL server tasks to
     // wind down. A single bounded join over the whole set keeps a wedged client
-    // connection on any listener from hanging the flip back to the TUI. The same
-    // watch flip also stops the session sweep task; await it (bounded) too.
+    // connection on any listener from hanging the flip back to the TUI.
     shutdown.trigger();
     runtime.block_on(async {
         let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, async {
             while server_tasks.join_next().await.is_some() {}
         })
         .await;
-        let _ = tokio::time::timeout(SERVER_JOIN_TIMEOUT, sweep_task).await;
     });
     // Tear the runtime down with a bounded timeout. An implicit `drop(runtime)`
     // would block forever on any parked `spawn_blocking` task (drop cannot abort
@@ -1008,10 +853,9 @@ async fn next_terminate_signal(
 #[cfg(test)]
 mod tests {
     use super::{
-        Reachability, ServeShutdown, bind_plan_addrs, login_row, plain_http_banner, reachability,
-        resolve_host_only, tailscale_bind_warning, wait_for_shutdown,
+        Reachability, ServeShutdown, bind_plan_addrs, plain_http_banner, reachability,
+        tailscale_bind_warning, wait_for_shutdown,
     };
-    use crate::console::LoginRow;
     use dux_core::config::PlanAddr;
     use dux_core::engine::Command;
 
@@ -1127,72 +971,6 @@ mod tests {
     }
 
     #[test]
-    fn login_row_disabled_when_auth_flag_set() {
-        // --disable-auth wins regardless of reachability or user count.
-        assert!(matches!(
-            login_row(true, Reachability::LoopbackOnly, 0),
-            LoginRow::Disabled
-        ));
-        assert!(matches!(
-            login_row(true, Reachability::Public, 3),
-            LoginRow::Disabled
-        ));
-    }
-
-    #[test]
-    fn login_row_enabled_with_count() {
-        // ≥1 valid user is the green enabled row, reachability irrelevant.
-        match login_row(false, Reachability::Public, 2) {
-            LoginRow::Enabled { count } => assert_eq!(count, 2),
-            other => panic!("expected enabled, got {other:?}"),
-        }
-        match login_row(false, Reachability::LoopbackOnly, 1) {
-            LoginRow::Enabled { count } => assert_eq!(count, 1),
-            other => panic!("expected enabled, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn login_row_zero_users_loopback_is_no_login_required_muted() {
-        // Zero users on a loopback-only bind: the gate is OFF, so the honest row
-        // is the calm muted "No login required (local only)" — never an enabled
-        // 0-user row (which would lie about a protecting gate).
-        assert!(matches!(
-            login_row(false, Reachability::LoopbackOnly, 0),
-            LoginRow::NoLoginRequired {
-                reachable: false,
-                public: false,
-            }
-        ));
-    }
-
-    #[test]
-    fn login_row_zero_users_tailscale_is_no_login_required_warning() {
-        // A best-effort Tailscale leg is reachable off-host → warning, but not the
-        // stronger public wording (public: false).
-        assert!(matches!(
-            login_row(false, Reachability::Tailscale, 0),
-            LoginRow::NoLoginRequired {
-                reachable: true,
-                public: false,
-            }
-        ));
-    }
-
-    #[test]
-    fn login_row_zero_users_public_is_no_login_required_public_warning() {
-        // A required public/LAN leg is reachable → the strongest "No login
-        // required" warning (public: true).
-        assert!(matches!(
-            login_row(false, Reachability::Public, 0),
-            LoginRow::NoLoginRequired {
-                reachable: true,
-                public: true,
-            }
-        ));
-    }
-
-    #[test]
     fn reachability_worst_wins_across_legs() {
         // Loopback-only.
         assert_eq!(
@@ -1226,71 +1004,21 @@ mod tests {
             (addr("100.64.0.5:8080"), false), // best-effort → Tailscale
             (addr("203.0.113.7:8080"), true), // required non-loopback → Listen
         ];
-        let banner = plain_http_banner("0.1.0", &legs, false, 1, &[]);
+        let banner = plain_http_banner("0.1.0", &legs, &[]);
         assert_eq!(banner.mode, "plain HTTP");
         assert_eq!(banner.listeners.len(), 3);
         assert_eq!(banner.listeners[0].label, "Local (loopback)");
         assert_eq!(banner.listeners[0].url, "http://127.0.0.1:8080");
         assert_eq!(banner.listeners[1].label, "Tailscale");
         assert_eq!(banner.listeners[2].label, "Listen");
-        assert!(matches!(banner.login, LoginRow::Enabled { count: 1 }));
     }
 
     #[test]
     fn plain_http_banner_carries_degradation_warnings() {
         let legs = vec![(addr("127.0.0.1:8080"), true)];
         let warnings = vec!["Tailscale: 100.64.0.1:8080 busy — serving without it".to_string()];
-        let banner = plain_http_banner("0.1.0", &legs, false, 0, &warnings);
+        let banner = plain_http_banner("0.1.0", &legs, &warnings);
         assert_eq!(banner.warnings, warnings);
-        // Zero users on a loopback-only bind → the muted "No login required (local
-        // only)" row, never an enabled 0-user row and never disabled.
-        assert!(matches!(
-            banner.login,
-            LoginRow::NoLoginRequired {
-                reachable: false,
-                public: false,
-            }
-        ));
-    }
-
-    #[test]
-    fn plain_http_banner_zero_users_public_leg_is_public_warning() {
-        // A required public/LAN leg with zero users → the strongest "No login
-        // required" warning, derived from the bound legs.
-        let legs = vec![(addr("127.0.0.1:8080"), true), (addr("0.0.0.0:8080"), true)];
-        let banner = plain_http_banner("0.1.0", &legs, false, 0, &[]);
-        assert!(matches!(
-            banner.login,
-            LoginRow::NoLoginRequired {
-                reachable: true,
-                public: true,
-            }
-        ));
-    }
-
-    #[test]
-    fn plain_http_banner_zero_users_tailscale_leg_is_tailscale_warning() {
-        // A best-effort Tailscale leg with zero users → the warning row, but not
-        // the stronger public wording.
-        let legs = vec![
-            (addr("127.0.0.1:8080"), true),
-            (addr("100.64.0.5:8080"), false),
-        ];
-        let banner = plain_http_banner("0.1.0", &legs, false, 0, &[]);
-        assert!(matches!(
-            banner.login,
-            LoginRow::NoLoginRequired {
-                reachable: true,
-                public: false,
-            }
-        ));
-    }
-
-    #[test]
-    fn plain_http_banner_disabled_auth_row() {
-        let legs = vec![(addr("0.0.0.0:8080"), true)];
-        let banner = plain_http_banner("0.1.0", &legs, true, 0, &[]);
-        assert!(matches!(banner.login, LoginRow::Disabled));
     }
 
     #[test]
@@ -1301,7 +1029,8 @@ mod tests {
         // load-bearing logic, tested directly because forcing a real axum accept
         // loop to error mid-serve is inherently flaky. Now exercised through the
         // ONE shared [`ServeShutdown`] primitive every serve path uses.
-        let (shutdown, mut shutdown_rx) = ServeShutdown::new();
+        let shutdown = ServeShutdown::new();
+        let mut shutdown_rx = shutdown.subscribe();
 
         let first = shutdown.record_failure(anyhow::anyhow!("listener A died"));
         assert!(first, "the first failure must win");
@@ -1333,7 +1062,7 @@ mod tests {
         // a plain `trigger()` (a SIGINT/SIGTERM or the flip's engine loop exiting)
         // must resolve `wait_for_shutdown` WITHOUT recording any error, so a clean
         // stop is not mistaken for a listener death.
-        let (shutdown, _rx) = ServeShutdown::new();
+        let shutdown = ServeShutdown::new();
         let waiter = shutdown.subscribe();
         shutdown.trigger();
         // Resolves promptly (bounded so a regression fails rather than hangs).
@@ -1356,7 +1085,7 @@ mod tests {
         // winds the others down. This is the run_plain_http first-error behavior
         // exercised over a real accept loop (cheap, deterministic — no flaky
         // mid-serve error injection needed: we trip the lane the sibling would).
-        let (shutdown, _rx) = ServeShutdown::new();
+        let shutdown = ServeShutdown::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
         let task_shutdown = shutdown.subscribe();
@@ -1386,46 +1115,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_host_only_true_for_loopback_only_listeners() {
-        // Two loopback listeners → host-only (a loopback-only flip permits the
-        // documented downgrade on reload).
-        let a = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback v4");
-        let b = std::net::TcpListener::bind("[::1]:0").expect("bind loopback v6");
-        assert!(
-            resolve_host_only(&[a, b]),
-            "loopback-only listeners must classify as host-only"
-        );
-    }
-
-    #[test]
-    fn resolve_host_only_false_when_a_non_loopback_listener_is_present() {
-        // A loopback listener PLUS a non-loopback (wildcard `0.0.0.0`, standing in
-        // for a Tailscale/public bind we can't allocate in CI) → NOT host-only,
-        // so the live gate downgrade is refused. This is the F1 guard at the
-        // resolution layer: any reachable listener flips host_only false even when
-        // a loopback listener is also present.
-        let loopback = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let wildcard = std::net::TcpListener::bind("0.0.0.0:0").expect("bind wildcard");
-        assert!(
-            !resolve_host_only(&[loopback, wildcard]),
-            "a non-loopback listener must flip host_only false"
-        );
-        // And a sole non-loopback listener is likewise not host-only.
-        let only_wildcard = std::net::TcpListener::bind("0.0.0.0:0").expect("bind wildcard");
-        assert!(!resolve_host_only(&[only_wildcard]));
-    }
-
-    #[test]
-    fn resolve_host_only_empty_is_vacuously_true() {
-        // No listeners: `all` is vacuously true. Not a real runtime case (the flip
-        // always binds at least loopback), but pins the boundary.
-        assert!(resolve_host_only(&[]));
-    }
-
-    /// Light smoke test that the public dux-core API can be invoked from
-    /// dux-web without TUI imports. Real architectural enforcement of the
-    /// "no TUI deps" rule lives in the `dep-isolation` CI job.
     #[test]
     fn dux_core_command_is_constructible() {
         let cmd = Command::OpenPath {

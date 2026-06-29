@@ -3,26 +3,16 @@
 //! REST (`/api/v1/*`); the sockets carry only change events + status (events) and
 //! terminal byte streams (PTY).
 //!
-//! ## Route structure and the auth gate
+//! ## Route structure
 //!
-//! Routes split into OPEN and GATED groups. The split is a CONVENTION, not a
-//! compile-time guarantee — nothing stops a route from being misplaced into the
-//! open group — so add every new data route to the `gated` sub-router below to
-//! keep it behind the gate:
+//! dux is a trusted-local tool: there is no login gate. Every route — static
+//! assets, `/healthz`, all `/api/v1/*` reads and actions, and every WS upgrade
+//! (`/ws/events` and the per-PTY sockets) — is served plainly.
 //!
-//! - OPEN: static assets, `/healthz`, `/api/login`, `/api/me`, `/api/logout`.
-//!   The SPA must load (and call `/api/me`) to render the login screen, so these
-//!   cannot require a session. `/api/logout` is idempotent, so it is open too.
-//! - GATED: every `/api/v1/*` route and every WS upgrade (`/ws/events` and the
-//!   per-PTY sockets). When auth is on, the gate middleware rejects with `401`
-//!   BEFORE the WS upgrade, so the browser sees a clean HTTP response rather than
-//!   a socket that opens and immediately closes.
-//!
-//! The Origin check on every WS upgrade runs REGARDLESS of auth (cross-site
-//! WebSocket hijacking defense): a browser attaches the page's `Origin`, and we
-//! only allow same-host origins. Non-browser clients (no `Origin`) are allowed —
-//! documented tradeoff: a CLI/test client is trusted to not be a hijacked browser
-//! tab.
+//! The Origin check on every WS upgrade still runs (cross-site WebSocket
+//! hijacking defense): a browser attaches the page's `Origin`, and we only allow
+//! same-host origins. Non-browser clients (no `Origin`) are allowed — documented
+//! tradeoff: a CLI/test client is trusted to not be a hijacked browser tab.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,40 +23,23 @@ use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
-use tower_sessions::cookie::SameSite;
-use tower_sessions::cookie::time::Duration as CookieDuration;
-use tower_sessions::{Expiry, Session, SessionManagerLayer};
 
 use dux_core::statusline::{KeyedWireStatus, StatusScope};
 
-use crate::auth::{self, RateLimiter, SharedAuth};
 use crate::changes::ChangesService;
 use crate::console::Console;
 use crate::engine_actor::{EngineHandle, SpineChange};
 use crate::event_bus::{self, Event, EventBus};
-use crate::host_guard::SweepableMemoryStore;
 
 #[derive(Clone)]
 pub struct AppState {
     pub engine: EngineHandle,
-    /// Parsed credentials + gate flag, shared so a config reload can rebuild it
-    /// (see `engine_actor`). Read briefly by the login/me handlers and the gate.
-    pub auth: SharedAuth,
-    /// Per-IP login backoff. Shared (cheap `Arc` clone) so all login requests
-    /// hit the same counters.
-    pub rate_limiter: RateLimiter,
-    /// How often a live, authenticated WebSocket re-verifies that its user
-    /// still exists (see [`handle_events_socket`]/[`handle_pty_socket`]). The HTTP
-    /// gate cannot revoke an ALREADY-upgraded socket, so this periodic recheck
-    /// closes that gap. A constructor-injectable field so the revocation e2e can
-    /// drive a short window instead of waiting the production cadence.
-    pub ws_recheck_period: std::time::Duration,
     /// The `dux server` terminal console. A real (stdout) console on the CLI
     /// serve paths; a [`Console::noop`] for the TUI flip (which owns the
-    /// terminal) and every test that does not assert console output. WS/auth
-    /// handlers emit life events through it; the access middleware reads it too.
+    /// terminal) and every test that does not assert console output. WS handlers
+    /// emit life events through it; the access middleware reads it too.
     pub console: Console,
     /// Whether the per-request access log is enabled (`[server] access_log`).
     /// The access middleware checks this AND `console.is_active()` before
@@ -108,37 +81,15 @@ pub struct AppState {
 /// paste, so legitimate input is never truncated.
 const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
-/// Build the router with the login gate OFF (no `[auth]` users). Kept as the
-/// zero-argument entry the existing test harnesses and any no-auth caller use;
-/// it delegates to [`router_with_auth`] with an empty, disabled [`AuthState`].
+/// Build the router. dux is trusted-local with no login gate, so every route is
+/// plain. The single-argument entry the test harnesses and any caller use.
 pub fn router(engine: EngineHandle) -> Router {
-    router_with_auth(engine, auth::shared_auth(&[], false))
+    build_app(engine, Router::new(), RouterParams::plain_http())
 }
-
-/// Build the axum router with an explicit shared auth snapshot, plain-HTTP
-/// defaults (no Secure cookie — see [`RouterParams`]). The session store is
-/// discarded here; callers that need to sweep expired sessions (the production
-/// serve paths) use [`build_app`] instead to keep a handle on the store.
-///
-/// `auth` carries the parsed credentials and the gate flag; when it reports the
-/// gate disabled, the gate middleware passes everything through (today's UX). The
-/// session layer is always installed (it is inert when no session is created), so
-/// turning auth on via a config reload needs no router rebuild.
-pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
-    build_app(engine, auth, Router::new(), RouterParams::plain_http()).0
-}
-
-/// Production cadence for the live `/ws` user-existence recheck. Short enough
-/// that a revoked user's open socket dies within a few seconds, long enough that
-/// the per-socket `Vec` scan under a brief read lock is negligible overhead.
-const WS_RECHECK_PERIOD: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Knobs for the serve paths.
 #[derive(Clone)]
 pub struct RouterParams {
-    /// `/ws` user-existence recheck cadence (injectable so the revocation e2e can
-    /// drive a short window).
-    pub ws_recheck_period: std::time::Duration,
     /// The console handler events (and the access middleware) emit through.
     /// Defaults to [`Console::noop`] so the flip and tests stay silent; the CLI
     /// serve paths replace it with a real stdout console via [`with_console`].
@@ -153,12 +104,11 @@ pub struct RouterParams {
 }
 
 impl RouterParams {
-    /// Plain-HTTP defaults: production recheck cadence, a no-op console, no
-    /// access log. Used by the loopback/Tailscale/proxy serve paths and every
-    /// test harness; the CLI paths layer a real console on with [`with_console`].
+    /// Plain-HTTP defaults: a no-op console, no access log. Used by the
+    /// loopback/Tailscale/proxy serve paths and every test harness; the CLI paths
+    /// layer a real console on with [`with_console`].
     pub fn plain_http() -> Self {
         Self {
-            ws_recheck_period: WS_RECHECK_PERIOD,
             console: Console::noop(),
             access_log: false,
             max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
@@ -183,76 +133,15 @@ impl RouterParams {
     }
 }
 
-/// Like [`router_with_auth`] but with an injectable `/ws` recheck period so the
-/// revocation e2e can drive a short window instead of the production cadence.
-/// Plain-HTTP defaults otherwise.
-pub fn build_router_with_recheck(
-    engine: EngineHandle,
-    auth: SharedAuth,
-    extra_gated: Router<AppState>,
-    ws_recheck_period: std::time::Duration,
-) -> Router {
-    build_app(
-        engine,
-        auth,
-        extra_gated,
-        RouterParams {
-            ws_recheck_period,
-            console: Console::noop(),
-            access_log: false,
-            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
-        },
-    )
-    .0
-}
-
-/// Shared router builder, returning BOTH the router and the session store so a
-/// caller can run the periodic expired-session sweep against it (the store is an
-/// `Arc` clone, so sweeping the returned handle prunes the SAME map the router
-/// uses). `extra_gated` is merged INTO the gated sub-router before the gate
-/// middleware is layered on, so any route it carries inherits the session gate
-/// exactly as `/ws` does. Production callers pass an empty router; a test injects
-/// a probe route to prove the gate covers arbitrary data routes, not just `/ws`
-/// (see [`tests::gated_data_route_is_401_without_session`]).
+/// Build the dux web router. dux is trusted-local: there is no login gate, so
+/// every route is served plainly. `extra_gated` is merged into the router as-is
+/// (a test seam for an injected probe route); production callers pass an empty
+/// router.
 pub fn build_app(
     engine: EngineHandle,
-    auth: SharedAuth,
     extra_gated: Router<AppState>,
     params: RouterParams,
-) -> (Router, SweepableMemoryStore) {
-    // In-memory session store: sessions die with the server (documented v1
-    // limitation — a restart forces re-login). It is a `SweepableMemoryStore`
-    // rather than tower-sessions' `MemoryStore` because that store never evicts
-    // EXPIRED records (its `load` skips them, but they linger in the map until the
-    // process exits). The sweepable store implements `ExpiredDeletion`; the serve
-    // paths spawn a periodic `delete_expired` sweep against the returned handle so
-    // memory stays bounded on a long-lived server with login churn. (Deferral 3.)
-    // Returned alongside the router so the caller owns that sweep handle.
-    let store = SweepableMemoryStore::new();
-    let router = build_app_with_store(engine, auth, extra_gated, params, store.clone());
-    (router, store)
-}
-
-/// Store-injectable core of [`build_app`]. Production always uses [`build_app`],
-/// which creates a [`SweepableMemoryStore`] and returns it so the serve paths can
-/// run the expiry sweep against it; this generic form lets an in-crate test inject
-/// a `tower_sessions::SessionStore` that fails on demand to exercise the handlers'
-/// session-error branches (e.g. a `cycle_id`/`insert` failure during login, which
-/// must still refund the rate-limit charge). The `store` is consumed by the session
-/// layer, so a caller that needs the sweep handle (see [`build_app`]) must clone its
-/// `Arc`-backed store before passing it here. `Clone` is required because
-/// `Router::layer` needs the session service to be cloneable. `pub(crate)`: a test
-/// seam, not part of the crate's public API.
-pub(crate) fn build_app_with_store<S>(
-    engine: EngineHandle,
-    auth: SharedAuth,
-    extra_gated: Router<AppState>,
-    params: RouterParams,
-    store: S,
-) -> Router
-where
-    S: tower_sessions::SessionStore + Clone + 'static,
-{
+) -> Router {
     // A zero cap is a valid-but-drastic setting ("refuse all new connections").
     // Warn loudly at startup so an accidental 0 isn't a silent web-UI lock-out —
     // every upgrade would 503 with no other clue (explicit failure over silence).
@@ -285,9 +174,6 @@ where
     spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
     let state = AppState {
         engine,
-        auth,
-        rate_limiter: RateLimiter::default(),
-        ws_recheck_period: params.ws_recheck_period,
         console: params.console,
         access_log: params.access_log,
         ws_semaphore: Arc::new(tokio::sync::Semaphore::new(
@@ -299,26 +185,13 @@ where
         pty_size_owners: Arc::new(PtySizeOwners::default()),
     };
 
-    // HttpOnly and SameSite=Strict are the tower-sessions defaults but we set them
-    // explicitly so the intent is visible and a future default change can't
-    // silently weaken the cookie.
-    let session_layer = SessionManagerLayer::new(store)
-        .with_name(auth::SESSION_COOKIE_NAME)
-        .with_http_only(true)
-        .with_same_site(SameSite::Strict)
-        .with_secure(false)
-        .with_expiry(Expiry::OnInactivity(CookieDuration::days(
-            auth::SESSION_INACTIVITY_DAYS,
-        )));
-
-    // GATED routes: the gate middleware runs before these. By convention, add
-    // every new data route here so it inherits the session requirement — the
-    // structure can't stop a route from being misplaced into the open group.
-    let gated = Router::new()
+    // Every route is served plainly (trusted-local: no login gate). `extra_gated`
+    // is merged as-is so a test can inject a probe route.
+    Router::new()
         .route("/ws/events", get(ws_events_upgrade))
         // Nested per-PTY byte-stream sockets. One socket per attached PTY: the
         // agent session's main provider PTY and a companion terminal's PTY. Each
-        // replicates the four WS protections in its upgrade handler.
+        // replicates the WS protections in its upgrade handler.
         .route("/ws/sessions/{id}/pty", get(ws_session_pty_upgrade))
         .route(
             "/ws/sessions/{id}/terminals/{tid}/pty",
@@ -337,22 +210,13 @@ where
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())
         .merge(extra_gated)
-        .route_layer(middleware::from_fn_with_state(state.clone(), gate));
-
-    // OPEN routes: reachable without a session so the SPA can boot and log in.
-    Router::new()
-        .merge(gated)
         .route("/healthz", get(|| async { "ok" }))
-        .route("/api/login", post(auth::login))
-        .route("/api/logout", post(auth::logout))
-        .route("/api/me", get(auth::me))
         .fallback(crate::web_assets::static_handler)
-        .layer(session_layer)
         // The access log is the OUTERMOST layer OF THIS app, so it sees the final
-        // status every layer it wraps produced — a 401 from the gate, the static
-        // fallback's status. It is gated inside on `access_log && console.is_active`,
-        // so the flip and disabled-console paths pay nothing. Stamped via
-        // `from_fn_with_state` so it reads the console/toggle off `AppState`.
+        // status every layer it wraps produced. It is gated inside on
+        // `access_log && console.is_active`, so the flip and disabled-console paths
+        // pay nothing. Stamped via `from_fn_with_state` so it reads the
+        // console/toggle off `AppState`.
         //
         // When a host allowlist is active (see `host_guard::host_allowlist_layer`),
         // a foreign-Host probe is 421'd BEFORE it reaches this middleware, so those
@@ -404,54 +268,21 @@ async fn log_request(
     response
 }
 
-/// Gate middleware for the protected sub-router. When auth is enabled, a valid
-/// session is required; otherwise the request is rejected with `401` BEFORE the
-/// WS upgrade. When auth is disabled, every request passes (today's UX).
-///
-/// Session PRESENCE is not sufficient: the session's username must STILL exist
-/// in the current [`auth::AuthState`]. An operator who removes a user (config
-/// edit or TUI palette) then reloads config expects that user's live session to
-/// stop working immediately, without a server restart. So when auth is on we
-/// re-check the username against the current snapshot on every request (a `Vec`
-/// scan under a brief read lock — no bcrypt; see [`auth::username_exists`]) and,
-/// if it is gone, flush the now-orphaned session and reject with `401`.
-async fn gate(
-    State(state): State<AppState>,
-    session: Session,
-    request: Request,
-    next: Next,
-) -> Response {
-    // Auth disabled: the user-existence re-check does not apply; every request
-    // passes (today's UX).
-    if !auth::is_enabled(&state.auth) {
-        return next.run(request).await;
-    }
-    // Session presence is not enough: the named user must STILL exist in the
-    // current snapshot (shared with `/api/me`; flushes an orphaned session
-    // internally). `None` → unauthenticated.
-    match auth::session_user_if_valid(&state.auth, &session).await {
-        Some(_) => next.run(request).await,
-        None => StatusCode::UNAUTHORIZED.into_response(),
-    }
-}
-
 /// Whether a WebSocket upgrade passes the same-host Origin check (cross-site
 /// WebSocket hijacking defense). `true` when the request carries no `Origin`
 /// (non-browser clients — CLIs, tests, native apps — don't send one, and the
 /// tradeoff is documented) or when the `Origin`'s `host[:port]` matches the
 /// `Host` header. `false` for a present-but-mismatched `Origin`. Browsers always
 /// send `Origin` for WS, so this only ever rejects a genuine cross-site attempt.
-/// Applies whether or not auth is enabled.
 // DNS-rebinding defense: the same-origin check below trusts the request's own
 // `Host` header, so on its own it does not stop a rebinding attacker who points a
 // controlled hostname at this server's IP (the browser then sends a matching
 // Origin/Host pair). When a host allowlist is configured (see
-// `host_guard::host_allowlist_layer`), that middleware runs AHEAD of the gate on
-// the whole app and pins the accepted `Host` values to the configured domains,
-// closing that gap (a mismatched Host gets 421 before reaching here). The plain
-// HTTP path has no allowlist by design (loopback/proxy mode, where the proxy owns
-// Host hygiene), so this same-origin check remains the WS-specific defense there.
-// (Deferral 2.)
+// `host_guard::host_allowlist_layer`), that middleware runs AHEAD of the whole app
+// and pins the accepted `Host` values to the configured domains, closing that gap
+// (a mismatched Host gets 421 before reaching here). The plain HTTP path has no
+// allowlist by design (loopback/proxy mode, where the proxy owns Host hygiene), so
+// this same-origin check remains the WS-specific defense there.
 fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // No Origin: a non-browser client. Allowed (documented tradeoff).
@@ -548,22 +379,6 @@ fn spawn_pty_forwarder(
             }
         }
     })
-}
-
-/// Read the username to periodically recheck for revocation on an authenticated
-/// socket (the HTTP gate cannot revoke an already-upgraded socket). `None` when
-/// auth is disabled or no username is recorded — such sockets are never rechecked.
-/// Shared by the nested PTY upgrade handlers so they recheck identically to `/ws`.
-async fn ws_recheck_user(state: &AppState, session: &Session) -> Option<String> {
-    if auth::is_enabled(&state.auth) {
-        session
-            .get::<String>(auth::SESSION_USER_KEY)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    }
 }
 
 /// Acquire a connection-cap permit before a WS upgrade. `None` means the cap is
@@ -676,14 +491,13 @@ impl PtySizeOwners {
 }
 
 /// Upgrade handler for `GET /ws/sessions/:id/pty` — stream the agent session's main
-/// provider PTY. Replicates the four `/ws` protections (origin check, connection-cap
-/// permit, frame-size limit, user-revocation recheck) and path-validates `:id`
-/// against a known session (404 otherwise, before the upgrade).
+/// provider PTY. Replicates the `/ws` protections (origin check, connection-cap
+/// permit, frame-size limit) and path-validates `:id` against a known session
+/// (404 otherwise, before the upgrade).
 async fn ws_session_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path(id): Path<String>,
-    session: Session,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -702,7 +516,6 @@ async fn ws_session_pty_upgrade(
     {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
-    let recheck_user = ws_recheck_user(&state, &session).await;
     let permit = match acquire_ws_permit(&state, peer.ip(), "/ws/sessions/:id/pty") {
         Some(permit) => permit,
         None => {
@@ -714,8 +527,6 @@ async fn ws_session_pty_upgrade(
         }
     };
     let engine = state.engine.clone();
-    let auth = state.auth.clone();
-    let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
     let peer_ip = peer.ip();
@@ -725,9 +536,6 @@ async fn ws_session_pty_upgrade(
                 socket,
                 engine,
                 PtyTarget::Agent(id),
-                auth,
-                recheck_user,
-                recheck_period,
                 console,
                 peer_ip,
                 permit,
@@ -738,7 +546,7 @@ async fn ws_session_pty_upgrade(
 }
 
 /// Upgrade handler for `GET /ws/sessions/:id/terminals/:tid/pty` — stream a
-/// companion terminal's PTY. Same four protections as the agent socket, and
+/// companion terminal's PTY. Same protections as the agent socket, and
 /// path-validates BOTH that `:id` is a known session AND that `:tid` belongs to it
 /// (the legacy `SubscribeTerminal` looked terminals up by id alone; here the path
 /// enforces session ownership). Either failing is a 404 before the upgrade.
@@ -746,7 +554,6 @@ async fn ws_terminal_pty_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path((id, tid)): Path<(String, String)>,
-    session: Session,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -769,7 +576,6 @@ async fn ws_terminal_pty_upgrade(
         Some(owner) if owner == id => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
-    let recheck_user = ws_recheck_user(&state, &session).await;
     let permit = match acquire_ws_permit(&state, peer.ip(), "/ws/sessions/:id/terminals/:tid/pty") {
         Some(permit) => permit,
         None => {
@@ -781,8 +587,6 @@ async fn ws_terminal_pty_upgrade(
         }
     };
     let engine = state.engine.clone();
-    let auth = state.auth.clone();
-    let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
     let peer_ip = peer.ip();
@@ -792,9 +596,6 @@ async fn ws_terminal_pty_upgrade(
                 socket,
                 engine,
                 PtyTarget::Terminal(tid),
-                auth,
-                recheck_user,
-                recheck_period,
                 console,
                 peer_ip,
                 permit,
@@ -812,14 +613,10 @@ async fn ws_terminal_pty_upgrade(
 /// only while this connection owns sizing (see [`PtySizeOwners`]). Close (or any
 /// stream end) detaches by dropping the subscription/forwarder and releasing
 /// sizing ownership.
-#[allow(clippy::too_many_arguments)]
 async fn handle_pty_socket(
     socket: WebSocket,
     engine: EngineHandle,
     target: PtyTarget,
-    auth: SharedAuth,
-    recheck_user: Option<String>,
-    recheck_period: std::time::Duration,
     console: Console,
     peer_ip: std::net::IpAddr,
     // Held for the socket's lifetime purely for its Drop (frees a connection-cap
@@ -864,34 +661,10 @@ async fn handle_pty_socket(
     send_binary(&sink, repaint).await;
     let pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
 
-    // Periodic user-existence recheck (auth-on sockets only), same policy as `/ws`.
-    let mut recheck = tokio::time::interval(recheck_period);
-    if recheck_user.is_some() {
-        recheck.tick().await;
-    }
-
     loop {
-        let msg = tokio::select! {
-            _ = recheck.tick(), if recheck_user.is_some() => {
-                if !auth::is_enabled(&auth) {
-                    // Gate downgraded to OFF: a loosening, not a revocation. Keep streaming.
-                    continue;
-                }
-                let still_valid = recheck_user
-                    .as_deref()
-                    .map(|u| auth::username_exists(&auth, u))
-                    .unwrap_or(false);
-                if !still_valid {
-                    let mut guard = sink.lock().await;
-                    let _ = guard.send(Message::Close(None)).await;
-                    break;
-                }
-                continue;
-            }
-            next = stream.next() => match next {
-                Some(Ok(msg)) => msg,
-                _ => break,
-            },
+        let msg = match stream.next().await {
+            Some(Ok(msg)) => msg,
+            _ => break,
         };
         match msg {
             // Binary frame = raw PTY stdin for THIS socket's PTY.
@@ -1063,15 +836,14 @@ struct WireStatusClearedEvent {
     key: Option<String>,
 }
 
-/// Upgrade handler for `/ws/events`. Replicates the four WS protections (origin
-/// check, connection-cap permit, frame-size limit, user-revocation recheck). The
-/// per-connection `connection_id` (minted inside [`handle_events_socket`]) is sent
-/// as the first frame and drives status-toast scoping: a REST action echoes it via
+/// Upgrade handler for `/ws/events`. Replicates the WS protections (origin
+/// check, connection-cap permit, frame-size limit). The per-connection
+/// `connection_id` (minted inside [`handle_events_socket`]) is sent as the first
+/// frame and drives status-toast scoping: a REST action echoes it via
 /// `X-Connection-Id` so its status reaches only the originating connection.
 async fn ws_events_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
-    session: Session,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -1082,15 +854,6 @@ async fn ws_events_upgrade(
         )
             .into_response();
     }
-    let recheck_user = if auth::is_enabled(&state.auth) {
-        session
-            .get::<String>(auth::SESSION_USER_KEY)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
     let permit = match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -1106,8 +869,6 @@ async fn ws_events_upgrade(
                 .into_response();
         }
     };
-    let auth = state.auth.clone();
-    let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
     let engine = state.engine.clone();
     let bus = Arc::clone(&state.event_bus);
@@ -1115,18 +876,7 @@ async fn ws_events_upgrade(
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
-            handle_events_socket(
-                socket,
-                engine,
-                bus,
-                changes,
-                auth,
-                recheck_user,
-                recheck_period,
-                console,
-                peer_ip,
-                permit,
-            )
+            handle_events_socket(socket, engine, bus, changes, console, peer_ip, permit)
         })
         .into_response()
 }
@@ -1140,15 +890,11 @@ async fn ws_events_upgrade(
 /// live status broadcast, the status-clear broadcast, and the on-connect status
 /// snapshot — all filtered by the per-connection scope rule ([`scope_delivers`])
 /// so one client's operation toasts never leak to another.
-#[allow(clippy::too_many_arguments)]
 async fn handle_events_socket(
     socket: WebSocket,
     engine: EngineHandle,
     bus: Arc<EventBus>,
     changes: Arc<ChangesService>,
-    auth: SharedAuth,
-    recheck_user: Option<String>,
-    recheck_period: std::time::Duration,
     console: Console,
     peer_ip: std::net::IpAddr,
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -1203,29 +949,8 @@ async fn handle_events_socket(
         bus: Arc::clone(&bus),
     };
 
-    let mut recheck = tokio::time::interval(recheck_period);
-    if recheck_user.is_some() {
-        recheck.tick().await;
-    }
-
     loop {
         tokio::select! {
-            // User-revocation recheck (auth-on sockets only).
-            _ = recheck.tick(), if recheck_user.is_some() => {
-                if !auth::is_enabled(&auth) {
-                    continue;
-                }
-                let still_valid = recheck_user
-                    .as_deref()
-                    .map(|u| auth::username_exists(&auth, u))
-                    .unwrap_or(false);
-                if !still_valid {
-                    let mut guard = sink.lock().await;
-                    let _ = guard.send(Message::Close(None)).await;
-                    break;
-                }
-                continue;
-            }
             ev = bus_rx.recv() => match ev {
                 Ok(Event::Resource { event, id, rev }) => {
                     // Forward a resource event only if this connection holds the
@@ -1596,300 +1321,6 @@ mod tests {
         handle
     }
 
-    /// A session store that delegates to a real in-memory store but can be ARMED to
-    /// fail `delete` on demand. `delete` is the store call `Session::cycle_id` makes
-    /// during login: on a fresh (cookieless) login there is no persisted prior
-    /// session, but tower-sessions still calls `store.delete` UNCONDITIONALLY on the
-    /// freshly-generated id (see `session.rs` `cycle_id`). Arming this therefore makes
-    /// `session.cycle_id().await` in the login handler return `Err` — the exact
-    /// "correct password, then session error" branch we need. Injected via
-    /// [`build_app_with_store`].
-    #[derive(Clone, Debug)]
-    struct FaultOnDeleteStore {
-        inner: SweepableMemoryStore,
-        fail_delete: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl FaultOnDeleteStore {
-        fn new() -> Self {
-            Self {
-                inner: SweepableMemoryStore::new(),
-                fail_delete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
-        }
-        /// Make every subsequent `delete` fail.
-        fn arm(&self) {
-            self.fail_delete
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl tower_sessions::session_store::SessionStore for FaultOnDeleteStore {
-        async fn create(
-            &self,
-            record: &mut tower_sessions::session::Record,
-        ) -> tower_sessions::session_store::Result<()> {
-            tower_sessions::session_store::SessionStore::create(&self.inner, record).await
-        }
-        async fn save(
-            &self,
-            record: &tower_sessions::session::Record,
-        ) -> tower_sessions::session_store::Result<()> {
-            tower_sessions::session_store::SessionStore::save(&self.inner, record).await
-        }
-        async fn load(
-            &self,
-            id: &tower_sessions::session::Id,
-        ) -> tower_sessions::session_store::Result<Option<tower_sessions::session::Record>>
-        {
-            tower_sessions::session_store::SessionStore::load(&self.inner, id).await
-        }
-        async fn delete(
-            &self,
-            id: &tower_sessions::session::Id,
-        ) -> tower_sessions::session_store::Result<()> {
-            if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(tower_sessions::session_store::Error::Backend(
-                    "injected delete failure".to_string(),
-                ));
-            }
-            tower_sessions::session_store::SessionStore::delete(&self.inner, id).await
-        }
-    }
-
-    /// The ghost-charge ordering fix, exercised end-to-end: a CORRECT password whose
-    /// session commit then fails must STILL refund the rate-limit charge. The
-    /// handler charges before the bcrypt verify and calls `clear()` immediately
-    /// after a correct verify — BEFORE `cycle_id()`/`insert()` — so a session error
-    /// returns 500 without leaving the attempt counted as a failure. If `clear()`
-    /// ran after the session ops (the pre-fix ordering) the budget would be stuck at
-    /// the limit and the next attempt would 429. This faults `cycle_id`'s `delete`;
-    /// the `insert` branch is symmetric (the single `clear()` precedes both ops), so
-    /// one fault path proves the ordering for both.
-    #[tokio::test]
-    async fn correct_login_with_session_error_still_refunds_the_budget() {
-        fn login_req(user: &str, pw: &str) -> axum::http::Request<axum::body::Body> {
-            axum::http::Request::builder()
-                .method("POST")
-                .uri("/api/login")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(format!(
-                    r#"{{"username":"{user}","password":"{pw}"}}"#
-                )))
-                .unwrap()
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        let handle = test_engine_handle(tmp.path());
-        let hash = dux_core::auth::hash_password("secret-pw").unwrap();
-        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-
-        let store = FaultOnDeleteStore::new();
-        // The login handler needs ConnectInfo<SocketAddr> for the per-IP limiter;
-        // MockConnectInfo supplies a fixed peer so every request shares one bucket.
-        let peer: SocketAddr = "10.9.9.9:4242".parse().unwrap();
-        let app = build_app_with_store(
-            handle,
-            auth,
-            Router::new(),
-            RouterParams::plain_http(),
-            store.clone(),
-        )
-        .layer(axum::extract::connect_info::MockConnectInfo(peer));
-
-        // (max-1) wrong logins → budget at exactly one below the limit, so the next
-        // (correct) login charges to the limit. Referencing the constant — rather
-        // than a bare `4` — keeps the test discriminating at ANY value of
-        // RATE_LIMIT_MAX_FAILURES: a literal would go vacuous if the limit were
-        // raised (the correct login would no longer sit at the limit, so a missing
-        // refund wouldn't 429). Wrong logins 401 before any session op, so they
-        // never touch the store.
-        for _ in 0..(auth::RATE_LIMIT_MAX_FAILURES - 1) {
-            let resp = app
-                .clone()
-                .oneshot(login_req("alice", "WRONG"))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        }
-
-        // Arm the store so cycle_id()'s delete fails during the next (correct) login.
-        store.arm();
-
-        // Correct password: charges to the limit, bcrypt ok, clear() refunds (→0),
-        // then cycle_id() hits the failing delete → 500.
-        let errored = app
-            .clone()
-            .oneshot(login_req("alice", "secret-pw"))
-            .await
-            .unwrap();
-        assert_eq!(
-            errored.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "a session error after a correct password must surface as 500"
-        );
-
-        // The next wrong login must be a normal 401, NOT 429 — proof the correct
-        // login refunded its charge despite the session error.
-        let after = app
-            .clone()
-            .oneshot(login_req("alice", "WRONG"))
-            .await
-            .unwrap();
-        assert_eq!(
-            after.status(),
-            StatusCode::UNAUTHORIZED,
-            "a correct login that hit a session error must still refund its rate-limit \
-             charge (got {} — the budget was not refunded)",
-            after.status()
-        );
-    }
-
-    /// A representative data route added to the GATED sub-router must 401 without
-    /// a session when auth is on — proving the gate covers arbitrary gated data
-    /// routes, not only `/ws`. This is the reviewer's regression test: it injects
-    /// a probe route through `build_app`'s test seam so a future data route
-    /// placed in the gated group is provably protected.
-    #[tokio::test]
-    async fn gated_data_route_is_401_without_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let handle = test_engine_handle(tmp.path());
-
-        // Auth ON (one user) so the gate enforces a session.
-        let hash = dux_core::auth::hash_password("pw").unwrap();
-        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-
-        // Inject a dummy gated data route through the test seam.
-        let probe: Router<AppState> =
-            Router::new().route("/api/_test_gated", get(|| async { "secret" }));
-        let app = build_app(handle, auth, probe, RouterParams::plain_http()).0;
-
-        let resp = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/api/_test_gated")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "a gated data route must reject an unauthenticated request before reaching its handler"
-        );
-    }
-
-    /// The real `GET /api/v1/sessions/:id/changes` read and the `/ws/events`
-    /// upgrade are both in the gated group: unauthenticated → 401, before reaching
-    /// the handler (the changed-files compute / the WS upgrade).
-    #[tokio::test]
-    async fn changes_and_events_routes_require_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let handle = test_engine_handle(tmp.path());
-        let hash = dux_core::auth::hash_password("pw").unwrap();
-        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
-
-        let changes = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/api/v1/sessions/s1/changes")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            changes.status(),
-            StatusCode::UNAUTHORIZED,
-            "the changed-files read must reject an unauthenticated request"
-        );
-
-        // The bootstrap read is in the same gated group: unauthenticated → 401.
-        let bootstrap = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/api/v1/bootstrap")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            bootstrap.status(),
-            StatusCode::UNAUTHORIZED,
-            "the bootstrap read must reject an unauthenticated request"
-        );
-
-        // The spine reads are in the same gated group: unauthenticated → 401.
-        for uri in [
-            "/api/v1/spine",
-            "/api/v1/projects",
-            "/api/v1/sessions",
-            "/api/v1/sessions/s1",
-        ] {
-            let resp = app
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "the spine read {uri} must reject an unauthenticated request"
-            );
-        }
-
-        // A plain GET to /ws/events (no Upgrade headers) still passes through the
-        // gate first, which 401s before the WS upgrade is attempted.
-        let events = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/ws/events")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            events.status(),
-            StatusCode::UNAUTHORIZED,
-            "the /ws/events upgrade must reject an unauthenticated request"
-        );
-
-        // The nested per-PTY sockets are in the same gated group: a plain GET (no
-        // Upgrade headers) still passes through the gate first, which 401s before
-        // any path validation or WS upgrade is attempted.
-        for uri in ["/ws/sessions/s1/pty", "/ws/sessions/s1/terminals/t1/pty"] {
-            let resp = app
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "the PTY socket {uri} must reject an unauthenticated request"
-            );
-        }
-    }
-
     async fn patch_project_provider(
         app: &Router,
         provider: &str,
@@ -1917,7 +1348,7 @@ mod tests {
     async fn project_patch_rejects_unconfigured_provider_up_front() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = seeded_engine_handle(tmp.path());
-        let app = router(handle); // auth disabled → the gate passes through.
+        let app = router(handle);
 
         let bad = patch_project_provider(&app, "frobnicate").await;
         assert_eq!(
@@ -1951,7 +1382,7 @@ mod tests {
     async fn session_patch_rejects_unconfigured_provider_up_front() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = seeded_engine_handle(tmp.path());
-        let app = router(handle); // auth disabled → the gate passes through.
+        let app = router(handle);
 
         // Resolvable session `s1`, unconfigured provider → rejected up front (400),
         // before the title/auto-reopen sub-commands could run.
@@ -1995,41 +1426,13 @@ mod tests {
         );
     }
 
-    /// A real git-mutation route is inside the gated group: unauthenticated →
-    /// 401, before any git work runs.
-    #[tokio::test]
-    async fn git_route_requires_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let handle = test_engine_handle(tmp.path());
-        let hash = dux_core::auth::hash_password("pw").unwrap();
-        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
-
-        let resp = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/git/stage")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"session_id":"s1","path":"a.txt"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
     /// With auth off the gate passes; an unknown session resolves to 404 (the
     /// handler is wired and resolves the worktree before doing any git work).
     #[tokio::test]
     async fn git_route_unknown_session_is_404() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let resp = app
             .oneshot(
@@ -2048,41 +1451,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The editor file routes live in the same gated group: unauthenticated read
-    /// → 401 before any file I/O runs.
-    #[tokio::test]
-    async fn file_route_requires_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let handle = test_engine_handle(tmp.path());
-        let hash = dux_core::auth::hash_password("pw").unwrap();
-        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
-
-        let resp = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/file/read")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"session_id":"s1","path":"a.txt"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
     /// With auth off the gate passes; an unknown session resolves to 404 (the
     /// write handler resolves the worktree before touching the filesystem).
     #[tokio::test]
     async fn file_route_unknown_session_is_404() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let resp = app
             .oneshot(
@@ -2164,8 +1539,7 @@ mod tests {
     async fn spine_route_returns_projects_sessions_and_sidebar() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = seeded_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let resp = app
             .oneshot(
@@ -2195,8 +1569,7 @@ mod tests {
     async fn session_route_is_200_for_known_and_404_for_unknown() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = seeded_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let known = app
             .clone()
@@ -2249,65 +1622,6 @@ mod tests {
             .status()
     }
 
-    /// Every Phase-4 session/project action route is in the gated group: an
-    /// unauthenticated request 401s before the handler runs. Extends the gate
-    /// regression to the new write verbs (and the `/api/v1` git/file aliases).
-    #[tokio::test]
-    async fn rest_action_routes_require_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let handle = test_engine_handle(tmp.path());
-        let hash = dux_core::auth::hash_password("pw").unwrap();
-        let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
-
-        let cases: &[(&str, &str, Option<&str>)] = &[
-            (
-                "POST",
-                "/api/v1/sessions",
-                Some(r#"{"kind":"new","project_id":"p1"}"#),
-            ),
-            ("DELETE", "/api/v1/sessions/s1", None),
-            ("PATCH", "/api/v1/sessions/s1", Some(r#"{"title":"x"}"#)),
-            ("POST", "/api/v1/sessions/s1/reconnect", Some("{}")),
-            (
-                "POST",
-                "/api/v1/sessions/reorder",
-                Some(r#"{"project_id":"p1","session_ids":[]}"#),
-            ),
-            ("POST", "/api/v1/projects", Some(r#"{"path":"/x"}"#)),
-            ("DELETE", "/api/v1/projects/p1", None),
-            ("PATCH", "/api/v1/projects/p1", Some("{}")),
-            (
-                "POST",
-                "/api/v1/projects/reorder",
-                Some(r#"{"project_ids":[]}"#),
-            ),
-            ("POST", "/api/v1/projects/p1/pull", None),
-            ("POST", "/api/v1/projects/p1/checkout-default", None),
-            // The /api/v1 git/file aliases are gated too.
-            (
-                "POST",
-                "/api/v1/git/stage",
-                Some(r#"{"session_id":"s1","path":"a"}"#),
-            ),
-            (
-                "POST",
-                "/api/v1/file/read",
-                Some(r#"{"session_id":"s1","path":"a"}"#),
-            ),
-            // The Phase-5 companion-terminal verbs are gated too.
-            ("POST", "/api/v1/sessions/s1/terminals", None),
-            ("DELETE", "/api/v1/sessions/s1/terminals/t1", None),
-        ];
-        for (method, uri, body) in cases {
-            assert_eq!(
-                oneshot_status(&app, method, uri, *body).await,
-                StatusCode::UNAUTHORIZED,
-                "{method} {uri} must 401 without a session"
-            );
-        }
-    }
-
     /// The body-keyed project git endpoints (`/api/v1/git/pull-project` and
     /// `/api/v1/git/checkout-default`) were removed in favor of the path-keyed
     /// `/api/v1/projects/:id/{pull,checkout-default}` actions, so they must no
@@ -2317,8 +1631,7 @@ mod tests {
     async fn removed_project_git_routes_are_gone() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         // A path under /api/v1/git that was never a route hits the SPA fallback.
         // The removed project endpoints must now behave identically.
@@ -2360,8 +1673,7 @@ mod tests {
     async fn session_actions_unknown_session_is_404() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("DELETE", "/api/v1/sessions/nope", None),
@@ -2386,8 +1698,7 @@ mod tests {
     async fn project_actions_unknown_project_is_404() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("DELETE", "/api/v1/projects/nope", None),
@@ -2414,8 +1725,7 @@ mod tests {
     async fn create_routes_reject_bad_input_with_400() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         // Malformed discriminator → 400.
         assert_eq!(
@@ -2461,8 +1771,7 @@ mod tests {
     async fn v1_git_and_file_routes_reach_handlers() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         assert_eq!(
             oneshot_status(
@@ -2507,8 +1816,7 @@ mod tests {
     async fn reorder_segment_does_not_collide_with_id() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = seeded_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         // `/reorder` is its own route, not `:id`. The seeded project p1 has exactly
         // session s1, so reordering to [s1] is accepted (200).
@@ -2634,10 +1942,9 @@ mod tests {
     async fn access_log_emits_request_lines_and_skips_healthz() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false); // auth off so /api/me is 200
         let (console, sink) = Console::test_capture(false);
         let params = RouterParams::plain_http().with_console(console, true);
-        let app = build_app(handle, auth, Router::new(), params).0;
+        let app = build_app(handle, Router::new(), params);
 
         // A 200 on an open route is logged.
         let me = app
@@ -2701,11 +2008,10 @@ mod tests {
     async fn access_log_toggle_off_emits_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
         let (console, sink) = Console::test_capture(false);
         // access_log = false.
         let params = RouterParams::plain_http().with_console(console, false);
-        let app = build_app(handle, auth, Router::new(), params).0;
+        let app = build_app(handle, Router::new(), params);
 
         let _ = app
             .oneshot(
@@ -2730,7 +2036,6 @@ mod tests {
     async fn access_log_noop_console_emits_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
         // The default plain_http params carry a no-op console; force access_log on
         // to prove the console-activity gate (not just the toggle) suppresses it.
         let params = RouterParams {
@@ -2740,7 +2045,7 @@ mod tests {
         };
         // The router still builds; nothing should panic and nothing is observable
         // (a no-op console drops every line). We assert the request succeeds.
-        let app = build_app(handle, auth, Router::new(), params).0;
+        let app = build_app(handle, Router::new(), params);
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -2937,8 +2242,7 @@ mod tests {
     async fn bootstrap_route_returns_expected_fields() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
-        let auth = auth::shared_auth(&[], false);
-        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
 
         let resp = app
             .oneshot(

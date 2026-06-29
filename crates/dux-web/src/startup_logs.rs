@@ -202,7 +202,7 @@ mod tests {
     use std::path::Path;
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     fn paths_for(root: &Path) -> DuxPaths {
         DuxPaths {
@@ -324,29 +324,5 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         // Drain the body so the response is fully consumed.
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn startup_log_reads_are_gated() {
-        for uri in [
-            "/api/v1/sessions/s1/startup-logs",
-            "/api/v1/sessions/s1/startup-logs/content?name=x.log",
-        ] {
-            let (_tmp, app) = router_with_auth();
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must be gated"
-            );
-        }
     }
 }

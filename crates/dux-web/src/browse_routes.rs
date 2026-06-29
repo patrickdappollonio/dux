@@ -116,7 +116,7 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     /// Percent-encode the bytes a directory path could carry in a query value so a
     /// space or other reserved char does not corrupt the request line. Small,
@@ -199,26 +199,5 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(value["name"].as_str().unwrap().contains('-'));
-    }
-
-    #[tokio::test]
-    async fn browse_and_agent_name_are_gated() {
-        for uri in ["/api/v1/browse", "/api/v1/agent-name"] {
-            let (_tmp, app) = router_with_auth();
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must be gated"
-            );
-        }
     }
 }

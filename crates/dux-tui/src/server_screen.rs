@@ -65,9 +65,6 @@ enum Role {
     Muted,
     /// The non-loopback security warning — warning-styled, bold.
     Warning,
-    /// The quieter "authenticated mode" informational line shown when the login
-    /// gate is on — muted, not alarming.
-    AuthInfo,
     /// An exit hint's key, rendered as a `<…>` keycap badge matching the TUI
     /// footer (e.g. `<q>`, `<Esc>`, `<Ctrl-C>`).
     Key,
@@ -92,12 +89,6 @@ pub struct ServerStatusScreen {
     /// the FULL WEB MODE listeners). All are shown so the user can pick one.
     urls: Vec<String>,
     loopback: bool,
-    /// Whether the web login gate is active for this serve. Controls whether the
-    /// status screen shows the quiet "login required" line (auth on) or the loud
-    /// no-auth warning on a non-loopback bind (auth off).
-    auth_enabled: bool,
-    /// Number of configured login users, shown in the auth-on informational line.
-    user_count: usize,
     started: Instant,
     /// Uptime second most recently drawn, so [`tick`] redraws only when the
     /// visible value actually changes (wall-clock, not per engine-loop tick).
@@ -117,8 +108,6 @@ impl ServerStatusScreen {
     pub fn new(
         urls: &[String],
         loopback: bool,
-        auth_enabled: bool,
-        user_count: usize,
         theme_name: &str,
         paths: &DuxPaths,
         activity: ActivityRing,
@@ -144,8 +133,6 @@ impl ServerStatusScreen {
             theme,
             urls: urls.to_vec(),
             loopback,
-            auth_enabled,
-            user_count,
             started,
             // Force the first `tick` redraw by seeding an impossible "last
             // drawn" value; the initial frame is drawn explicitly below.
@@ -213,13 +200,7 @@ impl ServerStatusScreen {
     /// generation without snapshotting twice.
     fn draw(&mut self, uptime_secs: u64, snapshot: &ActivitySnapshot) -> Result<()> {
         let theme = &self.theme;
-        let header = header_lines(
-            &self.urls,
-            self.loopback,
-            self.auth_enabled,
-            self.user_count,
-            uptime_secs,
-        );
+        let header = header_lines(&self.urls, self.loopback, uptime_secs);
         let footer = footer_hint_lines();
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -418,22 +399,14 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// Build the header content (logo, heading, URLs, uptime, auth/security line) as
-/// a pure, terminal-free, theme-free description: each line is a list of
+/// Build the header content (logo, heading, URLs, uptime, security line) as a
+/// pure, terminal-free, theme-free description: each line is a list of
 /// `(text, Role)` segments. The exit hints live in [`footer_hint_lines`]; the
 /// activity log in [`activity_lines`].
 ///
-/// The auth/security line is re-keyed off the login gate:
-/// - auth ON  → a quiet informational line naming the configured user count;
-/// - auth OFF + non-loopback → the loud no-auth security warning;
-/// - auth OFF + loopback → nothing (the bind is unreachable off the machine).
-fn header_lines(
-    urls: &[String],
-    loopback: bool,
-    auth_enabled: bool,
-    user_count: usize,
-    uptime_secs: u64,
-) -> Vec<ScreenLine> {
+/// dux has no login gate, so a NON-LOOPBACK bind shows the loud no-auth security
+/// warning; a loopback bind shows nothing (it is unreachable off the machine).
+fn header_lines(urls: &[String], loopback: bool, uptime_secs: u64) -> Vec<ScreenLine> {
     let mut lines: Vec<ScreenLine> = Vec::new();
 
     for logo_line in ASCII_LOGO {
@@ -451,14 +424,7 @@ fn header_lines(
         Role::Muted,
     )]);
 
-    if auth_enabled {
-        let noun = if user_count == 1 { "user" } else { "users" };
-        lines.push(vec![(String::new(), Role::Spacer)]);
-        lines.push(vec![(
-            format!("Login required. {user_count} {noun} configured."),
-            Role::AuthInfo,
-        )]);
-    } else if !loopback {
+    if !loopback {
         lines.push(vec![(String::new(), Role::Spacer)]);
         lines.push(vec![(
             "Listening beyond this machine with NO authentication. \
@@ -543,9 +509,6 @@ fn line_for<'a>(segments: &'a ScreenLine, theme: &Theme) -> Line<'a> {
             Role::Warning => Style::default()
                 .fg(theme.warning_fg)
                 .add_modifier(Modifier::BOLD),
-            // Auth-on info line: muted secondary text, informational (not
-            // alarming), since the login gate is protecting the bind.
-            Role::AuthInfo => Style::default().fg(theme.provider_label_fg),
             // Exit-hint description: muted hint text.
             Role::HintDesc => Style::default().fg(theme.hint_desc_fg),
             // Activity-log message: colored by its captured tone, reusing
@@ -723,7 +686,7 @@ mod tests {
 
     #[test]
     fn content_includes_url_and_heading_and_uptime() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 42);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
@@ -738,7 +701,7 @@ mod tests {
             "http://127.0.0.1:8080".to_string(),
             "http://100.101.102.103:8080".to_string(),
         ];
-        let lines = header_lines(&urls, true, false, 0, 0);
+        let lines = header_lines(&urls, true, 0);
         let text = plain_text(&lines);
         assert!(text.contains("http://127.0.0.1:8080"));
         assert!(text.contains("http://100.101.102.103:8080"));
@@ -755,22 +718,21 @@ mod tests {
 
     #[test]
     fn loopback_auth_off_omits_the_warning() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 0);
         let text = plain_text(&lines);
         assert!(!text.contains("NO authentication"));
-        assert!(!text.contains("Login required"));
-        // No line should carry the Warning or AuthInfo role either.
+        // No line should carry the Warning role.
         assert!(
             !lines
                 .iter()
                 .flatten()
-                .any(|(_, role)| matches!(role, Role::Warning | Role::AuthInfo))
+                .any(|(_, role)| *role == Role::Warning)
         );
     }
 
     #[test]
     fn non_loopback_auth_off_includes_the_loud_warning() {
-        let lines = header_lines(&one("http://0.0.0.0:8080"), false, false, 0, 0);
+        let lines = header_lines(&one("http://0.0.0.0:8080"), false, 0);
         let text = plain_text(&lines);
         assert!(text.contains("NO authentication"));
         assert!(text.contains("control your agents"));
@@ -780,44 +742,6 @@ mod tests {
                 .flatten()
                 .any(|(_, role)| *role == Role::Warning)
         );
-        // And it must NOT also show the quiet auth line.
-        assert!(
-            !lines
-                .iter()
-                .flatten()
-                .any(|(_, role)| *role == Role::AuthInfo)
-        );
-    }
-
-    #[test]
-    fn auth_on_shows_quiet_login_line_not_the_warning() {
-        // Auth on: a non-loopback bind is fine — show the quiet informational
-        // line, never the loud no-auth warning.
-        let lines = header_lines(&one("http://0.0.0.0:8080"), false, true, 3, 0);
-        let text = plain_text(&lines);
-        assert!(text.contains("Login required"));
-        assert!(text.contains("3 users configured"));
-        assert!(!text.contains("NO authentication"));
-        assert!(
-            lines
-                .iter()
-                .flatten()
-                .any(|(_, role)| *role == Role::AuthInfo)
-        );
-        assert!(
-            !lines
-                .iter()
-                .flatten()
-                .any(|(_, role)| *role == Role::Warning)
-        );
-    }
-
-    #[test]
-    fn auth_on_singular_user_uses_singular_noun() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, true, 1, 0);
-        let text = plain_text(&lines);
-        assert!(text.contains("1 user configured"));
-        assert!(!text.contains("1 users"));
     }
 
     #[test]
@@ -842,7 +766,7 @@ mod tests {
     #[test]
     fn header_lines_have_no_exit_hints() {
         // The exit hints moved to the footer — the header must not carry them.
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 0);
         let text = plain_text(&lines);
         assert!(!text.contains("return to dux"));
         assert!(!text.contains("quit dux entirely"));
@@ -928,7 +852,7 @@ mod tests {
     fn content_includes_the_wordmark() {
         // The first lines are the shared ASCII wordmark; assert one of its
         // distinctive rows is present so a future logo-export break is caught.
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, false, 0, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 0);
         assert!(lines.len() >= ASCII_LOGO.len());
         assert_eq!(lines[0][0].1, Role::Logo);
         assert_eq!(lines[0][0].0, ASCII_LOGO[0]);

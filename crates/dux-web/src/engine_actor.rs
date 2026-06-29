@@ -202,41 +202,6 @@ pub(crate) struct ActorLoopEnds {
     /// The inline `Shutdown` request trips this so forwarders exit promptly even
     /// before the engine drop disconnects their channels.
     shutdown_flag: Arc<AtomicBool>,
-    /// Live-reload hook for the login gate: the shared auth snapshot the server's
-    /// router reads, the `--disable-auth` flag captured at startup, and whether
-    /// every live listener is HOST-ONLY (genuine loopback). When a config reload
-    /// lands (`ApplyReloadedConfig`), the loop rebuilds the snapshot from the new
-    /// `[auth]` users so credential changes take effect without a server restart;
-    /// the `host_only` flag lets the rebuild REFUSE a gate downgrade on a
-    /// reachable bind (see `AuthState::rebuild`). `None` when no gate is wired
-    /// (e.g. tests that build channels directly).
-    auth_reload: Option<AuthReloadContext>,
-}
-
-/// The login-gate live-reload context threaded into the engine loop: the shared
-/// snapshot, the startup `--disable-auth` flag, and whether every live listener
-/// is HOST-ONLY loopback (which decides whether a reload may downgrade the gate
-/// to open).
-///
-/// NOTE the deliberate distinction from the startup bind gate's "local"
-/// classification: that gate treats a Tailscale bind as local (it does not need
-/// `--insecure-allow-remote`), but `host_only` is the stricter DOWNGRADE rule —
-/// it is `true` only when every listener is genuine loopback, so a Tailscale
-/// bind is `host_only = false` and a running gate cannot silently open over a
-/// shared tailnet. See `AuthState::rebuild` for the full rationale.
-///
-/// `pub` because the external `dux server` entry points and the auth integration
-/// tests construct it to wire `spawn_engine_thread_with_auth`.
-pub struct AuthReloadContext {
-    pub shared: crate::auth::SharedAuth,
-    pub disable_auth: bool,
-    pub host_only: bool,
-    /// The `dux server` terminal console. A config reload (and its drift warning)
-    /// is echoed here so an operator watching the terminal sees it in the
-    /// vite-style output, not just the WS status broadcast. A [`Console::noop`]
-    /// for the flip/tests emits nothing; callers set this field directly (the CLI
-    /// serve paths pass a real stdout console, the flip/tests pass a noop one).
-    pub console: crate::console::Console,
 }
 
 /// True when a config reload changed any `[server]` setting that only takes
@@ -246,20 +211,19 @@ pub struct AuthReloadContext {
 /// changes; a reload that only touched, say, `[ui]` theme settings leaves every
 /// compared field equal and triggers no warning.
 ///
-/// Compared fields: the LOCAL MODE `port`, the `tailscale_enabled` toggle, the
-/// FULL WEB MODE `listen_addrs`. `max_websocket_connections` is also
-/// startup-bound (the `/ws` connection-cap semaphore is built ONCE in
-/// `build_app` and never resized on reload). `bind` is intentionally absent: it
-/// is deprecated and migrated into `port`/`listen_addrs` on load, so a change
-/// to it surfaces through those fields. `insecure_allow_remote` is a gate input,
-/// not a bound value, so it cannot drift a live listener.
+/// Compared fields: the bind `host` and `port`, the `tailscale_enabled` toggle,
+/// and the `allowed_hosts` host-guard list. `max_websocket_connections` is also
+/// startup-bound (the `/ws` connection-cap semaphore is built ONCE in `build_app`
+/// and never resized on reload). The deprecated `bind` field is migrated into
+/// `host`/`port` on load, so a change to it surfaces through those fields.
 fn server_rebind_settings_changed(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
 ) -> bool {
-    prev.port != next.port
+    prev.host != next.host
+        || prev.port != next.port
         || prev.tailscale_enabled != next.tailscale_enabled
-        || prev.listen_addrs != next.listen_addrs
+        || prev.allowed_hosts != next.allowed_hosts
         || prev.max_websocket_connections != next.max_websocket_connections
 }
 
@@ -299,16 +263,6 @@ const REQ_CHANNEL_CAPACITY: usize = 1024;
 /// points (the dedicated engine thread and the in-process flip) call this so
 /// the channel topology is defined in exactly one place.
 pub(crate) fn build_actor_channels(engine: &Engine) -> (EngineHandle, ActorLoopEnds) {
-    build_actor_channels_with_auth(engine, None)
-}
-
-/// Like [`build_actor_channels`], but threads the live login-gate reload hook
-/// into the loop ends so a config reload rebuilds the server's shared auth
-/// snapshot from the new `[auth]` users.
-pub(crate) fn build_actor_channels_with_auth(
-    engine: &Engine,
-    auth_reload: Option<AuthReloadContext>,
-) -> (EngineHandle, ActorLoopEnds) {
     let (req_tx, req_rx) = mpsc::channel::<EngineRequest>(REQ_CHANNEL_CAPACITY);
     // Status uses THREE channels driven from one place (the StatusEmitter):
     //  - `status_tx` (broadcast) delivers every status LIVE, so a transient
@@ -352,7 +306,6 @@ pub(crate) fn build_actor_channels_with_auth(
             config_reload_tx,
             spine_change_tx,
             shutdown_flag,
-            auth_reload,
         },
     )
 }
@@ -817,23 +770,6 @@ pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>)
     (handle, join)
 }
 
-/// Like [`spawn_engine_thread`], but threads the login-gate reload hook into the
-/// loop so a config reload rebuilds the server's shared auth snapshot. Used by
-/// the `dux server` CLI path ([`crate::run_server`]).
-pub fn spawn_engine_thread_with_auth(
-    mut engine: Engine,
-    auth_reload: AuthReloadContext,
-) -> (EngineHandle, JoinHandle<()>) {
-    let (handle, ends) = build_actor_channels_with_auth(&engine, Some(auth_reload));
-    spawn_global_workers(&mut engine);
-
-    let join = thread::spawn(move || {
-        let _engine = run_engine_loop(engine, ends, || LoopControl::Continue);
-    });
-
-    (handle, join)
-}
-
 /// The shared engine request/drain loop. Runs on the CALLER's thread (a spawned
 /// std thread for `dux server`, the main thread for the in-process flip) and
 /// owns `engine` for the loop's duration, returning it on exit so the flip can
@@ -856,7 +792,6 @@ pub(crate) fn run_engine_loop(
         config_reload_tx,
         spine_change_tx,
         shutdown_flag,
-        auth_reload,
     } = ends;
     // Route every status through the shared KeyedStatusController so the web gets
     // the SAME auto-clear + pending→final behaviour as the TUI from one place.
@@ -983,11 +918,10 @@ pub(crate) fn run_engine_loop(
             // config-mutating commands were deferred during the reload (the
             // engine folds the `ApplyReloadedConfig` in with the deferred saves'
             // status reactions). Pull the `ApplyReloadedConfig` out of either the
-            // bare or the wrapped form so the auth-gate rebuild + server-restart
-            // warning always run — an auth/user change made during a reload must
-            // take effect without a restart. The deferred saves' own status
-            // reactions were already surfaced by the `wire_statuses_from_reaction`
-            // drain above (it flattens `Multi`).
+            // bare or the wrapped form so the server-restart warning always
+            // runs. The deferred saves' own status reactions were already
+            // surfaced by the `wire_statuses_from_reaction` drain above (it
+            // flattens `Multi`).
             if let Some(config) = take_apply_reloaded_config(reaction) {
                 // Capture the rebind-relevant [server] settings
                 // BEFORE the swap so we can tell whether the reload touched
@@ -1005,70 +939,19 @@ pub(crate) fn run_engine_loop(
                         // no forwarder is listening (e.g. the TUI flip), which is
                         // fine.
                         let _ = config_reload_tx.send(());
-                        // Rebuild the login gate's shared snapshot from the
-                        // freshly-applied `[auth]` users so credential changes
-                        // (add/remove/change password via config or the TUI
-                        // palette) take effect without a server restart. The
-                        // `--disable-auth` flag captured at startup is preserved.
-                        let mut auth_refused = false;
-                        if let Some(ctx) = auth_reload.as_ref()
-                            && let Ok(mut guard) = ctx.shared.write()
-                        {
-                            // Rebuild from the new config. On a reachable bind
-                            // (public OR Tailscale) the rebuild REFUSES a gate
-                            // downgrade (last user removed) and keeps the prior
-                            // users; on a host-only loopback bind it downgrades
-                            // with a warning. See `AuthState::rebuild`.
-                            let prev = guard.clone();
-                            let (next, refused) = crate::auth::AuthState::rebuild(
-                                &prev,
-                                &engine.config.auth.users,
-                                ctx.disable_auth,
-                                ctx.host_only,
-                            );
-                            *guard = next;
-                            auth_refused = refused;
-                        }
-                        // When the rebuild REFUSED the downgrade the `[auth]`
-                        // change was deliberately NOT applied, so a plain
-                        // "settings are active" status would mislead. Surface the
-                        // refusal (and how to actually run open) in a warn-tone
-                        // status instead.
-                        let status = if auth_refused {
-                            WireStatus::new(
-                                "warning",
-                                "Configuration reloaded, but removing the last login user was \
-                                 refused: this server is reachable from other devices (a public \
-                                 or Tailscale bind) and will not drop its login gate while \
-                                 running. Restart the server to apply.",
-                            )
-                        } else {
-                            WireStatus::new(
-                                "info",
-                                "Configuration reloaded. New settings are active.",
-                            )
-                        };
-                        // Echo the reload outcome on the CLI console too (a refusal
-                        // reads as a warning, a clean reload as info); the WS
-                        // broadcast carries the same text. A no-op console (flip/
-                        // tests) emits nothing.
-                        if let Some(ctx) = auth_reload.as_ref() {
-                            ctx.console.reload(&status.message, auth_refused);
-                        }
-                        let _ = thread_status_tx.send(status);
+                        let _ = thread_status_tx.send(WireStatus::new(
+                            "info",
+                            "Configuration reloaded. New settings are active.",
+                        ));
 
                         // The new config WAS applied to the engine, but the
-                        // listen/TLS sections only bind at startup — a reload
-                        // cannot rebind them. Warn so the user knows a restart is
-                        // needed for those specific changes to take effect. This
-                        // is a separate concern from the auth-refusal status
-                        // above, so it rides as its own warn-tone status.
+                        // `[server]` bind section only takes effect at startup — a
+                        // reload cannot rebind listeners. Warn so the user knows a
+                        // restart is needed for those specific changes to take
+                        // effect.
                         if server_settings_changed {
-                            let drift = "Server listen/TLS settings changed in config — restart \
+                            let drift = "Server bind settings changed in config — restart \
                                  the server to apply them.";
-                            if let Some(ctx) = auth_reload.as_ref() {
-                                ctx.console.reload(drift, true);
-                            }
                             let _ = thread_status_tx.send(WireStatus::new("warning", drift));
                         }
                     }
@@ -1746,7 +1629,7 @@ mod tests {
     /// Build a `StatusEmitter` directly from inline channels (no engine needed)
     /// so the shape of the struct and its snapshot behaviour can be tested
     /// without spawning a thread. Mirrors the channel setup in
-    /// `build_actor_channels_with_auth`.
+    /// `build_actor_channels`.
     fn make_emitter() -> (StatusEmitter, watch::Receiver<Vec<KeyedWireStatus>>) {
         let (tx, _rx) = broadcast::channel::<WireStatus>(16);
         let (clear_tx, _crx) = broadcast::channel::<Option<String>>(16);
@@ -1919,10 +1802,18 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_detects_listen_addrs_change() {
+    fn rebind_drift_detects_host_change() {
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
-        next.listen_addrs.push("0.0.0.0:9000".to_string());
+        next.host = "0.0.0.0".to_string();
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_allowed_hosts_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.allowed_hosts.push("box.tailnet.ts.net".to_string());
         assert!(server_rebind_settings_changed(&prev, &next));
     }
 
@@ -1938,12 +1829,12 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_ignores_insecure_allow_remote() {
-        // insecure_allow_remote is a startup GATE input, not a bound value; a
+    fn rebind_drift_ignores_color_setting() {
+        // [server] color is a console-only preference, not a bound value; a
         // running listener cannot drift because of it, so it must not warn.
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
-        next.insecure_allow_remote = !prev.insecure_allow_remote;
+        next.color = "never".to_string();
         assert!(!server_rebind_settings_changed(&prev, &next));
     }
 }

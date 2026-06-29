@@ -142,7 +142,6 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
     let engine = bootstrap_engine(&paths).unwrap();
     let (handle, _join) = spawn_engine_thread(engine);
 
-    let auth = dux_web::auth::shared_auth(&[], false);
     let probe: Router<AppState> = Router::new().route(
         "/api/_interest",
         get(|State(state): State<AppState>| async move {
@@ -151,7 +150,7 @@ async fn boot() -> (SocketAddr, tempfile::TempDir) {
             axum::Json(ids)
         }),
     );
-    let app = build_app(handle, auth, probe, RouterParams::plain_http()).0;
+    let app = build_app(handle, probe, RouterParams::plain_http());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -3,29 +3,19 @@ use anyhow::Result;
 const SERVER_USAGE: &str = "\
 Usage: dux server [OPTIONS]
 
-Run the dux web UI over the headless engine.
+Run the dux web UI over the headless engine. dux is a trusted-local tool with no
+login gate; only run a non-loopback bind on a network you trust.
 
 Options:
-      --port <PORT>            LOCAL MODE port. dux binds 127.0.0.1:port (and the
-                               machine's Tailscale address:port unless disabled).
-                               Used only when no --listen / [server] listen_addrs
-                               are set. Overrides [server] port (default 8080).
-      --listen <ADDR:PORT>     FULL WEB MODE listener (repeatable). Each is an
-                               IP:port socket address (hostnames are NOT resolved).
-                               Replaces [server] listen_addrs entirely.
-      --bind <ADDR:PORT>       DEPRECATED alias for --listen (accepted with a note).
-      --no-tailscale           Skip Tailscale detection for LOCAL MODE this run
-                               (serve loopback only).
-      --disable-auth           Run with the login gate OFF even when [auth] users are
-                               configured. Intended for deployments behind an upstream
-                               auth proxy (e.g. oauth2-proxy) that handles login itself.
-      --insecure-allow-remote  Allow a non-loopback plain-HTTP listen_addrs entry even
-                               though no login is configured. Anyone who can reach the
-                               address can control your agents and worktrees.
-      --dangerously-listen-http
-                               Allow serving PLAIN HTTP on a non-loopback address.
-                               Traffic (including the login password) is unencrypted.
-  -h, --help                   Print this help and exit.";
+      --bind <ADDR:PORT>  Bind this exact address, overriding [server] host+port.
+                          An IP:port socket address (hostnames are NOT resolved),
+                          e.g. 0.0.0.0:8080. May be given only once.
+      --port <PORT>       Override [server] port only (ignored when --bind is set).
+                          dux binds host:port (and the machine's Tailscale address
+                          unless disabled). Default port 8080.
+      --no-tailscale      Skip Tailscale detection this run (serve the configured
+                          host only).
+  -h, --help              Print this help and exit.";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -56,18 +46,10 @@ fn run_tui_with_flip() -> Result<()> {
                 // Read everything the status screen needs BEFORE the engine and
                 // listeners move into `serve_with_engine`. The theme name lives
                 // on the engine's config. The flip is local-only by construction
-                // (loopback + optional Tailscale), so it is always "all local" —
-                // there is no public, no-auth path to warn about here.
+                // (loopback + optional Tailscale), so it is always "all local".
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
                 let loopback = true;
-
-                // The flip never passes --disable-auth (that is a `dux server`
-                // CLI flag), so the gate is on iff [auth] has valid users. The
-                // user count drives the quiet "login required" line; the served
-                // engine rebuilds its AuthState from this same config.
-                let auth_enabled = dux_core::auth::auth_enabled(&engine.config, false);
-                let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
 
                 // The activity buffer is shared between the web console (the
                 // producer, wired in serve_with_engine) and the status screen
@@ -81,8 +63,6 @@ fn run_tui_with_flip() -> Result<()> {
                 let mut screen = match dux_tui::ServerStatusScreen::new(
                     &urls,
                     loopback,
-                    auth_enabled,
-                    user_count,
                     &theme_name,
                     &paths,
                     activity.clone(),
@@ -150,7 +130,6 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         ParsedServerArgs::Ok(parsed) => parsed,
     };
 
-    let cli_disable_auth = parsed.disable_auth;
     let overrides = parsed.into_overrides();
 
     let paths = dux_core::config::DuxPaths::discover()?;
@@ -158,24 +137,22 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let config = dux_core::config::load_config(&paths);
 
     // Initialize the logger early so every subsequent logger::* call in the server
-    // path (bootstrap, bind, auth-reload) actually reaches dux.log.
+    // path (bootstrap, bind) actually reaches dux.log.
     // OnceLock::set is idempotent — safe if the TUI already initialized it (flip).
     dux_core::logger::init(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
 
-    let auth_enabled = dux_core::auth::auth_enabled(&config, cli_disable_auth);
-
     // Detect the Tailscale address up front (blocking is fine at CLI startup).
-    // It feeds LOCAL MODE and the per-entry classification in the resolver. When
-    // detection fails but the user opted in (tailscale_enabled, no --no-tailscale),
-    // warn and proceed on loopback only — never block.
+    // It feeds the Tailscale leg of the bind plan. When detection fails but the
+    // user opted in (tailscale_enabled, no --no-tailscale), warn and proceed on
+    // the configured host only — never block.
     let tailscale_wanted = config.server.tailscale_enabled && !overrides.no_tailscale;
     let tailscale_ip = if tailscale_wanted {
         match dux_core::tailscale::detect_ip() {
             Ok(ip) => Some(ip),
             Err(reason) => {
                 eprintln!(
-                    "WARNING: Tailscale not detected ({}) — serving on loopback only. \
+                    "WARNING: Tailscale not detected ({}) — serving on the configured host only. \
                      Set tailscale_enabled = false in [server] (or pass --no-tailscale) to \
                      silence this warning.",
                     reason.reason()
@@ -187,13 +164,8 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         None
     };
 
-    let plan = match dux_core::config::resolve_server_plan(
-        &config.server,
-        auth_enabled,
-        cli_disable_auth,
-        &overrides,
-        tailscale_ip,
-    ) {
+    let plan = match dux_core::config::resolve_server_plan(&config.server, &overrides, tailscale_ip)
+    {
         Ok(plan) => plan,
         Err(e) => {
             eprintln!("error: {e}");
@@ -201,38 +173,22 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         }
     };
 
-    // Pre-bind warnings stay on STDERR: they fire BEFORE dux-web binds, so an
-    // operator still sees them even if a bind then fails. The informational
-    // startup banner (URLs, mode, login state, degraded legs) is printed POST-bind
-    // by dux-web's vite-style console, which knows what actually bound — so it is
-    // truthful and carries no "best-effort, see dux.log" hedging. Refusals were
-    // already printed on stderr above before we got here.
-    let dux_core::config::ServerPlan::PlainHttp { addrs } = &plan;
-    // An address is LOCAL when it is loopback OR the detected Tailscale
-    // address; only PUBLIC addresses get the deliberate-no-gate warning.
+    // Loud warning when binding a non-loopback address: dux has no login gate, so
+    // anyone who can reach the address can control your agents and worktrees.
+    // Fires pre-bind (stderr) so it is visible even if a bind then fails.
     let is_local = |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
-    let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr()));
-
-    // Loud warning when auth is deliberately disabled on a reachable
-    // (public) address: --disable-auth turned the gate off. Only an
-    // upstream auth proxy makes this safe. Fires pre-bind (stderr); the
-    // post-bind banner ALSO carries a login-DISABLED row.
-    if cli_disable_auth && !all_addrs_local {
-        for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr())) {
-            eprintln!(
-                "WARNING: --disable-auth is set and dux is binding {}, a non-loopback \
-                 address, with NO login gate. Anyone who can reach this address can control \
-                 your agents and worktrees. Only do this when an upstream auth proxy is \
-                 handling authentication in front of dux.",
-                plan_addr.addr()
-            );
-        }
+    for plan_addr in plan.addrs.iter().filter(|p| !is_local(&p.addr())) {
+        eprintln!(
+            "WARNING: dux is binding {}, a non-loopback address, with NO login gate. Anyone \
+             who can reach this address can control your agents and worktrees. Only do this on \
+             a network you trust, or front dux with an upstream auth proxy.",
+            plan_addr.addr()
+        );
     }
 
     dux_web::run_server(
         paths,
         plan,
-        cli_disable_auth,
         // Same display version as the TUI footer and the web sidebar
         // ("vX.Y.Z" for release builds, "development" otherwise) so all three
         // surfaces always show the same thing.
@@ -251,23 +207,19 @@ enum ParsedServerArgs {
 /// Raw parsed `dux server` flags before config is loaded.
 #[derive(Default)]
 struct ServerArgs {
+    /// `--bind <ADDR:PORT>`: an exact bind address, overriding config host+port.
+    /// May be given only once.
+    bind: Option<String>,
     port: Option<u16>,
-    /// `--listen` (repeatable) and the deprecated `--bind` alias, in order.
-    listen: Vec<String>,
     no_tailscale: bool,
-    insecure_allow_remote: bool,
-    disable_auth: bool,
-    dangerously_listen_http: bool,
 }
 
 impl ServerArgs {
     fn into_overrides(self) -> dux_core::config::ServerCliOverrides {
         dux_core::config::ServerCliOverrides {
+            bind: self.bind,
             port: self.port,
-            listen: self.listen,
             no_tailscale: self.no_tailscale,
-            insecure_allow_remote: self.insecure_allow_remote,
-            dangerously_listen_http: self.dangerously_listen_http,
         }
     }
 }
@@ -316,24 +268,19 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
 
         match flag.as_str() {
             "--help" | "-h" => return ParsedServerArgs::HelpRequested,
-            "--insecure-allow-remote" => out.insecure_allow_remote = true,
-            "--disable-auth" => out.disable_auth = true,
             "--no-tailscale" => out.no_tailscale = true,
-            "--dangerously-listen-http" => out.dangerously_listen_http = true,
             "--port" => match take_port("--port", inline, &mut args) {
                 Ok(p) => out.port = Some(p),
                 Err(e) => return ParsedServerArgs::Error(e),
             },
-            "--listen" => match take_value("--listen", inline, &mut args) {
-                Ok(v) => out.listen.push(v),
-                Err(e) => return ParsedServerArgs::Error(e),
-            },
             "--bind" => match take_value("--bind", inline, &mut args) {
                 Ok(v) => {
-                    eprintln!(
-                        "note: --bind is deprecated; use --listen {v} instead (treating it as --listen)."
-                    );
-                    out.listen.push(v);
+                    if out.bind.is_some() {
+                        return ParsedServerArgs::Error(
+                            "--bind may be given only once".to_string(),
+                        );
+                    }
+                    out.bind = Some(v);
                 }
                 Err(e) => return ParsedServerArgs::Error(e),
             },
@@ -380,12 +327,9 @@ mod tests {
     #[test]
     fn empty_args_parse_to_defaults() {
         let a = ok(&[]);
+        assert!(a.bind.is_none());
         assert!(a.port.is_none());
-        assert!(a.listen.is_empty());
         assert!(!a.no_tailscale);
-        assert!(!a.insecure_allow_remote);
-        assert!(!a.disable_auth);
-        assert!(!a.dangerously_listen_http);
     }
 
     #[test]
@@ -397,18 +341,33 @@ mod tests {
     }
 
     #[test]
-    fn listen_is_repeatable() {
-        let a = ok(&["--listen", "127.0.0.1:8080", "--listen=0.0.0.0:9000"]);
+    fn bind_parses_once() {
         assert_eq!(
-            a.listen,
-            vec!["127.0.0.1:8080".to_string(), "0.0.0.0:9000".to_string()]
+            ok(&["--bind", "0.0.0.0:8888"]).bind.as_deref(),
+            Some("0.0.0.0:8888")
         );
     }
 
     #[test]
-    fn bind_is_a_deprecated_alias_for_listen() {
-        let a = ok(&["--bind", "0.0.0.0:8080"]);
-        assert_eq!(a.listen, vec!["0.0.0.0:8080".to_string()]);
+    fn second_bind_is_rejected() {
+        assert!(err(&["--bind", "a:1", "--bind", "b:2"]).contains("once"));
+    }
+
+    #[test]
+    fn removed_flags_unknown() {
+        for f in [
+            "--listen",
+            "--disable-auth",
+            "--insecure-allow-remote",
+            "--acme-domain",
+            "--no-acme",
+            "--dangerously-listen-http",
+        ] {
+            assert!(
+                err(&[f]).contains("unknown argument")
+                    || err(&[f, "x"]).contains("unknown argument")
+            );
+        }
     }
 
     #[test]
@@ -424,24 +383,6 @@ mod tests {
             ParsedServerArgs::HelpRequested
         ));
         assert!(matches!(parse(&["-h"]), ParsedServerArgs::HelpRequested));
-    }
-
-    #[test]
-    fn listen_takes_value() {
-        let a = ok(&["--listen", "0.0.0.0:8080"]);
-        assert_eq!(a.listen, vec!["0.0.0.0:8080".to_string()]);
-    }
-
-    #[test]
-    fn boolean_flags_set_their_fields() {
-        let a = ok(&[
-            "--insecure-allow-remote",
-            "--disable-auth",
-            "--dangerously-listen-http",
-        ]);
-        assert!(a.insecure_allow_remote);
-        assert!(a.disable_auth);
-        assert!(a.dangerously_listen_http);
     }
 
     #[test]

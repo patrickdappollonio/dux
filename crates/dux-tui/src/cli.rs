@@ -272,6 +272,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
 
     // [server]
+    diff_str(
+        &mut changes,
+        "server.host",
+        &defaults.server.host,
+        &current.server.host,
+    );
     diff_u16(
         &mut changes,
         "server.port",
@@ -284,19 +290,13 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.tailscale_enabled,
         current.server.tailscale_enabled,
     );
-    let default_listen = defaults.server.listen_addrs.join(", ");
-    let current_listen = current.server.listen_addrs.join(", ");
+    let default_allowed = defaults.server.allowed_hosts.join(", ");
+    let current_allowed = current.server.allowed_hosts.join(", ");
     diff_str(
         &mut changes,
-        "server.listen_addrs",
-        &format!("[{default_listen}]"),
-        &format!("[{current_listen}]"),
-    );
-    diff_bool(
-        &mut changes,
-        "server.insecure_allow_remote",
-        defaults.server.insecure_allow_remote,
-        current.server.insecure_allow_remote,
+        "server.allowed_hosts",
+        &format!("[{default_allowed}]"),
+        &format!("[{current_allowed}]"),
     );
     diff_str(
         &mut changes,
@@ -316,16 +316,6 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.max_websocket_connections as usize,
         current.server.max_websocket_connections as usize,
     );
-
-    // [auth]
-    // Report only the configured user count, never the entries themselves —
-    // they embed bcrypt password hashes that must not be echoed to stdout.
-    if !current.auth.users.is_empty() {
-        changes.push(format!(
-            "auth.users: {} user(s) configured",
-            current.auth.users.len()
-        ));
-    }
 
     // [terminal]
     diff_str(
