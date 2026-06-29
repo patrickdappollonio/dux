@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use dux_core::statusline::StatusScope;
 
 use crate::engine_actor::EngineHandle;
@@ -68,15 +69,13 @@ pub enum ConnClass {
 /// WebSocket registers its server-minted id on connect and deregisters on
 /// disconnect, so the map is the authoritative set of LIVE connection ids.
 ///
-/// Two consumers read it: [`scope_from_headers`] validates an inbound
-/// `X-Connection-Id` against it (an id not present → broadcast, so a forged or
-/// stale id cannot silence a toast by routing it to a dead connection), and
-/// [`count`](ConnectionRegistry::count) reports the live socket count per class for
-/// a later task's caps.
+/// [`scope_from_headers`] validates an inbound `X-Connection-Id` against it: an id
+/// not present (or not of class [`ConnClass::Events`]) falls back to broadcast, so a
+/// forged, stale, or PTY-class id cannot silence a toast by routing it to a
+/// non-events connection.
 ///
-/// A plain `Mutex<HashMap<..>>`: every operation takes the lock, does an O(1) (or
-/// O(n) for `count`) map op, and releases it WITHOUT awaiting, so the guard never
-/// crosses an `.await`.
+/// A plain `Mutex<HashMap<..>>`: every operation takes the lock, does an O(1) map
+/// op, and releases it WITHOUT awaiting, so the guard never crosses an `.await`.
 #[derive(Default)]
 pub struct ConnectionRegistry {
     entries: Mutex<HashMap<String, ConnClass>>,
@@ -102,15 +101,11 @@ impl ConnectionRegistry {
         self.entries.lock().unwrap().contains_key(id)
     }
 
-    /// Count live connections of `class`. Exposed for a later task's per-class
-    /// connection caps; not consulted by [`scope_from_headers`].
-    pub fn count(&self, class: ConnClass) -> usize {
-        self.entries
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|c| **c == class)
-            .count()
+    /// The [`ConnClass`] of a currently-live connection, or `None` if absent.
+    /// Used by [`scope_from_headers`] to require that a scoped header carries
+    /// a live EVENTS-class id rather than any registered id.
+    pub fn class_of(&self, id: &str) -> Option<ConnClass> {
+        self.entries.lock().unwrap().get(id).copied()
     }
 }
 
@@ -141,9 +136,21 @@ pub fn scope_from_headers(headers: &HeaderMap, registry: &ConnectionRegistry) ->
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .filter(|id| registry.contains(id))
+        // Bound length (chars, not bytes) before any registry lookup.
+        .filter(|id| id.chars().count() <= MAX_ID_LEN)
+        // Only EVENTS-class connections are ever disclosed to clients; a PTY-class
+        // id in the header must not scope-and-silence toasts.
+        .filter(|id| registry.class_of(id) == Some(ConnClass::Events))
         .map(|id| StatusScope::Connection(id.to_string()))
         .unwrap_or(StatusScope::All)
+}
+
+/// 404 response for an unknown or over-length session id. Shared across the REST
+/// route modules (`git_routes`, `file_routes`) so the body text and status code
+/// stay in one place. The over-length guard calls this BEFORE the engine lookup
+/// so an outsized `:id` never reaches the actor.
+pub fn unknown_session() -> Response {
+    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 /// Whether `provider` is in the engine's configured provider list (the same source
@@ -341,27 +348,78 @@ mod tests {
         );
     }
 
+    /// An Events-class id in the header resolves to a Connection scope.
     #[test]
-    fn registry_insert_remove_contains_count() {
+    fn events_class_id_scopes_to_connection() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("ev-1".into(), ConnClass::Events);
+        let headers = header_map_with(CONNECTION_ID_HEADER, "ev-1");
+        assert!(
+            matches!(scope_from_headers(&headers, &reg), StatusScope::Connection(id) if id == "ev-1"),
+            "events-class id must produce a Connection scope"
+        );
+    }
+
+    /// A PTY-class id (AgentPty or TerminalPty) must fall back to All — PTY
+    /// connection ids are never disclosed to clients and must not scope toasts.
+    #[test]
+    fn pty_class_id_falls_back_to_all_scope() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("pty-1".into(), ConnClass::AgentPty);
+        reg.insert("pty-2".into(), ConnClass::TerminalPty);
+
+        let h1 = header_map_with(CONNECTION_ID_HEADER, "pty-1");
+        assert_eq!(
+            scope_from_headers(&h1, &reg),
+            StatusScope::All,
+            "AgentPty id must fall back to All"
+        );
+        let h2 = header_map_with(CONNECTION_ID_HEADER, "pty-2");
+        assert_eq!(
+            scope_from_headers(&h2, &reg),
+            StatusScope::All,
+            "TerminalPty id must fall back to All"
+        );
+    }
+
+    /// An id longer than MAX_ID_LEN characters must fall back to All without a
+    /// registry lookup.
+    #[test]
+    fn over_long_id_falls_back_to_all_scope() {
+        let reg = ConnectionRegistry::default();
+        let long_id = "x".repeat(MAX_ID_LEN + 1);
+        // Even if registered, the length guard rejects it first.
+        reg.insert(long_id.clone(), ConnClass::Events);
+        let headers = header_map_with(CONNECTION_ID_HEADER, &long_id);
+        assert_eq!(
+            scope_from_headers(&headers, &reg),
+            StatusScope::All,
+            "an id exceeding MAX_ID_LEN must fall back to All"
+        );
+    }
+
+    #[test]
+    fn registry_insert_remove_contains() {
         let reg = ConnectionRegistry::default();
         assert!(!reg.contains("a"));
-        assert_eq!(reg.count(ConnClass::Events), 0);
+        assert_eq!(reg.class_of("a"), None);
 
         reg.insert("a".into(), ConnClass::Events);
         reg.insert("b".into(), ConnClass::AgentPty);
         reg.insert("c".into(), ConnClass::AgentPty);
         assert!(reg.contains("a"));
         assert!(reg.contains("b"));
-        assert_eq!(reg.count(ConnClass::Events), 1);
-        assert_eq!(reg.count(ConnClass::AgentPty), 2);
-        assert_eq!(reg.count(ConnClass::TerminalPty), 0);
+        assert_eq!(reg.class_of("a"), Some(ConnClass::Events));
+        assert_eq!(reg.class_of("b"), Some(ConnClass::AgentPty));
+        assert_eq!(reg.class_of("z"), None);
 
         reg.remove("a");
         assert!(!reg.contains("a"));
-        assert_eq!(reg.count(ConnClass::Events), 0);
+        assert_eq!(reg.class_of("a"), None);
         // Removing a never-registered id is a harmless no-op.
         reg.remove("missing");
-        assert_eq!(reg.count(ConnClass::AgentPty), 2);
+        assert!(reg.contains("b"));
+        assert!(reg.contains("c"));
     }
 
     #[test]

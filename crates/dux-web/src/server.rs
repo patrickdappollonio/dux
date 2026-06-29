@@ -1762,25 +1762,15 @@ async fn handle_events_socket(
                         // Per-subscribe catch-up: for each newly-registered fine
                         // topic, send a `session.changes` frame immediately so the
                         // client does not miss an event that landed between its REST
-                        // refetch and this subscription registering. Mirrors the
-                        // Lagged recovery block above. `peek_rev` returns `None`
-                        // for a cold cache, which serialises to an absent `rev`
-                        // field; the client treats that as a force-refetch — correct.
+                        // refetch and this subscription registering. `peek_rev`
+                        // returns `None` for a cold cache, which serialises to an
+                        // absent `rev` field; the client treats that as a
+                        // force-refetch — correct.
                         let mut sink_dead = false;
-                        for topic in &new_fine {
-                            if let Some(sid) =
-                                event_bus::session_id_from_changes_topic(topic)
-                            {
-                                let catchup = WireEvent {
-                                    event: "session.changes".to_string(),
-                                    id: Some(sid.to_string()),
-                                    rev: changes.peek_rev(sid),
-                                    owner: None,
-                                };
-                                if send_event(&sink, &catchup).await.is_err() {
-                                    sink_dead = true;
-                                    break;
-                                }
+                        for frame in catchup_frames(&new_fine, &changes) {
+                            if send_event(&sink, &frame).await.is_err() {
+                                sink_dead = true;
+                                break;
                             }
                         }
                         if sink_dead {
@@ -1909,6 +1899,29 @@ async fn apply_events_frame(
     }
 
     new_fine_topics
+}
+
+/// Build the set of per-subscribe catch-up frames for `new_fine`: for each newly
+/// inserted `session:<id>:changes` fine topic, parse the session id and read the
+/// current cached rev from `changes`. Returns one [`WireEvent`] per topic; topics
+/// that do not parse as a changes topic (should not happen in practice) are silently
+/// skipped.
+///
+/// This is the SHARED production+test path for the catch-up emit, so tests exercise
+/// the topic-parse + rev-read integration rather than just serialization.
+fn catchup_frames(new_fine: &[String], changes: &ChangesService) -> Vec<WireEvent> {
+    new_fine
+        .iter()
+        .filter_map(|topic| {
+            let sid = event_bus::session_id_from_changes_topic(topic)?;
+            Some(WireEvent {
+                event: "session.changes".to_string(),
+                id: Some(sid.to_string()),
+                rev: changes.peek_rev(sid),
+                owner: None,
+            })
+        })
+        .collect()
 }
 
 /// Serialize and send one `/ws/events` resource frame as a text message.
@@ -3712,10 +3725,9 @@ mod tests {
 
     /// Subscribing to `session:<id>:changes` when the ChangesService cache is
     /// warm (`peek_rev` returns `Some(N)`) causes `apply_events_frame` to return
-    /// the newly-inserted fine topic, and the resulting catch-up frame carries
-    /// rev N. This tests the full contract: the right topic is returned, the
-    /// cached rev is read, and the serialised frame matches what the client
-    /// expects.
+    /// the newly-inserted fine topic, and `catchup_frames` (the REAL production
+    /// helper, not a manual WireEvent build) produces a frame carrying rev N.
+    /// This exercises the topic-parse + rev-read integration path.
     #[tokio::test]
     async fn subscribe_emits_catchup_with_current_rev() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3731,11 +3743,11 @@ mod tests {
         );
 
         let mut subscribed = std::collections::HashSet::new();
-        let frame = EventsClientFrame {
+        let sub_frame = EventsClientFrame {
             subscribe: vec![event_bus::changes_topic("s1")],
             unsubscribe: vec![],
         };
-        let new_fine = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus).await;
 
         // The topic was newly inserted and returned for catch-up.
         assert_eq!(
@@ -3744,24 +3756,24 @@ mod tests {
             "the newly-inserted fine topic must be returned"
         );
 
-        // The catch-up frame the caller emits must carry the cached rev.
-        let catchup = WireEvent {
-            event: "session.changes".to_string(),
-            id: Some("s1".to_string()),
-            rev: changes.peek_rev("s1"),
-            owner: None,
-        };
+        // Call the REAL production dispatch helper — not a hand-built WireEvent.
+        let frames = catchup_frames(&new_fine, &changes);
         assert_eq!(
-            serde_json::to_string(&catchup).unwrap(),
+            frames.len(),
+            1,
+            "one catch-up frame per newly-subscribed session"
+        );
+        assert_eq!(
+            serde_json::to_string(&frames[0]).unwrap(),
             r#"{"event":"session.changes","id":"s1","rev":42}"#,
             "warm-cache catch-up must carry the current rev"
         );
     }
 
     /// Subscribing when the cache is cold (`peek_rev` returns `None`) still
-    /// causes `apply_events_frame` to return the fine topic, and the resulting
-    /// catch-up frame omits `rev` (serialised as absent). The client treats an
-    /// absent `rev` as a force-refetch, so the changes pane converges even for
+    /// causes `apply_events_frame` to return the fine topic, and `catchup_frames`
+    /// produces a frame that omits `rev` (serialised as absent). The client treats
+    /// an absent `rev` as a force-refetch, so the changes pane converges even for
     /// a session whose cache has not been populated yet.
     #[tokio::test]
     async fn subscribe_cold_cache_emits_revless_catchup() {
@@ -3777,11 +3789,11 @@ mod tests {
         );
 
         let mut subscribed = std::collections::HashSet::new();
-        let frame = EventsClientFrame {
+        let sub_frame = EventsClientFrame {
             subscribe: vec![event_bus::changes_topic("s1")],
             unsubscribe: vec![],
         };
-        let new_fine = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus).await;
 
         assert_eq!(
             new_fine,
@@ -3789,15 +3801,15 @@ mod tests {
             "the newly-inserted fine topic must be returned even for a cold cache"
         );
 
-        // The catch-up frame must omit `rev` when peek_rev returns None.
-        let catchup = WireEvent {
-            event: "session.changes".to_string(),
-            id: Some("s1".to_string()),
-            rev: changes.peek_rev("s1"), // None
-            owner: None,
-        };
+        // Call the REAL production dispatch helper.
+        let frames = catchup_frames(&new_fine, &changes);
         assert_eq!(
-            serde_json::to_string(&catchup).unwrap(),
+            frames.len(),
+            1,
+            "one catch-up frame per newly-subscribed session"
+        );
+        assert_eq!(
+            serde_json::to_string(&frames[0]).unwrap(),
             r#"{"event":"session.changes","id":"s1"}"#,
             "cold-cache catch-up must omit rev so the client force-refetches"
         );
