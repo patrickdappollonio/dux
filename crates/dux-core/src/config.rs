@@ -2600,6 +2600,35 @@ bind = "0.0.0.0:9000"
         assert!(config.server.listen_addrs.is_empty());
     }
 
+    /// Deserializing a `[server]` table that omits all three `max_websocket_*` keys
+    /// must yield the expected defaults via the container `#[serde(default)]` plus
+    /// the manual `Default` impl. Pinned so a serde refactor cannot silently zero
+    /// out the caps.
+    #[test]
+    fn server_config_websocket_caps_default_when_keys_absent() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+port = 8080
+"#,
+        )
+        .expect("config without max_websocket_* keys should parse");
+        assert_eq!(
+            config.server.max_websocket_events_connections,
+            DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            "events cap must default to {DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS}"
+        );
+        assert_eq!(
+            config.server.max_websocket_agent_connections, DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            "agent cap must default to {DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS}"
+        );
+        assert_eq!(
+            config.server.max_websocket_terminal_connections,
+            DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
+            "terminal cap must default to {DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS}"
+        );
+    }
+
     #[test]
     fn acme_config_defaults_when_section_absent() {
         // An old config with [server] but no [server.acme] must parse into the

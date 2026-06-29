@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use dux_core::config::DuxPaths;
 
-use crate::rest_common::id_within_bound;
+use crate::rest_common::{id_within_bound, unknown_session};
 use crate::server::AppState;
 
 /// The gated startup-command-log read routes.
@@ -188,10 +188,6 @@ fn read_named_log(
             content: dux_core::startup::read_log(&entry.path).map_err(|e| format!("{e:#}"))?,
         })),
     }
-}
-
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 #[cfg(test)]

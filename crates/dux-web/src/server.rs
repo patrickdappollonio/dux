@@ -3353,9 +3353,10 @@ mod tests {
     }
 
     /// An attached-but-never-claimed connection (a backgrounded observer that sent
-    /// no size) owns nothing, so its stdin is dropped: attaching alone does not
-    /// grant input. An unowned PTY (nobody has sent a size) answers `is_owner`
-    /// false for every connection.
+    /// neither a size nor a write) owns nothing, so its stdin is dropped: attaching
+    /// alone does not grant input. This test covers the pure-observer case only --
+    /// `may_write` auto-claims an unowned PTY's first writer, so a connection that
+    /// sends a write would become the owner rather than staying an observer.
     #[test]
     fn attach_without_claim_is_a_read_only_observer() {
         let owners = PtySizeOwners::default();
@@ -3962,6 +3963,113 @@ mod tests {
             serde_json::to_string(&frames[0]).unwrap(),
             r#"{"event":"session.changes","id":"s1"}"#,
             "cold-cache catch-up must omit rev so the client force-refetches"
+        );
+    }
+
+    /// Build an engine handle with TWO sessions (s1 and s2) for multi-topic tests.
+    fn seeded_engine_handle_two_sessions(
+        tmp: &std::path::Path,
+    ) -> crate::engine_actor::EngineHandle {
+        use dux_core::config::{DuxPaths, ProjectConfig};
+        use dux_core::storage::SessionStore;
+
+        let root = tmp.to_path_buf();
+        let paths = DuxPaths {
+            root: root.clone(),
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        {
+            let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_project(&ProjectConfig {
+                    id: "p1".to_string(),
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("p1".to_string()),
+                    default_provider: None,
+                    leading_branch: None,
+                    auto_reopen_agents: None,
+                    startup_command: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+            let now = chrono::Utc::now();
+            for sid in ["s1", "s2"] {
+                store
+                    .upsert_session(&dux_core::model::AgentSession {
+                        id: sid.to_string(),
+                        project_id: "p1".to_string(),
+                        project_path: None,
+                        provider: dux_core::model::ProviderKind::new("claude"),
+                        source_branch: "main".to_string(),
+                        branch_name: format!("feat-{sid}"),
+                        worktree_path: root.to_string_lossy().into_owned(),
+                        title: None,
+                        started_providers: Vec::new(),
+                        desired_running: true,
+                        auto_reopen_enabled: false,
+                        status: dux_core::model::SessionStatus::Detached,
+                        created_at: now,
+                        updated_at: now,
+                    })
+                    .unwrap();
+            }
+        }
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        handle
+    }
+
+    /// Subscribing to TWO fine topics in one `apply_events_frame` call causes
+    /// `catchup_frames` to return TWO frames -- one per session, each carrying the
+    /// correct id and rev from the seeded cache.
+    #[tokio::test]
+    async fn subscribe_two_topics_emits_two_catchup_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle_two_sessions(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let changes = ChangesService::new(handle.clone(), Arc::clone(&bus));
+        // Seed two sessions with distinct revs.
+        changes.seed_rev_for_test("s1", 10);
+        changes.seed_rev_for_test("s2", 20);
+        assert_eq!(changes.peek_rev("s1"), Some(10), "s1 cache must be seeded");
+        assert_eq!(changes.peek_rev("s2"), Some(20), "s2 cache must be seeded");
+
+        let mut subscribed = std::collections::HashSet::new();
+        let sub_frame = EventsClientFrame {
+            subscribe: vec![
+                event_bus::changes_topic("s1"),
+                event_bus::changes_topic("s2"),
+            ],
+            unsubscribe: vec![],
+        };
+        let new_fine = apply_events_frame(&sub_frame, &mut subscribed, &handle, &bus).await;
+
+        assert_eq!(
+            new_fine.len(),
+            2,
+            "both fine topics must be returned for catch-up"
+        );
+
+        let frames = catchup_frames(&new_fine, &changes);
+        assert_eq!(frames.len(), 2, "one catch-up frame per subscribed session");
+
+        // Sort by session id for a deterministic assertion.
+        let mut jsons: Vec<String> = frames
+            .iter()
+            .map(|f| serde_json::to_string(f).unwrap())
+            .collect();
+        jsons.sort();
+        assert_eq!(
+            jsons[0], r#"{"event":"session.changes","id":"s1","rev":10}"#,
+            "s1 catch-up frame must carry rev 10"
+        );
+        assert_eq!(
+            jsons[1], r#"{"event":"session.changes","id":"s2","rev":20}"#,
+            "s2 catch-up frame must carry rev 20"
         );
     }
 

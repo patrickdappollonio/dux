@@ -31,7 +31,7 @@ use dux_core::wire::{WireCommand, WireCommandOutcome};
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
     CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, await_new_session, await_session_for_op,
-    id_within_bound, idempotency_key, provider_is_configured, scope_from_headers,
+    id_within_bound, idempotency_key, provider_is_configured, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -505,10 +505,6 @@ async fn reorder_sessions(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
-}
 
 fn engine_unavailable() -> Response {
     (
