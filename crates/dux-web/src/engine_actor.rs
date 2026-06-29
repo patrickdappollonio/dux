@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
-use dux_core::pty::PtyClient;
+use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, StatusScope, StatusTone,
 };
@@ -21,9 +21,11 @@ use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-/// A PTY subscription: an initial repaint snapshot plus the live byte stream the caller
-/// forwards. (PTY bytes never travel through the request channel.)
-pub type PtySubscription = (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>);
+/// A PTY subscription: an RAII unsubscribe guard, an initial repaint snapshot,
+/// and the live byte stream the caller forwards. Drop the guard to detach
+/// immediately without waiting for the next PTY output.
+/// (PTY bytes never travel through the request channel.)
+pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>);
 
 /// Which half of the projects/sessions spine changed since the last tick. The
 /// engine loop fingerprints the projected spine each tick and fires the matching

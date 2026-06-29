@@ -899,7 +899,9 @@ async fn handle_pty_socket(
         PtyTarget::Agent(id) => engine.subscribe_pty(id.clone()).await,
         PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
     };
-    let (repaint, rx) = match subscription {
+    // Bind the guard for the socket's full lifetime. Dropping it when this
+    // function returns removes the subscriber immediately on disconnect.
+    let (_viewer_guard, repaint, rx) = match subscription {
         Ok(sub) => sub,
         Err(e) => {
             // Subscribe failed after the upgrade (e.g. the agent failed to launch,
