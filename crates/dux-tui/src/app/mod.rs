@@ -3582,7 +3582,7 @@ mod tests {
         // STRUCTURAL: the flip pre-flight takes a port + optional Tailscale IP,
         // never the configurable [server] host, so it can only ever bind loopback
         // (and Tailscale). Even with a public host configured, the flip path is
-        // unaffected because it does not consult that field at all — this test
+        // unaffected because it does not consult that field at all; this test
         // documents the local-only guarantee by exercising the only inputs the
         // flip can take.
         let (listeners, _urls, _warnings) =

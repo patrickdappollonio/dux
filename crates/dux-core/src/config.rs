@@ -1038,7 +1038,7 @@ pub struct ServerCliOverrides {
 ///
 /// dux is trusted-local: the primary listener is always the configured
 /// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
-/// gate and no public-bind refusal — the operator chooses the host directly and
+/// gate and no public-bind refusal; the operator chooses the host directly and
 /// the host guard (config `allowed_hosts`) governs which `Host` headers are
 /// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary

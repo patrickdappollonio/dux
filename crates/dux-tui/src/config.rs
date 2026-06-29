@@ -262,7 +262,7 @@ fn migrate_prompt_for_name(
 /// Migrate the deprecated `[server] bind` key to the new host / port shape. A
 /// NON-LOOPBACK bind writes its IP into `host` and its port into `port` (so a
 /// previously public bind keeps serving where the operator put it), warning so
-/// the change is visible. A LOOPBACK bind is dropped silently — the new
+/// the change is visible. A LOOPBACK bind is dropped silently; the new
 /// loopback-host default already covers it. An empty or unparseable value is
 /// dropped silently. Existing new-key values are never overwritten (the user's
 /// explicit choice wins).
@@ -569,8 +569,8 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "host",
             comment: Some(CommentSource::Static(
                 "# Bind host for `dux server`. Must be an IP literal, not a hostname:\n\
-                 #   \"127.0.0.1\" — loopback only (the safe default; only this machine).\n\
-                 #   \"0.0.0.0\"   — every interface (reachable from the network).\n\
+                 #   \"127.0.0.1\": loopback only (the safe default; only this machine).\n\
+                 #   \"0.0.0.0\":   every interface (reachable from the network).\n\
                  # The in-app flip ignores this and always binds loopback (+ Tailscale).\n\
                  # Override per run with `dux server --bind IP:port`.",
             )),
