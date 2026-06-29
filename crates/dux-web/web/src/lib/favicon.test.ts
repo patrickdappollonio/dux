@@ -36,6 +36,17 @@ describe("resolveFavicon", () => {
       kind: "url",
       href: "/icons/me.svg",
     })
+    // A path with a query/fragment is preserved verbatim.
+    expect(resolveFavicon("/icon.svg?v=2#x")).toEqual({
+      kind: "url",
+      href: "/icon.svg?v=2#x",
+    })
+    // A percent-encoded backslash is a literal path character (NOT a host
+    // separator) per the WHATWG URL spec, so it stays same-origin and is allowed.
+    expect(resolveFavicon("/%5Cevil.test")).toEqual({
+      kind: "url",
+      href: "/%5Cevil.test",
+    })
   })
 
   it("rejects unsafe or unknown values, falling back to default", () => {
