@@ -339,6 +339,8 @@ function SessionSubItem({
           </div>
           <DropdownMenuContent side="right" align="start">
             <DropdownMenuGroup>
+              {/* Connection lifecycle: reconnect actions plus the auto-reopen
+                  toggle, which is just the automatic form of reopening. */}
               <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
                 <Plug />
                 Reconnect
@@ -347,7 +349,14 @@ function SessionSubItem({
                 <RotateCcw />
                 Force reconnect (fresh)
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleToggleAutoReopen}>
+                <RefreshCw />
+                {session.auto_reopen_enabled
+                  ? "Disable agent auto-reopen"
+                  : "Enable agent auto-reopen"}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
+              {/* Agent identity and provider. */}
               <DropdownMenuItem onClick={() => openRename(session.id)}>
                 <Pencil />
                 Rename agent…
@@ -359,34 +368,6 @@ function SessionSubItem({
               <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
                 <Cpu />
                 Change agent provider…
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleToggleAutoReopen}>
-                <RefreshCw />
-                {session.auto_reopen_enabled
-                  ? "Disable agent auto-reopen"
-                  : "Enable agent auto-reopen"}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => openEditor(session.id)}>
-                <FileCode2 />
-                Open editor
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  void copyToClipboard(session.worktree_path).then((ok) =>
-                    ok
-                      ? toast.success("Copied local path to clipboard")
-                      : toast.error("Couldn't copy the path"),
-                  )
-                }}
-              >
-                <ClipboardCopy />
-                Copy local path
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => createTerminal(session.id)}>
-                <SquareTerminal />
-                New terminal
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               {/* Startup command + env: these are project-scoped (no per-agent
@@ -411,7 +392,36 @@ function SessionSubItem({
                 Startup command logs…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
+              {/* Worktree access: open the agent's worktree in the editor or a
+                  terminal, or copy its path. */}
+              <DropdownMenuItem onClick={() => openEditor(session.id)}>
+                <FileCode2 />
+                Open editor
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => createTerminal(session.id)}>
+                <SquareTerminal />
+                New terminal
+              </DropdownMenuItem>
               <DropdownMenuItem
+                onClick={() => {
+                  void copyToClipboard(session.worktree_path).then((ok) =>
+                    ok
+                      ? toast.success("Copied local path to clipboard")
+                      : toast.error("Couldn't copy the path"),
+                  )
+                }}
+              >
+                <ClipboardCopy />
+                Copy local path
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {/* Destructive action, isolated. Deliberately tinted red here (dim
+                  at rest, bright on hover) at the user's request — this is the
+                  one menu entry that opts out of the neutral-destructive rule;
+                  the confirmation dialog still gates it. */}
+              <DropdownMenuItem
+                variant="destructive"
+                className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
                 onClick={() => openDelete(session.id)}
               >
                 <Trash2 />
