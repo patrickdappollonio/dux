@@ -54,6 +54,15 @@ pub enum Event {
         /// claim (stay owner) or a foreign takeover (show the read-only
         /// placeholder), replacing the old timing heuristic.
         owner: Option<String>,
+        /// The monotonic ownership epoch for a `pty.owner` handover, assigned
+        /// UNDER the [`PtySizeOwners`](crate::server) owners lock at the instant a
+        /// new owner is recorded. Because it is bumped in the same critical
+        /// section that serializes owner writes, epochs reflect TRUE claim order
+        /// even when two connections claim at once. The `pty.owner` broadcast is
+        /// emitted after the lock releases and can be reordered by the runtime, so
+        /// clients keep only the highest epoch seen per pty and ignore any older
+        /// arrival, converging on the latest claim. `None` for every other event.
+        epoch: Option<u64>,
     },
 }
 
@@ -210,6 +219,7 @@ mod tests {
             id: Some("s1".to_string()),
             rev: Some(7),
             owner: None,
+            epoch: None,
         });
         let ev = rx.recv().await.unwrap();
         assert_eq!(
@@ -219,6 +229,7 @@ mod tests {
                 id: Some("s1".to_string()),
                 rev: Some(7),
                 owner: None,
+                epoch: None,
             }
         );
     }

@@ -182,6 +182,12 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // `connected` frame (and re-issued on every reconnect). Compared against each
   // `pty.owner` event's claimer id to decide ownership. Null until that frame lands.
   const myConnIdRef = useRef<string | null>(null)
+  // A one-shot "claim as soon as our connection id is known" flag. `takeOver`
+  // sets it when it fires before the `connected` frame has assigned our id; the
+  // next `onConnected` consumes it and performs the deferred resize/claim. Without
+  // it, an optimistic claim sent while our id is null carries no recognisable
+  // owner and would be immediately revoked by its own `pty.owner` echo.
+  const pendingClaimRef = useRef(false)
 
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
@@ -279,6 +285,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // the `pty.owner` handler can compare a handover's claimer id against ours.
     pty.onConnected = (connId) => {
       myConnIdRef.current = connId
+      // A take-over requested before our id was known deferred its claim; now that
+      // we know our id, perform the resize/claim so the server's resulting
+      // `pty.owner` carries an id we recognise as ours.
+      if (pendingClaimRef.current) {
+        pendingClaimRef.current = false
+        const term = termRef.current
+        if (term) pty.sendResize(term.rows, term.cols)
+      }
     }
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
@@ -504,6 +518,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // reconnect (any open after the first) also arms the buffer reset above so the
     // replayed scrollback replaces, rather than stacks on, the stale buffer.
     pty.onOpen = () => {
+      // The server allocates a FRESH connection id per open, so the previous id is
+      // stale the instant the socket reopens. Clear it now (not only on the next
+      // `connected` frame): on reconnect a `pty.owner` over the separate
+      // `/ws/events` socket can arrive before this socket's new `connected` frame,
+      // and a stale id would make `isOwnerAfterHandover` misjudge ownership. With
+      // it null, a pre-`connected` handover safely reads as non-owner and resolves
+      // once the new `connected` frame lands (epoch dedup keeps the latest claim).
+      myConnIdRef.current = null
       initialResizeDone = false
       setReconnecting(false)
       if (firstOpen) {
@@ -678,7 +700,17 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     const term = termRef.current
     const pty = ptyRef.current
     if (term && pty) {
-      pty.sendResize(term.rows, term.cols)
+      // Only claim now if our connection id is known: the server stamps the
+      // resulting `pty.owner` with our id, and we must be able to recognise it as
+      // ours or the handover echo would immediately revoke this optimistic claim.
+      // If the `connected` frame has not landed yet (myConnIdRef null), defer the
+      // claim to the next `onConnected` via a one-shot flag instead of sending a
+      // claim whose owner we cannot match.
+      if (myConnIdRef.current !== null) {
+        pty.sendResize(term.rows, term.cols)
+      } else {
+        pendingClaimRef.current = true
+      }
     }
     term?.focus()
   }

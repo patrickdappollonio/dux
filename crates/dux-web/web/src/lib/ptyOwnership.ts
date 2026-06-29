@@ -63,7 +63,40 @@ export function onPtyOwner(cb: PtyOwnerListener): () => void {
   }
 }
 
-export function notifyPtyOwner(ptyId: string, ownerId: string | undefined): void {
+// The highest `pty.owner` epoch already applied per pty id. The server stamps every
+// ownership handover with a monotonic epoch assigned UNDER its owners lock, so the
+// epoch order is the TRUE claim order even though the broadcast is emitted after the
+// lock releases and the runtime may reorder two near-simultaneous broadcasts.
+// Dropping any handover whose epoch is not strictly newer than the last applied for
+// that pty makes the client converge on the latest claim regardless of arrival
+// order, closing the two-device simultaneous-claim race that reordering would
+// otherwise reopen (the map could end on owner=A while a client saw owner=B last).
+const lastEpochByPty = new Map<string, number>()
+
+// Reset the per-pty epoch high-water marks. The server's epoch counter restarts at
+// zero on a process restart, so without this a client that had seen a high epoch
+// would wrongly ignore every post-restart handover as "stale". Call this when the
+// events socket reconnects (a reconnect is the only way a restarted server's epochs
+// reach this client). Exported primarily for that wiring and for test isolation.
+export function resetPtyOwnerEpochs(): void {
+  lastEpochByPty.clear()
+}
+
+export function notifyPtyOwner(
+  ptyId: string,
+  ownerId: string | undefined,
+  epoch?: number,
+): void {
+  // Epoch-ordered dedup: ignore a handover that is not strictly newer than the
+  // newest already applied for this pty, so a reordered (older) broadcast cannot
+  // override a newer claim. An absent epoch (older server, or a non-`pty.owner`
+  // caller) is always delivered and never recorded, so mixed versions degrade to
+  // the prior last-arrival behavior rather than silently dropping events.
+  if (typeof epoch === "number") {
+    const last = lastEpochByPty.get(ptyId)
+    if (last !== undefined && epoch <= last) return
+    lastEpochByPty.set(ptyId, epoch)
+  }
   // Snapshot so a listener that unsubscribes during dispatch can't perturb the
   // live iteration.
   for (const cb of [...ptyOwnerListeners]) cb(ptyId, ownerId)
