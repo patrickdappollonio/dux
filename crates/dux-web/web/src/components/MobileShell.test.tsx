@@ -4,8 +4,8 @@ import { cleanup, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
-// Override only `useDux` so the mobile drawer header's wiring — `bootstrap.title`
-// → `resolveInstanceTitle` → the rendered wordmark — is exercised end to end,
+// Override only `useDux` so the mobile drawer header's wiring (`bootstrap.title`
+// to `resolveInstanceTitle` to the rendered wordmark) is exercised end to end,
 // keeping the version/subtitle line intact below it.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {

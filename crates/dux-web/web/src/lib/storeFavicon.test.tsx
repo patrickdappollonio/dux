@@ -61,7 +61,7 @@ class FakeWebSocket {
 beforeEach(() => {
   bootstrapBody = makeBootstrap()
   // jsdom provides window/document/location; it lacks localStorage and a usable
-  // WebSocket, and we don't want real network — stub those.
+  // WebSocket, and we don't want real network, so stub those.
   vi.stubGlobal("localStorage", {
     getItem: () => null,
     setItem: () => {},
