@@ -131,17 +131,20 @@ import type { SessionView, TerminalView } from "@/lib/types"
 // Bot icon (provider shown as text).
 function TerminalSubItem({
   terminal,
+  siblings,
   sessionId,
   active,
 }: {
   terminal: TerminalView
+  siblings: readonly TerminalView[]
   sessionId: string
   active: boolean
 }) {
-  // Title follows the TUI precedence: the foreground command if one is running,
-  // otherwise the static label. The static label rides along as the `title`
-  // tooltip so "Terminal 1" stays discoverable when a command is shown.
-  const title = terminalTitle(terminal)
+  // Title is the foreground command when one is running, otherwise the stable
+  // "Terminal N" label. When a sibling runs the same app the title gains the
+  // terminal's number ("vim (#1)") so the two rows stay distinct. The full
+  // "Terminal N" label still rides along as the hover tooltip below.
+  const title = terminalTitle(terminal, siblings)
   return (
     <SidebarMenuSubItem
       className={cn(
@@ -339,6 +342,8 @@ function SessionSubItem({
           </div>
           <DropdownMenuContent side="right" align="start">
             <DropdownMenuGroup>
+              {/* Connection lifecycle: reconnect actions plus the auto-reopen
+                  toggle, which is just the automatic form of reopening. */}
               <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
                 <Plug />
                 Reconnect
@@ -347,7 +352,14 @@ function SessionSubItem({
                 <RotateCcw />
                 Force reconnect (fresh)
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleToggleAutoReopen}>
+                <RefreshCw />
+                {session.auto_reopen_enabled
+                  ? "Disable agent auto-reopen"
+                  : "Enable agent auto-reopen"}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
+              {/* Agent identity and provider. */}
               <DropdownMenuItem onClick={() => openRename(session.id)}>
                 <Pencil />
                 Rename agent…
@@ -359,34 +371,6 @@ function SessionSubItem({
               <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
                 <Cpu />
                 Change agent provider…
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleToggleAutoReopen}>
-                <RefreshCw />
-                {session.auto_reopen_enabled
-                  ? "Disable agent auto-reopen"
-                  : "Enable agent auto-reopen"}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => openEditor(session.id)}>
-                <FileCode2 />
-                Open editor
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  void copyToClipboard(session.worktree_path).then((ok) =>
-                    ok
-                      ? toast.success("Copied local path to clipboard")
-                      : toast.error("Couldn't copy the path"),
-                  )
-                }}
-              >
-                <ClipboardCopy />
-                Copy local path
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => createTerminal(session.id)}>
-                <SquareTerminal />
-                New terminal
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               {/* Startup command + env: these are project-scoped (no per-agent
@@ -411,7 +395,36 @@ function SessionSubItem({
                 Startup command logs…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
+              {/* Worktree access: open the agent's worktree in the editor or a
+                  terminal, or copy its path. */}
+              <DropdownMenuItem onClick={() => openEditor(session.id)}>
+                <FileCode2 />
+                Open editor
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => createTerminal(session.id)}>
+                <SquareTerminal />
+                New terminal
+              </DropdownMenuItem>
               <DropdownMenuItem
+                onClick={() => {
+                  void copyToClipboard(session.worktree_path).then((ok) =>
+                    ok
+                      ? toast.success("Copied local path to clipboard")
+                      : toast.error("Couldn't copy the path"),
+                  )
+                }}
+              >
+                <ClipboardCopy />
+                Copy local path
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {/* Destructive action, isolated. Deliberately tinted red here (dim
+                  at rest, bright on hover) at the user's request — this is the
+                  one menu entry that opts out of the neutral-destructive rule;
+                  the confirmation dialog still gates it. */}
+              <DropdownMenuItem
+                variant="destructive"
+                className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
                 onClick={() => openDelete(session.id)}
               >
                 <Trash2 />
@@ -430,6 +443,7 @@ function SessionSubItem({
             <TerminalSubItem
               key={terminal.id}
               terminal={terminal}
+              siblings={session.terminals}
               sessionId={session.id}
               active={
                 selectedTarget?.kind === "terminal" &&

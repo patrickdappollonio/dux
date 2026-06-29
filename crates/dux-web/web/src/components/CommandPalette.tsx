@@ -6,14 +6,13 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-  CommandSeparator,
 } from "@/components/ui/command"
-import { logout, setPaletteOpen, useDux } from "@/lib/store"
+import { setPaletteOpen, useDux } from "@/lib/store"
 import { groupPaletteCommands } from "@/lib/paletteGroups"
 import { PALETTE_HANDLERS } from "@/lib/paletteRegistry"
 
 export function CommandPalette() {
-  const { paletteOpen, bootstrap, auth } = useDux()
+  const { paletteOpen, bootstrap } = useDux()
 
   // Global ⌘K / Ctrl-K handler.
   useEffect(() => {
@@ -89,27 +88,6 @@ export function CommandPalette() {
             ))}
           </CommandGroup>
         ))}
-        {/* Log out is web-only (the TUI has no session to end) and shown only
-            when auth is on. Deliberately NOT here: "Switch session" (switching
-            is the row's job — click it, or use its triple-dot menu) and "Recover
-            config" (it overwrites config.toml — far too destructive for a
-            one-keystroke palette entry). */}
-        {auth.phase === "authed" ? (
-          <>
-            {commandGroups.length > 0 ? <CommandSeparator /> : null}
-            <CommandGroup heading="Account">
-              <CommandItem
-                className="cursor-pointer"
-                onSelect={() => {
-                  void logout()
-                  close()
-                }}
-              >
-                Log out{auth.username ? ` (${auth.username})` : ""}
-              </CommandItem>
-            </CommandGroup>
-          </>
-        ) : null}
       </CommandList>
     </CommandDialog>
   )

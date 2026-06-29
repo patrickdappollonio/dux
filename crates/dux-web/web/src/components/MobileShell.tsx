@@ -20,7 +20,6 @@ import {
   FolderOpen,
   GitFork,
   GitPullRequest,
-  LogOut,
   Pencil,
   Play,
   Plug,
@@ -74,7 +73,6 @@ import {
 } from "@/lib/reorder"
 import {
   createTerminal,
-  logout,
   mobileNavigate,
   openAddProject,
   openAgentEnv,
@@ -163,7 +161,12 @@ function SessionActions({ session }: { session: SessionView }) {
         Startup command logs…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
+      {/* Destructive action, isolated. Tinted red (dim at rest, bright on hover)
+          to match the desktop sidebar's Delete item — see the CLAUDE.md
+          web-UI menu tenet; the confirmation dialog still gates it. */}
       <DropdownMenuItem
+        variant="destructive"
+        className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
         onClick={() => openDelete(session.id)}
       >
         <Trash2 />
@@ -189,15 +192,19 @@ function selectTerminalAndOpen(terminalId: string, sessionId: string): void {
 // action spaced away from the row tap target.
 function TerminalRow({
   terminal,
+  siblings,
   sessionId,
   active,
 }: {
   terminal: SessionView["terminals"][number]
+  siblings: readonly SessionView["terminals"][number][]
   sessionId: string
   active: boolean
 }) {
-  // Title follows the TUI precedence: foreground command if running, else label.
-  const title = terminalTitle(terminal)
+  // Title is the foreground command when one is running, otherwise the stable
+  // "Terminal N" label; a sibling running the same app adds the terminal's
+  // number ("vim (#1)") so the rows stay distinct.
+  const title = terminalTitle(terminal, siblings)
   return (
     <div className="flex items-center gap-1 pl-6">
       <Button
@@ -328,6 +335,7 @@ function SessionRow({
         <TerminalRow
           key={terminal.id}
           terminal={terminal}
+          siblings={session.terminals}
           sessionId={session.id}
           active={
             selectedTarget?.kind === "terminal" &&
@@ -529,7 +537,6 @@ function HomeScreen() {
     selectedTarget,
     pendingSessionOrder,
     pendingProjectOrder,
-    auth,
   } = useDux()
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
@@ -569,17 +576,6 @@ function HomeScreen() {
         >
           <Search />
         </Button>
-        {auth.phase === "authed" ? (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-11 shrink-0"
-            aria-label={`Log out ${auth.username ?? ""}`.trim()}
-            onClick={() => void logout()}
-          >
-            <LogOut />
-          </Button>
-        ) : null}
       </header>
 
       {hasProjects ? (

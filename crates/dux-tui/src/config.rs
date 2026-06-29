@@ -34,8 +34,26 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let mut config: Config = toml::from_str(&doc.to_string())
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     config.providers.ensure_defaults();
+    validate_server_host(&config)?;
     validate_project_envs(&config)?;
     Ok(config)
+}
+
+/// Reject a `[server] host` that is not an IP literal before the TUI starts.
+/// `dux server` resolves the bind plan with its own `?` validation as a backstop,
+/// but the TUI flip reads `host` too, so catch a bad value here with a clear
+/// message rather than failing later. Hostnames are not resolved (no DNS); the
+/// value must parse as an `IpAddr` such as `127.0.0.1` or `0.0.0.0`.
+fn validate_server_host(config: &Config) -> Result<()> {
+    use std::str::FromStr;
+    let host = config.server.host.trim();
+    if std::net::IpAddr::from_str(host).is_err() {
+        bail!(
+            "[server] host = \"{host}\" is not a valid IP address. Use an IP literal such as \
+             127.0.0.1 (loopback) or 0.0.0.0 (all interfaces); hostnames are not resolved."
+        );
+    }
+    Ok(())
 }
 
 fn validate_project_envs(config: &Config) -> Result<()> {
@@ -241,11 +259,13 @@ fn migrate_prompt_for_name(
     Ok(())
 }
 
-/// Migrate the deprecated `[server] bind` key to the new port / listen_addrs
-/// shape. A LOOPBACK bind adopts its port into `port` (local mode); a
-/// NON-LOOPBACK bind is appended to `listen_addrs` (full web mode). An empty or
-/// unparseable value is dropped silently — the new defaults take over. Existing
-/// new-key values are never overwritten (the user's explicit choice wins).
+/// Migrate the deprecated `[server] bind` key to the new host / port shape. A
+/// NON-LOOPBACK bind writes its IP into `host` and its port into `port` (so a
+/// previously public bind keeps serving where the operator put it), warning so
+/// the change is visible. A LOOPBACK bind is dropped silently; the new
+/// loopback-host default already covers it. An empty or unparseable value is
+/// dropped silently. Existing new-key values are never overwritten (the user's
+/// explicit choice wins).
 fn migrate_server_bind(
     doc: &mut DocumentMut,
     old: DeprecatedConfigKey,
@@ -266,32 +286,31 @@ fn migrate_server_bind(
         // NOTE this also drops a hostname `bind` (e.g. "localhost:9000"):
         // `SocketAddr` only parses literal IP:port. That is NOT a regression —
         // the OLD resolver also parsed `bind` with `SocketAddr::from_str` and
-        // rejected hostnames (no DNS), so a hostname bind never worked. Silently
-        // falling back to the new defaults matches the prior behavior.
+        // rejected hostnames (no DNS), so a hostname bind never worked.
         return Ok(());
     };
 
-    let table = dux_core::config_write::ensure_table(doc, "server");
     if addr.ip().is_loopback() {
-        // Loopback → local mode: adopt the port unless the user already set one.
-        if !table.contains_key("port") {
-            table["port"] = toml_edit::value(i64::from(addr.port()));
-        }
-    } else {
-        // Non-loopback → full web mode: append to listen_addrs (creating it if
-        // absent), avoiding a duplicate entry.
-        let entry = table
-            .entry("listen_addrs")
-            .or_insert_with(|| toml_edit::value(toml_edit::Array::new()));
-        if let Some(arr) = entry.as_array_mut() {
-            let already = arr
-                .iter()
-                .any(|v| v.as_str() == Some(addr.to_string().as_str()));
-            if !already {
-                arr.push(addr.to_string());
-            }
-        }
+        // Loopback bind: the new default host is already loopback, so there is
+        // nothing to carry over. Drop it silently.
+        return Ok(());
     }
+
+    // Non-loopback bind: carry the IP into `host` and the port into `port` so a
+    // previously reachable bind keeps serving where the operator placed it.
+    let table = dux_core::config_write::ensure_table(doc, "server");
+    if !table.contains_key("host") {
+        table["host"] = toml_edit::value(addr.ip().to_string());
+    }
+    if !table.contains_key("port") {
+        table["port"] = toml_edit::value(i64::from(addr.port()));
+    }
+    dux_core::logger::warn(&format!(
+        "[server] migrated the deprecated `bind = \"{raw}\"` to host = \"{}\" and port = {}. \
+         This server listens on a non-loopback address; only run it on a network you trust.",
+        addr.ip(),
+        addr.port()
+    ));
     Ok(())
 }
 
@@ -340,10 +359,6 @@ enum ConfigEntry {
     Terminal,
     /// Renders the `[startup_command_terminal]` section.
     StartupCommandTerminal,
-    /// Renders the `[server.acme]` built-in TLS / Let's Encrypt subsection.
-    ServerAcme,
-    /// Renders the `[auth]` section with the web UI login users.
-    Auth,
     /// Renders the `[keys]` section with all keybindings.
     Keys,
     /// Renders the `[macros]` section with text macros.
@@ -543,21 +558,29 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Blank,
         ConfigEntry::Section("server"),
         ConfigEntry::Comment(
-            "# The dux web UI has two ways to listen, LOCAL MODE and FULL WEB MODE.\n\
-             #\n\
-             # LOCAL MODE (port + tailscale_enabled below) is what the in-app\n\
-             # \"start web server\" flip uses, and what `dux server` falls back to when\n\
-             # listen_addrs is empty. It always serves on loopback (127.0.0.1) and,\n\
-             # when tailscale_enabled, also on this machine's Tailscale address so\n\
-             # your other tailnet devices can reach it (traffic is WireGuard-encrypted\n\
-             # in transit). The flip NEVER reads listen_addrs — it is local-only by\n\
-             # design and can never open a public listener.",
+            "# The dux web UI is a trusted-local tool: there is no login gate. It binds\n\
+             # host:port (loopback by default) and, when tailscale_enabled, also this\n\
+             # machine's Tailscale address so your other tailnet devices can reach it\n\
+             # (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
+             # server\" flip always serves on loopback (plus Tailscale) regardless of\n\
+             # host. Only run a non-loopback host on a network you trust.",
         ),
+        ConfigEntry::Field {
+            key: "host",
+            comment: Some(CommentSource::Static(
+                "# Bind host for `dux server`. Must be an IP literal, not a hostname:\n\
+                 #   \"127.0.0.1\": loopback only (the safe default; only this machine).\n\
+                 #   \"0.0.0.0\":   every interface (reachable from the network).\n\
+                 # The in-app flip ignores this and always binds loopback (+ Tailscale).\n\
+                 # Override per run with `dux server --bind IP:port`.",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.host.clone()),
+        },
         ConfigEntry::Field {
             key: "port",
             comment: Some(CommentSource::Static(
-                "# LOCAL MODE port. dux binds 127.0.0.1:port (and the Tailscale\n\
-                 # address:port when tailscale_enabled). The default is 8080.",
+                "# Bind port. dux binds host:port (and the Tailscale address:port when\n\
+                 # tailscale_enabled). The default is 8080.",
             )),
             value_fn: |c| FieldValue::U16(c.server.port),
         },
@@ -572,54 +595,23 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # already in use by another process, dux WARNS and serves on loopback\n\
                  # only rather than failing to start. Set false to skip detection and\n\
                  # silence that warning.\n\
-                 # NOTE: a shared tailnet means OTHER people's devices can reach dux.\n\
-                 # Configure [auth] users below so the login gate protects it.",
+                 # NOTE: a shared tailnet means OTHER people's devices can reach dux.",
             )),
             value_fn: |c| FieldValue::Bool(c.server.tailscale_enabled),
         },
         ConfigEntry::Field {
-            key: "listen_addrs",
+            key: "allowed_hosts",
             comment: Some(CommentSource::Static(
-                "# FULL WEB MODE listeners — used by `dux server` ONLY (the flip ignores\n\
-                 # this entirely). Each entry is an IP:port socket address; hostnames are\n\
-                 # NOT resolved. When non-empty, this REPLACES local mode for the CLI:\n\
-                 # dux binds exactly these addresses. Examples:\n\
-                 #   listen_addrs = [\"127.0.0.1:8080\"]            # loopback only\n\
-                 #   listen_addrs = [\"0.0.0.0:8080\"]             # every interface\n\
-                 # A non-loopback (public) entry is gated: it needs either [auth] users\n\
-                 # or insecure_allow_remote, AND `dux server --dangerously-listen-http`\n\
-                 # (plain HTTP is unencrypted). Prefer built-in TLS via [server.acme].",
+                "# Extra Host header values to accept on NON-same-origin requests. dux\n\
+                 # always serves on host:port and accepts same-origin requests; list any\n\
+                 # additional hostnames a reverse proxy or tailnet name forwards under\n\
+                 # so the host guard does not reject them. Hostnames only, no scheme or\n\
+                 # port. Examples:\n\
+                 #   allowed_hosts = [\"box.tailnet.ts.net\"]\n\
+                 #   allowed_hosts = [\"dux.example.com\"]\n\
+                 # Leave empty for a plain loopback or proxy-fronted deployment.",
             )),
-            value_fn: |c| FieldValue::StrList(c.server.listen_addrs.clone()),
-        },
-        ConfigEntry::Field {
-            key: "insecure_allow_remote",
-            comment: Some(CommentSource::Static(
-                "# Allow a non-loopback listen_addrs entry even though the web UI has\n\
-                 # NO authentication: anyone who can reach the port can fully control\n\
-                 # your agents and worktrees. Keep this false unless you understand the\n\
-                 # risk (for example, an upstream auth proxy fronting dux, or brief LAN\n\
-                 # testing on a trusted network). Loopback and Tailscale binds are never\n\
-                 # gated by this — only public listen_addrs entries are.",
-            )),
-            value_fn: |c| FieldValue::Bool(c.server.insecure_allow_remote),
-        },
-        ConfigEntry::Field {
-            key: "dangerously_listen_http",
-            comment: Some(CommentSource::Static(
-                "# Acknowledge serving UNENCRYPTED plain HTTP on a non-loopback (public)\n\
-                 # listen_addrs entry. This is the config-file equivalent of the\n\
-                 # `dux server --dangerously-listen-http` flag: either one satisfies the\n\
-                 # gate, so a config-only rollback off [server.acme] can re-open a public\n\
-                 # plain-HTTP bind without editing the service's command line. It only\n\
-                 # covers the ENCRYPTION requirement, though: a public bind still needs\n\
-                 # auth ([auth] users or insecure_allow_remote), so this alone will not\n\
-                 # unblock startup. Traffic (including the login password) is sent in the\n\
-                 # clear, so prefer built-in TLS via [server.acme]; set this true only\n\
-                 # when an upstream proxy terminates TLS or you accept the risk on a\n\
-                 # trusted network.",
-            )),
-            value_fn: |c| FieldValue::Bool(c.server.dangerously_listen_http),
+            value_fn: |c| FieldValue::StrList(c.server.allowed_hosts.clone()),
         },
         ConfigEntry::Field {
             key: "color",
@@ -648,22 +640,47 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.server.access_log),
         },
         ConfigEntry::Field {
-            key: "max_websocket_connections",
+            key: "max_websocket_events_connections",
             comment: Some(CommentSource::Static(
-                "# Maximum number of concurrent WebSocket connections to `dux server`.\n\
-                 # Each open browser tab or device holds one. Once this many are live,\n\
-                 # further connections are refused with HTTP 503 until a slot frees — a\n\
-                 # safety bound against connection exhaustion (a runaway reconnect loop,\n\
-                 # a tab left multiplying). The normal single-operator deployment uses a\n\
-                 # handful; raise it if you genuinely run many tabs/devices. 0 refuses\n\
-                 # all new connections. Changing this needs a server restart to take\n\
-                 # effect (a reload of the running server cannot resize the cap).",
+                "# Maximum number of concurrent EVENTS WebSocket (/ws) connections to\n\
+                 # `dux server`. This is the status/changed-files event stream every open\n\
+                 # browser tab holds. Once this many are live, further connections are\n\
+                 # refused with HTTP 503 until a slot frees: a safety bound against\n\
+                 # connection exhaustion (a runaway reconnect loop, a tab left\n\
+                 # multiplying). The normal single-operator deployment uses a handful;\n\
+                 # raise it if you genuinely run many tabs/devices. A value of 0\n\
+                 # PERMANENTLY blocks this connection class until the server restarts.\n\
+                 # Changing this needs a server restart to take effect (a reload of the\n\
+                 # running server cannot resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_connections as usize),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_events_connections as usize),
+        },
+        ConfigEntry::Field {
+            key: "max_websocket_agent_connections",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of concurrent AGENT-PTY WebSocket connections to\n\
+                 # `dux server`. This is the embedded-terminal stream for an agent\n\
+                 # session. Once this many are live, further connections are refused with\n\
+                 # HTTP 503 until a slot frees. A value of 0 PERMANENTLY blocks this\n\
+                 # connection class until the server restarts. Changing this needs a\n\
+                 # server restart to take effect (a reload of the running server cannot\n\
+                 # resize the cap).",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_agent_connections as usize),
+        },
+        ConfigEntry::Field {
+            key: "max_websocket_terminal_connections",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of concurrent TERMINAL-PTY WebSocket connections to\n\
+                 # `dux server`. This is the standalone scratch-terminal stream. Once\n\
+                 # this many are live, further connections are refused with HTTP 503\n\
+                 # until a slot frees. A value of 0 PERMANENTLY blocks this connection\n\
+                 # class until the server restarts. Changing this needs a server restart\n\
+                 # to take effect (a reload of the running server cannot resize the cap).",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_terminal_connections as usize),
         },
         ConfigEntry::Blank,
-        ConfigEntry::ServerAcme,
-        ConfigEntry::Auth,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
         ConfigEntry::Macros,
@@ -724,8 +741,6 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             ConfigEntry::StartupCommandTerminal => {
                 render_startup_command_terminal_config(&mut out, &config.startup_command_terminal);
             }
-            ConfigEntry::ServerAcme => render_server_acme_config(&mut out, &config.server.acme),
-            ConfigEntry::Auth => render_auth_config(&mut out, &config.auth, bindings),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
             ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
         }
@@ -778,9 +793,9 @@ pub fn save_config(
         // written, exactly as before.
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         let body = render_config(config, &bindings);
-        // 0600 perms: this file holds [auth] bcrypt hashes and [env] tokens, so
-        // it must not be group/world readable (shared with the config writer's
-        // patch path so first-creation and later saves agree).
+        // 0600 perms: this file may hold secrets such as [env] tokens, so it must
+        // not be group/world readable (shared with the config writer's patch path
+        // so first-creation and later saves agree).
         dux_core::config_write::write_config_secure(config_path, &body)?;
         Ok(())
     }
@@ -1005,92 +1020,6 @@ fn render_env_config(out: &mut String, env: &BTreeMap<String, String>) {
     out.push('\n');
 }
 
-fn render_auth_config(
-    out: &mut String,
-    auth: &AuthConfig,
-    bindings: &crate::keybindings::RuntimeBindings,
-) {
-    let palette_key = bindings.label_for(crate::keybindings::Action::OpenPalette);
-    out.push_str("[auth]\n");
-    let _ = writeln!(
-        out,
-        "# Login credentials for the `dux server` web UI. Each entry is an\n\
-         # htpasswd-style \"username:bcrypt-hash\" string, for example:\n\
-         #   users = [\"alice:$2y$12$......\"]\n\
-         # The hash must be bcrypt (the $2a$/$2b$/$2y$ family); plaintext is never\n\
-         # stored. Manage entries with the server-add-user and server-remove-user\n\
-         # commands in the palette ({palette_key}) rather than editing hashes by hand.\n\
-         # The login gate turns ON automatically as soon as at least one user is\n\
-         # listed here, and OFF when the list is empty. To run with no login (for\n\
-         # example behind an upstream auth proxy), leave this empty and start the\n\
-         # server with `dux server --disable-auth`.",
-    );
-    out.push_str(&format!("users = {}\n\n", render_string_list(&auth.users)));
-}
-
-fn render_server_acme_config(out: &mut String, acme: &AcmeSettings) {
-    out.push_str("[server.acme]\n");
-    out.push_str(
-        "# Built-in TLS via Let's Encrypt (ACME HTTP-01). When enabled, `dux server`\n\
-         # obtains and renews real certificates itself and serves HTTPS — no reverse\n\
-         # proxy required. This uses the HTTP-01 challenge, which means BOTH must hold:\n\
-         #   1. Each domain below has a public DNS A/AAAA record pointing at this host.\n\
-         #   2. Inbound http_port (default 80) is reachable from the internet so\n\
-         #      Let's Encrypt can fetch the challenge token.\n\
-         # The :80 listener answers the ACME challenge and otherwise redirects to HTTPS;\n\
-         # :443 serves the TLS web UI. Both ports are configurable below.\n\
-         #\n\
-         # Behind your own reverse proxy instead? Leave enabled = false, let the proxy\n\
-         # terminate TLS, and point the proxy at a loopback or private [server]\n\
-         # listen_addrs entry (or use LOCAL MODE).\n\
-         #\n\
-         # NOTE: ACME settings are read once when the server starts. Changing them and\n\
-         # running reload-config does NOT rebind the listeners — dux applies the rest\n\
-         # of the reload and posts a warning telling you to restart the server.\n",
-    );
-    out.push_str(
-        "# Turn the built-in ACME server on. Leave false to serve plain HTTP (loopback\n\
-         # dev, or TLS terminated by an upstream proxy).\n",
-    );
-    out.push_str(&format!("enabled = {}\n", acme.enabled));
-    out.push_str(
-        "# Domains to request certificates for. Each one needs a public DNS record\n\
-         # resolving to this host. Example: domains = [\"dux.example.com\"].\n",
-    );
-    out.push_str(&format!(
-        "domains = {}\n",
-        render_string_list(&acme.domains)
-    ));
-    out.push_str("# Contact email Let's Encrypt uses for expiry/renewal notices (recommended).\n");
-    out.push_str(&format!(
-        "email = \"{}\"\n",
-        escape_toml_string(&acme.email)
-    ));
-    out.push_str(
-        "# Port for the HTTP-01 challenge and the HTTPS redirect. Let's Encrypt always\n\
-         # connects to port 80 for HTTP-01, so keep this 80 unless a proxy forwards it.\n",
-    );
-    out.push_str(&format!("http_port = {}\n", acme.http_port));
-    out.push_str("# Port the TLS web UI listens on (443 is the browser default).\n");
-    out.push_str(&format!("https_port = {}\n", acme.https_port));
-    out.push_str(
-        "# Use the Let's Encrypt PRODUCTION directory (true) or the STAGING directory\n\
-         # (false). Production has strict rate limits and issues browser-trusted certs;\n\
-         # staging issues untrusted certs but lets you test the flow freely. Test with\n\
-         # production = false first, then flip to true once the challenge succeeds.\n",
-    );
-    out.push_str(&format!("production = {}\n", acme.production));
-    out.push_str(
-        "# Directory holding the ACME account key and issued certificates. These are\n\
-         # PRIVATE KEYS — keep the directory readable only by the dux user. Leave empty\n\
-         # to use <config-dir>/acme. Env vars and a leading ~ are expanded.\n",
-    );
-    out.push_str(&format!(
-        "cache_dir = \"{}\"\n\n",
-        escape_toml_string(acme.cache_dir.as_deref().unwrap_or(""))
-    ));
-}
-
 fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     out.push_str("[terminal]\n");
     out.push_str(
@@ -1243,6 +1172,36 @@ mod tests {
     }
 
     #[test]
+    fn rendered_server_section_is_local_only() {
+        let toml = render_default_config();
+        assert!(toml.contains("host = \"127.0.0.1\""));
+        assert!(toml.contains("allowed_hosts"));
+        assert!(!toml.contains("[server.acme]"));
+        assert!(!toml.contains("listen_addrs"));
+        assert!(!toml.contains("[auth]"));
+    }
+
+    #[test]
+    fn ensure_config_rejects_non_ip_host() {
+        let mut config = Config::default();
+        config.server.host = "example.com".to_string();
+        let err = validate_server_host(&config).expect_err("a non-IP host must be rejected");
+        assert!(
+            err.to_string().contains("example.com"),
+            "the error must name the bad host: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_config_accepts_ip_hosts() {
+        let mut config = Config::default();
+        config.server.host = "0.0.0.0".to_string();
+        validate_server_host(&config).expect("0.0.0.0 is a valid host");
+        config.server.host = "127.0.0.1".to_string();
+        validate_server_host(&config).expect("loopback is a valid host");
+    }
+
+    #[test]
     fn default_config_is_commented_and_complete() {
         let rendered = render_default_config();
         assert!(rendered.contains("# dux configuration"));
@@ -1278,36 +1237,24 @@ mod tests {
         assert!(rendered.contains("[editor]"));
         assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[server]"));
+        assert!(rendered.contains("host = \"127.0.0.1\""));
         assert!(rendered.contains("port = 8080"));
         assert!(rendered.contains("tailscale_enabled = true"));
-        assert!(rendered.contains("listen_addrs = []"));
+        assert!(rendered.contains("allowed_hosts = []"));
         assert!(
             !rendered.contains("bind = "),
             "renderer must not emit the deprecated bind key"
         );
-        assert!(rendered.contains("insecure_allow_remote = false"));
-        assert!(rendered.contains("dangerously_listen_http = false"));
+        assert!(!rendered.contains("listen_addrs"));
+        assert!(!rendered.contains("insecure_allow_remote"));
+        assert!(!rendered.contains("dangerously_listen_http"));
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
-        assert!(rendered.contains("max_websocket_connections = 128"));
-        assert!(rendered.contains("[server.acme]"));
-        assert!(rendered.contains("enabled = false"));
-        assert!(rendered.contains("domains = []"));
-        assert!(rendered.contains("http_port = 80"));
-        assert!(rendered.contains("https_port = 443"));
-        assert!(rendered.contains("production = true"));
-        assert!(rendered.contains("[auth]"));
-        assert!(rendered.contains("users = []"));
-        assert!(rendered.contains("server-add-user"));
-        assert!(rendered.contains("--disable-auth"));
-        // The palette-open keybinding in the [auth] comment is interpolated from
-        // the runtime bindings, never hardcoded (CLAUDE.md). The default label is
-        // "Ctrl-p", but assert the dynamic value so a rebind keeps the comment
-        // accurate.
-        let palette_key =
-            crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default())
-                .label_for(crate::keybindings::Action::OpenPalette);
-        assert!(rendered.contains(&format!("commands in the palette ({palette_key})")));
+        assert!(rendered.contains("max_websocket_events_connections = 32"));
+        assert!(rendered.contains("max_websocket_agent_connections = 32"));
+        assert!(rendered.contains("max_websocket_terminal_connections = 64"));
+        assert!(!rendered.contains("[auth]"));
+        assert!(!rendered.contains("[server.acme]"));
         assert!(rendered.contains("[keys]"));
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
@@ -1315,80 +1262,6 @@ mod tests {
         assert!(
             !rendered.contains("commit_prompt"),
             "the removed AI-commit prompt key must no longer be rendered"
-        );
-    }
-
-    #[test]
-    fn server_acme_section_documents_key_concepts() {
-        // The config file IS the documentation: the [server.acme] comments must
-        // explain HTTP-01 reachability, the staging/production toggle + rate
-        // limits, the behind-a-proxy path, the private-key cache, and that ACME
-        // changes need a server restart.
-        let rendered = render_default_config();
-        // HTTP-01: DNS record + inbound :80 reachable from the internet.
-        assert!(rendered.contains("HTTP-01"), "must name the challenge type");
-        assert!(
-            rendered.contains("DNS A/AAAA record"),
-            "must explain the DNS requirement"
-        );
-        assert!(
-            rendered.contains("reachable from the internet"),
-            "must explain the inbound :80 reachability requirement"
-        );
-        // Staging vs production + Let's Encrypt rate limits.
-        assert!(
-            rendered.contains("STAGING") && rendered.contains("PRODUCTION"),
-            "must explain the staging/production toggle"
-        );
-        assert!(
-            rendered.contains("rate limits"),
-            "must warn about Let's Encrypt rate limits"
-        );
-        // Behind-my-own-proxy path: enabled = false + private/loopback bind.
-        assert!(
-            rendered.contains("reverse proxy") && rendered.contains("enabled = false"),
-            "must describe the proxy path with enabled = false"
-        );
-        // Cache dir default + it holds PRIVATE KEYS.
-        assert!(
-            rendered.contains("<config-dir>/acme"),
-            "must document the default cache dir"
-        );
-        assert!(
-            rendered.contains("PRIVATE KEYS"),
-            "must warn the cache dir holds private keys"
-        );
-        // ACME changes need a RESTART (reload-config does not rebind).
-        assert!(
-            rendered.contains("restart the server"),
-            "must explain that ACME changes need a restart"
-        );
-    }
-
-    #[test]
-    fn rendered_config_with_acme_round_trips() {
-        // The rendered template (including a populated [server.acme]) must
-        // re-parse into an equivalent config — proving the section ordering is
-        // valid TOML (subtable after the bare [server] keys).
-        let mut config = Config::default();
-        config.server.acme.enabled = true;
-        config.server.acme.domains = vec!["dux.example.com".to_string()];
-        config.server.acme.email = "ops@example.com".to_string();
-        config.server.acme.production = false;
-        config.server.acme.cache_dir = Some("/var/lib/dux/acme".to_string());
-
-        let rendered = render_config_default(&config);
-        let parsed: Config = toml::from_str(&rendered).expect("rendered config must re-parse");
-        assert!(parsed.server.acme.enabled);
-        assert_eq!(
-            parsed.server.acme.domains,
-            vec!["dux.example.com".to_string()]
-        );
-        assert_eq!(parsed.server.acme.email, "ops@example.com");
-        assert!(!parsed.server.acme.production);
-        assert_eq!(
-            parsed.server.acme.cache_dir.as_deref(),
-            Some("/var/lib/dux/acme")
         );
     }
 
@@ -1700,7 +1573,9 @@ enable_randomized_pet_name_by_default = false
     }
 
     #[test]
-    fn server_bind_loopback_migrates_port_and_drops_bind() {
+    fn server_bind_loopback_is_dropped_silently() {
+        // A loopback bind has nothing to carry over (the new default host is
+        // already loopback), so it is dropped and creates no host/port keys.
         let mut doc: DocumentMut = r#"
 [server]
 bind = "127.0.0.1:9090"
@@ -1713,25 +1588,17 @@ bind = "127.0.0.1:9090"
 
         let server = doc["server"].as_table().expect("server table");
         assert!(!server.contains_key("bind"), "bind must be dropped");
-        assert_eq!(
-            server["port"].as_value().and_then(Value::as_integer),
-            Some(9090),
-            "loopback bind port adopted into port"
-        );
         assert!(
-            !server.contains_key("listen_addrs"),
-            "loopback bind must NOT create listen_addrs"
+            !server.contains_key("host"),
+            "a loopback bind must NOT write host"
         );
-
-        // Reparses into the new shape with the migrated port.
+        // Reparses into the new shape with the default host/port.
         let config: Config = toml::from_str(&doc.to_string()).expect("reparse migrated config");
-        assert_eq!(config.server.port, 9090);
-        assert!(config.server.listen_addrs.is_empty());
-        assert!(config.server.bind.is_none());
+        assert_eq!(config.server.host, "127.0.0.1");
     }
 
     #[test]
-    fn server_bind_non_loopback_migrates_into_listen_addrs() {
+    fn server_bind_non_loopback_migrates_into_host_and_port() {
         let mut doc: DocumentMut = r#"
 [server]
 bind = "0.0.0.0:9000"
@@ -1744,24 +1611,28 @@ bind = "0.0.0.0:9000"
 
         let server = doc["server"].as_table().expect("server table");
         assert!(!server.contains_key("bind"), "bind must be dropped");
-        let listen = server["listen_addrs"]
-            .as_array()
-            .expect("listen_addrs array");
-        assert_eq!(listen.len(), 1);
-        assert_eq!(listen.get(0).and_then(|v| v.as_str()), Some("0.0.0.0:9000"));
+        assert_eq!(
+            server["host"].as_value().and_then(Value::as_str),
+            Some("0.0.0.0")
+        );
+        assert_eq!(
+            server["port"].as_value().and_then(Value::as_integer),
+            Some(9000)
+        );
 
-        // Reparses into the new shape with the migrated listener.
+        // Reparses into the new shape with the migrated host/port.
         let config: Config = toml::from_str(&doc.to_string()).expect("reparse migrated config");
-        assert_eq!(config.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
-        assert!(config.server.bind.is_none());
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.port, 9000);
     }
 
     #[test]
     fn server_bind_migration_preserves_explicit_new_keys() {
-        // A loopback bind must NOT overwrite an explicitly-set port.
+        // A non-loopback bind must NOT overwrite an explicitly-set host/port.
         let mut doc: DocumentMut = r#"
 [server]
-bind = "127.0.0.1:9090"
+bind = "0.0.0.0:9000"
+host = "10.0.0.1"
 port = 7000
 "#
         .parse()
@@ -1771,9 +1642,14 @@ port = 7000
         let server = doc["server"].as_table().expect("server table");
         assert!(!server.contains_key("bind"));
         assert_eq!(
+            server["host"].as_value().and_then(Value::as_str),
+            Some("10.0.0.1"),
+            "explicit host wins over the migrated bind host"
+        );
+        assert_eq!(
             server["port"].as_value().and_then(Value::as_integer),
             Some(7000),
-            "explicit port wins over the migrated loopback bind port"
+            "explicit port wins over the migrated bind port"
         );
     }
 
@@ -2315,33 +2191,6 @@ oneshot_output = "stdout"
         let rendered = render_config_default(&config);
         assert!(rendered.contains("\"Review\" = { text = \"hello world\", surface = \"agent\" }"));
         assert!(rendered.contains("\"Test\" = { text = \"foo bar\", surface = \"terminal\" }"));
-    }
-
-    #[test]
-    fn render_auth_config_interpolates_rebound_palette_key() {
-        // The [auth] comment must reflect the USER's palette binding, not a
-        // hardcoded "(Ctrl-p)" (CLAUDE.md). Rebind the palette and assert the
-        // comment names the new key and never the literal default.
-        let mut config = Config::default();
-        config
-            .keys
-            .bindings
-            .insert("open_palette".to_string(), vec!["Ctrl-k".to_string()]);
-        let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
-        let rendered = render_config(&config, &bindings);
-        let palette_key = bindings.label_for(crate::keybindings::Action::OpenPalette);
-        assert_eq!(
-            palette_key, "Ctrl-k",
-            "rebind must take effect in the label"
-        );
-        assert!(
-            rendered.contains("commands in the palette (Ctrl-k)"),
-            "the [auth] comment must interpolate the rebound palette key"
-        );
-        assert!(
-            !rendered.contains("commands in the palette (Ctrl-p)"),
-            "the [auth] comment must not hardcode the default palette key"
-        );
     }
 
     #[test]

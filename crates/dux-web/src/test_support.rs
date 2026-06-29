@@ -1,16 +1,17 @@
 //! Test-only helpers shared by the REST route modules' `#[cfg(test)]` suites:
-//! a minimal headless engine handle plus router builders (gate off / gate on).
+//! a minimal headless engine handle plus a plain router builder. dux is
+//! trusted-local with no login gate, so every route is served plainly.
 //! Mirrors the private `test_engine_handle` in `server.rs`, lifted here so every
 //! route module can boot the same engine without duplicating the recipe.
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 use axum::Router;
 use tempfile::TempDir;
 
-use crate::auth;
 use crate::engine_actor::EngineHandle;
-use crate::server::{self, RouterParams, build_app};
+use crate::server;
 
 /// Boot a minimal headless engine handle rooted at `tmp`. The handle just needs
 /// to exist; routing-only tests never drive a real agent through it.
@@ -28,8 +29,7 @@ pub(crate) fn test_engine_handle(tmp: &Path) -> EngineHandle {
     handle
 }
 
-/// A fresh temp dir + an engine-backed router with the login gate OFF (the
-/// common case for happy-path/404/400 route tests). Returns the `TempDir` so the
+/// A fresh temp dir + an engine-backed router. Returns the `TempDir` so the
 /// caller keeps it alive for the test's duration.
 pub(crate) fn router_no_auth() -> (TempDir, Router) {
     let tmp = tempfile::tempdir().unwrap();
@@ -37,20 +37,22 @@ pub(crate) fn router_no_auth() -> (TempDir, Router) {
     (tmp, router)
 }
 
-/// A fresh temp dir + an engine-backed router with the login gate ON (a single
-/// bcrypt-hashed user, no live session). Every `/api/v1/*` request without a
-/// session cookie must 401, which is what the gated-401 tests assert.
-pub(crate) fn router_with_auth() -> (TempDir, Router) {
+/// Bind a real loopback server on an ephemeral port and serve the plain router on
+/// a background task. Returns the bound `SocketAddr` so an integration test can
+/// issue real HTTP/WebSocket requests against it. The `TempDir` is kept alive by
+/// the returned guard; drop it to clean up the engine's on-disk state.
+#[allow(dead_code)]
+pub(crate) async fn boot_plain_test_server() -> (TempDir, SocketAddr) {
     let tmp = tempfile::tempdir().unwrap();
-    let hash = dux_core::auth::hash_password("secret-pw").unwrap();
-    // `disable_auth = false` + a valid user → the gate is ENABLED, so a request
-    // without a session cookie is rejected with 401.
-    let auth = auth::shared_auth(&[format!("alice:{hash}")], false);
-    let (router, _store) = build_app(
-        test_engine_handle(tmp.path()),
-        auth,
-        Router::new(),
-        RouterParams::plain_http(),
-    );
-    (tmp, router)
+    let app = server::router(test_engine_handle(tmp.path()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+    (tmp, addr)
 }

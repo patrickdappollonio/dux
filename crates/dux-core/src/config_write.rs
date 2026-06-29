@@ -20,9 +20,9 @@ use anyhow::{Context, Result};
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
-/// holds bcrypt password hashes under `[auth]` and may hold tokens under `[env]`,
-/// so it must not be group/world readable. Unix-only — the project targets macOS
-/// and Linux (CLAUDE.md), so no `cfg(windows)` branch is needed.
+/// may hold secrets such as tokens under `[env]`, so it must not be group/world
+/// readable. Unix-only — the project targets macOS and Linux (CLAUDE.md), so no
+/// `cfg(windows)` branch is needed.
 const CONFIG_FILE_MODE: u32 = 0o600;
 
 /// Whether an atomic write fsyncs the file before the rename. Eager (critical)
@@ -83,7 +83,7 @@ pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic(path, contents, Durability::Fsync)
 }
 
-use crate::config::{AcmeSettings, Config, MacrosConfig, ProjectConfig, ProvidersConfig};
+use crate::config::{Config, MacrosConfig, ProjectConfig, ProvidersConfig};
 
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
 /// formatting, and any keys this writer doesn't manage. Reads the file, applies
@@ -276,9 +276,10 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "editor", "default", &config.editor.default);
 
     // --- [server] ---
-    // `bind` is DEPRECATED: it is migrated away on load and is never re-emitted
-    // here, so a patch/recover/plain write produces the new port/listen_addrs
-    // shape only.
+    // The deprecated `bind` field is migrated away on load and is never
+    // re-emitted here, so a patch/recover/plain write produces the new
+    // host/port shape only.
+    patch_table_str(doc, "server", "host", &config.server.host);
     patch_table_u16(doc, "server", "port", config.server.port);
     patch_table_bool(
         doc,
@@ -286,33 +287,41 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "tailscale_enabled",
         config.server.tailscale_enabled,
     );
-    patch_table_string_array(doc, "server", "listen_addrs", &config.server.listen_addrs);
-    patch_table_bool(
-        doc,
-        "server",
-        "insecure_allow_remote",
-        config.server.insecure_allow_remote,
-    );
-    patch_table_bool(
-        doc,
-        "server",
-        "dangerously_listen_http",
-        config.server.dangerously_listen_http,
-    );
+    patch_table_string_array(doc, "server", "allowed_hosts", &config.server.allowed_hosts);
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
+    // The single WebSocket cap was split into three per-class caps; drop the
+    // obsolete key from any existing config block on every save so saves stop
+    // carrying it (mirrors the oneshot strip in `patch_providers`). Warn when
+    // the key is actually present so a TUI user (who never calls load_config on
+    // the server path) still sees the migration notice in dux.log and on stderr.
+    if remove_table_key_item(doc, "server", "max_websocket_connections").is_some() {
+        let msg = "[server] max_websocket_connections has been removed and is being ignored. \
+            It was split into max_websocket_events_connections, \
+            max_websocket_agent_connections, and max_websocket_terminal_connections. \
+            Set those per-class caps instead; a value of 0 still means disable \
+            (refuse all new connections of that class until restart).";
+        crate::logger::warn(msg);
+        eprintln!("dux config migration warning: {msg}");
+    }
     patch_table_usize(
         doc,
         "server",
-        "max_websocket_connections",
-        config.server.max_websocket_connections as usize,
+        "max_websocket_events_connections",
+        config.server.max_websocket_events_connections as usize,
     );
-
-    // --- [server.acme] ---
-    patch_acme(doc, &config.server.acme);
-
-    // --- [auth] ---
-    patch_table_string_array(doc, "auth", "users", &config.auth.users);
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_agent_connections",
+        config.server.max_websocket_agent_connections as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_terminal_connections",
+        config.server.max_websocket_terminal_connections as usize,
+    );
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -423,36 +432,6 @@ fn patch_table_string_array(doc: &mut DocumentMut, section: &str, key: &str, val
         arr.push(v.as_str());
     }
     table[key] = toml_edit::value(arr);
-}
-
-/// Patch the `[server.acme]` subtable. Mirrors [`patch_providers`] for nested
-/// table access — every field is written so a recover/plain write never silently
-/// drops a setting (the [server] lesson).
-fn patch_acme(doc: &mut DocumentMut, acme: &AcmeSettings) {
-    let server = doc
-        .entry("server")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap();
-    let tbl = server
-        .entry("acme")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_mut()
-        .unwrap();
-
-    tbl["enabled"] = toml_edit::value(acme.enabled);
-
-    let mut domains = Array::new();
-    for d in &acme.domains {
-        domains.push(d.as_str());
-    }
-    tbl["domains"] = toml_edit::value(domains);
-
-    tbl["email"] = toml_edit::value(acme.email.as_str());
-    tbl["http_port"] = toml_edit::value(i64::from(acme.http_port));
-    tbl["https_port"] = toml_edit::value(i64::from(acme.https_port));
-    tbl["production"] = toml_edit::value(acme.production);
-    tbl["cache_dir"] = toml_edit::value(acme.cache_dir.as_deref().unwrap_or(""));
 }
 
 fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
@@ -813,30 +792,32 @@ unknown_key = \"untouched\"
         let config_path = dir.path().join("config.toml");
 
         let mut config = Config::default();
+        config.server.host = "0.0.0.0".to_string();
         config.server.port = 9000;
         config.server.tailscale_enabled = false;
-        config.server.listen_addrs = vec!["0.0.0.0:9000".to_string()];
-        config.server.insecure_allow_remote = true;
-        config.server.dangerously_listen_http = true;
+        config.server.allowed_hosts = vec!["box.tailnet.ts.net".to_string()];
         config.server.color = "never".to_string();
         config.server.access_log = false;
-        config.server.max_websocket_connections = 42;
+        config.server.max_websocket_events_connections = 42;
+        config.server.max_websocket_agent_connections = 43;
+        config.server.max_websocket_terminal_connections = 44;
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
         let saved = fs::read_to_string(&config_path).expect("read back");
         let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.server.host, "0.0.0.0");
         assert_eq!(parsed.server.port, 9000);
         assert!(!parsed.server.tailscale_enabled);
-        assert_eq!(parsed.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
-        assert!(parsed.server.insecure_allow_remote);
-        assert!(
-            parsed.server.dangerously_listen_http,
-            "dangerously_listen_http must round-trip through a plain write"
+        assert_eq!(
+            parsed.server.allowed_hosts,
+            vec!["box.tailnet.ts.net".to_string()]
         );
         assert_eq!(parsed.server.color, "never");
         assert!(!parsed.server.access_log);
-        assert_eq!(parsed.server.max_websocket_connections, 42);
+        assert_eq!(parsed.server.max_websocket_events_connections, 42);
+        assert_eq!(parsed.server.max_websocket_agent_connections, 43);
+        assert_eq!(parsed.server.max_websocket_terminal_connections, 44);
         // The deprecated `bind` key is never re-emitted by the patcher.
         assert!(
             !saved.contains("bind ="),
@@ -845,129 +826,27 @@ unknown_key = \"untouched\"
     }
 
     #[test]
-    fn write_config_plain_round_trips_acme_settings() {
-        // LESSON from the [server] slice: every managed field needs an
-        // apply_patches entry or a plain/recover write silently drops it. Guard
-        // the whole [server.acme] subtable against that regression.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-
-        let mut config = Config::default();
-        config.server.acme.enabled = true;
-        config.server.acme.domains =
-            vec!["dux.example.com".to_string(), "www.example.com".to_string()];
-        config.server.acme.email = "ops@example.com".to_string();
-        config.server.acme.http_port = 8080;
-        config.server.acme.https_port = 8443;
-        config.server.acme.production = false;
-        config.server.acme.cache_dir = Some("/var/lib/dux/acme".to_string());
-
-        write_config_plain(&config_path, &config).expect("write_config_plain");
-
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        let parsed: Config = toml::from_str(&saved).expect("reparse");
-        assert!(parsed.server.acme.enabled);
+    fn write_config_plain_round_trips_host_and_allowed_hosts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("c.toml");
+        let mut cfg = Config::default();
+        cfg.server.host = "0.0.0.0".into();
+        cfg.server.port = 9000;
+        cfg.server.allowed_hosts = vec!["box.tailnet.ts.net".into()];
+        write_config_plain(&path, &cfg).unwrap();
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.server.host, "0.0.0.0");
+        assert_eq!(parsed.server.port, 9000);
         assert_eq!(
-            parsed.server.acme.domains,
-            vec!["dux.example.com".to_string(), "www.example.com".to_string()]
-        );
-        assert_eq!(parsed.server.acme.email, "ops@example.com");
-        assert_eq!(parsed.server.acme.http_port, 8080);
-        assert_eq!(parsed.server.acme.https_port, 8443);
-        assert!(!parsed.server.acme.production);
-        assert_eq!(
-            parsed.server.acme.cache_dir.as_deref(),
-            Some("/var/lib/dux/acme")
-        );
-    }
-
-    #[test]
-    fn patch_preserves_existing_acme_settings() {
-        // Patching an existing file must keep the [server.acme] subtable intact
-        // (mirrors patch_preserves_existing_auth_users for the nested table).
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        fs::write(
-            &config_path,
-            "[server.acme]\nenabled = true\ndomains = [\"dux.example.com\"]\n",
-        )
-        .expect("write initial");
-
-        let mut config = Config::default();
-        // Mirror what a real load would do: the in-memory config carries the
-        // same acme settings back into the patch.
-        config.server.acme.enabled = true;
-        config.server.acme.domains = vec!["dux.example.com".to_string()];
-
-        patch_config_file(&config_path, &config).expect("patch");
-
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        let parsed: Config = toml::from_str(&saved).expect("reparse");
-        assert!(parsed.server.acme.enabled);
-        assert_eq!(
-            parsed.server.acme.domains,
-            vec!["dux.example.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn write_config_plain_round_trips_auth_users() {
-        // LESSON from the [server] slice: a managed section that forgets its
-        // apply_patches entry silently wipes user settings on the recover path.
-        // Guard the [auth] users against that regression: non-default users must
-        // survive a from-scratch plain write.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-
-        let mut config = Config::default();
-        config.auth.users = vec![
-            "alice:$2y$12$abcdefghijklmnopqrstuv".to_string(),
-            "bob:$2y$12$wxyz0123456789abcdefgh".to_string(),
-        ];
-
-        write_config_plain(&config_path, &config).expect("write_config_plain");
-
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        let parsed: Config = toml::from_str(&saved).expect("reparse");
-        assert_eq!(
-            parsed.auth.users,
-            vec![
-                "alice:$2y$12$abcdefghijklmnopqrstuv".to_string(),
-                "bob:$2y$12$wxyz0123456789abcdefgh".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn patch_preserves_existing_auth_users() {
-        // Patching an existing file must keep configured [auth] users intact.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        fs::write(
-            &config_path,
-            "[auth]\nusers = [\"alice:$2y$12$existinghashvalue000000\"]\n",
-        )
-        .expect("write initial");
-
-        let mut config = Config::default();
-        // Mirror what a real load would do: the in-memory config carries the
-        // same users back into the patch.
-        config.auth.users = vec!["alice:$2y$12$existinghashvalue000000".to_string()];
-
-        patch_config_file(&config_path, &config).expect("patch");
-
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        let parsed: Config = toml::from_str(&saved).expect("reparse");
-        assert_eq!(
-            parsed.auth.users,
-            vec!["alice:$2y$12$existinghashvalue000000".to_string()]
+            parsed.server.allowed_hosts,
+            vec!["box.tailnet.ts.net".to_string()]
         );
     }
 
     #[test]
     #[cfg(unix)]
     fn write_config_plain_sets_owner_only_perms() {
-        // config.toml carries bcrypt hashes ([auth]) and possibly tokens ([env]),
+        // config.toml may carry secrets (tokens under [env]),
         // so every write must restrict it to 0600 (owner read/write only).
         let dir = tempfile::TempDir::new().expect("tempdir");
         let config_path = dir.path().join("config.toml");
@@ -1069,5 +948,49 @@ unknown_key = \"untouched\"
         assert_eq!(parsed.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "project-1");
+    }
+
+    #[test]
+    fn apply_patches_strips_removed_max_websocket_connections_key() {
+        // Build a DocumentMut that still carries the obsolete key.
+        let raw = "[server]\nmax_websocket_connections = 16\nport = 7878\n";
+        assert!(
+            crate::config::raw_has_removed_max_websocket_connections(raw),
+            "precondition: raw must contain the removed key"
+        );
+        let mut doc: DocumentMut = raw.parse().expect("parse toml");
+        let config = Config::default();
+        apply_patches(&mut doc, &config);
+        // The key must be stripped after apply_patches.
+        let stripped = doc.to_string();
+        assert!(
+            !crate::config::raw_has_removed_max_websocket_connections(&stripped),
+            "apply_patches must remove max_websocket_connections; got: {stripped}"
+        );
+        // Other server settings survive.
+        assert!(
+            stripped.contains("port"),
+            "apply_patches must not wipe unrelated server keys; got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn apply_patches_does_not_warn_when_key_is_absent() {
+        // A config that never had max_websocket_connections must not trip the
+        // detection predicate after patching.
+        let raw = "[server]\nport = 7878\n";
+        assert!(
+            !crate::config::raw_has_removed_max_websocket_connections(raw),
+            "precondition: raw must not contain the removed key"
+        );
+        let mut doc: DocumentMut = raw.parse().expect("parse toml");
+        let config = Config::default();
+        // Must not panic and must leave the key absent.
+        apply_patches(&mut doc, &config);
+        let stripped = doc.to_string();
+        assert!(
+            !crate::config::raw_has_removed_max_websocket_connections(&stripped),
+            "key must remain absent; got: {stripped}"
+        );
     }
 }

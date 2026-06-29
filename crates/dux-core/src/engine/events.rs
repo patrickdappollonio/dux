@@ -216,19 +216,6 @@ pub enum EventReaction {
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
 
-    // -- Web-UI login-user add (App resolves the HandlerStatusOp). --
-    /// A web-UI login-user add finished: the bcrypt hash ran off-thread and the
-    /// engine performed the fallible post-worker config write. The Engine already
-    /// adopted (or rolled back) `config.auth.users`; the App only surfaces the
-    /// final. When `status_op_id` is `Some`, the App pops the matching
-    /// `HandlerStatusOp<AuthUserFinalOutcome>` and resolves it into the keyed
-    /// final; when `None` (web/wire, engine internals) the App/wire builds the
-    /// `StatusUpdate` directly via `AuthUserFinalOutcome::into_status`.
-    AuthUsersOutcome {
-        outcome: AuthUserFinalOutcome,
-        status_op_id: Option<String>,
-    },
-
     // -- Startup command / log viewer (App formats key + opens overlay). --
     StartupLogArrived {
         scope_label: String,
@@ -395,58 +382,6 @@ pub enum ProjectPersistenceView {
         project_name: String,
         env_count: usize,
     },
-}
-
-/// Handler-computed outcome for a web-UI login-user add (see
-/// [`crate::worker::WorkerEvent::AuthUsersPersisted`]). The bcrypt hash runs on a
-/// background thread; the engine handler then performs the fallible post-worker
-/// `config.toml` write (and a removal-empties-the-list warn flag), producing one
-/// of these results the worker never sees. A TUI `HandlerStatusOp` resolver
-/// (declared at the add dispatch site) maps this to the final user message; the
-/// `None`-correlation-id callers (web/wire, the engine's own tests) instead build
-/// the `StatusUpdate` directly via [`Self::into_status`].
-///
-/// The message and `warn` tone are decided where they always were — the worker
-/// builds the success line, the engine builds the single error template — and are
-/// carried here verbatim so both surfaces stay byte-identical to the pre-op code.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AuthUserFinalOutcome {
-    /// The hash succeeded and the post-worker config write succeeded. `message`
-    /// is the verbose, already-formatted status line; `warn` requests a
-    /// warning-tone status (set when a change empties the valid-user set, which
-    /// disables the login gate — an add never empties it, so the add path always
-    /// passes `false`).
-    Saved { warn: bool, message: String },
-    /// The hash/DB worker result was `Err`, OR the post-worker config write
-    /// failed. Both currently surface the same error template, so they fold into
-    /// one variant carrying the formatted error detail.
-    Errored(String),
-}
-
-impl AuthUserFinalOutcome {
-    /// Build the keyed-or-unkeyed final [`StatusUpdate`] for the callers that do
-    /// NOT drive a TUI `HandlerStatusOp` (web/wire and the engine's own
-    /// internals): the same tones and byte-identical messages a resolver would
-    /// produce. `key` correlates the status to a pending busy when one exists.
-    pub fn into_status(self, key: Option<String>) -> StatusUpdate {
-        let update = match self {
-            AuthUserFinalOutcome::Saved {
-                warn: true,
-                message,
-            } => StatusUpdate::warning(message),
-            AuthUserFinalOutcome::Saved {
-                warn: false,
-                message,
-            } => StatusUpdate::info(message),
-            AuthUserFinalOutcome::Errored(err) => StatusUpdate::error(format!(
-                "Could not save web UI login users to config.toml: {err}"
-            )),
-        };
-        match key {
-            Some(key) => update.with_key(key),
-            None => update,
-        }
-    }
 }
 
 /// What happened to the session's worktree during deletion. Each variant maps
@@ -1270,14 +1205,9 @@ impl Engine {
         let has_deferred = !deferred.is_empty();
         // Pre-swap `self.config` to the reloaded config (rather than leaving the
         // surface to do the swap) whenever we must base a follow-up write on the
-        // reloaded config: a deferred command drain, OR an auth-users replay.
-        // Without this, the auth replay would write/surface the OLD config (the
-        // no-deferral path leaves `self.config` untouched), reverting both the
-        // reloaded file on disk and the in-flight user change in memory + the live
-        // auth gate. The cost is the same rare tradeoff documented above: the
-        // surface's old-vs-new diff ("restart to apply server settings") is
-        // suppressed when an auth change coincides with a [server] change.
-        let must_preswap = has_deferred || self.pending_auth_users.is_some();
+        // reloaded config: a deferred command drain. With no deferral the engine
+        // leaves `self.config` untouched so the surface can still diff old vs new.
+        let must_preswap = has_deferred;
 
         // Step 1: compute the primary reaction and, on success, apply the reloaded
         // config to engine state BEFORE clearing the barrier — but only when we
@@ -1292,8 +1222,8 @@ impl Engine {
         let bare_apply: Option<EventReaction> = match result {
             Ok(config) => {
                 if must_preswap {
-                    // Apply the reloaded config so the deferred drain / auth replay
-                    // re-mutates it (and the surfaced config carries those edits).
+                    // Apply the reloaded config so the deferred drain re-mutates it
+                    // (and the surfaced config carries those edits).
                     // If applying it FAILS, do not pretend the reload worked: open
                     // the reload-failed modal and leave `self.config` as-is (the
                     // deferred commands below still re-apply against the current
@@ -1323,41 +1253,10 @@ impl Engine {
         self.reload_guard = None;
         self.reloading = false;
 
-        // Step 2b: replay any auth-users update that arrived while the barrier
-        // was open. The barrier is now cleared so the eager writer will accept
-        // the write. The user-initiated update wins over the on-disk reloaded
-        // value: we write AFTER apply_reloaded_config has swapped in the
-        // reloaded config, so the final on-disk state is reloaded-config +
-        // in-flight user change. Multiple arrivals folded into one by the
-        // stash: last one wins.
-        let pending_auth_reaction =
-            self.pending_auth_users
-                .take()
-                .map(|(users, message, warn, status_op_id)| {
-                    let previous = self.config.auth.users.clone();
-                    self.config.auth.users = users;
-                    // Same tone/message decision as the immediate handler, carried
-                    // back as an outcome so the App resolves the deferred op (it
-                    // stayed stashed across the reload barrier) against it, keyed by
-                    // the id that rode in on AuthUsersPersisted.
-                    let outcome = match self.config_writer.save_eager(self.config.clone()) {
-                        Ok(()) => AuthUserFinalOutcome::Saved { warn, message },
-                        Err(err) => {
-                            self.config.auth.users = previous;
-                            AuthUserFinalOutcome::Errored(err.to_string())
-                        }
-                    };
-                    EventReaction::AuthUsersOutcome {
-                        outcome,
-                        status_op_id,
-                    }
-                });
-
         if !must_preswap {
-            // No pre-swap needed (no deferral, no auth replay): the bare reloaded
-            // config is surfaced for the surface to swap. Exactly one of
-            // `bare_apply` (success) / `failure` (parse error) is set; fall back to
-            // Nothing. (`pending_auth_reaction` is always None here.)
+            // No pre-swap needed (no deferral): the bare reloaded config is
+            // surfaced for the surface to swap. Exactly one of `bare_apply`
+            // (success) / `failure` (parse error) is set; fall back to Nothing.
             return bare_apply.or(failure).unwrap_or(EventReaction::Nothing);
         }
 
@@ -1390,12 +1289,6 @@ impl Engine {
             )));
         }
         reactions.extend(deferred_reactions);
-        if let Some(auth_reaction) = pending_auth_reaction {
-            // Auth-users replay: append after deferred command reactions so its
-            // status (info or warning) is the last thing shown to the user.
-            // Appended before failure so a reload error still wins the headline.
-            reactions.push(auth_reaction);
-        }
         if let Some(failure) = failure {
             // Failure: append the reload-failed modal/error LAST so its error
             // status wins the surface's status line instead of being overwritten by
@@ -1958,56 +1851,6 @@ impl Engine {
                     self.process_project_persistence_completed(action, result, status_op_id);
                 EventReaction::ProjectPersistenceOutcome(Box::new(outcome))
             }
-            WorkerEvent::AuthUsersPersisted {
-                users,
-                message,
-                warn,
-                result,
-                status_op_id,
-            } => {
-                // Clear the single-flight guard on BOTH outcomes so the next
-                // add/remove can start; opening either prompt while this was set
-                // was refused (see App::open_server_add_user/open_server_remove_user).
-                self.clear_in_flight(&InFlightKey::AuthUsers);
-                match result {
-                    Ok(()) => {
-                        // If a config reload is in progress, the eager writer is
-                        // quiesced and would reject this write. Stash the payload
-                        // (and its op id) and replay it when `ConfigReloadReady`
-                        // closes the barrier (after the reloaded config is
-                        // applied), so the user-initiated change is never silently
-                        // lost. The op stays stashed on the App side until the
-                        // replay emits its final. Multiple arrivals within one
-                        // reload window fold: the last one wins.
-                        if self.reloading {
-                            self.pending_auth_users = Some((users, message, warn, status_op_id));
-                            return EventReaction::Nothing;
-                        }
-                        // Adopt the new user list and write it to config via the
-                        // eager queue; roll back in-memory state on write failure.
-                        // The tone/message decision is carried back as an outcome:
-                        // the App resolves its HandlerStatusOp against it, or (the
-                        // None callers) builds the StatusUpdate via into_status.
-                        let previous = self.config.auth.users.clone();
-                        self.config.auth.users = users;
-                        let outcome = match self.config_writer.save_eager(self.config.clone()) {
-                            Ok(()) => AuthUserFinalOutcome::Saved { warn, message },
-                            Err(err) => {
-                                self.config.auth.users = previous;
-                                AuthUserFinalOutcome::Errored(err.to_string())
-                            }
-                        };
-                        EventReaction::AuthUsersOutcome {
-                            outcome,
-                            status_op_id,
-                        }
-                    }
-                    Err(err) => EventReaction::AuthUsersOutcome {
-                        outcome: AuthUserFinalOutcome::Errored(err),
-                        status_op_id,
-                    },
-                }
-            }
             WorkerEvent::StartupCommandLogsLoaded {
                 scope_label,
                 result,
@@ -2167,7 +2010,6 @@ mod tests {
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
-            EventReaction::AuthUsersOutcome { .. } => "AuthUsersOutcome",
             EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
             EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
             EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
@@ -3995,214 +3837,6 @@ mod tests {
             counter.load(Ordering::Relaxed) >= 2,
             "loop did not continue past panic; counter = {}",
             counter.load(Ordering::Relaxed),
-        );
-    }
-
-    // ── AuthUsersPersisted reload-barrier deferral ───────────────────────
-
-    /// Deliver AuthUsersPersisted while the reload barrier is open. The write
-    /// must be deferred (Nothing returned, no config mutation), the in-flight
-    /// guard must be cleared, and the payload stashed in pending_auth_users.
-    #[test]
-    fn auth_users_persisted_deferred_while_reloading() {
-        let (mut engine, _tmp) = test_engine();
-        // Open the reload barrier manually (mirrors what ReloadConfig does).
-        engine.reloading = true;
-        engine.mark_in_flight(InFlightKey::AuthUsers);
-
-        let users = vec!["alice:hash".to_string()];
-        let reaction = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
-            users: users.clone(),
-            message: "Added user alice.".to_string(),
-            warn: false,
-            result: Ok(()),
-            status_op_id: Some("op-auth".to_string()),
-        });
-
-        // The reaction must be Nothing — not an error, not a status. The op stays
-        // stashed on the App side; the replay emits the final later.
-        assert!(
-            matches!(reaction, EventReaction::Nothing),
-            "expected Nothing during reload, got {}",
-            reaction_kind(&reaction),
-        );
-        // In-flight guard is cleared regardless of deferral.
-        assert!(!engine.is_in_flight(&InFlightKey::AuthUsers));
-        // The payload is stashed, not applied to config yet. The op id rides
-        // along so the later replay resolves the right op.
-        assert!(
-            matches!(
-                engine.pending_auth_users.as_ref(),
-                Some((_, _, _, Some(id))) if id == "op-auth"
-            ),
-            "payload (with its op id) must be stashed"
-        );
-        assert!(
-            engine.config.auth.users.is_empty(),
-            "config must not be mutated before barrier closes"
-        );
-    }
-
-    /// When ConfigReloadReady closes the barrier, a stashed auth-users payload
-    /// must be replayed: config.auth.users updated + config written to disk.
-    #[test]
-    fn auth_users_replayed_on_config_reload_ready() {
-        let (mut engine, _tmp) = test_engine();
-
-        // Stash a pending update as if AuthUsersPersisted arrived during reload.
-        let users = vec!["bob:hash".to_string()];
-        engine.pending_auth_users = Some((
-            users.clone(),
-            "Added user bob.".to_string(),
-            false,
-            Some("op-auth".to_string()),
-        ));
-
-        // Deliver a successful ConfigReloadReady with a config that has a
-        // different (or empty) auth.users — the in-flight update must win.
-        let reloaded = Config::default(); // auth.users is empty
-        let reaction =
-            engine.process_worker_event(WorkerEvent::ConfigReloadReady(Box::new(Ok(reloaded))));
-
-        // pending_auth_users must be consumed.
-        assert!(
-            engine.pending_auth_users.is_none(),
-            "pending_auth_users must be cleared after replay"
-        );
-        // Reproduce the SURFACE step: the surface (web actor / TUI) applies the
-        // returned ApplyReloadedConfig back onto the engine and rebuilds the web
-        // auth gate from it. The in-flight users must SURVIVE that re-apply. The
-        // previous version of this test skipped this step and asserted only the
-        // transient pre-surface `self.config`, masking a bug where the surfaced
-        // config carried the OLD (reloaded, empty) user list — so the surface
-        // reverted the change in memory and at the live auth gate.
-        let surfaced = match &reaction {
-            EventReaction::ApplyReloadedConfig(c) => Some((**c).clone()),
-            EventReaction::Multi(v) => v.iter().find_map(|r| match r {
-                EventReaction::ApplyReloadedConfig(c) => Some((**c).clone()),
-                _ => None,
-            }),
-            _ => None,
-        }
-        .expect("a successful reload must surface an ApplyReloadedConfig for the surface to swap");
-        engine
-            .apply_reloaded_config(surfaced)
-            .expect("surface re-apply of the reloaded config must succeed");
-
-        // After the surface re-apply, the in-flight user update must still win over
-        // the reloaded (empty) list.
-        assert_eq!(
-            engine.config.auth.users, users,
-            "in-flight user update must survive the surface's config re-apply"
-        );
-        // The reaction must include the auth-users outcome, carrying the saved
-        // message and the op id that rode in on the stash, so the App resolves
-        // the right deferred op into the final.
-        fn finds_auth_bob(r: &EventReaction) -> bool {
-            match r {
-                EventReaction::AuthUsersOutcome {
-                    outcome: AuthUserFinalOutcome::Saved { message, .. },
-                    status_op_id,
-                } => {
-                    message.contains("Added user bob") && status_op_id.as_deref() == Some("op-auth")
-                }
-                EventReaction::Multi(v) => v.iter().any(finds_auth_bob),
-                _ => false,
-            }
-        }
-        assert!(
-            finds_auth_bob(&reaction),
-            "reaction must surface the auth-users outcome with its op id; got {}",
-            reaction_kind(&reaction),
-        );
-    }
-
-    /// An AuthUsersPersisted failure (bcrypt or DB) arriving during a reload
-    /// must NOT be stashed — the error is surfaced immediately and the
-    /// in-flight guard is cleared.
-    #[test]
-    fn auth_users_error_during_reload_surfaces_immediately() {
-        let (mut engine, _tmp) = test_engine();
-        engine.reloading = true;
-        engine.mark_in_flight(InFlightKey::AuthUsers);
-
-        let reaction = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
-            users: vec![],
-            message: String::new(),
-            warn: false,
-            result: Err("bcrypt failed".to_string()),
-            status_op_id: Some("op-auth".to_string()),
-        });
-
-        // Error is surfaced immediately, not deferred. The outcome carries the
-        // op id so the App resolves the matching op to the error final, and
-        // `into_status` reproduces the byte-identical error message.
-        let (outcome, status_op_id) = match reaction {
-            EventReaction::AuthUsersOutcome {
-                outcome,
-                status_op_id,
-            } => (outcome, status_op_id),
-            other => panic!(
-                "expected AuthUsersOutcome reaction, got {}",
-                reaction_kind(&other)
-            ),
-        };
-        assert_eq!(status_op_id.as_deref(), Some("op-auth"));
-        assert!(
-            matches!(&outcome, AuthUserFinalOutcome::Errored(e) if e.contains("bcrypt failed")),
-            "error detail must be carried; got: {outcome:?}"
-        );
-        let status = outcome.into_status(status_op_id);
-        assert_eq!(status.tone, StatusTone::Error);
-        assert!(
-            status.message.contains("bcrypt failed"),
-            "error message must be surfaced; got: {}",
-            status.message,
-        );
-        // Nothing stashed.
-        assert!(engine.pending_auth_users.is_none());
-        // In-flight guard cleared.
-        assert!(!engine.is_in_flight(&InFlightKey::AuthUsers));
-    }
-
-    /// When multiple AuthUsersPersisted events arrive during a single reload,
-    /// only the last one is replayed (last-write-wins fold).
-    #[test]
-    fn auth_users_last_write_wins_within_one_reload() {
-        let (mut engine, _tmp) = test_engine();
-        engine.reloading = true;
-
-        // First event.
-        let _ = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
-            users: vec!["alice:hash".to_string()],
-            message: "Added alice.".to_string(),
-            warn: false,
-            result: Ok(()),
-            status_op_id: Some("op-alice".to_string()),
-        });
-        // Second event (arrives before barrier closes).
-        let _ = engine.process_worker_event(WorkerEvent::AuthUsersPersisted {
-            users: vec!["alice:hash".to_string(), "bob:hash".to_string()],
-            message: "Added bob.".to_string(),
-            warn: false,
-            result: Ok(()),
-            status_op_id: Some("op-bob".to_string()),
-        });
-
-        // Only the second payload is stashed (its op id too).
-        let (stashed_users, stashed_msg, _, stashed_op_id) = engine
-            .pending_auth_users
-            .take()
-            .expect("payload must be stashed");
-        assert_eq!(stashed_users.len(), 2, "second (last) event must win");
-        assert_eq!(
-            stashed_op_id.as_deref(),
-            Some("op-bob"),
-            "last event's op id must win the fold"
-        );
-        assert!(
-            stashed_msg.contains("bob"),
-            "message must be from last event"
         );
     }
 

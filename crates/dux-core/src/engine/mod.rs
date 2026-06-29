@@ -18,7 +18,7 @@ pub(crate) mod test_support;
 pub use command::Command;
 pub use config_saver::{ConfigSurface, NoopConfigSurface, ReloadCompletionGuard};
 pub use events::{
-    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, AuthUserFinalOutcome,
+    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DetachedSession,
     DispatchAgentLaunchView, DoDeleteSessionOutcome, DoDeleteSessionView, EventReaction,
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
@@ -198,22 +198,6 @@ pub struct Engine {
     /// at most once per [`FOREGROUND_REFRESH_INTERVAL`]. `None` until the first
     /// refresh runs. Wall-clock (not tick counts) per the design tenet.
     pub last_foreground_refresh: Option<Instant>,
-    /// A `WorkerEvent::AuthUsersPersisted` that arrived while a config-reload
-    /// barrier was open (`reloading == true`). The worker has already hashed and
-    /// persisted the user to bcrypt (the expensive part is done); only the
-    /// config.toml write + in-memory adoption are deferred here.
-    ///
-    /// Tuple fields: `(users, status_message, warn, status_op_id)`. Replayed
-    /// (write + in-memory update) when `ConfigReloadReady` closes the barrier,
-    /// AFTER the reloaded config is applied, so the user-initiated update wins
-    /// over the on-disk reloaded value. Stored as `Option` — `Some` only while a
-    /// reload is in flight AND an auth-users event arrived during that window.
-    /// Multiple arrivals within a single reload window are folded: the LAST one
-    /// wins, matching the semantics of multiple eager config writes (each
-    /// replaces the previous). `status_op_id` correlates the deferred final to
-    /// the TUI `HandlerStatusOp` minted at the add dispatch site, so the replay
-    /// resolves the right op (it rode in on `AuthUsersPersisted`).
-    pub pending_auth_users: Option<(Vec<String>, String, bool, Option<String>)>,
 
     /// Web-side `HandlerStatusOp`s awaiting completion, keyed by the op's opaque
     /// id. These three ops run entirely server-side (the web actor drives them);
@@ -572,17 +556,29 @@ impl Engine {
     /// and any extra calls within the interval are cheap no-ops. Both the TUI
     /// run loop and the web engine actor call this once per tick; they never run
     /// at the same time.
-    pub fn refresh_terminal_foregrounds(&mut self) {
+    ///
+    /// Returns `true` only when this call actually probed AND a terminal's
+    /// `foreground_cmd` changed (the spine's `foreground_cmd` therefore moved).
+    /// A throttled no-op, or a probe that found every foreground unchanged,
+    /// returns `false`. The web engine actor uses this to bump its spine-change
+    /// version only on a real change; the TUI ignores the result.
+    pub fn refresh_terminal_foregrounds(&mut self) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_foreground_refresh
             && now.duration_since(last) < FOREGROUND_REFRESH_INTERVAL
         {
-            return;
+            return false;
         }
         self.last_foreground_refresh = Some(now);
+        let mut changed = false;
         for terminal in self.companion_terminals.values_mut() {
-            terminal.foreground_cmd = terminal.client.foreground_process_name();
+            let next = terminal.client.foreground_process_name();
+            if next != terminal.foreground_cmd {
+                terminal.foreground_cmd = next;
+                changed = true;
+            }
         }
+        changed
     }
 
     /// Record that the user just forwarded interactive keystrokes to the given

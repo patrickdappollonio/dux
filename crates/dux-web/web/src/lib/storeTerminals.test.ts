@@ -8,9 +8,8 @@ import type { Bootstrap } from "./bootstrapApi"
 // REST client's own wire behaviour is in terminalsApi.test.ts; here we assert the
 // store calls it correctly and reacts (focus) to the result.
 //
-// The store fires a boot `/api/me` probe and fetches bootstrap + spine at import.
-// We steer the probe to auth-off and serve a configurable spine so deleteTerminal
-// can resolve a terminal's owner.
+// The store fetches bootstrap + spine at import. We serve a configurable spine
+// so deleteTerminal can resolve a terminal's owner.
 
 function makeBootstrap(): Bootstrap {
   return {
@@ -49,13 +48,6 @@ let calls: [string, RequestInit | undefined][] = []
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   calls.push([u, init])
-  if (u.includes("/api/me")) {
-    return {
-      status: 200,
-      json: async () => ({ auth: "disabled" }),
-      headers: { get: () => null },
-    } as unknown as Response
-  }
   if (u.includes("/api/v1/bootstrap")) {
     return {
       ok: true,
@@ -146,11 +138,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// Load the store and wait for the boot probe AND the initial spine to settle.
+// Load the store and wait for the initial spine to settle.
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().spine).not.toBeNull()
   })
   return mod

@@ -8,9 +8,9 @@ import type { ChangedFileView } from "./types"
 // the reconnect re-subscribe + refetch. The events socket's own wire behaviour
 // lives in eventsSocket.test.ts; here we spy its methods / drive its callbacks.
 //
-// The store fires a boot `/api/me` probe and builds two sockets at import. We
-// steer the probe to auth-off and route `/changes` GETs to manually-resolvable
-// deferred promises so a test controls fetch timing precisely.
+// The store connects the events socket and builds two sockets at import. We
+// route `/changes` GETs to manually-resolvable deferred promises so a test
+// controls fetch timing precisely.
 
 interface Deferred {
   resolve: (value: unknown) => void
@@ -52,13 +52,6 @@ function changesResponse(
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/me")) {
-    return {
-      status: 200,
-      json: async () => ({ auth: "disabled" }),
-      headers: { get: () => null },
-    } as unknown as Response
-  }
   if (u.includes("/changes")) {
     callOrder.push("fetch")
     const m = u.match(/sessions\/([^/]+)\/changes/)
@@ -104,7 +97,7 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    expect(mod.getSnapshot().booted).toBe(true)
   })
   return mod
 }
@@ -332,6 +325,48 @@ describe("changes slice — reconnect", () => {
     // the socket can re-send it on the wire.
     expect(new Set(mod.eventsSocket.topics)).toEqual(
       new Set(["sessions", "projects", "config", "session:s1:changes"]),
+    )
+  })
+})
+
+describe("changes slice — subscribe catch-up", () => {
+  // The server sends a `session.changes` frame immediately after a client
+  // subscribes to a fine topic. When the server's cache is cold it omits `rev`.
+  // The client must treat `rev === undefined` as a force-refetch so the changes
+  // pane converges even when no rev comparison is possible.
+
+  it("a revless session.changes event triggers loadChanges regardless of the current rev", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    // First fetch resolves: the pane is loaded with rev 7.
+    pendingChanges[0].d.resolve(
+      changesResponse({ rev: 7, staged: [], unstaged: [] }),
+    )
+    await tick()
+    expect(mod.getSnapshot().changes.rev).toBe(7)
+
+    const before = pendingChanges.length
+    // The server's subscribe catch-up carries no rev (cold cache). The store
+    // must NOT short-circuit on `undefined >= 7` and must call loadChanges.
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    expect(pendingChanges.length).toBe(
+      before + 1,
+      "a revless catch-up must trigger a refetch even when a rev is already held",
+    )
+  })
+
+  it("a revless session.changes event also triggers loadChanges from the loading phase", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    // The initial fetch is still in-flight (loading phase, rev = 0).
+    expect(mod.getSnapshot().changes.phase).toBe("loading")
+
+    const before = pendingChanges.length
+    // The subscribe catch-up arrives before the initial fetch resolves.
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    expect(pendingChanges.length).toBe(
+      before + 1,
+      "a revless catch-up must trigger a second fetch even in the loading phase",
     )
   })
 })

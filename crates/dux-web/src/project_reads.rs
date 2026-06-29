@@ -164,25 +164,31 @@ async fn inspect_path(
     }
 
     // Pre-flight branch inspection mirroring the TUI's `add_project`: it runs
-    // `current_branch` then `branch_warning_kind` before the non-default-branch
+    // `current_branch_opt` then `branch_warning_kind` before the non-default-branch
     // prompt. Both are bounded git plumbing reads with no working-tree writes, so
     // this runs off the async reactor in `spawn_blocking` (the browse precedent).
+    // A detached HEAD yields `current_branch: null` in the response with no warning
+    // (the caller cannot switch the user to a default branch from a detached state).
+    // A non-repo path still fails with a non-Ok result, which is returned as 400.
     let result = tokio::task::spawn_blocking(move || {
         let repo = Path::new(&path);
-        let branch = dux_core::git::current_branch(repo).map_err(|e| format!("{e:#}"))?;
-        let warning = dux_core::git::branch_warning_kind(repo, &branch).map(|kind| match kind {
-            dux_core::worker::BranchWarningKind::Known { default_branch } => {
-                BranchWarningView::Known { default_branch }
-            }
-            dux_core::worker::BranchWarningKind::Heuristic => BranchWarningView::Heuristic,
-        });
+        let branch = dux_core::git::current_branch_opt(repo).map_err(|e| format!("{e:#}"))?;
+        let warning = match branch.as_deref() {
+            Some(b) => dux_core::git::branch_warning_kind(repo, b).map(|kind| match kind {
+                dux_core::worker::BranchWarningKind::Known { default_branch } => {
+                    BranchWarningView::Known { default_branch }
+                }
+                dux_core::worker::BranchWarningKind::Heuristic => BranchWarningView::Heuristic,
+            }),
+            None => None, // detached HEAD: no "not on default branch" warning
+        };
         Ok::<_, String>((branch, warning))
     })
     .await;
 
     match result {
         Ok(Ok((branch, warning))) => Json(InspectReply {
-            current_branch: Some(branch),
+            current_branch: branch,
             warning,
         })
         .into_response(),
@@ -202,7 +208,7 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     /// Initialize a git repo on `main` with one commit so `current_branch`
     /// resolves and there is no `origin/HEAD` (the heuristic-warning path).
@@ -279,6 +285,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Build a detached-HEAD repo: init on `main`, commit once, then detach.
+    fn init_repo_detached(dir: &Path) {
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "hi").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        // Detach HEAD at the current commit.
+        run(&["checkout", "--detach"]);
+    }
+
+    #[tokio::test]
+    async fn inspect_detached_head_reports_null_branch_200() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_detached(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/projects/inspect?path={path}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Detached HEAD: branch must be JSON null and no warning emitted.
+        assert!(
+            value["current_branch"].is_null(),
+            "expected null current_branch, got {value}"
+        );
+        assert!(
+            value["warning"].is_null(),
+            "expected null warning, got {value}"
+        );
+    }
+
     #[tokio::test]
     async fn inspect_non_repo_reports_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -309,29 +367,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn project_reads_are_gated() {
-        for uri in [
-            "/api/v1/projects/inspect?path=/tmp",
-            "/api/v1/projects/p1/worktrees",
-        ] {
-            let (_tmp, app) = router_with_auth();
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must be gated"
-            );
-        }
     }
 }

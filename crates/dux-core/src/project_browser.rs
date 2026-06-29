@@ -67,11 +67,16 @@ pub(crate) fn canonical_or_original(path: &Path) -> PathBuf {
 
 /// Resolve the leading branch for a project. Prefer the remote's default
 /// branch (origin/HEAD) when available, otherwise fall back to whatever
-/// branch is currently checked out. Pure helper — only touches git plumbing.
-pub fn leading_branch_for_project(path: &Path, current_branch: &str) -> String {
+/// branch is currently checked out. When no current branch is known (detached
+/// HEAD), falls back to "main". Pure helper -- only touches git plumbing.
+pub fn leading_branch_for_project(path: &Path, current_branch: Option<&str>) -> String {
     match git::remote_default_branch(path) {
         Some(default) => default,
-        None => current_branch.to_string(),
+        // No remote default: use the current branch when available, else
+        // fall back to "main" (the same heuristic used in load_projects).
+        None => current_branch
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "main".to_string()),
     }
 }
 
@@ -105,12 +110,19 @@ pub fn load_projects(
         let current_branch = if missing {
             String::new()
         } else {
-            git::current_branch(&path).unwrap_or_else(|_| "main".to_string())
+            git::current_branch_opt(&path)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
         };
-        let leading_branch = project
-            .leading_branch
-            .clone()
-            .or_else(|| (!missing).then(|| leading_branch_for_project(&path, &current_branch)));
+        let leading_branch = project.leading_branch.clone().or_else(|| {
+            (!missing).then(|| {
+                leading_branch_for_project(
+                    &path,
+                    (!current_branch.is_empty()).then_some(current_branch.as_str()),
+                )
+            })
+        });
         projects.push(Project {
             id: project.id.clone(),
             name: project.name.clone().unwrap_or_else(|| {
@@ -194,8 +206,11 @@ pub fn classify_project_worktrees(
 
 pub fn run_project_branch_status_job(project: Project, worker_tx: Sender<WorkerEvent>) {
     let repo_path = PathBuf::from(&project.path);
-    let result = git::current_branch(&repo_path)
-        .map(|branch| {
+    // Use current_branch_opt so a detached HEAD is treated as "no current
+    // branch" (empty string) rather than a hard error.
+    let result = git::current_branch_opt(&repo_path)
+        .map(|opt_branch| {
+            let branch = opt_branch.unwrap_or_default();
             let branch_status = if let Some(leading_branch) = project.leading_branch.as_deref() {
                 if branch == leading_branch {
                     ProjectBranchStatus::Leading
@@ -221,8 +236,11 @@ pub fn run_checkout_project_default_branch_inspection_job(
     status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
-    let result = git::current_branch(&repo_path)
-        .map(|branch| {
+    // Use current_branch_opt so a detached HEAD is treated as "no current
+    // branch" (empty string) rather than a hard error.
+    let result = git::current_branch_opt(&repo_path)
+        .map(|opt_branch| {
+            let branch = opt_branch.unwrap_or_default();
             let warning_kind = if let Some(leading_branch) = project.leading_branch.as_deref() {
                 if branch == leading_branch {
                     None
@@ -487,5 +505,22 @@ mod tests {
         ));
         // Missing path → path_missing is true.
         assert!(project.path_missing);
+    }
+
+    #[test]
+    fn leading_branch_for_project_returns_main_when_detached_and_no_remote_default() {
+        // A non-git directory: remote_default_branch returns None, current
+        // branch is None (detached). Must fall back to "main".
+        let tmp = tempdir().unwrap();
+        let result = leading_branch_for_project(tmp.path(), None);
+        assert_eq!(result, "main");
+    }
+
+    #[test]
+    fn leading_branch_for_project_returns_current_branch_when_no_remote_default() {
+        // No remote default: should return whatever branch was passed.
+        let tmp = tempdir().unwrap();
+        let result = leading_branch_for_project(tmp.path(), Some("feature/my-thing"));
+        assert_eq!(result, "feature/my-thing");
     }
 }

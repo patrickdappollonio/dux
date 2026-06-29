@@ -146,45 +146,39 @@ pub struct EditorConfig {
     pub default: String,
 }
 
-/// Default cap on concurrent WebSocket connections — see
-/// [`ServerConfig::max_websocket_connections`]. Shared so the config default and
-/// the server's router default cannot drift apart.
-pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS: u32 = 128;
+/// Default cap on concurrent events (`/ws`) WebSocket connections; see
+/// [`ServerConfig::max_websocket_events_connections`]. Shared so the config
+/// default and the server's router default cannot drift apart.
+pub const DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS: u32 = 32;
+/// Default cap on concurrent agent-PTY WebSocket connections — see
+/// [`ServerConfig::max_websocket_agent_connections`].
+pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
+/// Default cap on concurrent terminal-PTY WebSocket connections — see
+/// [`ServerConfig::max_websocket_terminal_connections`].
+pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
-    /// LOCAL MODE port. The palette flip and the `dux server` no-`listen_addrs`
-    /// fallback bind `127.0.0.1:port` (plus the machine's Tailscale address when
-    /// `tailscale_enabled`). Default 8080.
+    /// LOCAL MODE bind host. `dux server` binds `host:port` (plus the machine's
+    /// Tailscale address when `tailscale_enabled`). Must be an IP literal such as
+    /// `127.0.0.1` (loopback, the safe default) or `0.0.0.0` (all interfaces);
+    /// hostnames are not resolved. Default `127.0.0.1`.
+    pub host: String,
+    /// LOCAL MODE port. `dux server` and the palette flip bind `host:port` (plus
+    /// the machine's Tailscale address when `tailscale_enabled`). Default 8080.
     pub port: u16,
-    /// OPT-OUT Tailscale binding for LOCAL MODE. When true, local mode also binds
-    /// the machine's Tailscale address (100.64.0.0/10) so tailnet devices reach
-    /// dux over WireGuard. Detection shells out to `tailscale ip`; when the CLI is
-    /// missing or the daemon is down, dux WARNS and serves loopback only.
+    /// OPT-OUT Tailscale binding. When true, the server also binds the machine's
+    /// Tailscale address (100.64.0.0/10) so tailnet devices reach dux over
+    /// WireGuard. Detection shells out to `tailscale ip`; when the CLI is missing
+    /// or the daemon is down, dux WARNS and serves the configured host only.
     pub tailscale_enabled: bool,
-    /// FULL WEB MODE listeners, `dux server` only. Each entry is an `IP:port`
-    /// SocketAddr. Empty = use LOCAL MODE (`port` + Tailscale). The palette flip
-    /// NEVER reads this field.
-    pub listen_addrs: Vec<String>,
-    /// DEPRECATED: superseded by `port` + `listen_addrs`. Kept for serde so old
-    /// configs parse; migrated away on load (see the TUI deprecation machinery).
-    /// A loopback `bind` adopts its port into `port`; a non-loopback `bind` is
-    /// appended to `listen_addrs`. The canonical renderer no longer emits it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bind: Option<String>,
-    pub insecure_allow_remote: bool,
-    /// Acknowledge serving UNENCRYPTED plain HTTP on a non-loopback (public)
-    /// listen address. Mirrors the `--dangerously-listen-http` CLI flag so the
-    /// choice is reviewable in config — and so a config-only rollback off
-    /// `[server.acme]` does not brick a public server (the CLI flag alone would
-    /// otherwise be the only escape). This only satisfies the ENCRYPTION half of
-    /// the public-bind gate: a public bind ALSO requires auth ([auth] users or
-    /// `insecure_allow_remote`), so setting this alone does not unblock startup.
-    /// Prefer built-in TLS via `[server.acme]`; only set this when an upstream
-    /// proxy terminates TLS or you accept the risk on a trusted network. Default
-    /// false.
-    pub dangerously_listen_http: bool,
+    /// Extra `Host` header values to accept when the request is NOT same-origin.
+    /// dux is trusted-local: it always serves on `host:port` (loopback by default)
+    /// and accepts same-origin requests. List any additional hostnames a reverse
+    /// proxy or tailnet name forwards under (e.g. `box.tailnet.ts.net`) so those
+    /// requests are not rejected by the host guard. Empty by default.
+    pub allowed_hosts: Vec<String>,
     /// Colored, vite-style console output for `dux server`. One of `"auto"`
     /// (default — color only when stdout is a terminal, `NO_COLOR` is unset, and
     /// `TERM` is not `dumb`), `"always"` (force color), or `"never"` (plain text).
@@ -196,64 +190,29 @@ pub struct ServerConfig {
     /// Default true. The access log is console-only (never written to `dux.log`),
     /// so piping `dux server`'s stdout captures it.
     pub access_log: bool,
-    /// Maximum number of concurrent WebSocket (`/ws`) connections. Once this many
-    /// are live, further upgrade attempts are rejected with HTTP 503 until a slot
-    /// frees. A safety bound against connection exhaustion (a runaway tab loop, a
-    /// buggy reconnector); the trusted single-operator deployment normally uses a
-    /// handful. Default 128. A value of 0 is treated as "no new connections".
-    /// Changing this requires a server restart to take effect — the connection-cap
+    /// Maximum number of concurrent events (`/ws`) WebSocket connections. This is
+    /// the status/changed-files event stream every browser tab opens. Once this
+    /// many are live, further upgrade attempts are rejected with HTTP 503 until a
+    /// slot frees. Default 32. A value of 0 permanently blocks this connection
+    /// class until the server restarts. Changing this requires a server restart to
+    /// take effect: the connection-cap semaphore is built at startup and a config
+    /// reload cannot resize it.
+    pub max_websocket_events_connections: u32,
+    /// Maximum number of concurrent agent-PTY WebSocket connections. This is the
+    /// embedded-terminal stream for an agent session. Once this many are live,
+    /// further upgrade attempts are rejected with HTTP 503 until a slot frees.
+    /// Default 32. A value of 0 permanently blocks this connection class until the
+    /// server restarts. Changing this requires a server restart to take effect:
+    /// the connection-cap semaphore is built at startup and a config reload cannot
+    /// resize it.
+    pub max_websocket_agent_connections: u32,
+    /// Maximum number of concurrent terminal-PTY WebSocket connections. This is the
+    /// standalone scratch-terminal stream. Once this many are live, further upgrade
+    /// attempts are rejected with HTTP 503 until a slot frees. Default 64. A value
+    /// of 0 permanently blocks this connection class until the server restarts.
+    /// Changing this requires a server restart to take effect: the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
-    pub max_websocket_connections: u32,
-    pub acme: AcmeSettings,
-}
-
-/// Built-in ACME (Let's Encrypt) settings for `dux server`.
-///
-/// When `enabled` is true, `dux server` runs its own HTTP-01 ACME client:
-/// it serves the challenge on `http_port`, redirects everything else to
-/// HTTPS, and serves TLS on `https_port`. All fields are serde-defaulted so
-/// older `config.toml` files without a `[server.acme]` section parse cleanly
-/// into the safe (ACME off) defaults. Changing any of these requires a server
-/// RESTART — the listeners are bound at startup and reload-config does not
-/// rebind them.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AcmeSettings {
-    pub enabled: bool,
-    pub domains: Vec<String>,
-    pub email: String,
-    pub http_port: u16,
-    pub https_port: u16,
-    pub production: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for AcmeSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            domains: Vec::new(),
-            email: String::new(),
-            http_port: 80,
-            https_port: 443,
-            production: true,
-            cache_dir: None,
-        }
-    }
-}
-
-/// Web UI login credentials.
-///
-/// Each entry is an htpasswd-style `"username:bcrypt-hash"` string. This shape
-/// renders as a self-documenting TOML array and round-trips trivially through
-/// `config_write`. Auth turns ON automatically when at least one valid entry
-/// exists (see [`crate::auth::auth_enabled`]); an empty list means the gate is
-/// off. Entries are managed by the TUI palette commands (server-add-user /
-/// server-remove-user) or by editing the config directly.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AuthConfig {
-    pub users: Vec<String>,
+    pub max_websocket_terminal_connections: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -406,16 +365,15 @@ impl Default for EditorConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            host: "127.0.0.1".to_string(),
             port: 8080,
             tailscale_enabled: true,
-            listen_addrs: Vec::new(),
-            bind: None,
-            insecure_allow_remote: false,
-            dangerously_listen_http: false,
+            allowed_hosts: Vec::new(),
             color: "auto".to_string(),
             access_log: true,
-            max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
-            acme: AcmeSettings::default(),
+            max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            max_websocket_terminal_connections: DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
         }
     }
 }
@@ -841,8 +799,6 @@ pub struct Config {
     pub editor: EditorConfig,
     #[serde(default)]
     pub server: ServerConfig,
-    #[serde(default)]
-    pub auth: AuthConfig,
     pub keys: KeysConfig,
     pub macros: MacrosConfig,
 }
@@ -905,7 +861,6 @@ impl Default for Config {
             },
             editor: EditorConfig::default(),
             server: ServerConfig::default(),
-            auth: AuthConfig::default(),
             keys: KeysConfig::default(),
             macros: MacrosConfig::default(),
         }
@@ -939,16 +894,23 @@ pub fn provider_config(
 /// server must not mutate config (that's the TUI's canonical renderer).
 pub fn load_config(paths: &DuxPaths) -> Config {
     let mut config = match std::fs::read_to_string(&paths.config_path) {
-        Ok(raw) => match toml::from_str::<Config>(&raw) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                crate::logger::error(&format!(
-                    "failed to parse {}: {e}; using defaults",
-                    paths.config_path.display()
-                ));
-                Config::default()
+        Ok(raw) => {
+            // One-time migration notice: the single `[server] max_websocket_connections`
+            // cap was split into three per-class caps. The unknown key is ignored on
+            // load (ServerConfig has no deny_unknown_fields), so warn once so the
+            // operator knows their old value is no longer in effect.
+            warn_on_removed_max_websocket_connections(&raw);
+            match toml::from_str::<Config>(&raw) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    crate::logger::error(&format!(
+                        "failed to parse {}: {e}; using defaults",
+                        paths.config_path.display()
+                    ));
+                    Config::default()
+                }
             }
-        },
+        }
         Err(_) => Config::default(),
     };
     config.providers.ensure_defaults();
@@ -964,6 +926,43 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         ));
     }
     config
+}
+
+/// Warn once when a `config.toml` still carries the removed
+/// `[server] max_websocket_connections` key. Parses the raw TOML generically so a
+/// commented-out line never trips the warning, then logs the three replacements
+/// and the `=0` semantics change. The key itself is silently ignored on load (no
+/// `deny_unknown_fields`), so this is the only place the operator learns their old
+/// value stopped taking effect.
+fn warn_on_removed_max_websocket_connections(raw: &str) {
+    if raw_has_removed_max_websocket_connections(raw) {
+        crate::logger::warn(
+            "[server] max_websocket_connections has been removed and is being ignored. It \
+             was split into max_websocket_events_connections, \
+             max_websocket_agent_connections, and max_websocket_terminal_connections. Set \
+             those per-class caps instead; a value of 0 still means disable (refuse all \
+             new connections of that class until restart).",
+        );
+    }
+}
+
+/// Pure predicate behind the migration warning: true when the raw TOML has a
+/// `[server] max_websocket_connections` key. Parses generically so a commented-out
+/// line is not detected; a parse failure returns false (the loader surfaces the
+/// real parse error separately).
+///
+/// `pub(crate)` so `config_write` can check the same condition on the write/strip
+/// path (where the TUI saves config) and emit the warning there too.
+pub(crate) fn raw_has_removed_max_websocket_connections(raw: &str) -> bool {
+    toml::from_str::<toml::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("server")
+                .and_then(toml::Value::as_table)
+                .map(|server| server.contains_key("max_websocket_connections"))
+        })
+        .unwrap_or(false)
 }
 
 /// Check whether a provider command is available on PATH.
@@ -1023,11 +1022,11 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.permissions().mode() & 0o111 != 0
 }
 
-/// One address in a [`ServerPlan::PlainHttp`] plan, tagged with whether binding
-/// it is REQUIRED or merely BEST-EFFORT.
+/// One address in a [`ServerPlan`], tagged with whether binding it is REQUIRED or
+/// merely BEST-EFFORT.
 ///
-/// - `required: true` — a deliberate listener (loopback, or any explicit
-///   `listen_addrs` entry). A bind failure here is FATAL per the explicit-failure
+/// - `required: true` — a deliberate listener (the configured `host:port` or an
+///   explicit `--bind`). A bind failure here is FATAL per the explicit-failure
 ///   tenet: the operator asked for this address, so refusing to serve it silently
 ///   would hide their intent.
 /// - `required: false` — an opportunistic add-on. Today this is ONLY the
@@ -1072,365 +1071,113 @@ impl PlanAddr {
     }
 }
 
-/// LOCAL MODE bind addresses: loopback on `port` (REQUIRED), plus the machine's
-/// Tailscale address on `port` when one was detected (BEST-EFFORT). This is the
-/// SHARED resolution for both the palette flip and the `dux server`
-/// empty-`listen_addrs` fallback.
+/// The fully-resolved listening plan for `dux server`, the single source of
+/// truth the binary hands to dux-web. Lives in dux-core because both server entry
+/// points and the resolver rules belong in the crate the binary and TUI share;
+/// keeping the plan type here avoids a dux-web dependency from the resolver and
+/// keeps the bind rules in one place.
 ///
-/// It deliberately takes NO `listen_addrs` and NO safety flags: local mode is a
-/// mode, not an address. Loopback is always safe (only this machine reaches it);
-/// the Tailscale address is reachable only by the operator's own tailnet over
-/// WireGuard-encrypted transit, so neither needs the public-bind gates. The flip
-/// calls this and therefore can never open a public listener — that is enforced
-/// structurally by this signature, not by a refusal branch.
+/// The addresses are deduplicated and listed in a stable order, each tagged
+/// [`PlanAddr::required`] (the configured/`--bind` primary, whose bind failure is
+/// fatal) or [`PlanAddr::best_effort`] (the Tailscale leg, whose bind failure
+/// degrades to a warning and serves the remaining addresses).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerPlan {
+    pub addrs: Vec<PlanAddr>,
+}
+
+/// CLI overrides for the server plan. Every field is `None`/`false` when the
+/// operator passed nothing, so config values win by default and a present CLI
+/// value takes precedence.
+#[derive(Clone, Debug, Default)]
+pub struct ServerCliOverrides {
+    /// `--bind <ADDR:PORT>`: bind this exact address, overriding config host+port.
+    pub bind: Option<String>,
+    /// `--port <PORT>`: override `[server] port` only. Ignored when `bind` is set.
+    pub port: Option<u16>,
+    /// `--no-tailscale`: do not bind the Tailscale leg this run.
+    pub no_tailscale: bool,
+}
+
+/// Resolve the complete `dux server` listening plan from config + CLI overrides +
+/// the detected Tailscale address. This is the single source of truth for the
+/// bind rules; the binary reads the returned [`ServerPlan`]'s addresses.
 ///
-/// The Tailscale leg is BEST-EFFORT: a third-party process already holding the
-/// Tailscale `ip:port` must not block the whole serve — it degrades to
-/// loopback-only with a warning, exactly as tailscale-not-DETECTED already does.
-/// Loopback is REQUIRED: if even loopback cannot bind there is nothing to serve.
-///
-/// `tailscale_ip` is the already-fetched address (the caller runs detection on a
-/// worker / at CLI startup); `None` means "Tailscale off or not detected" and
-/// yields loopback only.
-pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<PlanAddr> {
-    let mut addrs = vec![PlanAddr::required(std::net::SocketAddr::from((
-        [127, 0, 0, 1],
-        port,
-    )))];
+/// dux is trusted-local: the primary listener is always the configured
+/// `host:port` (loopback by default) or an explicit `--bind`. There is no auth
+/// gate and no public-bind refusal; the operator chooses the host directly and
+/// the host guard (config `allowed_hosts`) governs which `Host` headers are
+/// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
+/// disabled / not detected); when present and not already covered by the primary
+/// bind it is added as a BEST-EFFORT leg.
+pub fn resolve_server_plan(
+    server: &ServerConfig,
+    cli: &ServerCliOverrides,
+    tailscale_ip: Option<std::net::IpAddr>,
+) -> Result<ServerPlan> {
+    let bind: std::net::SocketAddr = match cli.bind.as_deref() {
+        Some(raw) => raw.parse().map_err(|_| {
+            anyhow!(
+                "invalid --bind address \"{raw}\": expected IP:port, e.g. 0.0.0.0:8080 \
+                 (hostnames are not resolved)"
+            )
+        })?,
+        None => {
+            let host: std::net::IpAddr = server.host.parse().map_err(|_| {
+                anyhow!(
+                    "invalid [server] host \"{}\": expected an IP address such as 127.0.0.1 \
+                     or 0.0.0.0 (hostnames are not resolved). Set [server] host in config.toml \
+                     or pass --bind IP:port.",
+                    server.host
+                )
+            })?;
+            std::net::SocketAddr::new(host, cli.port.unwrap_or(server.port))
+        }
+    };
+    if bind.port() == 0 {
+        bail!(
+            "refusing to bind {bind}: port 0 means \"pick any free port\", so there would be no \
+             stable address to open. Set [server] port (default 8080) or pass --port / --bind with \
+             a non-zero port."
+        );
+    }
+    let ts = if server.tailscale_enabled && !cli.no_tailscale {
+        tailscale_ip
+    } else {
+        None
+    };
+    Ok(ServerPlan {
+        addrs: plan_addrs(bind, ts),
+    })
+}
+
+/// Primary address (REQUIRED) plus the Tailscale leg (BEST-EFFORT) when detected and
+/// not already covered. A wildcard primary (0.0.0.0 / ::) already binds the Tailscale
+/// interface, and an explicit bind to the Tailscale address is already in the list, so
+/// both cases skip the extra leg.
+pub(crate) fn plan_addrs(
+    bind: std::net::SocketAddr,
+    tailscale_ip: Option<std::net::IpAddr>,
+) -> Vec<PlanAddr> {
+    let mut addrs = vec![PlanAddr::required(bind)];
     if let Some(ip) = tailscale_ip {
-        let ts = std::net::SocketAddr::new(ip, port);
-        // Guard against a Tailscale IP that is itself loopback (shouldn't happen,
-        // but keeps the list deduplicated and the listener count honest).
-        if !addrs.iter().any(|p| p.addr() == ts) {
+        let ts = std::net::SocketAddr::new(ip, bind.port());
+        let subsumed = bind.ip().is_unspecified() || bind.ip() == ip;
+        if !subsumed && !addrs.iter().any(|p| p.addr() == ts) {
             addrs.push(PlanAddr::best_effort(ts));
         }
     }
     addrs
 }
 
-/// The fully-resolved listening plan for `dux server`, the single source of
-/// truth the binary hands to dux-web. Lives in dux-core because both server entry
-/// points and the resolver
-/// rules belong in the crate the binary and TUI share; keeping the plan type
-/// here avoids a dux-web dependency from the resolver and keeps the bind rules
-/// in one place.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ServerPlan {
-    /// Plain HTTP on one or more addresses (multi-listener). TLS is either absent
-    /// (loopback dev / Tailscale / LAN testing) or terminated by an upstream
-    /// proxy. The addresses are deduplicated and listed in a stable order, each
-    /// tagged [`PlanAddr::required`] (a deliberate listener whose bind failure is
-    /// fatal) or [`PlanAddr::best_effort`] (the Tailscale leg of LOCAL MODE, whose
-    /// bind failure degrades to a warning and serves the remaining addresses).
-    PlainHttp { addrs: Vec<PlanAddr> },
-    /// Built-in ACME: serve the HTTP-01 challenge + HTTPS redirect on
-    /// `http_addr`, serve TLS on `https_addr`. `cache_dir` holds the ACME
-    /// account and certificate PRIVATE KEYS.
-    Acme {
-        http_addr: std::net::SocketAddr,
-        https_addr: std::net::SocketAddr,
-        domains: Vec<String>,
-        email: String,
-        production: bool,
-        cache_dir: PathBuf,
-    },
-}
-
-/// CLI overrides for the server plan. Every field is `None`/`false` when the
-/// operator passed nothing, so config values win by default and a present CLI
-/// value takes precedence (the existing `--bind` precedence, extended).
-#[derive(Clone, Debug, Default)]
-pub struct ServerCliOverrides {
-    /// `--port`: LOCAL MODE port override (used only when no `--listen`/config
-    /// `listen_addrs` exist — i.e. the local-mode fallback).
-    pub port: Option<u16>,
-    /// `--listen <ADDR:PORT>` (repeatable) and the deprecated `--bind` alias.
-    /// When non-empty, replaces config `listen_addrs` entirely (FULL WEB MODE).
-    pub listen: Vec<String>,
-    /// `--no-tailscale`: force LOCAL MODE Tailscale binding off for this run,
-    /// regardless of `tailscale_enabled` in config.
-    pub no_tailscale: bool,
-    pub insecure_allow_remote: bool,
-    /// `--acme-domain` (repeatable). When non-empty, replaces config domains.
-    pub acme_domains: Vec<String>,
-    /// `--acme-email`. When set, overrides config email.
-    pub acme_email: Option<String>,
-    /// `--http-port`. When set, overrides config http_port.
-    pub http_port: Option<u16>,
-    /// `--https-port`. When set, overrides config https_port.
-    pub https_port: Option<u16>,
-    /// `--no-acme`: force ACME off regardless of config.
-    pub no_acme: bool,
-    /// `--dangerously-listen-http`: the named opt-in for public PLAIN HTTP.
-    pub dangerously_listen_http: bool,
-}
-
-/// Resolve the complete `dux server` listening plan from config + auth state +
-/// CLI overrides + the detected Tailscale address. This is the single source of
-/// truth for the bind/ACME rules; the binary matches on the returned
-/// [`ServerPlan`].
-///
-/// `auth_enabled` already accounts for `--disable-auth` (it is false when the
-/// gate is deliberately disabled). `auth_explicitly_disabled` is threaded
-/// separately so the ACME gate can distinguish "no users configured" (refuse)
-/// from "deliberately disabled for an upstream auth proxy" (allowed, because it
-/// was named explicitly). `tailscale_ip` is the detected Tailscale address (or
-/// `None` when disabled / not detected); it is used both to fill LOCAL MODE and
-/// to classify `listen_addrs` entries as local. `config_dir` derives the default
-/// ACME cache dir.
-///
-/// Rules:
-/// - ACME ON (config `enabled` and not `--no-acme`): unchanged from T1 — needs
-///   ≥1 domain and (`auth_enabled` OR `auth_explicitly_disabled`); binds
-///   `0.0.0.0:http_port` + `0.0.0.0:https_port`.
-/// - ACME OFF → PlainHttp:
-///   - EMPTY `listen_addrs` (and no `--listen`) → LOCAL MODE: loopback:port
-///     (REQUIRED) plus the Tailscale address:port when detected (BEST-EFFORT — a
-///     bind failure there degrades to loopback with a warning). Always safe; no
-///     gates.
-///   - NON-EMPTY → FULL WEB MODE: parse each entry as a SocketAddr (hostnames
-///     rejected, no DNS). Classify each local (loopback OR == the Tailscale IP)
-///     vs public. If ANY entry is public, the public-bind gates apply to the
-///     whole plan: (`auth_enabled` OR `insecure_allow_remote`) AND
-///     `dangerously_listen_http`; the refusal names the offending entry and the
-///     exact missing piece (when BOTH the auth leg and the scary flag are
-///     missing, a single message names both).
-pub fn resolve_server_plan(
-    server: &ServerConfig,
-    auth_enabled: bool,
-    auth_explicitly_disabled: bool,
-    cli: &ServerCliOverrides,
-    tailscale_ip: Option<std::net::IpAddr>,
-    config_dir: &Path,
-) -> Result<ServerPlan> {
-    let acme_on = server.acme.enabled && !cli.no_acme;
-
-    if acme_on {
-        let domains: Vec<String> = if cli.acme_domains.is_empty() {
-            server.acme.domains.clone()
-        } else {
-            cli.acme_domains.clone()
-        };
-        if domains.is_empty() {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server: no domains are configured. \
-                 ACME issues certificates for specific hostnames, so it needs at least one. \
-                 Add domains to [server.acme] in config.toml (for example \
-                 domains = [\"dux.example.com\"]) or pass --acme-domain dux.example.com \
-                 (repeatable)."
-            );
-        }
-
-        if !auth_enabled && !auth_explicitly_disabled {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server with no authentication: \
-                 the certificates make the web UI reachable over the public internet, \
-                 so it must be protected. Add at least one user to [auth] in config.toml \
-                 (or use the server-add-user palette command) so the login gate protects it. \
-                 Alternatively, if an upstream auth proxy handles authentication, \
-                 pass --disable-auth to acknowledge that explicitly."
-            );
-        }
-
-        let http_port = cli.http_port.unwrap_or(server.acme.http_port);
-        let https_port = cli.https_port.unwrap_or(server.acme.https_port);
-        // Port 0 means "let the OS pick an ephemeral port", which is meaningless
-        // for ACME: HTTP-01 needs the challenge reachable on the public :80 the
-        // CA dials, and the published HTTPS URL needs a fixed port. Refuse it.
-        if http_port == 0 || https_port == 0 {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server: port 0 means \
-                 \"pick any free port\", but ACME needs fixed, publicly reachable ports \
-                 (HTTP-01 validation dials :80 and the certificate URL uses the HTTPS port). \
-                 Set [server.acme] http_port and https_port in config.toml (the defaults are \
-                 80 and 443), or pass --http-port / --https-port with non-zero values."
-            );
-        }
-        // The two listeners cannot share a port — one terminates TLS, the other
-        // answers the plaintext challenge + redirect, and they bind the SAME
-        // wildcard address, so an identical port is a guaranteed bind clash.
-        if http_port == https_port {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server: the HTTP and HTTPS ports \
-                 are both {http_port}, but they must differ — dux binds one plaintext listener \
-                 (for the HTTP-01 challenge and the HTTPS redirect) and one TLS listener, and \
-                 they cannot share a port. Set distinct [server.acme] http_port and https_port \
-                 in config.toml (the defaults are 80 and 443), or pass --http-port / --https-port."
-            );
-        }
-        let http_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
-        let https_addr = std::net::SocketAddr::from(([0, 0, 0, 0], https_port));
-
-        let email = cli
-            .acme_email
-            .clone()
-            .unwrap_or_else(|| server.acme.email.clone());
-
-        let cache_dir = resolve_acme_cache_dir(server.acme.cache_dir.as_deref(), config_dir)?;
-
-        return Ok(ServerPlan::Acme {
-            http_addr,
-            https_addr,
-            domains,
-            email,
-            production: server.acme.production,
-            cache_dir,
-        });
-    }
-
-    // ACME OFF: plain HTTP. `--listen` (repeatable, plus the deprecated `--bind`
-    // alias) replaces config `listen_addrs` entirely when present.
-    let listen_addrs: &[String] = if cli.listen.is_empty() {
-        &server.listen_addrs
-    } else {
-        &cli.listen
-    };
-
-    // EMPTY listen_addrs → LOCAL MODE fallback: loopback:port (+ Tailscale).
-    if listen_addrs.is_empty() {
-        let port = cli.port.unwrap_or(server.port);
-        // Port 0 is "pick any free port", which would leave the operator with no
-        // stable URL to open. Refuse it with a named fix.
-        if port == 0 {
-            bail!(
-                "refusing to start the local server on port 0: port 0 means \
-                 \"pick any free port\", so there would be no stable address to open. \
-                 Set [server] port in config.toml (the default is 8080) or pass --port \
-                 with a non-zero value."
-            );
-        }
-        let ts = if server.tailscale_enabled && !cli.no_tailscale {
-            tailscale_ip
-        } else {
-            None
-        };
-        return Ok(ServerPlan::PlainHttp {
-            addrs: local_addrs(port, ts),
-        });
-    }
-
-    // FULL WEB MODE: parse + classify each entry. Every explicit listen_addrs
-    // entry is REQUIRED — the operator named it deliberately, so a bind failure
-    // there stays fatal (explicit-failure tenet). Only LOCAL MODE's auto-added
-    // Tailscale leg is best-effort.
-    let mut addrs: Vec<PlanAddr> = Vec::with_capacity(listen_addrs.len());
-    let mut public: Vec<std::net::SocketAddr> = Vec::new();
-    for raw in listen_addrs {
-        let addr: std::net::SocketAddr = raw.parse().map_err(|_| {
-            anyhow!(
-                "invalid listen address \"{raw}\": expected IP:port, \
-                 e.g. 127.0.0.1:8080 or 0.0.0.0:8080 (hostnames are not resolved)"
-            )
-        })?;
-        // Port 0 is "pick any free port" — useless for a server the operator
-        // must reach at a known address. Refuse it with the offending entry.
-        if addr.port() == 0 {
-            bail!(
-                "refusing to bind the listen address \"{raw}\": port 0 means \
-                 \"pick any free port\", so there would be no stable address to reach dux at. \
-                 Use a fixed port, e.g. {ip}:8080.",
-                ip = addr.ip()
-            );
-        }
-        if !addrs.iter().any(|p| p.addr() == addr) {
-            addrs.push(PlanAddr::required(addr));
-        }
-        // A listen entry is LOCAL when it is loopback OR equals the detected
-        // Tailscale address (reachable only over the operator's own tailnet).
-        let is_local = addr.ip().is_loopback() || Some(addr.ip()) == tailscale_ip;
-        if !is_local && !public.contains(&addr) {
-            public.push(addr);
-        }
-    }
-
-    // Any public entry subjects the whole plan to the public-bind gates.
-    if let Some(offender) = public.first() {
-        let allow_remote = cli.insecure_allow_remote || server.insecure_allow_remote;
-        let auth_ok = auth_enabled || allow_remote;
-        // If the offender is in the RFC 6598 shared CGNAT range (100.64.0.0/10) —
-        // which Tailscale reuses for its IPv4 tailnet addresses — or Tailscale's
-        // IPv6 range (fd7a:115c:a1e0::/48), and Tailscale was NOT detected at
-        // startup, the operator most likely meant a tailnet-only bind and the
-        // daemon is simply down. Without detection dux can't recognize it as local
-        // and treats it as public, so name that so the refusal is not mystifying.
-        let offender_in_cgnat_range = match offender.ip() {
-            std::net::IpAddr::V4(v4) => {
-                v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])
-            }
-            std::net::IpAddr::V6(v6) => {
-                let s = v6.segments();
-                s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
-            }
-        };
-        let tailscale_note = if tailscale_ip.is_none() && offender_in_cgnat_range {
-            " Note: this address is in the RFC 6598 shared CGNAT range (100.64.0.0/10), or \
-             Tailscale's IPv6 range — Tailscale reuses these for tailnet addresses. The \
-             Tailscale daemon was not detected at startup, so dux is treating it as a public \
-             bind. If you meant a tailnet-only bind, ensure the Tailscale daemon is running \
-             so dux can classify it as local; if this is a carrier-grade-NAT address from \
-             your ISP, it is genuinely reachable beyond this host."
-        } else {
-            ""
-        };
-        // The "acknowledge unencrypted plain HTTP" escape exists as BOTH a CLI flag
-        // and a config field, mirroring `insecure_allow_remote`, so a config-only
-        // rollback off [server.acme] can re-open a public plain-HTTP bind without
-        // editing the service unit's CLI args.
-        let listen_http = cli.dangerously_listen_http || server.dangerously_listen_http;
-        match (auth_ok, listen_http) {
-            (false, false) => bail!(
-                "refusing to serve plain HTTP on the non-loopback listen address {offender}: \
-                 it has NO login configured (anyone who can reach it could control your agents \
-                 and worktrees) AND the traffic (including the login password) would be \
-                 unencrypted. Add at least one user to [auth] in config.toml \
-                 (or use the server-add-user palette command) so the login gate protects it, \
-                 OR pass --insecure-allow-remote if an upstream auth proxy handles login; \
-                 then ALSO enable built-in TLS via [server.acme], or acknowledge the \
-                 unencrypted public bind with --dangerously-listen-http (or set \
-                 dangerously_listen_http = true under [server] in config.toml).{tailscale_note}"
-            ),
-            (false, true) => bail!(
-                "refusing to bind the non-loopback listen address {offender}: the dux web UI \
-                 has no login configured, so anyone who can reach it can control your agents \
-                 and worktrees. Add at least one user to [auth] in config.toml \
-                 (or use the server-add-user palette command) so the login gate protects it. \
-                 Alternatively, if an upstream auth proxy handles authentication, \
-                 re-run with --insecure-allow-remote or set insecure_allow_remote = true \
-                 under [server] in config.toml.{tailscale_note}"
-            ),
-            (true, false) => bail!(
-                "refusing to serve plain HTTP on the non-loopback listen address {offender}: \
-                 traffic (including the login password) would travel unencrypted. \
-                 To serve encrypted, enable built-in TLS via [server.acme] (set enabled = true \
-                 and configure domains). If TLS is terminated by an upstream proxy, or you \
-                 accept the risk on a trusted network, re-run with --dangerously-listen-http \
-                 or set dangerously_listen_http = true under [server] in config.toml to \
-                 acknowledge the unencrypted public bind explicitly.{tailscale_note}"
-            ),
-            (true, true) => {}
-        }
-    }
-
-    Ok(ServerPlan::PlainHttp { addrs })
-}
-
-/// Resolve the ACME cache directory: the configured value (env-expanded like
-/// other config paths) when set, otherwise `<config-dir>/acme`. This directory
-/// holds the ACME account and certificate private keys.
-fn resolve_acme_cache_dir(cfg_cache_dir: Option<&str>, config_dir: &Path) -> Result<PathBuf> {
-    match cfg_cache_dir.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(raw) => {
-            let expanded = expand_path(raw).ok_or_else(|| {
-                anyhow!(
-                    "invalid [server.acme] cache_dir \"{raw}\": must be an absolute path \
-                     (env vars and a leading ~ are expanded; relative paths and `..` \
-                     traversal are rejected)"
-                )
-            })?;
-            Ok(PathBuf::from(expanded))
-        }
-        None => Ok(config_dir.join("acme")),
-    }
+/// LOCAL MODE bind addresses for the TUI palette flip: loopback (REQUIRED) plus the
+/// Tailscale leg. A thin wrapper over `plan_addrs` so the flip can never open a
+/// non-loopback primary listener.
+pub fn local_addrs(port: u16, tailscale_ip: Option<std::net::IpAddr>) -> Vec<PlanAddr> {
+    plan_addrs(
+        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        tailscale_ip,
+    )
 }
 
 #[cfg(test)]
@@ -1481,660 +1228,104 @@ mod local_addrs_tests {
 }
 
 #[cfg(test)]
-mod resolve_server_plan_tests {
-    use std::path::{Path, PathBuf};
-
-    use super::{
-        AcmeSettings, PlanAddr, ServerCliOverrides, ServerConfig, ServerPlan, resolve_server_plan,
-    };
-
-    fn cfg_dir() -> PathBuf {
-        PathBuf::from("/home/user/.config/dux")
+mod resolve_plan_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    fn ts() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(100, 100, 0, 1))
     }
-
-    /// Build a ServerConfig with given listen_addrs, insecure flag, ACME, and the
-    /// other LOCAL MODE defaults (port 8080, tailscale on).
-    fn server_listen(listen: &[&str], insecure: bool, acme: AcmeSettings) -> ServerConfig {
-        ServerConfig {
-            listen_addrs: listen.iter().map(|s| s.to_string()).collect(),
-            insecure_allow_remote: insecure,
-            acme,
-            ..ServerConfig::default()
-        }
-    }
-
-    /// Back-compat shim for the ACME-leg tests that don't care about the plain
-    /// listener shape: builds a config with empty listen_addrs (local mode) and a
-    /// given insecure flag + ACME settings. The old `bind` arg is ignored — ACME
-    /// always binds 0.0.0.0 regardless.
-    fn server(_bind: &str, insecure: bool, acme: AcmeSettings) -> ServerConfig {
-        ServerConfig {
-            insecure_allow_remote: insecure,
-            acme,
-            ..ServerConfig::default()
-        }
-    }
-
-    fn acme_on(domains: &[&str]) -> AcmeSettings {
-        AcmeSettings {
-            enabled: true,
-            domains: domains.iter().map(|s| s.to_string()).collect(),
-            ..AcmeSettings::default()
-        }
-    }
-
-    fn resolve(
-        cfg: &ServerConfig,
-        auth_enabled: bool,
-        auth_disabled: bool,
-        cli: ServerCliOverrides,
-    ) -> anyhow::Result<ServerPlan> {
-        resolve_server_plan(cfg, auth_enabled, auth_disabled, &cli, None, &cfg_dir())
-    }
-
-    fn resolve_ts(
-        cfg: &ServerConfig,
-        auth_enabled: bool,
-        auth_disabled: bool,
-        cli: ServerCliOverrides,
-        tailscale_ip: Option<std::net::IpAddr>,
-    ) -> anyhow::Result<ServerPlan> {
-        resolve_server_plan(
-            cfg,
-            auth_enabled,
-            auth_disabled,
-            &cli,
-            tailscale_ip,
-            &cfg_dir(),
-        )
-    }
-
-    /// FULL WEB MODE expectation: every address is a REQUIRED listener (an
-    /// explicit `listen_addrs` entry the operator named, so a bind failure is
-    /// fatal).
-    fn plain(addrs: &[&str]) -> ServerPlan {
-        ServerPlan::PlainHttp {
-            addrs: addrs
-                .iter()
-                .map(|s| PlanAddr::required(s.parse().unwrap()))
-                .collect(),
-        }
-    }
-
-    /// LOCAL MODE expectation: loopback is REQUIRED, the auto-added Tailscale leg
-    /// is BEST-EFFORT. Pass the loopback address(es) first and the Tailscale
-    /// address (if any) as the best-effort tail.
-    fn plain_local(required: &[&str], best_effort: &[&str]) -> ServerPlan {
-        let mut addrs: Vec<PlanAddr> = required
-            .iter()
-            .map(|s| PlanAddr::required(s.parse().unwrap()))
-            .collect();
-        addrs.extend(
-            best_effort
-                .iter()
-                .map(|s| PlanAddr::best_effort(s.parse().unwrap())),
-        );
-        ServerPlan::PlainHttp { addrs }
-    }
-
-    // ── LOCAL MODE (empty listen_addrs) ───────────────────────────────────
-
-    #[test]
-    fn local_mode_loopback_only_when_no_tailscale() {
-        // Empty listen_addrs + no detected Tailscale + no flags → loopback:port.
-        // This is the flip's and the fallback's safe default, identical
-        // regardless of the dangerously flag.
-        let cfg = server_listen(&[], false, AcmeSettings::default());
-        let plan = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect("local mode loopback ok");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
+    fn cli() -> ServerCliOverrides {
+        ServerCliOverrides::default()
     }
 
     #[test]
-    fn local_mode_includes_tailscale_when_detected() {
-        // LOCAL MODE: loopback is REQUIRED, the detected Tailscale leg is added as
-        // BEST-EFFORT (a busy Tailscale port degrades to loopback + a warning
-        // rather than failing the serve).
-        let cfg = server_listen(&[], false, AcmeSettings::default());
-        let ts = "100.101.102.103".parse().unwrap();
-        let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
-            .expect("local mode + tailscale ok");
+    fn default_loopback_only_without_tailscale() {
+        let p = resolve_server_plan(&ServerConfig::default(), &cli(), None).unwrap();
         assert_eq!(
-            plan,
-            plain_local(&["127.0.0.1:8080"], &["100.101.102.103:8080"])
+            p.addrs,
+            vec![PlanAddr::required("127.0.0.1:8080".parse().unwrap())]
         );
     }
-
     #[test]
-    fn local_mode_drops_tailscale_when_disabled_in_config() {
-        let mut cfg = server_listen(&[], false, AcmeSettings::default());
-        cfg.tailscale_enabled = false;
-        let ts = "100.101.102.103".parse().unwrap();
-        let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
-            .expect("tailscale disabled → loopback only");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
+    fn default_adds_best_effort_tailscale_leg() {
+        let p = resolve_server_plan(&ServerConfig::default(), &cli(), Some(ts())).unwrap();
+        assert_eq!(p.addrs.len(), 2);
+        assert!(!p.addrs[1].is_required());
     }
-
     #[test]
-    fn local_mode_drops_tailscale_when_no_tailscale_flag() {
-        let cfg = server_listen(&[], false, AcmeSettings::default());
-        let ts = "100.101.102.103".parse().unwrap();
-        let cli = ServerCliOverrides {
+    fn no_tailscale_suppresses_leg() {
+        let c = ServerCliOverrides {
             no_tailscale: true,
-            ..ServerCliOverrides::default()
+            ..cli()
         };
-        let plan =
-            resolve_ts(&cfg, false, false, cli, Some(ts)).expect("--no-tailscale → loopback only");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
-    }
-
-    #[test]
-    fn local_mode_cli_port_overrides_config_port() {
-        let cfg = server_listen(&[], false, AcmeSettings::default());
-        let cli = ServerCliOverrides {
-            port: Some(9090),
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, false, false, cli).expect("cli port override ok");
-        assert_eq!(plan, plain(&["127.0.0.1:9090"]));
-    }
-
-    // ── FULL WEB MODE (non-empty listen_addrs) matrix ─────────────────────
-
-    #[test]
-    fn listen_loopback_passes_with_no_flags() {
-        let cfg = server_listen(&["127.0.0.1:8080"], false, AcmeSettings::default());
-        let plan = resolve(&cfg, false, false, ServerCliOverrides::default()).expect("loopback ok");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
-    }
-
-    #[test]
-    fn listen_loopback_unaffected_by_dangerously_flag() {
-        let cfg = server_listen(&["127.0.0.1:8080"], false, AcmeSettings::default());
-        let plan = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect("loopback resolves regardless of the scary flag");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
-    }
-
-    #[test]
-    fn listen_tailscale_entry_classified_local() {
-        // An explicit listen entry equal to the detected Tailscale IP is LOCAL,
-        // so it needs none of the public-bind gates.
-        let cfg = server_listen(&["100.64.0.1:8080"], false, AcmeSettings::default());
-        let ts = "100.64.0.1".parse().unwrap();
-        let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
-            .expect("tailscale listen entry is local");
-        assert_eq!(plan, plain(&["100.64.0.1:8080"]));
-    }
-
-    #[test]
-    fn listen_mixed_local_and_public_refuses_naming_the_public_entry() {
-        // Loopback + a public entry: the public one drives the gates, and the
-        // refusal must NAME it (not the loopback one).
-        let cfg = server_listen(
-            &["127.0.0.1:8080", "0.0.0.0:9000"],
-            false,
-            AcmeSettings::default(),
-        );
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("a public entry must trigger the gates");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("0.0.0.0:9000"),
-            "should name the offender: {msg}"
-        );
-        assert!(
-            !msg.contains("127.0.0.1:8080"),
-            "should not name the local entry: {msg}"
-        );
-    }
-
-    #[test]
-    fn listen_public_no_auth_no_flags_refuses_naming_both_fixes() {
-        // T1-review obligation 4: when BOTH the auth leg and the scary flag are
-        // missing, a single message names both fixes (no two-step convergence).
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("public plain HTTP with no auth + no flag must refuse");
-        let msg = err.to_string();
-        assert!(msg.contains("[auth]"), "should name auth as a fix: {msg}");
-        assert!(
-            msg.contains("--insecure-allow-remote"),
-            "should mention the insecure flag: {msg}"
-        );
-        assert!(
-            msg.contains("--dangerously-listen-http"),
-            "should ALSO name the unencrypted opt-in in the same message: {msg}"
-        );
-    }
-
-    #[test]
-    fn listen_public_auth_on_without_dangerously_refuses_naming_the_flag() {
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("public plain HTTP needs --dangerously-listen-http even with auth");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("--dangerously-listen-http"),
-            "should name the unencrypted opt-in: {msg}"
-        );
-        assert!(
-            msg.contains("[server.acme]"),
-            "should point at the TLS alternative: {msg}"
-        );
-    }
-
-    #[test]
-    fn listen_public_no_auth_with_dangerously_refuses_naming_auth() {
-        // The scary flag clears the encryption leg, but auth is still missing.
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
-        let cli = ServerCliOverrides {
-            dangerously_listen_http: true,
-            ..ServerCliOverrides::default()
-        };
-        let err = resolve(&cfg, false, false, cli)
-            .expect_err("dangerously alone is not enough without auth");
-        let msg = err.to_string();
-        assert!(msg.contains("[auth]"), "should name auth as the fix: {msg}");
-        assert!(
-            msg.contains("--insecure-allow-remote"),
-            "should mention the insecure flag: {msg}"
-        );
-    }
-
-    #[test]
-    fn listen_public_auth_on_with_dangerously_passes() {
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
-        let cli = ServerCliOverrides {
-            dangerously_listen_http: true,
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, true, false, cli).expect("auth + dangerously ok");
-        assert_eq!(plan, plain(&["0.0.0.0:8080"]));
-    }
-
-    #[test]
-    fn listen_public_auth_on_with_config_dangerously_passes() {
-        // The config-file equivalent of --dangerously-listen-http must ALSO satisfy
-        // the gate (mirroring insecure_allow_remote), so a config-only rollback off
-        // [server.acme] can re-open a public plain-HTTP bind without editing the
-        // service's CLI args.
-        let cfg = ServerConfig {
-            dangerously_listen_http: true,
-            ..server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default())
-        };
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect("auth + config dangerously_listen_http ok");
-        assert_eq!(plan, plain(&["0.0.0.0:8080"]));
-    }
-
-    #[test]
-    fn listen_public_no_auth_with_config_dangerously_still_refuses() {
-        // The config field only satisfies the ENCRYPTION half of the gate. With no
-        // auth (no users, no insecure_allow_remote), a public bind must STILL be
-        // refused even when dangerously_listen_http=true is set in config — the
-        // field must not become an auth bypass.
-        let cfg = ServerConfig {
-            dangerously_listen_http: true,
-            ..server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default())
-        };
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("config dangerously_listen_http without auth must still refuse");
-        assert!(
-            err.to_string().contains("[auth]"),
-            "the refusal must still name auth as the fix: {err}"
-        );
-    }
-
-    #[test]
-    fn listen_public_insecure_with_dangerously_passes() {
-        let cfg = server_listen(&["0.0.0.0:8080"], true, AcmeSettings::default());
-        let cli = ServerCliOverrides {
-            dangerously_listen_http: true,
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, false, false, cli).expect("insecure + dangerously ok");
-        assert_eq!(plan, plain(&["0.0.0.0:8080"]));
-    }
-
-    #[test]
-    fn listen_public_insecure_without_dangerously_still_refuses() {
-        let cfg = server_listen(&["0.0.0.0:8080"], true, AcmeSettings::default());
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("insecure alone is not enough for public plain HTTP");
-        assert!(
-            err.to_string().contains("--dangerously-listen-http"),
-            "should still demand the unencrypted opt-in: {err}"
-        );
-    }
-
-    #[test]
-    fn listen_cli_overrides_config_listen_addrs() {
-        // --listen replaces config listen_addrs entirely.
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
-        let cli = ServerCliOverrides {
-            listen: vec!["127.0.0.1:9999".to_string()],
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, false, false, cli).expect("cli listen override ok");
-        assert_eq!(plan, plain(&["127.0.0.1:9999"]));
-    }
-
-    #[test]
-    fn listen_dedups_repeated_entries() {
-        let cfg = server_listen(
-            &["127.0.0.1:8080", "127.0.0.1:8080"],
-            false,
-            AcmeSettings::default(),
-        );
-        let plan = resolve(&cfg, false, false, ServerCliOverrides::default()).expect("dedup ok");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
-    }
-
-    #[test]
-    fn listen_invalid_entry_errors_with_shape() {
-        let cfg = server_listen(&["not-an-addr"], false, AcmeSettings::default());
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("invalid listen entry must error");
-        let msg = err.to_string();
-        assert!(msg.contains("not-an-addr"), "should name the value: {msg}");
-        assert!(msg.contains("IP:port"), "should explain the shape: {msg}");
-    }
-
-    #[test]
-    fn listen_hostname_entry_rejected_no_dns() {
-        let cfg = server_listen(&["dux.local:8080"], false, AcmeSettings::default());
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("hostnames are not resolved");
-        assert!(
-            err.to_string().contains("dux.local:8080"),
-            "should name the bad entry: {err}"
-        );
-    }
-
-    #[test]
-    fn no_acme_flag_forces_plain_path_from_acme_config() {
-        // Config enables ACME, but --no-acme forces the plain-HTTP path → here
-        // empty listen_addrs means LOCAL MODE (loopback).
-        let cfg = server_listen(&[], false, acme_on(&["dux.example.com"]));
-        let cli = ServerCliOverrides {
-            no_acme: true,
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, false, false, cli).expect("--no-acme falls back to plain");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
-    }
-
-    // ── ACME (on) matrix ──────────────────────────────────────────────────
-
-    #[test]
-    fn acme_on_no_domains_refuses_naming_the_fix() {
-        let cfg = server("127.0.0.1:8080", false, acme_on(&[]));
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("ACME with no domains must refuse");
-        let msg = err.to_string();
-        assert!(msg.contains("domains"), "should name domains: {msg}");
-        assert!(
-            msg.contains("--acme-domain"),
-            "should mention the CLI override: {msg}"
-        );
-    }
-
-    #[test]
-    fn acme_on_with_domains_but_no_auth_refuses_naming_auth_and_disable() {
-        let cfg = server("127.0.0.1:8080", false, acme_on(&["dux.example.com"]));
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("ACME with no auth and not explicitly disabled must refuse");
-        let msg = err.to_string();
-        assert!(msg.contains("[auth]"), "should name auth: {msg}");
-        assert!(
-            msg.contains("--disable-auth"),
-            "should offer the explicit-disable escape hatch: {msg}"
-        );
-    }
-
-    #[test]
-    fn acme_on_with_auth_enabled_produces_plan() {
-        let cfg = server("127.0.0.1:8080", false, acme_on(&["dux.example.com"]));
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default()).expect("acme ok");
         assert_eq!(
-            plan,
-            ServerPlan::Acme {
-                http_addr: "0.0.0.0:80".parse().unwrap(),
-                https_addr: "0.0.0.0:443".parse().unwrap(),
-                domains: vec!["dux.example.com".to_string()],
-                email: String::new(),
-                production: true,
-                cache_dir: Path::new("/home/user/.config/dux/acme").to_path_buf(),
-            }
+            resolve_server_plan(&ServerConfig::default(), &c, Some(ts()))
+                .unwrap()
+                .addrs
+                .len(),
+            1
         );
     }
-
     #[test]
-    fn acme_on_with_explicit_disable_auth_is_allowed() {
-        // auth_enabled is false (the gate is off), but it was DELIBERATELY
-        // disabled — that counts as "named explicitly" for the proxy-auth case.
-        let cfg = server("127.0.0.1:8080", false, acme_on(&["dux.example.com"]));
-        let plan = resolve(&cfg, false, true, ServerCliOverrides::default())
-            .expect("explicit --disable-auth satisfies the ACME gate");
-        match plan {
-            ServerPlan::Acme { domains, .. } => {
-                assert_eq!(domains, vec!["dux.example.com".to_string()]);
-            }
-            other => panic!("expected Acme plan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn acme_cli_domains_email_and_ports_override_config() {
-        let cfg = server(
-            "127.0.0.1:8080",
-            false,
-            AcmeSettings {
-                enabled: true,
-                domains: vec!["config.example.com".to_string()],
-                email: "config@example.com".to_string(),
-                http_port: 80,
-                https_port: 443,
-                production: false,
-                cache_dir: None,
-            },
-        );
-        let cli = ServerCliOverrides {
-            acme_domains: vec!["cli.example.com".to_string()],
-            acme_email: Some("cli@example.com".to_string()),
-            http_port: Some(8080),
-            https_port: Some(8443),
-            ..ServerCliOverrides::default()
+    fn bind_wildcard_overrides_and_subsumes_tailscale() {
+        let c = ServerCliOverrides {
+            bind: Some("0.0.0.0:9000".into()),
+            ..cli()
         };
-        let plan = resolve(&cfg, true, false, cli).expect("acme cli overrides ok");
+        let p = resolve_server_plan(&ServerConfig::default(), &c, Some(ts())).unwrap();
         assert_eq!(
-            plan,
-            ServerPlan::Acme {
-                http_addr: "0.0.0.0:8080".parse().unwrap(),
-                https_addr: "0.0.0.0:8443".parse().unwrap(),
-                domains: vec!["cli.example.com".to_string()],
-                email: "cli@example.com".to_string(),
-                production: false,
-                cache_dir: Path::new("/home/user/.config/dux/acme").to_path_buf(),
-            }
+            p.addrs,
+            vec![PlanAddr::required("0.0.0.0:9000".parse().unwrap())]
         );
     }
-
     #[test]
-    fn acme_cache_dir_from_config_is_used_when_absolute() {
-        let cfg = server(
-            "127.0.0.1:8080",
-            false,
-            AcmeSettings {
-                enabled: true,
-                domains: vec!["dux.example.com".to_string()],
-                cache_dir: Some("/var/lib/dux/acme".to_string()),
-                ..AcmeSettings::default()
-            },
-        );
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default()).expect("acme ok");
-        match plan {
-            ServerPlan::Acme { cache_dir, .. } => {
-                assert_eq!(cache_dir, Path::new("/var/lib/dux/acme"));
-            }
-            other => panic!("expected Acme plan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn acme_cache_dir_relative_value_is_rejected() {
-        let cfg = server(
-            "127.0.0.1:8080",
-            false,
-            AcmeSettings {
-                enabled: true,
-                domains: vec!["dux.example.com".to_string()],
-                cache_dir: Some("relative/acme".to_string()),
-                ..AcmeSettings::default()
-            },
-        );
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("relative cache_dir must be rejected");
-        assert!(
-            err.to_string().contains("cache_dir"),
-            "error should name the bad field: {err}"
-        );
-    }
-
-    #[test]
-    fn acme_on_ignores_plain_bind_rules() {
-        // ACME binds 0.0.0.0:80/443 regardless of listen_addrs; the plain-HTTP
-        // non-loopback gate does not apply to the ACME path.
-        let cfg = server_listen(&["0.0.0.0:8080"], false, acme_on(&["dux.example.com"]));
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect("acme path ignores the plain bind gate");
-        match plan {
-            ServerPlan::Acme {
-                http_addr,
-                https_addr,
-                ..
-            } => {
-                assert_eq!(http_addr.to_string(), "0.0.0.0:80");
-                assert_eq!(https_addr.to_string(), "0.0.0.0:443");
-            }
-            other => panic!("expected Acme plan, got {other:?}"),
-        }
-    }
-
-    // ── Obligation 2: port 0 / http==https collision refusals ─────────────
-
-    #[test]
-    fn acme_rejects_http_port_zero() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.http_port = 0;
-        let cfg = server("", false, acme);
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_https_port_zero() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.https_port = 0;
-        let cfg = server("", false, acme);
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("https port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_equal_http_and_https_ports() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.http_port = 8443;
-        acme.https_port = 8443;
-        let cfg = server("", false, acme);
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("identical http/https ports must be refused");
-        assert!(
-            err.to_string().contains("must differ"),
-            "names the collision: {err}"
-        );
-    }
-
-    #[test]
-    fn acme_port_collision_via_cli_overrides_is_refused() {
-        // The collision check sees the CLI-resolved ports, not just config.
-        let cfg = server("", false, acme_on(&["dux.example.com"]));
-        let cli = ServerCliOverrides {
-            http_port: Some(9000),
-            https_port: Some(9000),
-            ..ServerCliOverrides::default()
+    fn port_flag_overrides_only_port() {
+        let c = ServerCliOverrides {
+            port: Some(7000),
+            ..cli()
         };
-        let err = resolve(&cfg, true, false, cli)
-            .expect_err("CLI-induced port collision must be refused");
-        assert!(err.to_string().contains("must differ"), "names it: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_http_port_zero_via_cli_override() {
-        // A non-zero config http_port overridden to 0 on the CLI must still be
-        // refused — the resolver checks the CLI-resolved port, not just config.
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.http_port = 80;
-        let cfg = server("", false, acme);
-        let cli = ServerCliOverrides {
-            http_port: Some(0),
-            ..ServerCliOverrides::default()
-        };
-        let err =
-            resolve(&cfg, true, false, cli).expect_err("--http-port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_https_port_zero_via_cli_override() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.https_port = 443;
-        let cfg = server("", false, acme);
-        let cli = ServerCliOverrides {
-            https_port: Some(0),
-            ..ServerCliOverrides::default()
-        };
-        let err =
-            resolve(&cfg, true, false, cli).expect_err("--https-port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn local_mode_rejects_port_zero() {
-        let mut cfg = server_listen(&[], false, AcmeSettings::default());
-        cfg.port = 0;
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("local-mode port 0 must be refused");
-        assert!(err.to_string().contains("port 0"), "names it: {err}");
-    }
-
-    #[test]
-    fn local_mode_rejects_port_zero_via_cli_override() {
-        // A healthy config port overridden to 0 on the CLI (--port 0) must be
-        // refused: the CLI value wins via `unwrap_or`, so the zero must be caught.
-        let mut cfg = server_listen(&[], false, AcmeSettings::default());
-        cfg.port = 8080;
-        let cli = ServerCliOverrides {
-            port: Some(0),
-            ..ServerCliOverrides::default()
-        };
-        let err = resolve(&cfg, false, false, cli)
-            .expect_err("--port 0 must be refused for the local server");
-        assert!(err.to_string().contains("port 0"), "names it: {err}");
-    }
-
-    #[test]
-    fn listen_addrs_rejects_port_zero_entry() {
-        let cfg = server_listen(&["127.0.0.1:0"], false, AcmeSettings::default());
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("a :0 listen entry must be refused");
-        assert!(
-            err.to_string().contains("port 0") && err.to_string().contains("127.0.0.1:0"),
-            "names the offending entry and the cause: {err}"
+        let p = resolve_server_plan(&ServerConfig::default(), &c, None).unwrap();
+        assert_eq!(
+            p.addrs,
+            vec![PlanAddr::required("127.0.0.1:7000".parse().unwrap())]
         );
+    }
+    #[test]
+    fn bind_beats_port() {
+        let c = ServerCliOverrides {
+            bind: Some("127.0.0.1:1234".into()),
+            port: Some(7000),
+            ..cli()
+        };
+        let p = resolve_server_plan(&ServerConfig::default(), &c, None).unwrap();
+        assert_eq!(
+            p.addrs,
+            vec![PlanAddr::required("127.0.0.1:1234".parse().unwrap())]
+        );
+    }
+    #[test]
+    fn port_zero_refused() {
+        let c = ServerConfig {
+            port: 0,
+            ..ServerConfig::default()
+        };
+        assert!(resolve_server_plan(&c, &cli(), None).is_err());
+    }
+    #[test]
+    fn invalid_bind_refused() {
+        let c = ServerCliOverrides {
+            bind: Some("nope".into()),
+            ..cli()
+        };
+        assert!(resolve_server_plan(&ServerConfig::default(), &c, None).is_err());
+    }
+    #[test]
+    fn invalid_host_refused() {
+        let c = ServerConfig {
+            host: "example.com".into(),
+            ..ServerConfig::default()
+        };
+        assert!(resolve_server_plan(&c, &cli(), None).is_err());
     }
 }
 
@@ -2472,13 +1663,12 @@ github_integration = false
     #[test]
     fn server_config_defaults_when_section_absent() {
         // A config TOML with no [server] section must still parse and yield the
-        // safe LOCAL MODE defaults (port 8080, Tailscale opt-out on, no listeners).
+        // safe local defaults (loopback host, port 8080, Tailscale opt-out on).
         let config: Config = toml::from_str("").expect("empty config should parse");
+        assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8080);
         assert!(config.server.tailscale_enabled);
-        assert!(config.server.listen_addrs.is_empty());
-        assert!(config.server.bind.is_none());
-        assert!(!config.server.insecure_allow_remote);
+        assert!(config.server.allowed_hosts.is_empty());
     }
 
     #[test]
@@ -2486,17 +1676,20 @@ github_integration = false
         let config: Config = toml::from_str(
             r#"
 [server]
+host = "0.0.0.0"
 port = 9000
 tailscale_enabled = false
-listen_addrs = ["0.0.0.0:9000"]
-insecure_allow_remote = true
+allowed_hosts = ["box.tailnet.ts.net"]
 "#,
         )
         .expect("config with full [server] should parse");
+        assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 9000);
         assert!(!config.server.tailscale_enabled);
-        assert_eq!(config.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
-        assert!(config.server.insecure_allow_remote);
+        assert_eq!(
+            config.server.allowed_hosts,
+            vec!["box.tailnet.ts.net".to_string()]
+        );
     }
 
     #[test]
@@ -2509,139 +1702,39 @@ port = 9000
 "#,
         )
         .expect("config with partial [server] should parse");
+        assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9000);
         assert!(config.server.tailscale_enabled);
-        assert!(config.server.listen_addrs.is_empty());
-        assert!(!config.server.insecure_allow_remote);
+        assert!(config.server.allowed_hosts.is_empty());
     }
 
+    /// Deserializing a `[server]` table that omits all three `max_websocket_*` keys
+    /// must yield the expected defaults via the container `#[serde(default)]` plus
+    /// the manual `Default` impl. Pinned so a serde refactor cannot silently zero
+    /// out the caps.
     #[test]
-    fn server_config_deprecated_bind_still_parses() {
-        // Old configs that only set `bind` must still deserialize (serde keeps
-        // the field); the TUI deprecation machinery migrates it to port /
-        // listen_addrs on load. Here we just prove the raw struct still parses.
+    fn server_config_websocket_caps_default_when_keys_absent() {
         let config: Config = toml::from_str(
             r#"
 [server]
-bind = "0.0.0.0:9000"
+port = 8080
 "#,
         )
-        .expect("config with deprecated [server] bind should parse");
-        assert_eq!(config.server.bind.as_deref(), Some("0.0.0.0:9000"));
-        // The new fields fall back to defaults until migration runs.
-        assert_eq!(config.server.port, 8080);
-        assert!(config.server.listen_addrs.is_empty());
-    }
-
-    #[test]
-    fn acme_config_defaults_when_section_absent() {
-        // An old config with [server] but no [server.acme] must parse into the
-        // safe ACME-off defaults.
-        let config: Config = toml::from_str(
-            r#"
-[server]
-bind = "0.0.0.0:9000"
-"#,
-        )
-        .expect("config without [server.acme] should parse");
-        assert!(!config.server.acme.enabled);
-        assert!(config.server.acme.domains.is_empty());
-        assert_eq!(config.server.acme.email, "");
-        assert_eq!(config.server.acme.http_port, 80);
-        assert_eq!(config.server.acme.https_port, 443);
-        assert!(config.server.acme.production);
-        assert!(config.server.acme.cache_dir.is_none());
-    }
-
-    #[test]
-    fn acme_config_parses_full_section() {
-        let config: Config = toml::from_str(
-            r#"
-[server]
-bind = "0.0.0.0:9000"
-
-[server.acme]
-enabled = true
-domains = ["dux.example.com", "www.example.com"]
-email = "ops@example.com"
-http_port = 8080
-https_port = 8443
-production = false
-cache_dir = "/var/lib/dux/acme"
-"#,
-        )
-        .expect("config with full [server.acme] should parse");
-        assert!(config.server.acme.enabled);
+        .expect("config without max_websocket_* keys should parse");
         assert_eq!(
-            config.server.acme.domains,
-            vec!["dux.example.com".to_string(), "www.example.com".to_string()]
+            config.server.max_websocket_events_connections,
+            DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            "events cap must default to {DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS}"
         );
-        assert_eq!(config.server.acme.email, "ops@example.com");
-        assert_eq!(config.server.acme.http_port, 8080);
-        assert_eq!(config.server.acme.https_port, 8443);
-        assert!(!config.server.acme.production);
         assert_eq!(
-            config.server.acme.cache_dir.as_deref(),
-            Some("/var/lib/dux/acme")
+            config.server.max_websocket_agent_connections, DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            "agent cap must default to {DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS}"
         );
-    }
-
-    #[test]
-    fn acme_config_partial_section_defaults_remaining_fields() {
-        // Only `enabled` and `domains` are provided; the rest default.
-        let config: Config = toml::from_str(
-            r#"
-[server.acme]
-enabled = true
-domains = ["dux.example.com"]
-"#,
-        )
-        .expect("config with partial [server.acme] should parse");
-        assert!(config.server.acme.enabled);
         assert_eq!(
-            config.server.acme.domains,
-            vec!["dux.example.com".to_string()]
+            config.server.max_websocket_terminal_connections,
+            DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
+            "terminal cap must default to {DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS}"
         );
-        assert_eq!(config.server.acme.http_port, 80);
-        assert_eq!(config.server.acme.https_port, 443);
-        assert!(config.server.acme.production);
-        assert!(config.server.acme.cache_dir.is_none());
-    }
-
-    #[test]
-    fn auth_config_defaults_when_section_absent() {
-        // A config TOML with no [auth] section must still parse and yield an
-        // empty user list (auth off).
-        let config: Config = toml::from_str("").expect("empty config should parse");
-        assert!(config.auth.users.is_empty());
-    }
-
-    #[test]
-    fn auth_config_parses_user_entries() {
-        let config: Config = toml::from_str(
-            r#"
-[auth]
-users = ["alice:$2y$12$abc", "bob:$2y$12$def"]
-"#,
-        )
-        .expect("config with [auth] users should parse");
-        assert_eq!(
-            config.auth.users,
-            vec!["alice:$2y$12$abc".to_string(), "bob:$2y$12$def".to_string()]
-        );
-    }
-
-    #[test]
-    fn auth_config_empty_users_array_parses() {
-        // The canonical first-boot value `users = []` must parse cleanly.
-        let config: Config = toml::from_str(
-            r#"
-[auth]
-users = []
-"#,
-        )
-        .expect("config with empty [auth] users should parse");
-        assert!(config.auth.users.is_empty());
     }
 
     #[test]
@@ -2658,5 +1751,36 @@ users = []
             config.providers.commands.contains_key("claude"),
             "claude provider should be present via defaults after parse failure"
         );
+    }
+
+    #[test]
+    fn old_max_websocket_connections_key_still_loads_and_is_ignored() {
+        // Back-compat: the removed `max_websocket_connections` key parses without
+        // error because `ServerConfig` has no `#[serde(deny_unknown_fields)]` (TOML
+        // simply ignores unknown keys; this is not a `serde(default)` effect), and
+        // the three new split fields take their per-field defaults.
+        let toml = r#"[server]
+max_websocket_connections = 16
+"#;
+        let cfg: Config = toml::from_str(toml).expect("old config must still parse");
+        assert_eq!(cfg.server.max_websocket_events_connections, 32);
+        assert_eq!(cfg.server.max_websocket_agent_connections, 32);
+        assert_eq!(cfg.server.max_websocket_terminal_connections, 64);
+    }
+
+    #[test]
+    fn detects_removed_max_websocket_connections_key_for_migration_warning() {
+        assert!(raw_has_removed_max_websocket_connections(
+            "[server]\nmax_websocket_connections = 16\n"
+        ));
+        // A commented-out line must NOT trip the warning.
+        assert!(!raw_has_removed_max_websocket_connections(
+            "[server]\n# max_websocket_connections = 16\n"
+        ));
+        // The new split keys must NOT trip the warning.
+        assert!(!raw_has_removed_max_websocket_connections(
+            "[server]\nmax_websocket_events_connections = 16\n"
+        ));
+        assert!(!raw_has_removed_max_websocket_connections("[server]\n"));
     }
 }

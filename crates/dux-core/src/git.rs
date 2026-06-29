@@ -77,6 +77,41 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Like [`current_branch`], but tolerates a detached HEAD: returns `Ok(None)`
+/// when HEAD is not a symbolic ref (git `symbolic-ref` exit code 1, with
+/// `--quiet` suppressing the message), and `Err` for any real failure
+/// (exit 128 = not a repo, git missing, etc.). Used by inspection/preview
+/// call sites that must not treat a detached HEAD as a hard error.
+pub fn current_branch_opt(repo_path: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "HEAD",
+        ])
+        .output()
+        .with_context(|| format!("failed to inspect {}", repo_path.display()))?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    // Exit code 1 = "ref is not a symbolic ref" (detached HEAD). Anything else
+    // (128 = not a repo / fatal) is a real error. `--quiet` silenced stderr for
+    // the detached case only.
+    if output.status.code() == Some(1) {
+        return Ok(None);
+    }
+    Err(anyhow!(
+        "git symbolic-ref failed for {}: {}",
+        repo_path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
 /// Returns the default branch name for the `origin` remote by reading
 /// `refs/remotes/origin/HEAD`.  This ref is set automatically by `git clone`;
 /// repos created with `git init` + manual remote typically lack it.
@@ -219,7 +254,14 @@ pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>>
 }
 
 pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
-    let branch = current_branch(repo_path)?;
+    let branch = match current_branch_opt(repo_path)? {
+        Some(b) => b,
+        None => {
+            return Err(anyhow!(
+                "HEAD is detached; check out a branch before pulling"
+            ));
+        }
+    };
     pull_origin_branch(repo_path, &branch)
 }
 
@@ -229,8 +271,10 @@ pub fn pull_branch(repo_path: &Path, branch: &str) -> Result<()> {
 }
 
 pub fn switch_branch_if_needed(repo_path: &Path, branch: &str) -> Result<()> {
-    let current = current_branch(repo_path)?;
-    if current != branch {
+    // On a detached HEAD there is no current branch to compare against, so we
+    // simply switch. Only skip the switch when already on the target branch.
+    let current = current_branch_opt(repo_path)?;
+    if current.as_deref() != Some(branch) {
         switch_branch(repo_path, branch)?;
     }
     Ok(())
@@ -964,7 +1008,14 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
 
 pub fn push(worktree_path: &Path) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
-    let branch = current_branch(worktree_path)?;
+    let branch = match current_branch_opt(worktree_path)? {
+        Some(b) => b,
+        None => {
+            return Err(anyhow!(
+                "HEAD is detached; check out a branch before pushing"
+            ));
+        }
+    };
     let output = Command::new("git")
         .args(["-C", wt.as_ref(), "push", "-u", "origin", &branch])
         .output()?;
@@ -2426,6 +2477,45 @@ mod tests {
         );
     }
 
+    // ── current_branch_opt tests ─────────────────────────────────
+
+    #[test]
+    fn current_branch_opt_returns_branch_on_normal_head() {
+        let tmp = init_test_repo();
+        assert_eq!(
+            current_branch_opt(tmp.path()).unwrap(),
+            Some("main".to_string())
+        );
+    }
+
+    #[test]
+    fn current_branch_opt_returns_none_on_detached_head() {
+        let tmp = init_test_repo();
+        let p = tmp.path();
+        // Create a second commit so there is a parent to detach onto.
+        std::fs::write(p.join("f"), b"x").unwrap();
+        run_git(p, &["add", "."]);
+        run_git(p, &["commit", "-m", "second"]);
+        run_git(p, &["checkout", "--detach", "HEAD~1"]);
+        assert_eq!(current_branch_opt(p).unwrap(), None);
+    }
+
+    #[test]
+    fn current_branch_opt_errors_on_non_repo() {
+        let tmp = tempfile::tempdir().unwrap(); // not a git repo
+        assert!(current_branch_opt(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn switch_branch_if_needed_switches_from_detached_head() {
+        let tmp = init_test_repo();
+        let p = tmp.path().to_path_buf();
+        run_git(&p, &["checkout", "--detach", "HEAD"]);
+        // Must not error on detached HEAD; must end up on main.
+        switch_branch_if_needed(&p, "main").unwrap();
+        assert_eq!(current_branch_opt(&p).unwrap(), Some("main".to_string()));
+    }
+
     #[test]
     fn pull_branch_switches_to_requested_branch_before_pull() {
         let bare_dir = tempfile::tempdir().unwrap();
@@ -2467,5 +2557,47 @@ mod tests {
 
         fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
         assert!(has_tracked_changes(repo.path()).unwrap());
+    }
+
+    #[test]
+    fn pull_current_branch_on_detached_head_returns_clear_error() {
+        let repo = init_test_repo();
+        // A second commit is required so HEAD~1 exists for the detach.
+        fs::write(repo.path().join("detach.txt"), "x\n").unwrap();
+        run_git(repo.path(), &["add", "detach.txt"]);
+        run_git(repo.path(), &["commit", "-m", "second commit"]);
+        run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
+
+        let err = pull_current_branch(repo.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("detached"),
+            "expected 'detached' in error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("symbolic-ref"),
+            "expected no 'symbolic-ref' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn push_on_detached_head_returns_clear_error() {
+        let repo = init_test_repo();
+        // A second commit is required so HEAD~1 exists for the detach.
+        fs::write(repo.path().join("detach.txt"), "x\n").unwrap();
+        run_git(repo.path(), &["add", "detach.txt"]);
+        run_git(repo.path(), &["commit", "-m", "second commit"]);
+        run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
+
+        let err = push(repo.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("detached"),
+            "expected 'detached' in error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("symbolic-ref"),
+            "expected no 'symbolic-ref' in error, got: {msg}"
+        );
     }
 }
