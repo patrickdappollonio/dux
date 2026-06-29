@@ -184,4 +184,26 @@ describe("bootstrap slice", () => {
       expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(true)
     })
   })
+
+  // Scoped `document` stub: the file-wide beforeEach stays document-free so the
+  // `typeof document` guard in applyBootstrap is still exercised as "absent" for
+  // every other test. The sentinel title (not "dux") proves applyBootstrap wrote
+  // the value rather than coincidentally matching the stub's initial state.
+  describe("instance title → document.title", () => {
+    beforeEach(() => {
+      vi.stubGlobal("document", { title: "pending" })
+    })
+
+    it("sets document.title from the configured instance title", async () => {
+      bootstrapBody = makeBootstrap({ title: "dux #1" })
+      await loadStore()
+      expect(document.title).toBe("dux #1")
+    })
+
+    it("resolves a blank instance title to the product name", async () => {
+      bootstrapBody = makeBootstrap({ title: "   " })
+      await loadStore()
+      expect(document.title).toBe("dux")
+    })
+  })
 })
