@@ -239,40 +239,28 @@ pub struct AuthReloadContext {
     pub console: crate::console::Console,
 }
 
-/// True when a config reload changed any `[server]`/`[server.acme]` setting that
-/// only takes effect at startup — listeners and the TLS acceptor are bound once,
-/// and reload-config never rebinds them. The engine actor calls this on every
-/// reload (before the config swap) so it can warn the user that a restart is
-/// needed for these specific changes; a reload that only touched, say, `[ui]`
-/// theme settings leaves every compared field equal and triggers no warning.
+/// True when a config reload changed any `[server]` setting that only takes
+/// effect at startup -- listeners are bound once, and reload-config never
+/// rebinds them. The engine actor calls this on every reload (before the config
+/// swap) so it can warn the user that a restart is needed for these specific
+/// changes; a reload that only touched, say, `[ui]` theme settings leaves every
+/// compared field equal and triggers no warning.
 ///
-/// Compared fields mirror what the resolver consumes to bind: the LOCAL MODE
-/// `port`, the `tailscale_enabled` toggle, the FULL WEB MODE `listen_addrs`, and
-/// the entire `[server.acme]` section (any of its fields shifts the bound ports,
-/// the issued domains, or staging-vs-production). `max_websocket_connections` is
-/// also startup-bound: the `/ws` connection-cap semaphore is built ONCE in
-/// `build_app` and never resized on reload, so changing the cap needs a restart
-/// just like the listeners. `bind` is intentionally absent: it is deprecated and
-/// migrated into `port`/`listen_addrs` on load, so a change to it surfaces through
-/// those fields. `insecure_allow_remote` is a gate input, not a bound value, so it
-/// cannot drift a live listener.
+/// Compared fields: the LOCAL MODE `port`, the `tailscale_enabled` toggle, the
+/// FULL WEB MODE `listen_addrs`. `max_websocket_connections` is also
+/// startup-bound (the `/ws` connection-cap semaphore is built ONCE in
+/// `build_app` and never resized on reload). `bind` is intentionally absent: it
+/// is deprecated and migrated into `port`/`listen_addrs` on load, so a change
+/// to it surfaces through those fields. `insecure_allow_remote` is a gate input,
+/// not a bound value, so it cannot drift a live listener.
 fn server_rebind_settings_changed(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
 ) -> bool {
-    let a = &prev.acme;
-    let b = &next.acme;
     prev.port != next.port
         || prev.tailscale_enabled != next.tailscale_enabled
         || prev.listen_addrs != next.listen_addrs
         || prev.max_websocket_connections != next.max_websocket_connections
-        || a.enabled != b.enabled
-        || a.domains != b.domains
-        || a.email != b.email
-        || a.http_port != b.http_port
-        || a.https_port != b.https_port
-        || a.production != b.production
-        || a.cache_dir != b.cache_dir
 }
 
 /// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.
@@ -467,21 +455,21 @@ impl EngineHandle {
     /// Like [`emit_status`] but attaches a correlation key so a later success,
     /// error, or clear on the same key replaces or dismisses the same toast.
     /// Prefer this over `emit_status` for any operation that has a keyed lifecycle
-    /// (e.g. ACME certificate renewal, where a "Renewing…" busy should be
-    /// replaced by a "Renewed." info on success and dismissed by `StatusCleared`).
+    /// (a "Working…" busy that should be replaced by an info on success and
+    /// dismissed by `StatusCleared`).
     pub fn emit_keyed_status(&self, key: impl Into<String>, status: WireStatus) {
         self.emit_status(status.with_key(key));
     }
 
-    /// Publish a status from a non-engine producer (the ACME certificate-lifecycle
-    /// task) THROUGH the shared status controller — not directly onto the broadcast
-    /// — so it auto-clears on the same tone-aware policy as every other status and
-    /// can never linger. The engine loop drains this and emits it via its
-    /// `StatusEmitter`. A no-op if the engine loop has already exited.
+    /// Publish a status from a non-engine producer (the changed-files
+    /// `ChangesService`) THROUGH the shared status controller — not directly onto
+    /// the broadcast — so it auto-clears on the same tone-aware policy as every
+    /// other status and can never linger. The engine loop drains this and emits it
+    /// via its `StatusEmitter`. A no-op if the engine loop has already exited.
     pub fn emit_status(&self, status: WireStatus) {
         // `try_send` (not `send().await`): this is sync fire-and-forget, called
-        // from non-engine producers (the ACME certificate-lifecycle task, the
-        // changed-files `ChangesService`). On a full channel the status is dropped
+        // from non-engine producers (the changed-files `ChangesService`). On a
+        // full channel the status is dropped
         // — only under extreme overload — but a dropped status is worth a
         // breadcrumb, so log the Full case with the status's tone/key so the
         // operator can tell WHICH producer's update went missing. A Closed channel
@@ -1001,7 +989,7 @@ pub(crate) fn run_engine_loop(
             // reactions were already surfaced by the `wire_statuses_from_reaction`
             // drain above (it flattens `Multi`).
             if let Some(config) = take_apply_reloaded_config(reaction) {
-                // Capture the rebind-relevant [server]/[server.acme] settings
+                // Capture the rebind-relevant [server] settings
                 // BEFORE the swap so we can tell whether the reload touched
                 // anything that only takes effect at startup (listeners are
                 // bound once; reload-config never rebinds). Comparing here — the
@@ -1947,39 +1935,6 @@ mod tests {
         let mut next = prev.clone();
         next.max_websocket_connections += 1;
         assert!(server_rebind_settings_changed(&prev, &next));
-    }
-
-    #[test]
-    fn rebind_drift_detects_acme_field_changes() {
-        let base = dux_core::config::ServerConfig::default();
-
-        let mut enabled = base.clone();
-        enabled.acme.enabled = !base.acme.enabled;
-        assert!(server_rebind_settings_changed(&base, &enabled));
-
-        let mut domains = base.clone();
-        domains.acme.domains.push("example.com".to_string());
-        assert!(server_rebind_settings_changed(&base, &domains));
-
-        let mut email = base.clone();
-        email.acme.email = "ops@example.com".to_string();
-        assert!(server_rebind_settings_changed(&base, &email));
-
-        let mut http_port = base.clone();
-        http_port.acme.http_port += 1;
-        assert!(server_rebind_settings_changed(&base, &http_port));
-
-        let mut https_port = base.clone();
-        https_port.acme.https_port += 1;
-        assert!(server_rebind_settings_changed(&base, &https_port));
-
-        let mut production = base.clone();
-        production.acme.production = !base.acme.production;
-        assert!(server_rebind_settings_changed(&base, &production));
-
-        let mut cache_dir = base.clone();
-        cache_dir.acme.cache_dir = Some("/tmp/acme".to_string());
-        assert!(server_rebind_settings_changed(&base, &cache_dir));
     }
 
     #[test]

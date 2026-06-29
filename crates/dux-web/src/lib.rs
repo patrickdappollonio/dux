@@ -38,6 +38,7 @@ pub mod engine_actor;
 pub mod event_bus;
 pub mod file_routes;
 pub mod git_routes;
+pub mod host_guard;
 pub mod project_actions;
 pub mod project_reads;
 pub mod rest_common;
@@ -46,7 +47,6 @@ pub mod session_actions;
 pub mod spine_routes;
 pub mod startup_logs;
 pub mod terminal_actions;
-pub mod tls;
 pub mod web_assets;
 
 /// Crate-wide test helpers shared by the per-module route test suites (a single
@@ -67,8 +67,8 @@ use dux_core::engine::Engine;
 
 use crate::console::{Banner, Console, ListenerRow, LoginRow};
 use crate::engine_actor::LoopControl;
+use crate::host_guard::SESSION_SWEEP_PERIOD;
 use crate::server::RouterParams;
-use crate::tls::{AcmePlan, SESSION_SWEEP_PERIOD};
 
 /// Boot the engine on its own thread and serve the web UI on every address in
 /// the plan (one axum task per listener, sharing the router/state). Blocking
@@ -102,26 +102,6 @@ pub fn run_server(
 ) -> Result<()> {
     match plan {
         ServerPlan::PlainHttp { addrs } => run_plain_http(paths, addrs, disable_auth, version),
-        ServerPlan::Acme {
-            http_addr,
-            https_addr,
-            domains,
-            email,
-            production,
-            cache_dir,
-        } => run_acme(
-            paths,
-            AcmePlan {
-                http_addr,
-                https_addr,
-                domains,
-                email,
-                production,
-                cache_dir,
-            },
-            disable_auth,
-            version,
-        ),
     }
 }
 
@@ -229,11 +209,11 @@ async fn bind_plan_addrs(addrs: &[PlanAddr]) -> Result<(Vec<BoundListener>, Vec<
 
 /// The plain-HTTP serve path: one axum task per listener (loopback, Tailscale,
 /// LAN, or proxy-fronted), sharing the router/state, plus the periodic
-/// expired-session sweep. Shutdown is the SAME [`ServeShutdown`] watch lane the
-/// ACME path and the flip use: a SIGINT/SIGTERM trips the watch, and the FIRST
-/// listener to die records its error and trips the watch too, so the siblings get
-/// a graceful shutdown and the error propagates (genuine first-error wind-down —
-/// no longer a no-abort JoinSet wait). The single sweep rides the same lane.
+/// expired-session sweep. Shutdown rides the [`ServeShutdown`] watch lane: a
+/// SIGINT/SIGTERM trips the watch, and the FIRST listener to die records its
+/// error and trips the watch too, so the siblings get a graceful shutdown and the
+/// error propagates (genuine first-error wind-down — no longer a no-abort JoinSet
+/// wait). The single sweep rides the same lane.
 ///
 /// A BEST-EFFORT (Tailscale) address whose bind fails (a third-party process
 /// already holds it) does NOT abort the serve: it warns loudly to `dux.log` and
@@ -431,7 +411,7 @@ fn run_plain_http(
                 .with_console(console.clone(), access_log)
                 .with_max_websocket_connections(max_ws_connections),
         );
-        let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
+        let sweep = host_guard::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
 
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
         // down gracefully (the same trigger a first-listener failure uses).
@@ -506,308 +486,6 @@ fn run_plain_http(
     })
 }
 
-/// The loud warning shown when the login gate is OFF on a built-in-TLS server.
-///
-/// An ACME server is ALWAYS public (a browser-trusted certificate on :443), so a
-/// disabled gate means anyone who can reach :443 controls the agents and
-/// filesystem. The only safe way to run this is behind an upstream auth proxy
-/// (oauth2-proxy and friends). Shared by the `dux server` startup banner (stderr)
-/// and the `run_acme` log line (so `dux.log` carries it for long-running servers),
-/// so the two can never drift. Pure so it is unit-testable.
-pub fn acme_disable_auth_warning() -> String {
-    "WARNING: --disable-auth is set and dux is serving built-in TLS on :443 with a \
-     browser-trusted certificate but NO login gate. This server is public: anyone who can \
-     reach it can control your agents and worktrees. Only do this when an upstream auth proxy \
-     (e.g. oauth2-proxy) is handling authentication in front of dux."
-        .to_string()
-}
-
-/// Build the ACME (built-in TLS) startup banner. The mode line names Let's
-/// Encrypt and flags `[STAGING]` when `production` is false; the single listener
-/// row is the certificate's primary domain over HTTPS (with the non-default port
-/// suffix when `https_port != 443`) plus the `:80` redirect note. An ACME server
-/// is always public, so the login row passes `Reachability::Public` — it is the
-/// enabled count or the loud `--disable-auth` warning in practice (the resolver
-/// refuses ACME without auth-or-explicit-disable, so the public "No login
-/// required" branch is unreachable here). Pure so it is unit-testable.
-fn acme_banner(
-    version: &str,
-    domains: &[String],
-    https_addr: SocketAddr,
-    production: bool,
-    disable_auth: bool,
-    user_count: usize,
-) -> Banner {
-    let primary = domains.first().cloned().unwrap_or_default();
-    let suffix = if https_addr.port() == 443 {
-        String::new()
-    } else {
-        format!(":{}", https_addr.port())
-    };
-    let mode = if production {
-        "TLS via Let's Encrypt".to_string()
-    } else {
-        "TLS via Let's Encrypt [STAGING]".to_string()
-    };
-    let listeners = vec![ListenerRow {
-        label: primary.clone(),
-        url: format!("https://{primary}{suffix}/"),
-        note: Some("(plain HTTP on :80 redirects here & answers ACME challenges)".to_string()),
-    }];
-    // ACME is always public, so the row is the enabled count, the disabled
-    // warning, or — only if it ever reached zero users without --disable-auth,
-    // which the ACME resolver forbids — the public "No login required" warning.
-    Banner {
-        version: version.to_string(),
-        mode,
-        listeners,
-        login: login_row(disable_auth, Reachability::Public, user_count),
-        warnings: vec![],
-    }
-}
-
-/// The ACME (built-in TLS) serve path: two public listeners. `:80` answers the
-/// HTTP-01 challenge and otherwise 308-redirects to HTTPS; `:443` serves the
-/// existing app router over TLS with the rustls-acme acceptor. A dedicated task
-/// polls the `AcmeState` so certificates acquire and renew, and the periodic
-/// session sweep runs here too. Shutdown is the SAME [`ServeShutdown`] watch lane
-/// `run_plain_http` and the flip use: a SIGINT/SIGTERM or a first-listener failure
-/// trips the watch, a watcher awaits it (no sleep-poll) and drives the
-/// axum-server `Handle`s' bounded graceful shutdown, so both listeners wind down
-/// together and the first error propagates.
-///
-/// `host_only` is FALSE by nature here (the certs make dux reachable on the
-/// public internet), so the live auth-downgrade rule refuses to open the gate.
-fn run_acme(paths: DuxPaths, plan: AcmePlan, disable_auth: bool, version: String) -> Result<()> {
-    let engine = bootstrap::bootstrap_engine(&paths)?;
-    // Mirror the startup banner into dux.log so a long-running TLS server that was
-    // launched with the gate off keeps a visible record of it — the banner only
-    // appears once on stderr at boot.
-    if disable_auth {
-        dux_core::logger::warn(&format!("[server] {}", acme_disable_auth_warning()));
-    }
-    let auth = auth::shared_auth(&engine.config.auth.users, disable_auth);
-    // Build the CLI console + access-log toggle and capture the banner inputs
-    // BEFORE the engine moves into the actor thread.
-    let (console, access_log) = build_console(&engine.config);
-    let user_count = dux_core::auth::parse_users(&engine.config.auth.users).len();
-    // Capture the connection cap before the engine moves into the actor thread.
-    let max_ws_connections = engine.config.server.max_websocket_connections;
-    let production = plan.production;
-    let https_addr = plan.https_addr;
-    let (handle, _join) = engine_actor::spawn_engine_thread_with_auth(
-        engine,
-        engine_actor::AuthReloadContext {
-            shared: Arc::clone(&auth),
-            disable_auth,
-            // ACME serving is public by nature: never host-only, so a live
-            // reload that removes the last user must NOT silently open the gate.
-            host_only: false,
-            console: console.clone(),
-        },
-    );
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    let https_port = plan.https_addr.port();
-
-    runtime.block_on(async move {
-        // Build the ACME state (creates the 0700 cache dir, normalizes domains)
-        // and the normalized domain list reused for the Host allowlist + the
-        // :80 redirect router.
-        let (acme_state, domains) = tls::build_acme_state(&plan)?;
-
-        // Post-bind banner: the normalized domains are now known, so the banner
-        // shows the certificate's primary hostname + the :80 redirect note.
-        // ACME serving is always public, so the gate state uses host_only = false.
-        console.banner(&acme_banner(
-            &version,
-            &domains,
-            https_addr,
-            production,
-            disable_auth,
-            user_count,
-        ));
-
-        // The :80 challenge service borrows the SAME state's resolver, so build
-        // the challenge router BEFORE moving the state into the polling task.
-        let http_router = tls::build_http_challenge_router(
-            &acme_state,
-            https_port,
-            domains.clone(),
-            console.clone(),
-            access_log,
-        );
-        let acceptor = acme_state.axum_acceptor(acme_state.default_rustls_config());
-
-        // Drive certificate acquisition/renewal. Without this nothing progresses.
-        // Thread the engine's status broadcast in so certificate lifecycle events
-        // (acquired/renewed, errors, stream-end) reach web clients live — routed
-        // through the shared status controller so they auto-clear like every other
-        // status — not just dux.log — AND the CLI console.
-        let acme_task = tls::spawn_acme_event_task(
-            acme_state,
-            Some(handle.clone()),
-            console.clone(),
-            domains.clone(),
-        );
-
-        // Build the HTTPS app (Secure cookie ON) + its session store, then pin
-        // every route to the configured domains (DNS-rebinding defense). The
-        // console + access-log toggle ride into the router too.
-        let (https_app, store) = server::build_app(
-            handle.clone(),
-            Arc::clone(&auth),
-            axum::Router::new(),
-            RouterParams::tls()
-                .with_console(console.clone(), access_log)
-                .with_max_websocket_connections(max_ws_connections),
-        );
-        // Pin every route to the configured domains (DNS-rebinding defense) and
-        // stamp HSTS on every response. Both are HTTPS-ONLY hardening: dux owns
-        // TLS on this path, so it is correct to tell the browser this host is
-        // HTTPS-only. The plain-HTTP/proxy/flip paths get neither.
-        let https_app = tls::host_allowlist_layer(https_app, domains.clone());
-        let https_app = tls::hsts_layer(https_app);
-
-        // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
-        // failure flips its watch; the watcher below awaits it and drives the
-        // axum-server handles' bounded graceful shutdown. The sweep rides the same
-        // lane so it exits with the server.
-        let (shutdown, sweep_shutdown_rx) = ServeShutdown::new();
-        let sweep = tls::spawn_session_sweep(store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx);
-
-        // axum-server graceful-shutdown handles, one per listener, both driven by
-        // the shared watch below.
-        let http_handle = axum_server::Handle::new();
-        let https_handle = axum_server::Handle::new();
-
-        let mut tasks = tokio::task::JoinSet::new();
-        {
-            let http_addr = plan.http_addr;
-            let h = http_handle.clone();
-            let shutdown = shutdown.clone();
-            let console = console.clone();
-            tasks.spawn(async move {
-                let r = tls::serve_http_challenge(http_addr, http_router, h).await;
-                if let Err(e) = &r {
-                    let msg = format!(
-                        "the ACME challenge/redirect listener on {http_addr} failed: {e} — is \
-                         something already listening on that port? (For a port below 1024, dux may \
-                         instead lack the privilege to bind it — run as root or grant \
-                         CAP_NET_BIND_SERVICE.) While it is down, Let's Encrypt cannot reach the \
-                         HTTP-01 challenge, so TLS certificates will not issue or renew. Resolve \
-                         the bind and restart dux."
-                    );
-                    dux_core::logger::error(&format!("[server] {msg}"));
-                    // Surface on the `dux server` console too — dux.log is not the
-                    // operator's primary watch surface.
-                    console.acme(true, &msg);
-                    shutdown.record_failure(anyhow::anyhow!(msg));
-                }
-                r
-            });
-        }
-        {
-            let https_addr = plan.https_addr;
-            let h = https_handle.clone();
-            let shutdown = shutdown.clone();
-            let console = console.clone();
-            tasks.spawn(async move {
-                let r = tls::serve_https_acme(https_addr, https_app, acceptor, h).await;
-                if let Err(e) = &r {
-                    let msg = format!(
-                        "the TLS listener on {https_addr} failed: {e} — is something already \
-                         listening on that port? (For a port below 1024, dux may instead lack the \
-                         privilege to bind it — run as root or grant CAP_NET_BIND_SERVICE.)"
-                    );
-                    dux_core::logger::error(&format!("[server] {msg}"));
-                    console.acme(true, &msg);
-                    shutdown.record_failure(anyhow::anyhow!(msg));
-                }
-                r
-            });
-        }
-
-        // Boot log for the pre-first-cert window. rustls-acme has not issued a
-        // certificate yet at this point, so TLS handshakes on :443 will FAIL until
-        // the first cert arrives from Let's Encrypt (driven by the poller task and
-        // the :80 HTTP-01 challenge). Say so loudly per the explicit-failure tenet
-        // so an operator watching the log knows the early handshake failures are
-        // expected, not a misconfiguration.
-        let directory = if plan.production {
-            "production"
-        } else {
-            "staging"
-        };
-        dux_core::logger::info(&format!(
-            "[server] TLS listener up on {} — waiting for the first certificate from {directory} \
-             Let's Encrypt (HTTP-01 challenge served on {}). HTTPS handshakes will FAIL until that \
-             certificate is issued; watch this log for the [acme] certificate lifecycle events.",
-            plan.https_addr, plan.http_addr
-        ));
-
-        // Signal/abort watcher: a SIGINT/SIGTERM OR a first listener error both
-        // flip the shared watch; this awaits it (no sleep-poll) and drives the
-        // bounded graceful shutdown on both axum-server handles. A separate task
-        // translates the OS signal into a watch trip so the two triggers converge
-        // on the same lane.
-        {
-            let shutdown = shutdown.clone();
-            tokio::spawn(async move {
-                shutdown_signal().await;
-                shutdown.trigger();
-            });
-        }
-        {
-            let http_handle = http_handle.clone();
-            let https_handle = https_handle.clone();
-            let watch_rx = shutdown.subscribe();
-            tokio::spawn(async move {
-                wait_for_shutdown(watch_rx).await;
-                // Bounded graceful shutdown so a wedged TLS client can't hang exit.
-                http_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
-                https_handle.graceful_shutdown(Some(ACME_GRACEFUL_SHUTDOWN));
-            });
-        }
-
-        // Wait for both serve tasks to finish. A serve task that returned `Err`
-        // already recorded itself via `shutdown.record_failure` inside the task;
-        // but a task that PANICKED yields a `JoinError` here and recorded nothing,
-        // so record the JoinError too and trip the watch so the sibling listener
-        // winds down — consistent with `run_plain_http`.
-        while let Some(joined) = tasks.join_next().await {
-            if let Err(join_err) = joined {
-                dux_core::logger::error(&format!(
-                    "[server] an ACME serve task panicked: {join_err} — shutting the other \
-                     listener down so the server does not limp on half-dead."
-                ));
-                shutdown.record_failure(anyhow::anyhow!("an ACME serve task panicked: {join_err}"));
-            }
-        }
-
-        // Wind down the ACME poller and the sweep (the watch is already tripped,
-        // so the sweep is winding down; trip again is idempotent).
-        acme_task.abort();
-        shutdown.trigger();
-        let _ = sweep.await;
-
-        handle.shutdown().await;
-
-        match shutdown.take_error() {
-            Some(e) => Err(e),
-            None => Ok::<(), anyhow::Error>(()),
-        }
-    })
-}
-
-/// Bounded graceful-shutdown window for the ACME listeners: long enough for
-/// in-flight requests to finish, short enough that a wedged TLS connection cannot
-/// hang process exit.
-const ACME_GRACEFUL_SHUTDOWN: Duration = Duration::from_secs(3);
-
 /// What the status-screen tick asks `serve_with_engine` to do after the current
 /// iteration. `Continue` keeps serving; `ReturnToTui` flips back to the TUI
 /// (server torn down, PTYs preserved); `QuitProcess` exits the whole process
@@ -844,7 +522,7 @@ const SERVER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The ONE serve-shutdown primitive shared by all three serve paths
-/// (`run_plain_http`, `run_acme`, `serve_with_engine`). It bundles the
+/// (`run_plain_http`, `serve_with_engine`). It bundles the
 /// first-error bookkeeping with the `watch<bool>` shutdown lane every listener
 /// awaits, so a single dying listener winds the siblings down identically
 /// everywhere:
@@ -855,7 +533,7 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// - `shutdown_tx` — flipped to `true` on the first failure (and on a normal
 ///   SIGINT/SIGTERM); every serve task's graceful-shutdown future awaits the
 ///   matching receiver, so tripping it stops the whole server. Replaces the old
-///   ACME `AtomicBool` + 100ms poll AND `run_plain_http`'s no-abort JoinSet wait.
+///   `run_plain_http` no-abort JoinSet wait.
 #[derive(Clone)]
 struct ServeShutdown {
     failed: Arc<AtomicBool>,
@@ -902,8 +580,8 @@ impl ServeShutdown {
     /// Record a serve-task failure exactly once and wind the whole server down.
     ///
     /// Called by every per-listener serve task whose accept loop returns an `Err`
-    /// (graceful shutdown returns `Ok`, so this only fires on a genuine death) and
-    /// by the ACME join-error handler. The FIRST caller wins: it stores the error
+    /// (graceful shutdown returns `Ok`, so this only fires on a genuine death).
+    /// The FIRST caller wins: it stores the error
     /// and is the one reported; later callers (other listeners winding down behind
     /// it) no-op the error slot. Always trips the shutdown watch so the remaining
     /// listeners stop too. Returns `true` when this call was the first-error
@@ -924,8 +602,8 @@ impl ServeShutdown {
 
 /// Await the shared shutdown lane: resolve once the watch flips to `true` (a
 /// SIGINT/SIGTERM trigger or a first-listener failure). The receiver is consumed,
-/// so each caller passes its own [`ServeShutdown::subscribe`] handle. Replaces the
-/// ACME path's `wait_for_flag` 100ms sleep-poll with a wakeup-driven await.
+/// so each caller passes its own [`ServeShutdown::subscribe`] handle. A
+/// wakeup-driven await (no sleep-poll).
 async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     while !*rx.borrow_and_update() {
         if rx.changed().await.is_err() {
@@ -1092,7 +770,7 @@ pub fn serve_with_engine(
     };
     let sweep_task = {
         let _guard = runtime.enter();
-        tls::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx)
+        host_guard::spawn_session_sweep(sweep_store, SESSION_SWEEP_PERIOD, sweep_shutdown_rx)
     };
 
     // One axum serve task per listener, all sharing the same router/state and the
@@ -1331,9 +1009,8 @@ async fn next_terminate_signal(
 #[cfg(test)]
 mod tests {
     use super::{
-        Reachability, ServeShutdown, acme_banner, acme_disable_auth_warning, bind_plan_addrs,
-        login_row, plain_http_banner, reachability, resolve_host_only, tailscale_bind_warning,
-        wait_for_shutdown,
+        Reachability, ServeShutdown, bind_plan_addrs, login_row, plain_http_banner, reachability,
+        resolve_host_only, tailscale_bind_warning, wait_for_shutdown,
     };
     use crate::console::LoginRow;
     use dux_core::config::PlanAddr;
@@ -1441,23 +1118,6 @@ mod tests {
             text.contains("could not bind the listen address")
                 && text.contains(&held_addr.to_string()),
             "the fatal error must name the busy required address: {text}"
-        );
-    }
-
-    #[test]
-    fn acme_disable_auth_warning_flags_public_no_gate() {
-        // The warning the banner prints and run_acme logs must name the risk
-        // (public, no gate) and the only safe mitigation (an upstream auth proxy).
-        let w = acme_disable_auth_warning();
-        assert!(w.contains("--disable-auth"), "must name the flag: {w}");
-        assert!(w.contains("NO login gate"), "must say the gate is off: {w}");
-        assert!(
-            w.to_lowercase().contains("public"),
-            "must call the server public: {w}"
-        );
-        assert!(
-            w.contains("auth proxy"),
-            "must point at the upstream-proxy mitigation: {w}"
         );
     }
 
@@ -1631,39 +1291,6 @@ mod tests {
     fn plain_http_banner_disabled_auth_row() {
         let legs = vec![(addr("0.0.0.0:8080"), true)];
         let banner = plain_http_banner("0.1.0", &legs, true, 0, &[]);
-        assert!(matches!(banner.login, LoginRow::Disabled));
-    }
-
-    #[test]
-    fn acme_banner_production_mode_and_redirect_note() {
-        let domains = vec!["dux.example.com".to_string()];
-        let banner = acme_banner("0.1.0", &domains, addr("0.0.0.0:443"), true, false, 2);
-        assert_eq!(banner.mode, "TLS via Let's Encrypt");
-        assert_eq!(banner.listeners.len(), 1);
-        assert_eq!(banner.listeners[0].label, "dux.example.com");
-        assert_eq!(banner.listeners[0].url, "https://dux.example.com/");
-        assert!(
-            banner.listeners[0]
-                .note
-                .as_deref()
-                .is_some_and(|n| n.contains("redirects here"))
-        );
-        assert!(matches!(banner.login, LoginRow::Enabled { count: 2 }));
-    }
-
-    #[test]
-    fn acme_banner_staging_mode_and_nondefault_port() {
-        let domains = vec!["dux.example.com".to_string()];
-        let banner = acme_banner("0.1.0", &domains, addr("0.0.0.0:8443"), false, false, 1);
-        assert_eq!(banner.mode, "TLS via Let's Encrypt [STAGING]");
-        assert_eq!(banner.listeners[0].url, "https://dux.example.com:8443/");
-    }
-
-    #[test]
-    fn acme_banner_disabled_auth_row() {
-        let domains = vec!["dux.example.com".to_string()];
-        // ACME is always public (host_only=false), so disable_auth → loud row.
-        let banner = acme_banner("0.1.0", &domains, addr("0.0.0.0:443"), true, true, 0);
         assert!(matches!(banner.login, LoginRow::Disabled));
     }
 

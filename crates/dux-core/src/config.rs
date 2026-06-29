@@ -176,14 +176,12 @@ pub struct ServerConfig {
     pub insecure_allow_remote: bool,
     /// Acknowledge serving UNENCRYPTED plain HTTP on a non-loopback (public)
     /// listen address. Mirrors the `--dangerously-listen-http` CLI flag so the
-    /// choice is reviewable in config — and so a config-only rollback off
-    /// `[server.acme]` does not brick a public server (the CLI flag alone would
-    /// otherwise be the only escape). This only satisfies the ENCRYPTION half of
-    /// the public-bind gate: a public bind ALSO requires auth ([auth] users or
-    /// `insecure_allow_remote`), so setting this alone does not unblock startup.
-    /// Prefer built-in TLS via `[server.acme]`; only set this when an upstream
-    /// proxy terminates TLS or you accept the risk on a trusted network. Default
-    /// false.
+    /// choice is reviewable in config (and a config-only change can re-open a
+    /// public plain-HTTP bind without editing the service's command line). This
+    /// only satisfies the ENCRYPTION half of the public-bind gate: a public bind
+    /// ALSO requires auth ([auth] users or `insecure_allow_remote`), so setting
+    /// this alone does not unblock startup. Only set this when an upstream proxy
+    /// terminates TLS or you accept the risk on a trusted network. Default false.
     pub dangerously_listen_http: bool,
     /// Colored, vite-style console output for `dux server`. One of `"auto"`
     /// (default — color only when stdout is a terminal, `NO_COLOR` is unset, and
@@ -204,42 +202,6 @@ pub struct ServerConfig {
     /// Changing this requires a server restart to take effect — the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
     pub max_websocket_connections: u32,
-    pub acme: AcmeSettings,
-}
-
-/// Built-in ACME (Let's Encrypt) settings for `dux server`.
-///
-/// When `enabled` is true, `dux server` runs its own HTTP-01 ACME client:
-/// it serves the challenge on `http_port`, redirects everything else to
-/// HTTPS, and serves TLS on `https_port`. All fields are serde-defaulted so
-/// older `config.toml` files without a `[server.acme]` section parse cleanly
-/// into the safe (ACME off) defaults. Changing any of these requires a server
-/// RESTART — the listeners are bound at startup and reload-config does not
-/// rebind them.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AcmeSettings {
-    pub enabled: bool,
-    pub domains: Vec<String>,
-    pub email: String,
-    pub http_port: u16,
-    pub https_port: u16,
-    pub production: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for AcmeSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            domains: Vec::new(),
-            email: String::new(),
-            http_port: 80,
-            https_port: 443,
-            production: true,
-            cache_dir: None,
-        }
-    }
 }
 
 /// Web UI login credentials.
@@ -415,7 +377,6 @@ impl Default for ServerConfig {
             color: "auto".to_string(),
             access_log: true,
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
-            acme: AcmeSettings::default(),
         }
     }
 }
@@ -1123,17 +1084,6 @@ pub enum ServerPlan {
     /// fatal) or [`PlanAddr::best_effort`] (the Tailscale leg of LOCAL MODE, whose
     /// bind failure degrades to a warning and serves the remaining addresses).
     PlainHttp { addrs: Vec<PlanAddr> },
-    /// Built-in ACME: serve the HTTP-01 challenge + HTTPS redirect on
-    /// `http_addr`, serve TLS on `https_addr`. `cache_dir` holds the ACME
-    /// account and certificate PRIVATE KEYS.
-    Acme {
-        http_addr: std::net::SocketAddr,
-        https_addr: std::net::SocketAddr,
-        domains: Vec<String>,
-        email: String,
-        production: bool,
-        cache_dir: PathBuf,
-    },
 }
 
 /// CLI overrides for the server plan. Every field is `None`/`false` when the
@@ -1142,7 +1092,7 @@ pub enum ServerPlan {
 #[derive(Clone, Debug, Default)]
 pub struct ServerCliOverrides {
     /// `--port`: LOCAL MODE port override (used only when no `--listen`/config
-    /// `listen_addrs` exist — i.e. the local-mode fallback).
+    /// `listen_addrs` exist -- i.e. the local-mode fallback).
     pub port: Option<u16>,
     /// `--listen <ADDR:PORT>` (repeatable) and the deprecated `--bind` alias.
     /// When non-empty, replaces config `listen_addrs` entirely (FULL WEB MODE).
@@ -1151,134 +1101,40 @@ pub struct ServerCliOverrides {
     /// regardless of `tailscale_enabled` in config.
     pub no_tailscale: bool,
     pub insecure_allow_remote: bool,
-    /// `--acme-domain` (repeatable). When non-empty, replaces config domains.
-    pub acme_domains: Vec<String>,
-    /// `--acme-email`. When set, overrides config email.
-    pub acme_email: Option<String>,
-    /// `--http-port`. When set, overrides config http_port.
-    pub http_port: Option<u16>,
-    /// `--https-port`. When set, overrides config https_port.
-    pub https_port: Option<u16>,
-    /// `--no-acme`: force ACME off regardless of config.
-    pub no_acme: bool,
     /// `--dangerously-listen-http`: the named opt-in for public PLAIN HTTP.
     pub dangerously_listen_http: bool,
 }
 
 /// Resolve the complete `dux server` listening plan from config + auth state +
 /// CLI overrides + the detected Tailscale address. This is the single source of
-/// truth for the bind/ACME rules; the binary matches on the returned
-/// [`ServerPlan`].
+/// truth for the bind rules; the binary destructures the returned [`ServerPlan`].
 ///
 /// `auth_enabled` already accounts for `--disable-auth` (it is false when the
-/// gate is deliberately disabled). `auth_explicitly_disabled` is threaded
-/// separately so the ACME gate can distinguish "no users configured" (refuse)
-/// from "deliberately disabled for an upstream auth proxy" (allowed, because it
-/// was named explicitly). `tailscale_ip` is the detected Tailscale address (or
-/// `None` when disabled / not detected); it is used both to fill LOCAL MODE and
-/// to classify `listen_addrs` entries as local. `config_dir` derives the default
-/// ACME cache dir.
+/// gate is deliberately disabled). `_auth_explicitly_disabled` is kept in the
+/// signature for future extension but is not currently used. `tailscale_ip` is
+/// the detected Tailscale address (or `None` when disabled / not detected); it
+/// is used both to fill LOCAL MODE and to classify `listen_addrs` entries as local.
 ///
 /// Rules:
-/// - ACME ON (config `enabled` and not `--no-acme`): unchanged from T1 — needs
-///   ≥1 domain and (`auth_enabled` OR `auth_explicitly_disabled`); binds
-///   `0.0.0.0:http_port` + `0.0.0.0:https_port`.
-/// - ACME OFF → PlainHttp:
-///   - EMPTY `listen_addrs` (and no `--listen`) → LOCAL MODE: loopback:port
-///     (REQUIRED) plus the Tailscale address:port when detected (BEST-EFFORT — a
-///     bind failure there degrades to loopback with a warning). Always safe; no
-///     gates.
-///   - NON-EMPTY → FULL WEB MODE: parse each entry as a SocketAddr (hostnames
-///     rejected, no DNS). Classify each local (loopback OR == the Tailscale IP)
-///     vs public. If ANY entry is public, the public-bind gates apply to the
-///     whole plan: (`auth_enabled` OR `insecure_allow_remote`) AND
-///     `dangerously_listen_http`; the refusal names the offending entry and the
-///     exact missing piece (when BOTH the auth leg and the scary flag are
-///     missing, a single message names both).
+/// - EMPTY `listen_addrs` (and no `--listen`) → LOCAL MODE: loopback:port
+///   (REQUIRED) plus the Tailscale address:port when detected (BEST-EFFORT -- a
+///   bind failure there degrades to loopback with a warning). Always safe; no
+///   gates.
+/// - NON-EMPTY → FULL WEB MODE: parse each entry as a SocketAddr (hostnames
+///   rejected, no DNS). Classify each local (loopback OR == the Tailscale IP)
+///   vs public. If ANY entry is public, the public-bind gates apply to the
+///   whole plan: (`auth_enabled` OR `insecure_allow_remote`) AND
+///   `dangerously_listen_http`; the refusal names the offending entry and the
+///   exact missing piece (when BOTH the auth leg and the scary flag are
+///   missing, a single message names both).
 pub fn resolve_server_plan(
     server: &ServerConfig,
     auth_enabled: bool,
-    auth_explicitly_disabled: bool,
+    _auth_explicitly_disabled: bool,
     cli: &ServerCliOverrides,
     tailscale_ip: Option<std::net::IpAddr>,
-    config_dir: &Path,
 ) -> Result<ServerPlan> {
-    let acme_on = server.acme.enabled && !cli.no_acme;
-
-    if acme_on {
-        let domains: Vec<String> = if cli.acme_domains.is_empty() {
-            server.acme.domains.clone()
-        } else {
-            cli.acme_domains.clone()
-        };
-        if domains.is_empty() {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server: no domains are configured. \
-                 ACME issues certificates for specific hostnames, so it needs at least one. \
-                 Add domains to [server.acme] in config.toml (for example \
-                 domains = [\"dux.example.com\"]) or pass --acme-domain dux.example.com \
-                 (repeatable)."
-            );
-        }
-
-        if !auth_enabled && !auth_explicitly_disabled {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server with no authentication: \
-                 the certificates make the web UI reachable over the public internet, \
-                 so it must be protected. Add at least one user to [auth] in config.toml \
-                 (or use the server-add-user palette command) so the login gate protects it. \
-                 Alternatively, if an upstream auth proxy handles authentication, \
-                 pass --disable-auth to acknowledge that explicitly."
-            );
-        }
-
-        let http_port = cli.http_port.unwrap_or(server.acme.http_port);
-        let https_port = cli.https_port.unwrap_or(server.acme.https_port);
-        // Port 0 means "let the OS pick an ephemeral port", which is meaningless
-        // for ACME: HTTP-01 needs the challenge reachable on the public :80 the
-        // CA dials, and the published HTTPS URL needs a fixed port. Refuse it.
-        if http_port == 0 || https_port == 0 {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server: port 0 means \
-                 \"pick any free port\", but ACME needs fixed, publicly reachable ports \
-                 (HTTP-01 validation dials :80 and the certificate URL uses the HTTPS port). \
-                 Set [server.acme] http_port and https_port in config.toml (the defaults are \
-                 80 and 443), or pass --http-port / --https-port with non-zero values."
-            );
-        }
-        // The two listeners cannot share a port — one terminates TLS, the other
-        // answers the plaintext challenge + redirect, and they bind the SAME
-        // wildcard address, so an identical port is a guaranteed bind clash.
-        if http_port == https_port {
-            bail!(
-                "refusing to start the ACME (Let's Encrypt) server: the HTTP and HTTPS ports \
-                 are both {http_port}, but they must differ — dux binds one plaintext listener \
-                 (for the HTTP-01 challenge and the HTTPS redirect) and one TLS listener, and \
-                 they cannot share a port. Set distinct [server.acme] http_port and https_port \
-                 in config.toml (the defaults are 80 and 443), or pass --http-port / --https-port."
-            );
-        }
-        let http_addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
-        let https_addr = std::net::SocketAddr::from(([0, 0, 0, 0], https_port));
-
-        let email = cli
-            .acme_email
-            .clone()
-            .unwrap_or_else(|| server.acme.email.clone());
-
-        let cache_dir = resolve_acme_cache_dir(server.acme.cache_dir.as_deref(), config_dir)?;
-
-        return Ok(ServerPlan::Acme {
-            http_addr,
-            https_addr,
-            domains,
-            email,
-            production: server.acme.production,
-            cache_dir,
-        });
-    }
-
-    // ACME OFF: plain HTTP. `--listen` (repeatable, plus the deprecated `--bind`
+    // Plain HTTP. `--listen` (repeatable, plus the deprecated `--bind`
     // alias) replaces config `listen_addrs` entirely when present.
     let listen_addrs: &[String] = if cli.listen.is_empty() {
         &server.listen_addrs
@@ -1374,8 +1230,8 @@ pub fn resolve_server_plan(
         };
         // The "acknowledge unencrypted plain HTTP" escape exists as BOTH a CLI flag
         // and a config field, mirroring `insecure_allow_remote`, so a config-only
-        // rollback off [server.acme] can re-open a public plain-HTTP bind without
-        // editing the service unit's CLI args.
+        // change can re-open a public plain-HTTP bind without editing the service
+        // unit's CLI args.
         let listen_http = cli.dangerously_listen_http || server.dangerously_listen_http;
         match (auth_ok, listen_http) {
             (false, false) => bail!(
@@ -1385,9 +1241,9 @@ pub fn resolve_server_plan(
                  unencrypted. Add at least one user to [auth] in config.toml \
                  (or use the server-add-user palette command) so the login gate protects it, \
                  OR pass --insecure-allow-remote if an upstream auth proxy handles login; \
-                 then ALSO enable built-in TLS via [server.acme], or acknowledge the \
-                 unencrypted public bind with --dangerously-listen-http (or set \
-                 dangerously_listen_http = true under [server] in config.toml).{tailscale_note}"
+                 then ALSO acknowledge the unencrypted public bind with \
+                 --dangerously-listen-http (or set dangerously_listen_http = true \
+                 under [server] in config.toml).{tailscale_note}"
             ),
             (false, true) => bail!(
                 "refusing to bind the non-loopback listen address {offender}: the dux web UI \
@@ -1401,8 +1257,8 @@ pub fn resolve_server_plan(
             (true, false) => bail!(
                 "refusing to serve plain HTTP on the non-loopback listen address {offender}: \
                  traffic (including the login password) would travel unencrypted. \
-                 To serve encrypted, enable built-in TLS via [server.acme] (set enabled = true \
-                 and configure domains). If TLS is terminated by an upstream proxy, or you \
+                 To serve encrypted, terminate TLS at an upstream proxy and point it at \
+                 a loopback or private listen_addrs entry. If TLS is already terminated upstream, or you \
                  accept the risk on a trusted network, re-run with --dangerously-listen-http \
                  or set dangerously_listen_http = true under [server] in config.toml to \
                  acknowledge the unencrypted public bind explicitly.{tailscale_note}"
@@ -1412,25 +1268,6 @@ pub fn resolve_server_plan(
     }
 
     Ok(ServerPlan::PlainHttp { addrs })
-}
-
-/// Resolve the ACME cache directory: the configured value (env-expanded like
-/// other config paths) when set, otherwise `<config-dir>/acme`. This directory
-/// holds the ACME account and certificate private keys.
-fn resolve_acme_cache_dir(cfg_cache_dir: Option<&str>, config_dir: &Path) -> Result<PathBuf> {
-    match cfg_cache_dir.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(raw) => {
-            let expanded = expand_path(raw).ok_or_else(|| {
-                anyhow!(
-                    "invalid [server.acme] cache_dir \"{raw}\": must be an absolute path \
-                     (env vars and a leading ~ are expanded; relative paths and `..` \
-                     traversal are rejected)"
-                )
-            })?;
-            Ok(PathBuf::from(expanded))
-        }
-        None => Ok(config_dir.join("acme")),
-    }
 }
 
 #[cfg(test)]
@@ -1482,44 +1319,15 @@ mod local_addrs_tests {
 
 #[cfg(test)]
 mod resolve_server_plan_tests {
-    use std::path::{Path, PathBuf};
+    use super::{PlanAddr, ServerCliOverrides, ServerConfig, ServerPlan, resolve_server_plan};
 
-    use super::{
-        AcmeSettings, PlanAddr, ServerCliOverrides, ServerConfig, ServerPlan, resolve_server_plan,
-    };
-
-    fn cfg_dir() -> PathBuf {
-        PathBuf::from("/home/user/.config/dux")
-    }
-
-    /// Build a ServerConfig with given listen_addrs, insecure flag, ACME, and the
-    /// other LOCAL MODE defaults (port 8080, tailscale on).
-    fn server_listen(listen: &[&str], insecure: bool, acme: AcmeSettings) -> ServerConfig {
+    /// Build a ServerConfig with given listen_addrs, insecure flag, and the other
+    /// LOCAL MODE defaults (port 8080, tailscale on).
+    fn server_listen(listen: &[&str], insecure: bool) -> ServerConfig {
         ServerConfig {
             listen_addrs: listen.iter().map(|s| s.to_string()).collect(),
             insecure_allow_remote: insecure,
-            acme,
             ..ServerConfig::default()
-        }
-    }
-
-    /// Back-compat shim for the ACME-leg tests that don't care about the plain
-    /// listener shape: builds a config with empty listen_addrs (local mode) and a
-    /// given insecure flag + ACME settings. The old `bind` arg is ignored — ACME
-    /// always binds 0.0.0.0 regardless.
-    fn server(_bind: &str, insecure: bool, acme: AcmeSettings) -> ServerConfig {
-        ServerConfig {
-            insecure_allow_remote: insecure,
-            acme,
-            ..ServerConfig::default()
-        }
-    }
-
-    fn acme_on(domains: &[&str]) -> AcmeSettings {
-        AcmeSettings {
-            enabled: true,
-            domains: domains.iter().map(|s| s.to_string()).collect(),
-            ..AcmeSettings::default()
         }
     }
 
@@ -1529,7 +1337,7 @@ mod resolve_server_plan_tests {
         auth_disabled: bool,
         cli: ServerCliOverrides,
     ) -> anyhow::Result<ServerPlan> {
-        resolve_server_plan(cfg, auth_enabled, auth_disabled, &cli, None, &cfg_dir())
+        resolve_server_plan(cfg, auth_enabled, auth_disabled, &cli, None)
     }
 
     fn resolve_ts(
@@ -1539,14 +1347,7 @@ mod resolve_server_plan_tests {
         cli: ServerCliOverrides,
         tailscale_ip: Option<std::net::IpAddr>,
     ) -> anyhow::Result<ServerPlan> {
-        resolve_server_plan(
-            cfg,
-            auth_enabled,
-            auth_disabled,
-            &cli,
-            tailscale_ip,
-            &cfg_dir(),
-        )
+        resolve_server_plan(cfg, auth_enabled, auth_disabled, &cli, tailscale_ip)
     }
 
     /// FULL WEB MODE expectation: every address is a REQUIRED listener (an
@@ -1584,7 +1385,7 @@ mod resolve_server_plan_tests {
         // Empty listen_addrs + no detected Tailscale + no flags → loopback:port.
         // This is the flip's and the fallback's safe default, identical
         // regardless of the dangerously flag.
-        let cfg = server_listen(&[], false, AcmeSettings::default());
+        let cfg = server_listen(&[], false);
         let plan = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect("local mode loopback ok");
         assert_eq!(plan, plain(&["127.0.0.1:8080"]));
@@ -1595,7 +1396,7 @@ mod resolve_server_plan_tests {
         // LOCAL MODE: loopback is REQUIRED, the detected Tailscale leg is added as
         // BEST-EFFORT (a busy Tailscale port degrades to loopback + a warning
         // rather than failing the serve).
-        let cfg = server_listen(&[], false, AcmeSettings::default());
+        let cfg = server_listen(&[], false);
         let ts = "100.101.102.103".parse().unwrap();
         let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
             .expect("local mode + tailscale ok");
@@ -1607,7 +1408,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn local_mode_drops_tailscale_when_disabled_in_config() {
-        let mut cfg = server_listen(&[], false, AcmeSettings::default());
+        let mut cfg = server_listen(&[], false);
         cfg.tailscale_enabled = false;
         let ts = "100.101.102.103".parse().unwrap();
         let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
@@ -1617,7 +1418,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn local_mode_drops_tailscale_when_no_tailscale_flag() {
-        let cfg = server_listen(&[], false, AcmeSettings::default());
+        let cfg = server_listen(&[], false);
         let ts = "100.101.102.103".parse().unwrap();
         let cli = ServerCliOverrides {
             no_tailscale: true,
@@ -1630,7 +1431,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn local_mode_cli_port_overrides_config_port() {
-        let cfg = server_listen(&[], false, AcmeSettings::default());
+        let cfg = server_listen(&[], false);
         let cli = ServerCliOverrides {
             port: Some(9090),
             ..ServerCliOverrides::default()
@@ -1643,14 +1444,14 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_loopback_passes_with_no_flags() {
-        let cfg = server_listen(&["127.0.0.1:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["127.0.0.1:8080"], false);
         let plan = resolve(&cfg, false, false, ServerCliOverrides::default()).expect("loopback ok");
         assert_eq!(plan, plain(&["127.0.0.1:8080"]));
     }
 
     #[test]
     fn listen_loopback_unaffected_by_dangerously_flag() {
-        let cfg = server_listen(&["127.0.0.1:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["127.0.0.1:8080"], false);
         let plan = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect("loopback resolves regardless of the scary flag");
         assert_eq!(plan, plain(&["127.0.0.1:8080"]));
@@ -1660,7 +1461,7 @@ mod resolve_server_plan_tests {
     fn listen_tailscale_entry_classified_local() {
         // An explicit listen entry equal to the detected Tailscale IP is LOCAL,
         // so it needs none of the public-bind gates.
-        let cfg = server_listen(&["100.64.0.1:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["100.64.0.1:8080"], false);
         let ts = "100.64.0.1".parse().unwrap();
         let plan = resolve_ts(&cfg, false, false, ServerCliOverrides::default(), Some(ts))
             .expect("tailscale listen entry is local");
@@ -1671,11 +1472,7 @@ mod resolve_server_plan_tests {
     fn listen_mixed_local_and_public_refuses_naming_the_public_entry() {
         // Loopback + a public entry: the public one drives the gates, and the
         // refusal must NAME it (not the loopback one).
-        let cfg = server_listen(
-            &["127.0.0.1:8080", "0.0.0.0:9000"],
-            false,
-            AcmeSettings::default(),
-        );
+        let cfg = server_listen(&["127.0.0.1:8080", "0.0.0.0:9000"], false);
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("a public entry must trigger the gates");
         let msg = err.to_string();
@@ -1693,7 +1490,7 @@ mod resolve_server_plan_tests {
     fn listen_public_no_auth_no_flags_refuses_naming_both_fixes() {
         // T1-review obligation 4: when BOTH the auth leg and the scary flag are
         // missing, a single message names both fixes (no two-step convergence).
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], false);
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("public plain HTTP with no auth + no flag must refuse");
         let msg = err.to_string();
@@ -1710,7 +1507,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_public_auth_on_without_dangerously_refuses_naming_the_flag() {
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], false);
         let err = resolve(&cfg, true, false, ServerCliOverrides::default())
             .expect_err("public plain HTTP needs --dangerously-listen-http even with auth");
         let msg = err.to_string();
@@ -1719,15 +1516,15 @@ mod resolve_server_plan_tests {
             "should name the unencrypted opt-in: {msg}"
         );
         assert!(
-            msg.contains("[server.acme]"),
-            "should point at the TLS alternative: {msg}"
+            msg.contains("upstream proxy"),
+            "should point at the TLS-terminating proxy alternative: {msg}"
         );
     }
 
     #[test]
     fn listen_public_no_auth_with_dangerously_refuses_naming_auth() {
         // The scary flag clears the encryption leg, but auth is still missing.
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], false);
         let cli = ServerCliOverrides {
             dangerously_listen_http: true,
             ..ServerCliOverrides::default()
@@ -1744,7 +1541,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_public_auth_on_with_dangerously_passes() {
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], false);
         let cli = ServerCliOverrides {
             dangerously_listen_http: true,
             ..ServerCliOverrides::default()
@@ -1756,12 +1553,11 @@ mod resolve_server_plan_tests {
     #[test]
     fn listen_public_auth_on_with_config_dangerously_passes() {
         // The config-file equivalent of --dangerously-listen-http must ALSO satisfy
-        // the gate (mirroring insecure_allow_remote), so a config-only rollback off
-        // [server.acme] can re-open a public plain-HTTP bind without editing the
-        // service's CLI args.
+        // the gate (mirroring insecure_allow_remote), so a config-only change can
+        // re-open a public plain-HTTP bind without editing the service's CLI args.
         let cfg = ServerConfig {
             dangerously_listen_http: true,
-            ..server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default())
+            ..server_listen(&["0.0.0.0:8080"], false)
         };
         let plan = resolve(&cfg, true, false, ServerCliOverrides::default())
             .expect("auth + config dangerously_listen_http ok");
@@ -1776,7 +1572,7 @@ mod resolve_server_plan_tests {
         // field must not become an auth bypass.
         let cfg = ServerConfig {
             dangerously_listen_http: true,
-            ..server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default())
+            ..server_listen(&["0.0.0.0:8080"], false)
         };
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("config dangerously_listen_http without auth must still refuse");
@@ -1788,7 +1584,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_public_insecure_with_dangerously_passes() {
-        let cfg = server_listen(&["0.0.0.0:8080"], true, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], true);
         let cli = ServerCliOverrides {
             dangerously_listen_http: true,
             ..ServerCliOverrides::default()
@@ -1799,7 +1595,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_public_insecure_without_dangerously_still_refuses() {
-        let cfg = server_listen(&["0.0.0.0:8080"], true, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], true);
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("insecure alone is not enough for public plain HTTP");
         assert!(
@@ -1811,7 +1607,7 @@ mod resolve_server_plan_tests {
     #[test]
     fn listen_cli_overrides_config_listen_addrs() {
         // --listen replaces config listen_addrs entirely.
-        let cfg = server_listen(&["0.0.0.0:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["0.0.0.0:8080"], false);
         let cli = ServerCliOverrides {
             listen: vec!["127.0.0.1:9999".to_string()],
             ..ServerCliOverrides::default()
@@ -1822,18 +1618,14 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_dedups_repeated_entries() {
-        let cfg = server_listen(
-            &["127.0.0.1:8080", "127.0.0.1:8080"],
-            false,
-            AcmeSettings::default(),
-        );
+        let cfg = server_listen(&["127.0.0.1:8080", "127.0.0.1:8080"], false);
         let plan = resolve(&cfg, false, false, ServerCliOverrides::default()).expect("dedup ok");
         assert_eq!(plan, plain(&["127.0.0.1:8080"]));
     }
 
     #[test]
     fn listen_invalid_entry_errors_with_shape() {
-        let cfg = server_listen(&["not-an-addr"], false, AcmeSettings::default());
+        let cfg = server_listen(&["not-an-addr"], false);
         let err = resolve(&cfg, true, false, ServerCliOverrides::default())
             .expect_err("invalid listen entry must error");
         let msg = err.to_string();
@@ -1843,7 +1635,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_hostname_entry_rejected_no_dns() {
-        let cfg = server_listen(&["dux.local:8080"], false, AcmeSettings::default());
+        let cfg = server_listen(&["dux.local:8080"], false);
         let err = resolve(&cfg, true, false, ServerCliOverrides::default())
             .expect_err("hostnames are not resolved");
         assert!(
@@ -1853,258 +1645,8 @@ mod resolve_server_plan_tests {
     }
 
     #[test]
-    fn no_acme_flag_forces_plain_path_from_acme_config() {
-        // Config enables ACME, but --no-acme forces the plain-HTTP path → here
-        // empty listen_addrs means LOCAL MODE (loopback).
-        let cfg = server_listen(&[], false, acme_on(&["dux.example.com"]));
-        let cli = ServerCliOverrides {
-            no_acme: true,
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, false, false, cli).expect("--no-acme falls back to plain");
-        assert_eq!(plan, plain(&["127.0.0.1:8080"]));
-    }
-
-    // ── ACME (on) matrix ──────────────────────────────────────────────────
-
-    #[test]
-    fn acme_on_no_domains_refuses_naming_the_fix() {
-        let cfg = server("127.0.0.1:8080", false, acme_on(&[]));
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("ACME with no domains must refuse");
-        let msg = err.to_string();
-        assert!(msg.contains("domains"), "should name domains: {msg}");
-        assert!(
-            msg.contains("--acme-domain"),
-            "should mention the CLI override: {msg}"
-        );
-    }
-
-    #[test]
-    fn acme_on_with_domains_but_no_auth_refuses_naming_auth_and_disable() {
-        let cfg = server("127.0.0.1:8080", false, acme_on(&["dux.example.com"]));
-        let err = resolve(&cfg, false, false, ServerCliOverrides::default())
-            .expect_err("ACME with no auth and not explicitly disabled must refuse");
-        let msg = err.to_string();
-        assert!(msg.contains("[auth]"), "should name auth: {msg}");
-        assert!(
-            msg.contains("--disable-auth"),
-            "should offer the explicit-disable escape hatch: {msg}"
-        );
-    }
-
-    #[test]
-    fn acme_on_with_auth_enabled_produces_plan() {
-        let cfg = server("127.0.0.1:8080", false, acme_on(&["dux.example.com"]));
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default()).expect("acme ok");
-        assert_eq!(
-            plan,
-            ServerPlan::Acme {
-                http_addr: "0.0.0.0:80".parse().unwrap(),
-                https_addr: "0.0.0.0:443".parse().unwrap(),
-                domains: vec!["dux.example.com".to_string()],
-                email: String::new(),
-                production: true,
-                cache_dir: Path::new("/home/user/.config/dux/acme").to_path_buf(),
-            }
-        );
-    }
-
-    #[test]
-    fn acme_on_with_explicit_disable_auth_is_allowed() {
-        // auth_enabled is false (the gate is off), but it was DELIBERATELY
-        // disabled — that counts as "named explicitly" for the proxy-auth case.
-        let cfg = server("127.0.0.1:8080", false, acme_on(&["dux.example.com"]));
-        let plan = resolve(&cfg, false, true, ServerCliOverrides::default())
-            .expect("explicit --disable-auth satisfies the ACME gate");
-        match plan {
-            ServerPlan::Acme { domains, .. } => {
-                assert_eq!(domains, vec!["dux.example.com".to_string()]);
-            }
-            other => panic!("expected Acme plan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn acme_cli_domains_email_and_ports_override_config() {
-        let cfg = server(
-            "127.0.0.1:8080",
-            false,
-            AcmeSettings {
-                enabled: true,
-                domains: vec!["config.example.com".to_string()],
-                email: "config@example.com".to_string(),
-                http_port: 80,
-                https_port: 443,
-                production: false,
-                cache_dir: None,
-            },
-        );
-        let cli = ServerCliOverrides {
-            acme_domains: vec!["cli.example.com".to_string()],
-            acme_email: Some("cli@example.com".to_string()),
-            http_port: Some(8080),
-            https_port: Some(8443),
-            ..ServerCliOverrides::default()
-        };
-        let plan = resolve(&cfg, true, false, cli).expect("acme cli overrides ok");
-        assert_eq!(
-            plan,
-            ServerPlan::Acme {
-                http_addr: "0.0.0.0:8080".parse().unwrap(),
-                https_addr: "0.0.0.0:8443".parse().unwrap(),
-                domains: vec!["cli.example.com".to_string()],
-                email: "cli@example.com".to_string(),
-                production: false,
-                cache_dir: Path::new("/home/user/.config/dux/acme").to_path_buf(),
-            }
-        );
-    }
-
-    #[test]
-    fn acme_cache_dir_from_config_is_used_when_absolute() {
-        let cfg = server(
-            "127.0.0.1:8080",
-            false,
-            AcmeSettings {
-                enabled: true,
-                domains: vec!["dux.example.com".to_string()],
-                cache_dir: Some("/var/lib/dux/acme".to_string()),
-                ..AcmeSettings::default()
-            },
-        );
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default()).expect("acme ok");
-        match plan {
-            ServerPlan::Acme { cache_dir, .. } => {
-                assert_eq!(cache_dir, Path::new("/var/lib/dux/acme"));
-            }
-            other => panic!("expected Acme plan, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn acme_cache_dir_relative_value_is_rejected() {
-        let cfg = server(
-            "127.0.0.1:8080",
-            false,
-            AcmeSettings {
-                enabled: true,
-                domains: vec!["dux.example.com".to_string()],
-                cache_dir: Some("relative/acme".to_string()),
-                ..AcmeSettings::default()
-            },
-        );
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("relative cache_dir must be rejected");
-        assert!(
-            err.to_string().contains("cache_dir"),
-            "error should name the bad field: {err}"
-        );
-    }
-
-    #[test]
-    fn acme_on_ignores_plain_bind_rules() {
-        // ACME binds 0.0.0.0:80/443 regardless of listen_addrs; the plain-HTTP
-        // non-loopback gate does not apply to the ACME path.
-        let cfg = server_listen(&["0.0.0.0:8080"], false, acme_on(&["dux.example.com"]));
-        let plan = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect("acme path ignores the plain bind gate");
-        match plan {
-            ServerPlan::Acme {
-                http_addr,
-                https_addr,
-                ..
-            } => {
-                assert_eq!(http_addr.to_string(), "0.0.0.0:80");
-                assert_eq!(https_addr.to_string(), "0.0.0.0:443");
-            }
-            other => panic!("expected Acme plan, got {other:?}"),
-        }
-    }
-
-    // ── Obligation 2: port 0 / http==https collision refusals ─────────────
-
-    #[test]
-    fn acme_rejects_http_port_zero() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.http_port = 0;
-        let cfg = server("", false, acme);
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_https_port_zero() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.https_port = 0;
-        let cfg = server("", false, acme);
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("https port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_equal_http_and_https_ports() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.http_port = 8443;
-        acme.https_port = 8443;
-        let cfg = server("", false, acme);
-        let err = resolve(&cfg, true, false, ServerCliOverrides::default())
-            .expect_err("identical http/https ports must be refused");
-        assert!(
-            err.to_string().contains("must differ"),
-            "names the collision: {err}"
-        );
-    }
-
-    #[test]
-    fn acme_port_collision_via_cli_overrides_is_refused() {
-        // The collision check sees the CLI-resolved ports, not just config.
-        let cfg = server("", false, acme_on(&["dux.example.com"]));
-        let cli = ServerCliOverrides {
-            http_port: Some(9000),
-            https_port: Some(9000),
-            ..ServerCliOverrides::default()
-        };
-        let err = resolve(&cfg, true, false, cli)
-            .expect_err("CLI-induced port collision must be refused");
-        assert!(err.to_string().contains("must differ"), "names it: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_http_port_zero_via_cli_override() {
-        // A non-zero config http_port overridden to 0 on the CLI must still be
-        // refused — the resolver checks the CLI-resolved port, not just config.
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.http_port = 80;
-        let cfg = server("", false, acme);
-        let cli = ServerCliOverrides {
-            http_port: Some(0),
-            ..ServerCliOverrides::default()
-        };
-        let err =
-            resolve(&cfg, true, false, cli).expect_err("--http-port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
-    fn acme_rejects_https_port_zero_via_cli_override() {
-        let mut acme = acme_on(&["dux.example.com"]);
-        acme.https_port = 443;
-        let cfg = server("", false, acme);
-        let cli = ServerCliOverrides {
-            https_port: Some(0),
-            ..ServerCliOverrides::default()
-        };
-        let err =
-            resolve(&cfg, true, false, cli).expect_err("--https-port 0 must be refused for ACME");
-        assert!(err.to_string().contains("port 0"), "names the cause: {err}");
-    }
-
-    #[test]
     fn local_mode_rejects_port_zero() {
-        let mut cfg = server_listen(&[], false, AcmeSettings::default());
+        let mut cfg = server_listen(&[], false);
         cfg.port = 0;
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("local-mode port 0 must be refused");
@@ -2115,7 +1657,7 @@ mod resolve_server_plan_tests {
     fn local_mode_rejects_port_zero_via_cli_override() {
         // A healthy config port overridden to 0 on the CLI (--port 0) must be
         // refused: the CLI value wins via `unwrap_or`, so the zero must be caught.
-        let mut cfg = server_listen(&[], false, AcmeSettings::default());
+        let mut cfg = server_listen(&[], false);
         cfg.port = 8080;
         let cli = ServerCliOverrides {
             port: Some(0),
@@ -2128,7 +1670,7 @@ mod resolve_server_plan_tests {
 
     #[test]
     fn listen_addrs_rejects_port_zero_entry() {
-        let cfg = server_listen(&["127.0.0.1:0"], false, AcmeSettings::default());
+        let cfg = server_listen(&["127.0.0.1:0"], false);
         let err = resolve(&cfg, false, false, ServerCliOverrides::default())
             .expect_err("a :0 listen entry must be refused");
         assert!(
@@ -2531,81 +2073,6 @@ bind = "0.0.0.0:9000"
         // The new fields fall back to defaults until migration runs.
         assert_eq!(config.server.port, 8080);
         assert!(config.server.listen_addrs.is_empty());
-    }
-
-    #[test]
-    fn acme_config_defaults_when_section_absent() {
-        // An old config with [server] but no [server.acme] must parse into the
-        // safe ACME-off defaults.
-        let config: Config = toml::from_str(
-            r#"
-[server]
-bind = "0.0.0.0:9000"
-"#,
-        )
-        .expect("config without [server.acme] should parse");
-        assert!(!config.server.acme.enabled);
-        assert!(config.server.acme.domains.is_empty());
-        assert_eq!(config.server.acme.email, "");
-        assert_eq!(config.server.acme.http_port, 80);
-        assert_eq!(config.server.acme.https_port, 443);
-        assert!(config.server.acme.production);
-        assert!(config.server.acme.cache_dir.is_none());
-    }
-
-    #[test]
-    fn acme_config_parses_full_section() {
-        let config: Config = toml::from_str(
-            r#"
-[server]
-bind = "0.0.0.0:9000"
-
-[server.acme]
-enabled = true
-domains = ["dux.example.com", "www.example.com"]
-email = "ops@example.com"
-http_port = 8080
-https_port = 8443
-production = false
-cache_dir = "/var/lib/dux/acme"
-"#,
-        )
-        .expect("config with full [server.acme] should parse");
-        assert!(config.server.acme.enabled);
-        assert_eq!(
-            config.server.acme.domains,
-            vec!["dux.example.com".to_string(), "www.example.com".to_string()]
-        );
-        assert_eq!(config.server.acme.email, "ops@example.com");
-        assert_eq!(config.server.acme.http_port, 8080);
-        assert_eq!(config.server.acme.https_port, 8443);
-        assert!(!config.server.acme.production);
-        assert_eq!(
-            config.server.acme.cache_dir.as_deref(),
-            Some("/var/lib/dux/acme")
-        );
-    }
-
-    #[test]
-    fn acme_config_partial_section_defaults_remaining_fields() {
-        // Only `enabled` and `domains` are provided; the rest default.
-        let config: Config = toml::from_str(
-            r#"
-[server.acme]
-enabled = true
-domains = ["dux.example.com"]
-"#,
-        )
-        .expect("config with partial [server.acme] should parse");
-        assert!(config.server.acme.enabled);
-        assert_eq!(
-            config.server.acme.domains,
-            vec!["dux.example.com".to_string()]
-        );
-        assert_eq!(config.server.acme.http_port, 80);
-        assert_eq!(config.server.acme.https_port, 443);
-        assert!(config.server.acme.production);
-        assert!(config.server.acme.cache_dir.is_none());
     }
 
     #[test]

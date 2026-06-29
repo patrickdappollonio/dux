@@ -12,8 +12,7 @@ Options:
                                are set. Overrides [server] port (default 8080).
       --listen <ADDR:PORT>     FULL WEB MODE listener (repeatable). Each is an
                                IP:port socket address (hostnames are NOT resolved).
-                               Replaces [server] listen_addrs entirely. Only used
-                               when built-in ACME/TLS is off.
+                               Replaces [server] listen_addrs entirely.
       --bind <ADDR:PORT>       DEPRECATED alias for --listen (accepted with a note).
       --no-tailscale           Skip Tailscale detection for LOCAL MODE this run
                                (serve loopback only).
@@ -23,14 +22,6 @@ Options:
       --insecure-allow-remote  Allow a non-loopback plain-HTTP listen_addrs entry even
                                though no login is configured. Anyone who can reach the
                                address can control your agents and worktrees.
-      --acme-domain <DOMAIN>   Domain to request a Let's Encrypt certificate for
-                               (repeatable). Overrides [server.acme] domains.
-      --acme-email <EMAIL>     Contact email for Let's Encrypt. Overrides config.
-      --http-port <PORT>       Port for the ACME HTTP-01 challenge and HTTPS redirect
-                               (default 80). Overrides [server.acme] http_port.
-      --https-port <PORT>      Port the TLS web UI listens on (default 443).
-                               Overrides [server.acme] https_port.
-      --no-acme                Force built-in ACME/TLS off even if config enables it.
       --dangerously-listen-http
                                Allow serving PLAIN HTTP on a non-loopback address.
                                Traffic (including the login password) is unencrypted.
@@ -167,7 +158,7 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     let config = dux_core::config::load_config(&paths);
 
     // Initialize the logger early so every subsequent logger::* call in the server
-    // path (bootstrap, bind, auth-reload, ACME lifecycle) actually reaches dux.log.
+    // path (bootstrap, bind, auth-reload) actually reaches dux.log.
     // OnceLock::set is idempotent — safe if the TUI already initialized it (flip).
     dux_core::logger::init(&config.logging, &paths);
     dux_core::logger::info("bootstrapping dux server");
@@ -202,7 +193,6 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
         cli_disable_auth,
         &overrides,
         tailscale_ip,
-        &paths.root,
     ) {
         Ok(plan) => plan,
         Err(e) => {
@@ -217,40 +207,25 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
     // by dux-web's vite-style console, which knows what actually bound — so it is
     // truthful and carries no "best-effort, see dux.log" hedging. Refusals were
     // already printed on stderr above before we got here.
-    match &plan {
-        dux_core::config::ServerPlan::PlainHttp { addrs } => {
-            // An address is LOCAL when it is loopback OR the detected Tailscale
-            // address; only PUBLIC addresses get the deliberate-no-gate warning.
-            let is_local =
-                |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
-            let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr()));
+    let dux_core::config::ServerPlan::PlainHttp { addrs } = &plan;
+    // An address is LOCAL when it is loopback OR the detected Tailscale
+    // address; only PUBLIC addresses get the deliberate-no-gate warning.
+    let is_local = |a: &std::net::SocketAddr| a.ip().is_loopback() || Some(a.ip()) == tailscale_ip;
+    let all_addrs_local = addrs.iter().all(|p| is_local(&p.addr()));
 
-            // Loud warning when auth is deliberately disabled on a reachable
-            // (public) address: --disable-auth turned the gate off. Only an
-            // upstream auth proxy makes this safe. Fires pre-bind (stderr); the
-            // post-bind banner ALSO carries a login-DISABLED row.
-            if cli_disable_auth && !all_addrs_local {
-                for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr())) {
-                    eprintln!(
-                        "WARNING: --disable-auth is set and dux is binding {}, a non-loopback \
-                         address, with NO login gate. Anyone who can reach this address can control \
-                         your agents and worktrees. Only do this when an upstream auth proxy is \
-                         handling authentication in front of dux.",
-                        plan_addr.addr()
-                    );
-                }
-            }
-        }
-        dux_core::config::ServerPlan::Acme { .. } => {
-            // Loud warning when auth is deliberately disabled on a built-in-TLS
-            // server. An ACME server is ALWAYS public (a browser-trusted cert on
-            // :443), so the gate-off warning fires whenever --disable-auth is set.
-            // Fires pre-bind (stderr); the post-bind banner ALSO carries a
-            // login-DISABLED row, and the staging note now rides the banner's mode
-            // line as "[STAGING]".
-            if cli_disable_auth {
-                eprintln!("{}", dux_web::acme_disable_auth_warning());
-            }
+    // Loud warning when auth is deliberately disabled on a reachable
+    // (public) address: --disable-auth turned the gate off. Only an
+    // upstream auth proxy makes this safe. Fires pre-bind (stderr); the
+    // post-bind banner ALSO carries a login-DISABLED row.
+    if cli_disable_auth && !all_addrs_local {
+        for plan_addr in addrs.iter().filter(|p| !is_local(&p.addr())) {
+            eprintln!(
+                "WARNING: --disable-auth is set and dux is binding {}, a non-loopback \
+                 address, with NO login gate. Anyone who can reach this address can control \
+                 your agents and worktrees. Only do this when an upstream auth proxy is \
+                 handling authentication in front of dux.",
+                plan_addr.addr()
+            );
         }
     }
 
@@ -282,11 +257,6 @@ struct ServerArgs {
     no_tailscale: bool,
     insecure_allow_remote: bool,
     disable_auth: bool,
-    acme_domains: Vec<String>,
-    acme_email: Option<String>,
-    http_port: Option<u16>,
-    https_port: Option<u16>,
-    no_acme: bool,
     dangerously_listen_http: bool,
 }
 
@@ -297,11 +267,6 @@ impl ServerArgs {
             listen: self.listen,
             no_tailscale: self.no_tailscale,
             insecure_allow_remote: self.insecure_allow_remote,
-            acme_domains: self.acme_domains,
-            acme_email: self.acme_email,
-            http_port: self.http_port,
-            https_port: self.https_port,
-            no_acme: self.no_acme,
             dangerously_listen_http: self.dangerously_listen_http,
         }
     }
@@ -353,7 +318,6 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
             "--help" | "-h" => return ParsedServerArgs::HelpRequested,
             "--insecure-allow-remote" => out.insecure_allow_remote = true,
             "--disable-auth" => out.disable_auth = true,
-            "--no-acme" => out.no_acme = true,
             "--no-tailscale" => out.no_tailscale = true,
             "--dangerously-listen-http" => out.dangerously_listen_http = true,
             "--port" => match take_port("--port", inline, &mut args) {
@@ -371,22 +335,6 @@ fn parse_server_args(mut args: impl Iterator<Item = String>) -> ParsedServerArgs
                     );
                     out.listen.push(v);
                 }
-                Err(e) => return ParsedServerArgs::Error(e),
-            },
-            "--acme-domain" => match take_value("--acme-domain", inline, &mut args) {
-                Ok(v) => out.acme_domains.push(v),
-                Err(e) => return ParsedServerArgs::Error(e),
-            },
-            "--acme-email" => match take_value("--acme-email", inline, &mut args) {
-                Ok(v) => out.acme_email = Some(v),
-                Err(e) => return ParsedServerArgs::Error(e),
-            },
-            "--http-port" => match take_port("--http-port", inline, &mut args) {
-                Ok(p) => out.http_port = Some(p),
-                Err(e) => return ParsedServerArgs::Error(e),
-            },
-            "--https-port" => match take_port("--https-port", inline, &mut args) {
-                Ok(p) => out.https_port = Some(p),
                 Err(e) => return ParsedServerArgs::Error(e),
             },
             other => {
@@ -437,11 +385,6 @@ mod tests {
         assert!(!a.no_tailscale);
         assert!(!a.insecure_allow_remote);
         assert!(!a.disable_auth);
-        assert!(a.acme_domains.is_empty());
-        assert!(a.acme_email.is_none());
-        assert!(a.http_port.is_none());
-        assert!(a.https_port.is_none());
-        assert!(!a.no_acme);
         assert!(!a.dangerously_listen_http);
     }
 
@@ -484,58 +427,9 @@ mod tests {
     }
 
     #[test]
-    fn acme_domain_is_repeatable() {
-        let a = ok(&[
-            "--acme-domain",
-            "a.example.com",
-            "--acme-domain",
-            "b.example.com",
-        ]);
-        assert_eq!(
-            a.acme_domains,
-            vec!["a.example.com".to_string(), "b.example.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn acme_domain_accepts_equals_form() {
-        let a = ok(&["--acme-domain=a.example.com", "--acme-domain=b.example.com"]);
-        assert_eq!(
-            a.acme_domains,
-            vec!["a.example.com".to_string(), "b.example.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn ports_parse_as_numbers() {
-        let a = ok(&["--http-port", "8080", "--https-port=8443"]);
-        assert_eq!(a.http_port, Some(8080));
-        assert_eq!(a.https_port, Some(8443));
-    }
-
-    #[test]
-    fn non_numeric_port_errors() {
-        let msg = err(&["--http-port", "nope"]);
-        assert!(msg.contains("--http-port"), "should name the flag: {msg}");
-        assert!(msg.contains("nope"), "should echo the bad value: {msg}");
-    }
-
-    #[test]
-    fn out_of_range_port_errors() {
-        let msg = err(&["--https-port", "70000"]);
-        assert!(msg.contains("--https-port"), "should name the flag: {msg}");
-    }
-
-    #[test]
-    fn listen_and_email_take_values() {
-        let a = ok(&[
-            "--listen",
-            "0.0.0.0:8080",
-            "--acme-email",
-            "ops@example.com",
-        ]);
+    fn listen_takes_value() {
+        let a = ok(&["--listen", "0.0.0.0:8080"]);
         assert_eq!(a.listen, vec!["0.0.0.0:8080".to_string()]);
-        assert_eq!(a.acme_email.as_deref(), Some("ops@example.com"));
     }
 
     #[test]
@@ -543,12 +437,10 @@ mod tests {
         let a = ok(&[
             "--insecure-allow-remote",
             "--disable-auth",
-            "--no-acme",
             "--dangerously-listen-http",
         ]);
         assert!(a.insecure_allow_remote);
         assert!(a.disable_auth);
-        assert!(a.no_acme);
         assert!(a.dangerously_listen_http);
     }
 

@@ -442,13 +442,6 @@ impl Console {
         self.emit(Tone::Info, &format!("logout for \"{username}\""));
     }
 
-    /// An ACME certificate-lifecycle event, already classified into a tone +
-    /// message by the caller (the same classification `dux.log` uses).
-    pub fn acme(&self, tone_is_error: bool, message: &str) {
-        let tone = if tone_is_error { Tone::Error } else { Tone::Ok };
-        self.emit(tone, message);
-    }
-
     /// A config reload landed. `refused`/`rebind_changed` drive the tone so a
     /// refusal or a restart-needed reload reads as a warning, a clean reload as
     /// info.
@@ -1167,17 +1160,15 @@ mod tests {
         console.client_connected(ip("10.0.0.1"));
         console.login_ok("alice", ip("10.0.0.2"));
         console.login_failed(ip("10.0.0.3"));
-        console.acme(true, "order failed");
 
         let snap = ring.snapshot(dux_core::activity::ACTIVITY_CAP);
         let tones: Vec<ActivityTone> = snap.events.iter().map(|e| e.tone).collect();
         assert_eq!(
             tones,
             vec![
-                ActivityTone::Info,  // client connected
-                ActivityTone::Ok,    // login ok
-                ActivityTone::Warn,  // login failed
-                ActivityTone::Error, // acme failure
+                ActivityTone::Info, // client connected
+                ActivityTone::Ok,   // login ok
+                ActivityTone::Warn, // login failed
             ]
         );
         assert!(
@@ -1186,7 +1177,7 @@ mod tests {
                 .contains("client connected from 10.0.0.1")
         );
         assert!(snap.events[1].message.contains("login ok for \"alice\""));
-        // The capture stores the structured message — no ANSI escapes.
+        // The capture stores the structured message -- no ANSI escapes.
         assert!(!snap.events[0].message.contains('\u{1b}'));
     }
 
