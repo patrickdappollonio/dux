@@ -945,12 +945,12 @@ pub(crate) fn run_engine_loop(
                         ));
 
                         // The new config WAS applied to the engine, but the
-                        // `[server]` bind section only takes effect at startup — a
+                        // `[server]` bind section only takes effect at startup; a
                         // reload cannot rebind listeners. Warn so the user knows a
                         // restart is needed for those specific changes to take
                         // effect.
                         if server_settings_changed {
-                            let drift = "Server bind settings changed in config — restart \
+                            let drift = "Server bind settings changed in config; restart \
                                  the server to apply them.";
                             let _ = thread_status_tx.send(WireStatus::new("warning", drift));
                         }

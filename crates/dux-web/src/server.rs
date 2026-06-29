@@ -5,9 +5,9 @@
 //!
 //! ## Route structure
 //!
-//! dux is a trusted-local tool: there is no login gate. Every route — static
-//! assets, `/healthz`, all `/api/v1/*` reads and actions, and every WS upgrade
-//! (`/ws/events` and the per-PTY sockets) — is served plainly.
+//! dux is a trusted-local tool: there is no login gate. Every route is served
+//! plainly: static assets, `/healthz`, all `/api/v1/*` reads and actions, and
+//! every WS upgrade (`/ws/events` and the per-PTY sockets).
 //!
 //! The Origin check on every WS upgrade still runs (cross-site WebSocket
 //! hijacking defense): a browser attaches the page's `Origin`, and we only allow
