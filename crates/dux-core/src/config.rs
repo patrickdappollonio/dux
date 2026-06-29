@@ -210,6 +210,14 @@ pub struct ServerConfig {
     /// "dux #1" / "dux (prod)" — to tell several dux tabs apart at a glance.
     /// Default "dux". An empty/whitespace value falls back to "dux" in the UI.
     pub title: String,
+    /// WEB-ONLY favicon for this dux instance, so several dux tabs are easy to
+    /// tell apart. Empty (default) keeps the bundled dux logo. Otherwise one of:
+    /// a COLOUR — a hex value like "#863bff" or a name (violet, blue, sky, cyan,
+    /// teal, green, lime, amber, orange, red, pink, rose, slate, gray, white,
+    /// black) — which renders the dux logo OUTLINE in that colour; or a custom
+    /// favicon URL beginning with "http://", "https://", or "/". Unrecognized
+    /// values fall back to the bundled logo.
+    pub favicon: String,
     pub acme: AcmeSettings,
 }
 
@@ -422,6 +430,7 @@ impl Default for ServerConfig {
             access_log: true,
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             title: "dux".to_string(),
+            favicon: String::new(),
             acme: AcmeSettings::default(),
         }
     }
@@ -2503,6 +2512,24 @@ title = "dux #1"
         )
         .expect("config with [server] title should parse");
         assert_eq!(config.server.title, "dux #1");
+    }
+
+    #[test]
+    fn server_favicon_defaults_empty_and_parses_override() {
+        // No [server] section: favicon is empty, meaning "use the bundled logo".
+        let default: Config = toml::from_str("").expect("empty config should parse");
+        assert_eq!(default.server.favicon, "");
+
+        // An explicit favicon (a colour, here) round-trips verbatim; the web
+        // interprets the string (colour vs URL vs default).
+        let config: Config = toml::from_str(
+            r#"
+[server]
+favicon = "violet"
+"#,
+        )
+        .expect("config with [server] favicon should parse");
+        assert_eq!(config.server.favicon, "violet");
     }
 
     #[test]

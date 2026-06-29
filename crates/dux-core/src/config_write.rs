@@ -308,6 +308,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.server.max_websocket_connections as usize,
     );
     patch_table_str(doc, "server", "title", &config.server.title);
+    patch_table_str(doc, "server", "favicon", &config.server.favicon);
 
     // --- [server.acme] ---
     patch_acme(doc, &config.server.acme);
@@ -823,6 +824,7 @@ unknown_key = \"untouched\"
         config.server.access_log = false;
         config.server.max_websocket_connections = 42;
         config.server.title = "dux #1".to_string();
+        config.server.favicon = "violet".to_string();
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
@@ -840,6 +842,7 @@ unknown_key = \"untouched\"
         assert!(!parsed.server.access_log);
         assert_eq!(parsed.server.max_websocket_connections, 42);
         assert_eq!(parsed.server.title, "dux #1");
+        assert_eq!(parsed.server.favicon, "violet");
         // The deprecated `bind` key is never re-emitted by the patcher.
         assert!(
             !saved.contains("bind ="),

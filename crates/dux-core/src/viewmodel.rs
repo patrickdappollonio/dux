@@ -88,6 +88,12 @@ pub struct BootstrapView {
     /// empty/whitespace value to "dux". Older servers omit it (the web treats a
     /// missing value as "dux").
     pub title: String,
+    /// Mirrors `config.server.favicon`: empty means the bundled dux logo; a
+    /// colour (hex or a known name) selects the dux-logo outline in that colour;
+    /// a URL beginning with http(s):// or / is a custom favicon. The web resolves
+    /// and applies it; an unrecognized value falls back to the bundled logo.
+    /// Older servers omit it (the web treats a missing value as the default).
+    pub favicon: String,
 }
 
 /// A single text macro projected for web clients, from
@@ -397,6 +403,7 @@ impl Engine {
             global_env: self.config.env.clone(),
             status_clear_seconds: self.config.ui.status_clear_seconds,
             title: self.config.server.title.clone(),
+            favicon: self.config.server.favicon.clone(),
         }
     }
 }
@@ -894,6 +901,17 @@ mod tests {
     }
 
     #[test]
+    fn server_favicon_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+        // Default is empty (the web treats that as "bundled logo").
+        assert_eq!(engine.bootstrap().favicon, "");
+        // A configured value reaches the bootstrap view verbatim; the web
+        // interprets it (colour vs URL vs default).
+        engine.config.server.favicon = "violet".to_string();
+        assert_eq!(engine.bootstrap().favicon, "violet");
+    }
+
+    #[test]
     fn gh_available_reflects_integration_and_gh_status() {
         let (mut engine, _tmp) = test_engine();
 
@@ -974,6 +992,7 @@ mod tests {
             "show_changes_pane",
             "global_env",
             "title",
+            "favicon",
             "status_clear_seconds",
         ] {
             assert!(
