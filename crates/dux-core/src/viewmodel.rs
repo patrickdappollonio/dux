@@ -82,6 +82,12 @@ pub struct BootstrapView {
     /// arrives (0 disables auto-clear, matching the TUI's tone-aware policy).
     /// Warning/error toasts ignore it and persist until replaced.
     pub status_clear_seconds: u16,
+    /// Mirrors `config.server.title`: the operator-chosen display name for this
+    /// dux instance. The web shows it as the browser tab title and the brand
+    /// wordmark above the version in the projects pane, and resolves an
+    /// empty/whitespace value to "dux". Older servers omit it (the web treats a
+    /// missing value as "dux").
+    pub title: String,
 }
 
 /// A single text macro projected for web clients, from
@@ -390,6 +396,7 @@ impl Engine {
             show_changes_pane: self.config.ui.show_changes_pane,
             global_env: self.config.env.clone(),
             status_clear_seconds: self.config.ui.status_clear_seconds,
+            title: self.config.server.title.clone(),
         }
     }
 }
@@ -876,6 +883,17 @@ mod tests {
     }
 
     #[test]
+    fn server_title_is_projected() {
+        let (mut engine, _tmp) = test_engine();
+        // Defaults flow through unchanged.
+        assert_eq!(engine.bootstrap().title, "dux");
+        // A configured instance name reaches the bootstrap view verbatim (the web
+        // resolves empty/whitespace to "dux"; the projection itself is faithful).
+        engine.config.server.title = "dux #1".to_string();
+        assert_eq!(engine.bootstrap().title, "dux #1");
+    }
+
+    #[test]
     fn gh_available_reflects_integration_and_gh_status() {
         let (mut engine, _tmp) = test_engine();
 
@@ -955,6 +973,8 @@ mod tests {
             "agent_scrollback_lines",
             "show_changes_pane",
             "global_env",
+            "title",
+            "status_clear_seconds",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
