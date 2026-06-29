@@ -19,13 +19,12 @@ import { macroPayloadBytes } from "./macros"
 import type { PtySocket } from "./ptySocket"
 
 // `store` reads `location`/`localStorage`, registers a `popstate` listener, and
-// at module load fires a boot `/api/me` fetch + constructs an `EventsSocket`. Stub
-// the minimum so the import succeeds; steer the boot probe to auth-off so the
-// store settles cleanly (mirrors storeAuth.test.ts's setup).
+// at module load constructs an `EventsSocket` and fetches bootstrap. Stub the
+// minimum so the import succeeds.
 //
 // Macros moved off the broadcast ViewModel onto the `GET /api/v1/bootstrap`
 // document (Phase 2), so the dialog seeds from `state.bootstrap.macros`. The
-// boot path fetches it after auth resolves; tests control its body via the
+// boot path fetches it at module load; tests control its body via the
 // `bootstrapMacros` variable the fetch double reads at call time.
 
 let bootstrapMacros: MacroView[] = []
@@ -80,11 +79,11 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // /api/me (and anything else): auth off.
+  // Anything else: empty 200.
   return {
     ok: true,
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
@@ -120,12 +119,12 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// Load the store and wait for the boot probe AND the bootstrap fetch to settle,
+// Load the store and wait for the bootstrap fetch to settle,
 // so `state.bootstrap.macros` is the `bootstrapMacros` set by the test.
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    expect(mod.getSnapshot().booted).toBe(true)
     expect(mod.getSnapshot().bootstrap).not.toBeNull()
   })
   return mod
@@ -136,7 +135,7 @@ async function loadStore() {
 async function loadStoreNoBootstrap() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    expect(mod.getSnapshot().booted).toBe(true)
   })
   expect(mod.getSnapshot().bootstrap).toBeNull()
   return mod

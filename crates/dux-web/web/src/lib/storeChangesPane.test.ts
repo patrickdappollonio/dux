@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Bootstrap } from "./bootstrapApi"
 
 // Mirror the store test harness: the module reads location/localStorage,
-// registers listeners, and fires a boot probe + a bootstrap fetch on import.
-// Stub the minimum and steer the probe to auth-off so the store settles.
+// registers listeners, and fires a bootstrap fetch on import.
+// Stub the minimum so the store settles.
 //
 // `show_changes_pane` moved off the broadcast ViewModel onto the
 // `GET /api/v1/bootstrap` document (Phase 2). The optimistic Changes-pane
@@ -93,7 +93,6 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().bootstrap).not.toBeNull()
   })
   return mod
