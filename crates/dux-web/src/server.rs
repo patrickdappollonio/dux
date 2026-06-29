@@ -92,6 +92,10 @@ pub struct AppState {
     /// `POST /api/v1/sessions` or `/projects` after a lost response returns the
     /// same resource instead of creating a duplicate worktree/project.
     pub idempotency: Arc<crate::rest_common::IdempotencyCache>,
+    /// Per-PTY sizing ownership so two viewers of one PTY don't thrash its size.
+    /// The most recently attached per-PTY socket owns sizing; a non-owner's resize
+    /// frame is ignored (see [`PtySizeOwners`]).
+    pty_size_owners: Arc<PtySizeOwners>,
 }
 
 /// Maximum size of a single inbound WebSocket message (text or binary). This
@@ -300,12 +304,6 @@ where
     // so clients on the `projects` / `sessions` topics refetch `/api/v1/spine`.
     // Same lifetime/teardown story as the config forwarder above.
     spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
-    // Commit-message-ready -> `session.commit_message` forwarder. The engine
-    // broadcasts a `CommitMessageEvent` when a one-shot generation completes; this
-    // turns each into a per-session `session.commit_message` event so a subscribed
-    // client refetches `GET /api/v1/sessions/:id/commit-message`. Same lifetime as
-    // the other forwarders (exits when the engine — and thus the broadcast — is gone).
-    spawn_commit_message_forwarder(engine.subscribe_commit_messages(), Arc::clone(&event_bus));
     let state = AppState {
         engine,
         auth,
@@ -319,6 +317,7 @@ where
         event_bus,
         changes,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
+        pty_size_owners: Arc::new(PtySizeOwners::default()),
     };
 
     // HttpOnly and SameSite=Strict are the tower-sessions defaults but we set them
@@ -674,12 +673,66 @@ impl PtyTarget {
 
 /// A resize control frame on a PTY socket: the Text frame `{"rows":R,"cols":C}`,
 /// distinct from the Binary stdin frames. Routed to `engine.resize_pty` for the
-/// socket's own PTY, so resize is naturally gated — only a socket attached to a PTY
-/// can resize it (multi-viewer last-writer-wins, as today).
+/// socket's own PTY ONLY when this connection currently owns sizing for it (see
+/// [`PtySizeOwners`]); a non-owner's resize is ignored so two viewers of one PTY
+/// don't thrash its size last-writer-wins.
 #[derive(serde::Deserialize)]
 struct PtyResizeFrame {
     rows: u16,
     cols: u16,
+}
+
+/// Tracks which connection currently owns sizing for each PTY, keyed by pty id
+/// (the session id for an agent PTY, the terminal id for a companion). The most
+/// recently ATTACHED connection owns sizing; a resize from a non-owner is ignored,
+/// which breaks the last-writer-wins feedback loop two viewers of one PTY would
+/// otherwise create. Lives in [`AppState`] so every per-PTY socket shares it.
+#[derive(Default)]
+struct PtySizeOwners {
+    owners: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    next_conn_id: std::sync::atomic::AtomicU64,
+}
+
+impl PtySizeOwners {
+    /// Allocate a process-unique id for a freshly attached PTY socket, used to
+    /// compare against the recorded owner.
+    fn next_conn_id(&self) -> u64 {
+        self.next_conn_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Make `conn_id` the current sizing owner of `pty_id`. Called on every new
+    /// attach, so the most recently attached connection wins.
+    fn claim(&self, pty_id: &str, conn_id: u64) {
+        self.owners
+            .lock()
+            .unwrap()
+            .insert(pty_id.to_string(), conn_id);
+    }
+
+    /// Whether `conn_id` may apply a resize to `pty_id`: true if it is the current
+    /// owner, or if no owner is recorded (the previous owner dropped) — in which
+    /// case `conn_id` claims it so the next live resize takes over.
+    fn may_resize(&self, pty_id: &str, conn_id: u64) -> bool {
+        let mut owners = self.owners.lock().unwrap();
+        match owners.get(pty_id) {
+            Some(&owner) => owner == conn_id,
+            None => {
+                owners.insert(pty_id.to_string(), conn_id);
+                true
+            }
+        }
+    }
+
+    /// Release ownership of `pty_id` if `conn_id` still holds it (called when the
+    /// connection disconnects). A no-op if another connection has since claimed it,
+    /// so a later attach is never clobbered.
+    fn release(&self, pty_id: &str, conn_id: u64) {
+        let mut owners = self.owners.lock().unwrap();
+        if owners.get(pty_id) == Some(&conn_id) {
+            owners.remove(pty_id);
+        }
+    }
 }
 
 /// Upgrade handler for `GET /ws/sessions/:id/pty` — stream the agent session's main
@@ -724,6 +777,7 @@ async fn ws_session_pty_upgrade(
     let auth = state.auth.clone();
     let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
+    let pty_size_owners = Arc::clone(&state.pty_size_owners);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -737,6 +791,7 @@ async fn ws_session_pty_upgrade(
                 console,
                 peer_ip,
                 permit,
+                pty_size_owners,
             )
         })
         .into_response()
@@ -789,6 +844,7 @@ async fn ws_terminal_pty_upgrade(
     let auth = state.auth.clone();
     let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
+    let pty_size_owners = Arc::clone(&state.pty_size_owners);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -802,6 +858,7 @@ async fn ws_terminal_pty_upgrade(
                 console,
                 peer_ip,
                 permit,
+                pty_size_owners,
             )
         })
         .into_response()
@@ -811,8 +868,10 @@ async fn ws_terminal_pty_upgrade(
 /// the buffered scrollback/repaint (sized to `agent_scrollback_lines` inside the
 /// `PtyClient`). Then:
 /// server→client is Binary frames of raw PTY bytes; a client→server Binary frame is
-/// PTY stdin; a client→server Text frame `{"rows":R,"cols":C}` is a resize. Close
-/// (or any stream end) detaches by dropping the subscription/forwarder.
+/// PTY stdin; a client→server Text frame `{"rows":R,"cols":C}` is a resize applied
+/// only while this connection owns sizing (see [`PtySizeOwners`]). Close (or any
+/// stream end) detaches by dropping the subscription/forwarder and releasing
+/// sizing ownership.
 #[allow(clippy::too_many_arguments)]
 async fn handle_pty_socket(
     socket: WebSocket,
@@ -826,6 +885,7 @@ async fn handle_pty_socket(
     // Held for the socket's lifetime purely for its Drop (frees a connection-cap
     // slot when this returns). Never read.
     _permit: tokio::sync::OwnedSemaphorePermit,
+    pty_size_owners: Arc<PtySizeOwners>,
 ) {
     console.client_connected(peer_ip);
     let (sink, mut stream) = socket.split();
@@ -855,6 +915,11 @@ async fn handle_pty_socket(
             return;
         }
     };
+    // This connection now owns sizing for its PTY: the most recently attached socket
+    // wins, so a second viewer opening takes over and the first viewer's later
+    // resizes are ignored until it reattaches. Released on disconnect below.
+    let conn_id = pty_size_owners.next_conn_id();
+    pty_size_owners.claim(target.pty_id(), conn_id);
     // Replay the buffered scrollback/repaint before streaming live bytes.
     send_binary(&sink, repaint).await;
     let pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
@@ -893,11 +958,14 @@ async fn handle_pty_socket(
             Message::Binary(bytes) => {
                 engine.write_pty(target.pty_id().to_string(), bytes.to_vec());
             }
-            // Text frame = a resize control message. Resize is gated to this socket's
-            // own PTY (the socket IS the subscription); multi-viewer is last-writer-
-            // wins, but only sockets attached to THIS pty can resize it.
+            // Text frame = a resize control message. Applied to the engine PTY ONLY
+            // when this connection currently owns sizing (the most recently attached
+            // viewer). A non-owner's resize is dropped, breaking the last-writer-wins
+            // feedback loop between two viewers of the same PTY.
             Message::Text(text) => {
-                if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
+                if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str())
+                    && pty_size_owners.may_resize(target.pty_id(), conn_id)
+                {
                     engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
                 }
             }
@@ -906,8 +974,10 @@ async fn handle_pty_socket(
         }
     }
 
-    // Detach: stop the forwarder so it doesn't linger on the subscription.
+    // Detach: stop the forwarder so it doesn't linger on the subscription, and
+    // release sizing ownership so the next attach (or the next live resize) claims it.
     pty_forwarder.abort();
+    pty_size_owners.release(target.pty_id(), conn_id);
     console.client_disconnected(peer_ip);
 }
 
@@ -988,41 +1058,6 @@ fn spawn_spine_changed_forwarder(
                     bus.emit(projects_changed_event());
                     bus.emit(sessions_changed_event());
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
-}
-
-/// A `session.commit_message` signal for one session: no `rev`, just "a new
-/// commit message is ready — refetch `/api/v1/sessions/:id/commit-message`",
-/// delivered on the fine `session:<id>:commit-message` topic.
-fn commit_message_event(session_id: String) -> Event {
-    Event::Resource {
-        event: "session.commit_message".to_string(),
-        id: Some(session_id),
-        rev: None,
-    }
-}
-
-/// Bridge engine commit-message completions onto the event bus as per-session
-/// `session.commit_message` events. The engine broadcasts a `CommitMessageEvent`
-/// when a one-shot generation finishes; this re-emits the matching event so a
-/// subscribed client refetches the generated draft. On `Lagged` it cannot know
-/// which sessions it missed, so it emits nothing (the on-connect commit-message
-/// snapshot, also delivered on `/ws/events`, backstops a reconnecting client).
-/// Exits when the engine — and thus the broadcast — is gone. Returns the task
-/// handle (tests use it; the
-/// production caller fire-and-forgets).
-fn spawn_commit_message_forwarder(
-    mut commit_rx: tokio::sync::broadcast::Receiver<crate::engine_actor::CommitMessageEvent>,
-    bus: Arc<EventBus>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            match commit_rx.recv().await {
-                Ok(event) => bus.emit(commit_message_event(event.session_id)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -1164,9 +1199,7 @@ async fn ws_events_upgrade(
 /// Besides resource-change events, this socket also delivers status toasts: the
 /// live status broadcast, the status-clear broadcast, and the on-connect status
 /// snapshot — all filtered by the per-connection scope rule ([`scope_delivers`])
-/// so one client's operation toasts never leak to another. The on-connect
-/// commit-message snapshot is delivered here too, as `session.commit_message`
-/// events the client refetches.
+/// so one client's operation toasts never leak to another.
 #[allow(clippy::too_many_arguments)]
 async fn handle_events_socket(
     socket: WebSocket,
@@ -1220,25 +1253,6 @@ async fn handle_events_socket(
         }
     }
 
-    // Initial commit messages: a client that reconnected after generation
-    // completed (or in the connect/subscribe gap) is nudged to refetch each
-    // session's last generated message via a `session.commit_message` event. The
-    // client applies it conservatively (only into a matching, still-empty draft).
-    for event in engine.commit_message_snapshots() {
-        if event.message.is_empty() {
-            continue;
-        }
-        let _ = send_event(
-            &sink,
-            &WireEvent {
-                event: "session.commit_message".to_string(),
-                id: Some(event.session_id),
-                rev: None,
-            },
-        )
-        .await;
-    }
-
     // This connection's fine + coarse topic set (the sole owner), wrapped in a Drop
     // guard so the held fine-topic interests are drained on EVERY exit — including
     // task cancellation (a runtime shutdown drops this future at an `.await`), not
@@ -1283,9 +1297,6 @@ async fn handle_events_socket(
                         ("session.changes", Some(sid)) => {
                             interest.subscribed.contains(&event_bus::changes_topic(sid))
                         }
-                        ("session.commit_message", Some(sid)) => interest
-                            .subscribed
-                            .contains(&event_bus::commit_message_topic(sid)),
                         ("config.changed", _) => interest.subscribed.contains("config"),
                         // Coarse spine signals ride their own coarse topics (no
                         // id/rev — a plain refetch of `/api/v1/spine`).
@@ -1314,24 +1325,6 @@ async fn handle_events_socket(
                                 event: "session.changes".to_string(),
                                 id: Some(sid.to_string()),
                                 rev: changes.peek_rev(sid),
-                            };
-                            if send_event(&sink, &frame).await.is_err() {
-                                sink_dead = true;
-                                break;
-                            }
-                        // The fine commit-message topic carries no rev either, so the
-                        // changes branch above never covers it. A lagged client holding
-                        // it must be nudged to refetch each session's generated draft;
-                        // mirror the on-connect commit-message snapshot (only when a
-                        // fresh message actually exists, to avoid a spurious refetch).
-                        } else if let Some(sid) =
-                            event_bus::session_id_from_commit_message_topic(topic)
-                            .filter(|sid| engine.commit_message_for(sid).is_some())
-                        {
-                            let frame = WireEvent {
-                                event: "session.commit_message".to_string(),
-                                id: Some(sid.to_string()),
-                                rev: None,
                             };
                             if send_event(&sink, &frame).await.is_err() {
                                 sink_dead = true;
@@ -2341,8 +2334,6 @@ mod tests {
                 "/api/v1/sessions/reorder",
                 Some(r#"{"project_id":"p1","session_ids":[]}"#),
             ),
-            ("POST", "/api/v1/sessions/s1/commit-message", None),
-            ("GET", "/api/v1/sessions/s1/commit-message", None),
             ("POST", "/api/v1/projects", Some(r#"{"path":"/x"}"#)),
             ("DELETE", "/api/v1/projects/p1", None),
             ("PATCH", "/api/v1/projects/p1", Some("{}")),
@@ -2436,8 +2427,6 @@ mod tests {
             ("DELETE", "/api/v1/sessions/nope", None),
             ("PATCH", "/api/v1/sessions/nope", Some(r#"{"title":"x"}"#)),
             ("POST", "/api/v1/sessions/nope/reconnect", Some("{}")),
-            ("POST", "/api/v1/sessions/nope/commit-message", None),
-            ("GET", "/api/v1/sessions/nope/commit-message", None),
             // Companion-terminal verbs resolve the session first → 404 when unknown.
             ("POST", "/api/v1/sessions/nope/terminals", None),
             ("DELETE", "/api/v1/sessions/nope/terminals/t1", None),
@@ -2571,22 +2560,16 @@ mod tests {
         );
     }
 
-    /// `GET /api/v1/sessions/:id/commit-message` is 404 when nothing has been
-    /// generated for a (known) session, and the literal `/reorder` segment does not
-    /// collide with `:id` (a reorder with an empty list against the seeded project
-    /// is accepted — 200 — not routed into the `:id` handler).
+    /// The literal `/reorder` segment does not collide with `:id` (a reorder with a
+    /// full list against the seeded project is accepted — 200 — not routed into the
+    /// `:id` handlers).
     #[tokio::test]
-    async fn commit_message_get_404_and_reorder_does_not_collide() {
+    async fn reorder_segment_does_not_collide_with_id() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = seeded_engine_handle(tmp.path());
         let auth = auth::shared_auth(&[], false);
         let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
 
-        // No message generated for the seeded session yet → 404.
-        assert_eq!(
-            oneshot_status(&app, "GET", "/api/v1/sessions/s1/commit-message", None).await,
-            StatusCode::NOT_FOUND,
-        );
         // `/reorder` is its own route, not `:id`. The seeded project p1 has exactly
         // session s1, so reordering to [s1] is accepted (200).
         assert_eq!(
@@ -2601,33 +2584,63 @@ mod tests {
         );
     }
 
-    /// The commit-message forwarder maps a `CommitMessageEvent` onto a per-session
-    /// `session.commit_message` event on the bus (the contract the frontend
-    /// subscribes to for `GET /api/v1/sessions/:id/commit-message`).
-    #[tokio::test]
-    async fn commit_message_forwarder_emits_event_on_the_bus() {
-        let bus = Arc::new(EventBus::new());
-        let mut rx = bus.subscribe();
-        let (tx, commit_rx) =
-            tokio::sync::broadcast::channel::<crate::engine_actor::CommitMessageEvent>(8);
-        let _handle = spawn_commit_message_forwarder(commit_rx, Arc::clone(&bus));
+    /// Two viewers of one PTY: the most recently attached connection owns sizing.
+    /// The later attacher's resize applies; the earlier one's is ignored. After the
+    /// owner drops, the surviving connection's next resize claims ownership.
+    #[test]
+    fn pty_size_owner_is_most_recent_attach_and_releases_on_drop() {
+        let owners = PtySizeOwners::default();
+        let pty = "session-1";
 
-        tx.send(crate::engine_actor::CommitMessageEvent {
-            session_id: "s1".to_string(),
-            message: "msg".to_string(),
-        })
-        .unwrap();
-        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-            .await
-            .expect("event delivered")
-            .expect("bus open");
-        assert_eq!(
-            ev,
-            Event::Resource {
-                event: "session.commit_message".to_string(),
-                id: Some("s1".to_string()),
-                rev: None,
-            }
+        // First viewer attaches and owns sizing.
+        let conn_a = owners.next_conn_id();
+        owners.claim(pty, conn_a);
+        assert!(
+            owners.may_resize(pty, conn_a),
+            "the sole attached connection owns sizing"
+        );
+
+        // Second viewer attaches: it becomes the owner (most-recent-attach wins).
+        let conn_b = owners.next_conn_id();
+        owners.claim(pty, conn_b);
+        assert!(
+            owners.may_resize(pty, conn_b),
+            "the later attacher's resize applies"
+        );
+        assert!(
+            !owners.may_resize(pty, conn_a),
+            "the earlier attacher's resize is ignored while it is not the owner"
+        );
+
+        // The owner (B) disconnects and releases ownership.
+        owners.release(pty, conn_b);
+        // Now A's next resize claims the unowned PTY and applies.
+        assert!(
+            owners.may_resize(pty, conn_a),
+            "after the owner drops, the surviving connection claims sizing on its next resize"
+        );
+        // B's stale id no longer owns it.
+        assert!(!owners.may_resize(pty, conn_b));
+    }
+
+    /// `release` is a no-op when another connection has already claimed the PTY, so
+    /// a late-arriving disconnect from a former owner never steals sizing from the
+    /// current one.
+    #[test]
+    fn pty_size_owner_release_does_not_clobber_a_newer_owner() {
+        let owners = PtySizeOwners::default();
+        let pty = "term-9";
+
+        let conn_a = owners.next_conn_id();
+        owners.claim(pty, conn_a);
+        let conn_b = owners.next_conn_id();
+        owners.claim(pty, conn_b);
+
+        // A disconnects after B took over: releasing A must not drop B's ownership.
+        owners.release(pty, conn_a);
+        assert!(
+            owners.may_resize(pty, conn_b),
+            "B remains the owner after A's stale release"
         );
     }
 

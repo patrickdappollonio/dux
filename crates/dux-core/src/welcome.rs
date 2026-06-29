@@ -85,17 +85,6 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: Some(
-            "Tired of writing commit messages? `Generate with AI` in the commit dialog does it for you.",
-        ),
-        tui: Some(|resolve| {
-            format!(
-                "Tired of writing commit messages? `{}` lets AI do it for you.",
-                resolve(Action::GenerateCommitMessage)
-            )
-        }),
-    },
-    WelcomeTip {
         web: None,
         tui: Some(|resolve| {
             format!(

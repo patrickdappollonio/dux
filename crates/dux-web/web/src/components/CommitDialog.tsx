@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Loader2, Sparkles } from "lucide-react"
+import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { git } from "@/lib/git"
 import { Button } from "@/components/ui/button"
@@ -11,23 +11,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  closeCommit,
-  generateCommitMessage,
-  setCommitDraft,
-  useDux,
-} from "@/lib/store"
+import { closeCommit, setCommitDraft, useDux } from "@/lib/store"
 
 export function CommitDialog() {
-  const { commitTarget, commitDraft, changes } = useDux()
+  const { commitTarget, commitDraft } = useDux()
   const [committing, setCommitting] = useState(false)
 
   const isOpen = commitTarget !== null
-  // Only trust the staged list when the changes slice belongs to THIS dialog's
-  // session, so "Generate with AI" never lights up off another session's stale
-  // staged count.
-  const stagedCount =
-    changes.sessionId === commitTarget ? changes.staged.length : 0
 
   async function handleCommit() {
     if (!commitTarget || !commitDraft.trim() || committing) return
@@ -40,11 +30,6 @@ export function CommitDialog() {
     } finally {
       setCommitting(false)
     }
-  }
-
-  function handleGenerate() {
-    if (!commitTarget) return
-    generateCommitMessage(commitTarget)
   }
 
   function handleOpenChange(open: boolean) {
@@ -70,30 +55,20 @@ export function CommitDialog() {
             }
           }}
         />
-        <DialogFooter className="sm:justify-between">
-          <Button
-            variant="outline"
-            onClick={handleGenerate}
-            disabled={stagedCount === 0}
-          >
-            <Sparkles />
-            Generate with AI
+        <DialogFooter>
+          <Button variant="outline" onClick={() => closeCommit()}>
+            Cancel
           </Button>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => closeCommit()}>
-              Cancel
-            </Button>
-            <Button
-              onClick={handleCommit}
-              disabled={committing || !commitDraft.trim()}
-              aria-busy={committing}
-            >
-              {committing ? (
-                <Loader2 className="motion-safe:animate-spin" />
-              ) : null}
-              Commit
-            </Button>
-          </div>
+          <Button
+            onClick={handleCommit}
+            disabled={committing || !commitDraft.trim()}
+            aria-busy={committing}
+          >
+            {committing ? (
+              <Loader2 className="motion-safe:animate-spin" />
+            ) : null}
+            Commit
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

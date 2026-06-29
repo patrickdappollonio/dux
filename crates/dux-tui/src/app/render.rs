@@ -1755,15 +1755,7 @@ impl App {
         self.commit_input
             .set_visible_lines(text_area.height as usize);
 
-        if let Some(overlay) = self.commit_input.overlay() {
-            // Overlay (e.g. "Generating commit message…") with spinner prefix.
-            let idx = self.spinner_frame_index();
-            let spinner = crate::theme::SPINNER_FRAMES[idx];
-            let text = format!("{spinner} {overlay}");
-            Paragraph::new(text)
-                .style(Style::default().fg(self.theme.hint_desc_fg))
-                .render(text_area, frame.buffer_mut());
-        } else if self.commit_input.is_empty() && !focused {
+        if self.commit_input.is_empty() && !focused {
             // Show placeholder when unfocused and empty — nothing to render
             // (the placeholder is shown only when focused, below).
         } else {
@@ -1805,7 +1797,6 @@ impl App {
             let desc_style = Style::default().fg(self.theme.hint_dim_desc_fg);
             let exit = self.bindings.labels_for(Action::ExitCommitInput);
             let engage = self.bindings.labels_for(Action::EngageCommitInput);
-            let ai_msg = self.bindings.label_for(Action::GenerateCommitMessage);
             let commit = self.bindings.label_for(Action::CommitChanges);
             let mut spans: Vec<Span> = Vec::new();
             if focused {
@@ -1814,8 +1805,6 @@ impl App {
             } else {
                 spans.extend(self.theme.dim_key_badge_default(&engage));
                 spans.push(Span::styled(" Edit  ", desc_style));
-                spans.extend(self.theme.dim_key_badge_default(&ai_msg));
-                spans.push(Span::styled(" AI msg  ", desc_style));
                 spans.extend(self.theme.dim_key_badge_default(&commit));
                 spans.push(Span::styled(" Commit", desc_style));
             }

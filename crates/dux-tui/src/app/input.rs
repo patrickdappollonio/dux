@@ -1033,9 +1033,6 @@ impl App {
                 Action::DiscardChanges if self.right_section != RightSection::CommitInput => {
                     self.confirm_discard_selected_file()?;
                 }
-                Action::GenerateCommitMessage => {
-                    self.trigger_ai_commit_message()?;
-                }
                 Action::EngageCommitInput if !self.engine.staged_files.is_empty() => {
                     self.input_target = InputTarget::CommitMessage;
                 }
@@ -1222,90 +1219,6 @@ impl App {
         Ok(())
     }
 
-    fn trigger_ai_commit_message(&mut self) -> Result<()> {
-        if self.engine.staged_files.is_empty() {
-            self.set_error("Stage files first.");
-            return Ok(());
-        }
-        if self.commit_input.overlay().is_some() {
-            return Ok(());
-        }
-        let Some(session) = self.selected_session() else {
-            self.set_error("Select a session first.");
-            return Ok(());
-        };
-        let worktree = PathBuf::from(&session.worktree_path);
-        // Tag the worker events with the originating session so the result is
-        // session-scoped end-to-end (the web routes it to the matching dialog).
-        let session_id = session.id.clone();
-        let base_prompt = self.engine.config.default_commit_prompt();
-
-        // Capture the staged diff up-front so the provider does not need tool
-        // access to inspect it. The diff is appended after the prompt text.
-        let diff_text = match git::staged_diff_text(&worktree) {
-            Ok(d) if d.is_empty() => {
-                self.set_error("No staged diff found.");
-                return Ok(());
-            }
-            Ok(d) => d,
-            Err(e) => {
-                self.set_error(format!("Failed to read staged diff: {e}"));
-                return Ok(());
-            }
-        };
-        let prompt = format!("{base_prompt}\n\n{diff_text}");
-
-        let cfg = provider_config(&self.engine.config, &session.provider);
-        let prov = provider::create_provider(session.provider.as_str(), cfg);
-        let tx = self.engine.worker_tx.clone();
-        // Resolve the render-time keybinding labels HERE (the worker thread has
-        // no access to `self.bindings`) and bake them into the StatusOp's
-        // outcomes. The status rides a separate StatusOpCompleted event; the
-        // CommitMessageGenerated/Failed events (shared with the web) keep doing
-        // only their domain work (set the draft text / clear the overlay).
-        let exit_key = self.bindings.label_for(Action::ExitCommitInput);
-        let commit_key = self.bindings.label_for(Action::CommitChanges);
-        let gen_key = self.bindings.label_for(Action::GenerateCommitMessage);
-        let op = dux_core::engine::status_op(
-            "Generating AI commit message from staged diff\u{2026}",
-        )
-        .on_success(move |_: &String| {
-            dux_core::engine::Final::info(format!(
-                "AI commit message generated. Press {exit_key} to exit, then {commit_key} to commit.",
-            ))
-        })
-        .on_failure(move |e: &String| {
-            dux_core::engine::Final::error(format!(
-                "Failed to generate AI commit message: {e}. \
-                 You can write one manually or retry with {gen_key}.",
-            ))
-        });
-        let pending = op.pending_status();
-        self.commit_input
-            .set_overlay("Generating commit message\u{2026}");
-        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
-        thread::spawn(move || match prov.run_oneshot(&prompt, &worktree) {
-            Ok(message) => {
-                let resolved = op.resolve(&Ok::<String, String>(message.clone()));
-                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-                let _ = tx.send(WorkerEvent::CommitMessageGenerated {
-                    session_id,
-                    message,
-                });
-            }
-            Err(e) => {
-                let err = e.to_string();
-                let resolved = op.resolve(&Err::<String, String>(err.clone()));
-                let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-                let _ = tx.send(WorkerEvent::CommitMessageFailed {
-                    session_id,
-                    error: err,
-                });
-            }
-        });
-        Ok(())
-    }
-
     fn execute_commit(&mut self) -> Result<()> {
         if self.engine.staged_files.is_empty() {
             self.set_error("No staged changes to commit.");
@@ -1322,10 +1235,8 @@ impl App {
         let worktree = PathBuf::from(&session.worktree_path);
         let message = self.commit_input.text.clone();
         let push_key = self.bindings.label_for(Action::PushToRemote);
-        let ai_key = self.bindings.label_for(Action::GenerateCommitMessage);
-        let success_message = format!(
-            "Changes committed successfully. Press {push_key} to push to remote, or {ai_key} to generate an AI message."
-        );
+        let success_message =
+            format!("Changes committed successfully. Press {push_key} to push to remote.");
         let reaction = self.engine.apply(Command::CommitChanges {
             worktree_path: worktree,
             message,

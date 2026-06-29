@@ -15,18 +15,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const DEFAULT_COMMIT_PROMPT: &str = "\
-Write a commit message for the following staged diff.
-
-Rules:
-- Subject line: use Conventional Commits (feat:, fix:, refactor:, docs:, test:, chore:, style:, perf:, ci:, build:). Imperative mood, max 72 chars, no period at the end.
-- Trivial changes (typo, rename, one-liner): ONLY the subject line, nothing else.
-- Small changes (2-3 files, single logical concern): subject line, blank line, then a short paragraph (2-3 sentences max) explaining the motivation and impact. Do NOT use bullet points for this case.
-- Larger changes (4+ files or multiple distinct logical concerns): subject line, blank line, then concise bullet points (one per logical change, each under 80 chars). Use \"- \" for bullets.
-- This is a plain text commit message, not markdown. NEVER use backticks, asterisks, code fences, or any markdown syntax. Refer to functions and files by name without formatting.
-- Focus on intent and impact, not mechanical description of lines added/removed.
-- Output ONLY the raw commit message. No preamble, no quotes, no explanation.";
-
 /// Which surface(s) a macro is available on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -119,7 +107,6 @@ pub struct MacrosConfig {
 pub struct Defaults {
     pub provider: String,
     pub start_directory: Option<String>,
-    pub commit_prompt: Option<String>,
     pub enable_randomized_pet_name_by_default: bool,
     #[serde(default = "default_true")]
     pub pull_before_creating_agent_by_default: bool,
@@ -269,22 +256,13 @@ pub struct AuthConfig {
     pub users: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OneshotOutput {
-    Stdout,
-    Tempfile,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderCommandConfig {
     pub command: String,
     pub args: Vec<String>,
     pub resume_args: Option<Vec<String>>,
     pub resume_wait_timeout_ms: Option<u64>,
-    pub oneshot_args: Vec<String>,
-    pub oneshot_output: OneshotOutput,
     pub install_hint: Option<String>,
     /// Scroll-forwarding policy for the wheel and PgUp/PgDn over this
     /// provider's embedded PTY. Tri-state:
@@ -355,7 +333,6 @@ impl Default for Defaults {
         Self {
             provider: "claude".to_string(),
             start_directory,
-            commit_prompt: Some(DEFAULT_COMMIT_PROMPT.to_string()),
             enable_randomized_pet_name_by_default: false,
             pull_before_creating_agent_by_default: true,
         }
@@ -369,21 +346,6 @@ impl Default for ProvidersConfig {
             .map(|(name, config)| (name.to_string(), config))
             .collect();
         Self { commands }
-    }
-}
-
-impl Default for ProviderCommandConfig {
-    fn default() -> Self {
-        Self {
-            command: String::new(),
-            args: Vec::new(),
-            resume_args: None,
-            resume_wait_timeout_ms: None,
-            oneshot_args: Vec::new(),
-            oneshot_output: OneshotOutput::Stdout,
-            install_hint: None,
-            forward_scroll: None,
-        }
     }
 }
 
@@ -528,16 +490,6 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 args: Vec::new(),
                 resume_args: Some(vec!["--continue".to_string()]),
                 resume_wait_timeout_ms: None,
-                oneshot_args: vec![
-                    "--bare".to_string(),
-                    "-p".to_string(),
-                    "{prompt}".to_string(),
-                    "--tools".to_string(),
-                    String::new(),
-                    "--max-turns".to_string(),
-                    "1".to_string(),
-                ],
-                oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://claude.ai/install.sh | bash".to_string()),
                 forward_scroll: None,
             },
@@ -549,17 +501,6 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 args: Vec::new(),
                 resume_args: Some(vec!["resume".to_string(), "--last".to_string()]),
                 resume_wait_timeout_ms: None,
-                oneshot_args: vec![
-                    "exec".to_string(),
-                    "--ephemeral".to_string(),
-                    "--full-auto".to_string(),
-                    "--color".to_string(),
-                    "never".to_string(),
-                    "-o".to_string(),
-                    "{tempfile}".to_string(),
-                    "{prompt}".to_string(),
-                ],
-                oneshot_output: OneshotOutput::Tempfile,
                 install_hint: Some("brew install --cask codex".to_string()),
                 forward_scroll: None,
             },
@@ -571,8 +512,6 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 args: Vec::new(),
                 resume_args: Some(vec!["--continue".to_string()]),
                 resume_wait_timeout_ms: Some(3_000),
-                oneshot_args: vec!["run".to_string(), "{prompt}".to_string()],
-                oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://opencode.ai/install | bash".to_string()),
                 forward_scroll: None,
             },
@@ -588,12 +527,6 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 // to limit resume to the CWD, so we disable it.
                 resume_args: None,
                 resume_wait_timeout_ms: None,
-                oneshot_args: vec![
-                    "-p".to_string(),
-                    "{prompt}".to_string(),
-                    "--allow-all-tools".to_string(),
-                ],
-                oneshot_output: OneshotOutput::Stdout,
                 install_hint: Some("curl -fsSL https://gh.io/copilot-install | bash".to_string()),
                 forward_scroll: None,
             },
@@ -982,15 +915,6 @@ impl Default for Config {
 impl Config {
     pub fn default_provider(&self) -> crate::model::ProviderKind {
         crate::model::ProviderKind::from_str(&self.defaults.provider)
-    }
-
-    pub fn default_commit_prompt(&self) -> String {
-        self.defaults
-            .commit_prompt
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_COMMIT_PROMPT.to_string())
     }
 }
 

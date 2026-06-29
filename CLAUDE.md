@@ -39,7 +39,7 @@ The web UI (`crates/dux-web/web/`, React + Vite + Tailwind v4) has its own conve
 
 ### Agents and Providers
 
-- **A provider is supported if and only if it supports PTY and oneshot mode.** PTY for interactive sessions; oneshot (headless: send a prompt, get one response) for automated tasks like commit message generation.
+- **A provider is supported if and only if it supports PTY mode.** dux embeds the CLI's interactive session in a pseudo-terminal; that is the only thing a provider has to support.
 - **Any CLI tool can be a provider.** Configure `command` in `config.toml` and dux spawns it. No adapters, no protocol layer. Adding a new provider is a config-only change, not a code change.
 - **Claude, Codex, OpenCode, and Copilot are the defaults.**
 - **No protocol layer.** No JSON-RPC, no custom message format, no adapter binaries. The CLI runs exactly as it would in a normal terminal.

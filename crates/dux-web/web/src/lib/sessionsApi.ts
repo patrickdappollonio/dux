@@ -1,6 +1,6 @@
 // HTTP client for mutating agent-session operations (create/fork/from-worktree/
 // from-pr, delete, rename, change-provider, toggle auto-reopen, reconnect,
-// reorder, trigger commit-message generation). These used to ride the
+// reorder). These used to ride the
 // fire-and-forget `/ws` `sendCommand` channel; they are now scoped, programmable
 // REST verbs so the server can authorize each one and route its operation toasts
 // back to the initiating client.
@@ -107,14 +107,4 @@ export const sessionsApi = {
       project_id: projectId,
       session_ids: sessionIds,
     }),
-  generateCommitMessage: (id: string) =>
-    request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/commit-message`),
-  // Fetch the latest generated commit message for a session, triggered by a
-  // `session.commit_message` event over `/ws/events`. Throws a 404 `SessionsApiError`
-  // when none has been generated yet (the caller drops it).
-  commitMessage: (id: string) =>
-    request<{ session_id: string; message: string }>(
-      "GET",
-      `/api/v1/sessions/${encodeURIComponent(id)}/commit-message`,
-    ),
 }

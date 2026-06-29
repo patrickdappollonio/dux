@@ -195,7 +195,7 @@ export interface ResourceEvent {
 // Server -> client `/ws/events` frame. A single flat shape (the server emits a
 // flat JSON object) discriminated by `event`:
 //   - resource changes: `session.changes` (id+rev), `projects.changed`,
-//     `sessions.changed`, `config.changed`, `session.commit_message` (id)
+//     `sessions.changed`, `config.changed`
 //     (terminal add/remove/relabel folds into `sessions.changed`; there is no
 //     separate `terminals.changed` frame);
 //   - control frames migrated off the retired `/ws`: `connected` (id = the
@@ -206,7 +206,7 @@ export interface ResourceEvent {
 // read only the fields that frame carries.
 export interface EventsServerMessage {
   event: string
-  /** Resource id (`session.changes`/`session.commit_message`)
+  /** Resource id (`session.changes`)
    *  OR the per-connection id (`connected`). */
   id?: string
   /** Monotonic per-session revision (`session.changes`). */

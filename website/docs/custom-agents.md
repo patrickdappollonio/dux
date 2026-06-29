@@ -13,14 +13,9 @@ would in a normal terminal.
 
 ## The one rule
 
-A tool can be a provider if and only if it supports two modes:
-
-- **PTY mode:** an interactive session dux can embed in a pseudo-terminal. This is
-  how you actually work with the agent.
-- **Oneshot mode** (headless): hand it a prompt, get one response back. dux uses
-  this for automated tasks like generating commit messages.
-
-If your CLI can do both, dux can drive it.
+A tool can be a provider if and only if it supports **PTY mode**: an interactive
+session dux can embed in a pseudo-terminal. That's how you actually work with the
+agent. If your CLI can run interactively in a terminal, dux can drive it.
 
 ## Anatomy of a provider
 
@@ -39,11 +34,6 @@ resume_args = ["--continue"]
 # Optional timeout (ms) for a resumed session that renders nothing. If a resume
 # hangs before showing output, dux kills it and starts fresh. 0 disables it.
 resume_wait_timeout_ms = 0
-# Oneshot args for non-interactive use (e.g. AI commit messages).
-# Placeholders: {prompt} = the prompt text, {tempfile} = a temp file path.
-oneshot_args = ["--bare", "-p", "{prompt}", "--tools", "", "--max-turns", "1"]
-# Where to read the oneshot response from: "stdout" or "tempfile".
-oneshot_output = "stdout"
 # Hint shown to the user when the command isn't found on PATH.
 install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 # Where the mouse wheel and PgUp/PgDn go. Leave this key absent for auto: dux
@@ -54,33 +44,16 @@ install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
 # forward_scroll = true
 ```
 
-### The oneshot placeholders
-
-`oneshot_args` is a template. dux substitutes two placeholders before running it:
-
-- `{prompt}`: the prompt text, inserted as a single argument.
-- `{tempfile}`: the path to a temp file dux creates for the run.
-
-How you read the result depends on the CLI:
-
-- `oneshot_output = "stdout"`: dux captures the command's standard output. Use this
-  when the CLI prints its answer.
-- `oneshot_output = "tempfile"`: dux reads the file at `{tempfile}` after the
-  command exits. Use this when the CLI writes its answer to a file you pass it.
-
 ## A worked example
 
-Say you have a CLI called `myagent` that takes a prompt with `--prompt` for
-interactive use and writes a oneshot answer to a file given by `--out`. The whole
-integration is this:
+Say you have a CLI called `myagent` that you launch interactively with no extra
+arguments and resume with `--continue`. The whole integration is this:
 
 ```toml
 [providers.myagent]
 command = "myagent"
 args = []
-resume_args = []
-oneshot_args = ["--out", "{tempfile}", "--prompt", "{prompt}"]
-oneshot_output = "tempfile"
+resume_args = ["--continue"]
 install_hint = "see https://example.com/install"
 # forward_scroll left absent: auto-detect (forward only to a fullscreen,
 # mouse-aware child, otherwise dux host scrollback).

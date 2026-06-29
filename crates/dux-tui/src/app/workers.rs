@@ -298,25 +298,6 @@ impl App {
                 self.apply_agent_launch_failed_view(*boxed);
             }
 
-            EventReaction::CommitMessageGenerated {
-                session_id: _,
-                message,
-            } => {
-                // Domain only: drop the draft into the input. The user-facing
-                // status rides the StatusOp's separate StatusOpCompleted event.
-                self.commit_input.clear_overlay();
-                self.commit_input.set_text(message);
-                self.input_target = InputTarget::CommitMessage;
-            }
-            EventReaction::CommitMessageFailed {
-                session_id: _,
-                error: _,
-            } => {
-                // Domain only: clear the overlay. The failure status rides the
-                // StatusOp's separate StatusOpCompleted event.
-                self.commit_input.clear_overlay();
-            }
-
             EventReaction::BrowserEntriesArrived { dir, entries } => {
                 if let PromptState::BrowseProjects {
                     current_dir,

@@ -156,12 +156,6 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.defaults.start_directory.as_deref(),
         current.defaults.start_directory.as_deref(),
     );
-    diff_opt_str(
-        &mut changes,
-        "defaults.commit_prompt",
-        defaults.defaults.commit_prompt.as_deref(),
-        current.defaults.commit_prompt.as_deref(),
-    );
 
     // [logging]
     diff_str(

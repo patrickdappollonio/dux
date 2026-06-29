@@ -141,18 +141,6 @@ pub enum EventReaction {
     AgentLaunchReadyView(Box<AgentLaunchReadyOutcome>),
     AgentLaunchFailedView(Box<AgentLaunchFailedOutcome>),
 
-    // -- Commit message overlay (App formats final status with bindings). The
-    //    session id scopes the result so a web client routes it to the matching
-    //    commit dialog (the TUI has a single dialog and ignores it). --
-    CommitMessageGenerated {
-        session_id: String,
-        message: String,
-    },
-    CommitMessageFailed {
-        session_id: String,
-        error: String,
-    },
-
     // -- Picker/browser prompts. --
     BrowserEntriesArrived {
         dir: std::path::PathBuf,
@@ -1501,16 +1489,6 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
-            WorkerEvent::CommitMessageGenerated {
-                session_id,
-                message,
-            } => EventReaction::CommitMessageGenerated {
-                session_id,
-                message,
-            },
-            WorkerEvent::CommitMessageFailed { session_id, error } => {
-                EventReaction::CommitMessageFailed { session_id, error }
-            }
             WorkerEvent::StatusOpCompleted { resolved } => resolved.into_reaction(),
             WorkerEvent::PullCompleted {
                 repo_path,
@@ -2173,8 +2151,6 @@ mod tests {
             EventReaction::ClampFilesCursor => "ClampFilesCursor",
             EventReaction::AgentLaunchReadyView(_) => "AgentLaunchReadyView",
             EventReaction::AgentLaunchFailedView(_) => "AgentLaunchFailedView",
-            EventReaction::CommitMessageGenerated { .. } => "CommitMessageGenerated",
-            EventReaction::CommitMessageFailed { .. } => "CommitMessageFailed",
             EventReaction::BrowserEntriesArrived { .. } => "BrowserEntriesArrived",
             EventReaction::ProjectWorktreesArrived { .. } => "ProjectWorktreesArrived",
             EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",

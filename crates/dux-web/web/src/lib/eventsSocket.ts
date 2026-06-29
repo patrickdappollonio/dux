@@ -160,8 +160,8 @@ export class EventsSocket {
     }
     // Every server frame carries an `event` discriminator — resource-change
     // events (`session.changes`, `projects.changed`, …) plus the control frames
-    // the old `/ws` used to carry (`connected`, `status`, `status_cleared`,
-    // `session.commit_message`). Forward as-is; the store's single handler
+    // the old `/ws` used to carry (`connected`, `status`, `status_cleared`).
+    // Forward as-is; the store's single handler
     // switches on `event`. Lag catch-up arrives as an ordinary `session.changes`
     // for this connection, so it is covered too.
     if (typeof message.event === "string") {

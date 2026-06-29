@@ -19,11 +19,6 @@ pub struct TextInput {
     multiline: Option<MultilineState>,
     /// Optional placeholder text shown when the input is empty.
     placeholder: Option<String>,
-    /// Temporary overlay message that replaces the display (e.g. a loading
-    /// indicator). While set, the underlying text is preserved and any edits
-    /// are applied normally — when the overlay is dismissed the current text
-    /// is shown.
-    overlay: Option<String>,
     /// Optional mapper consulted before each character insertion. Receives
     /// the current text, the cursor byte-offset where the character would be
     /// inserted, and the candidate character. Return `Some(c)` to insert `c`
@@ -59,7 +54,6 @@ impl TextInput {
             cursor: 0,
             multiline: None,
             placeholder: None,
-            overlay: None,
             char_map: None,
             masked: false,
         }
@@ -72,7 +66,6 @@ impl TextInput {
             cursor,
             multiline: None,
             placeholder: None,
-            overlay: None,
             char_map: None,
             masked: false,
         }
@@ -87,23 +80,6 @@ impl TextInput {
     /// Returns the placeholder text, if set, for rendering when the input is empty.
     pub fn placeholder(&self) -> Option<&str> {
         self.placeholder.as_deref()
-    }
-
-    /// Set a temporary overlay message that replaces the display.
-    /// The underlying text is preserved; edits applied while the overlay
-    /// is active take effect normally and are visible once dismissed.
-    pub fn set_overlay(&mut self, message: impl Into<String>) {
-        self.overlay = Some(message.into());
-    }
-
-    /// Dismiss the overlay, restoring the normal text display.
-    pub fn clear_overlay(&mut self) {
-        self.overlay = None;
-    }
-
-    /// Returns the overlay message if one is active.
-    pub fn overlay(&self) -> Option<&str> {
-        self.overlay.as_deref()
     }
 
     /// Set a character mapper that is consulted before each insertion.
