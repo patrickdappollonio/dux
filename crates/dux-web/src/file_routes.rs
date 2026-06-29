@@ -32,7 +32,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::git_routes::resolve_worktree;
-use crate::rest_common::id_within_bound;
+use crate::rest_common::{id_within_bound, unknown_session};
 use crate::server::AppState;
 
 /// Largest raw asset the markdown-preview proxy will serve. Bigger than the
@@ -100,12 +100,6 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/raw"), get(read_raw))
         .route(&format!("{prefix}/write"), post(write_file))
         .route(&format!("{prefix}/open-in-editor"), post(open_in_editor))
-}
-
-/// 404 for an unknown/over-long session id. Mirrors `session_actions` /
-/// `terminal_actions` so an oversized `:id` never reaches the engine lookup.
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Response {

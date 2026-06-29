@@ -157,18 +157,6 @@ pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
 /// [`ServerConfig::max_websocket_terminal_connections`].
 pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
 
-fn default_max_ws_events() -> u32 {
-    DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS
-}
-
-fn default_max_ws_agent() -> u32 {
-    DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS
-}
-
-fn default_max_ws_terminal() -> u32 {
-    DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -221,7 +209,6 @@ pub struct ServerConfig {
     /// class until the server restarts. Changing this requires a server restart to
     /// take effect: the connection-cap semaphore is built at startup and a config
     /// reload cannot resize it.
-    #[serde(default = "default_max_ws_events")]
     pub max_websocket_events_connections: u32,
     /// Maximum number of concurrent agent-PTY WebSocket connections. This is the
     /// embedded-terminal stream for an agent session. Once this many are live,
@@ -230,7 +217,6 @@ pub struct ServerConfig {
     /// server restarts. Changing this requires a server restart to take effect:
     /// the connection-cap semaphore is built at startup and a config reload cannot
     /// resize it.
-    #[serde(default = "default_max_ws_agent")]
     pub max_websocket_agent_connections: u32,
     /// Maximum number of concurrent terminal-PTY WebSocket connections. This is the
     /// standalone scratch-terminal stream. Once this many are live, further upgrade
@@ -238,7 +224,6 @@ pub struct ServerConfig {
     /// of 0 permanently blocks this connection class until the server restarts.
     /// Changing this requires a server restart to take effect: the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
-    #[serde(default = "default_max_ws_terminal")]
     pub max_websocket_terminal_connections: u32,
     pub acme: AcmeSettings,
 }

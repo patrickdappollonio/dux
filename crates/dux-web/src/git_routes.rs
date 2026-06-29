@@ -30,7 +30,7 @@ use axum::{
 use dux_core::wire::WireCommand;
 use serde::Deserialize;
 
-use crate::rest_common::{id_within_bound, scope_from_headers};
+use crate::rest_common::{id_within_bound, scope_from_headers, unknown_session};
 use crate::server::AppState;
 
 #[derive(Deserialize)]
@@ -65,12 +65,6 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/commit"), post(commit))
         .route(&format!("{prefix}/push"), post(push))
         .route(&format!("{prefix}/pull"), post(pull))
-}
-
-/// 404 for an unknown/over-long session id. Mirrors `session_actions` /
-/// `terminal_actions` so an oversized `:id` never reaches the engine lookup.
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 pub(crate) async fn resolve_worktree(
