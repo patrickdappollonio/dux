@@ -45,11 +45,30 @@ fn run_tui_with_flip() -> Result<()> {
             } => {
                 // Read everything the status screen needs BEFORE the engine and
                 // listeners move into `serve_with_engine`. The theme name lives
-                // on the engine's config. The flip is local-only by construction
-                // (loopback + optional Tailscale), so it is always "all local".
+                // on the engine's config. The flip is LOCAL MODE: the primary addr
+                // is always loopback, and the only non-loopback addr is the
+                // Tailscale best-effort leg (if it bound). Derive the safety note
+                // from the URLs: a non-loopback URL means the Tailscale leg
+                // successfully bound and the server is reachable on the tailnet.
                 let theme_name = engine.config.ui.theme.clone();
                 let paths = engine.paths.clone();
-                let loopback = true;
+                let safety_note = if urls.iter().any(|u| {
+                    u.strip_prefix("http://")
+                        .and_then(|rest| rest.rsplit_once(':'))
+                        .map(|(host, _)| {
+                            let ip = host.trim_start_matches('[').trim_end_matches(']');
+                            ip != "127.0.0.1" && ip != "::1"
+                        })
+                        .unwrap_or(false)
+                }) {
+                    Some(
+                        "Reachable by other devices on your tailnet (no login). \
+                         Disable with tailscale_enabled = false under [server]."
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
 
                 // The activity buffer is shared between the web console (the
                 // producer, wired in serve_with_engine) and the status screen
@@ -62,7 +81,7 @@ fn run_tui_with_flip() -> Result<()> {
                 // can drop it (restoring the terminal) AFTER serving returns.
                 let mut screen = match dux_tui::ServerStatusScreen::new(
                     &urls,
-                    loopback,
+                    safety_note,
                     &theme_name,
                     &paths,
                     activity.clone(),
