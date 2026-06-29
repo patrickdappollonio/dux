@@ -23,6 +23,7 @@ const EXPECTED_WEB_COMMANDS = [
   "add-project",
   "configure-global-env",
   "edit-macros",
+  "kill-running",
   "reload-config",
   "sort-agents-by-created",
   "sort-agents-by-name",

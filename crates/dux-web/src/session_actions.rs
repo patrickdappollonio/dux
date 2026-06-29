@@ -53,6 +53,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/sessions/{id}/rerun-startup-command",
             post(rerun_startup_command),
         )
+        .route("/api/v1/sessions/{id}/kill", post(kill_session))
 }
 
 // ── Create ───────────────────────────────────────────────────────────────────
@@ -475,6 +476,38 @@ async fn rerun_startup_command(
     }
 }
 
+// ── Kill (force-detach a running agent) ──────────────────────────────────────
+
+/// Force-kill the agent's running PTY without deleting its session or worktree
+/// (the web counterpart to one row of the TUI's kill-running modal). The engine
+/// drops the provider (SIGKILL) and marks the session Detached, so it can be
+/// reconnected. Unknown session → 404; an agent that is not running is a
+/// successful no-op. Companion terminals are killed through the existing
+/// `DELETE /api/v1/sessions/:id/terminals/:tid`.
+async fn kill_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
+        return resp;
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::KillSessionPty { session_id: id },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 // ── Reorder ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -540,6 +573,23 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/sessions/ghost/rerun-startup-command")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kill_session_404_for_unknown_session() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions/ghost/kill")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

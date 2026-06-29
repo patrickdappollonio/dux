@@ -198,6 +198,17 @@ pub enum WireCommand {
     /// talking to `gh`. The write is eager because the user wants to know if
     /// persisting the toggle failed.
     ToggleGithubIntegration {},
+    /// Force-kill a running agent's PTY WITHOUT deleting its session or
+    /// worktree, the web counterpart to the TUI's kill-running modal (for one
+    /// agent). Mirrors the force-reconnect teardown block but stops there (no
+    /// relaunch): the provider is dropped (SIGKILL on Drop), resume state is
+    /// cleared, and the session is marked Detached so it can be reconnected
+    /// later. Companion terminals are killed through the existing
+    /// `DeleteTerminal`. Unknown session is an `Err`; killing an agent that is
+    /// not running is an idempotent no-op.
+    KillSessionPty {
+        session_id: String,
+    },
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
     AddProject {
@@ -747,6 +758,13 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::KillSessionPty { session_id } => {
+                let status = self.kill_session_pty(&session_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::AddProject { .. } => {
                 // The direct add (no branch-checkout step) is the primary web add
                 // path. Like the inline checkout-add in `drive_add_project_followup`,
@@ -880,6 +898,44 @@ impl Engine {
                 ),
             ),
         }
+    }
+
+    /// Force-kill one running agent's PTY without deleting its session or
+    /// worktree. Mirrors the force-reconnect teardown block (drop the provider →
+    /// SIGKILL on Drop, clear resume state) but stops short of relaunching, and
+    /// marks the session Detached so it can be reconnected later. The per-tick
+    /// spine diff notices the status change and fires `sessions.changed`, so
+    /// connected clients refetch and the agent shows as detached. Unknown session
+    /// is an `Err` (→ 400); an agent that is not running is an idempotent no-op.
+    fn kill_session_pty(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        // No live PTY → nothing to kill. Idempotent success so a double-click or
+        // a kill racing a natural exit is not surfaced as an error.
+        if self.providers.remove(&session.id).is_none() {
+            return Ok(WireStatus::new(
+                "info",
+                format!("Agent \"{}\" is not running.", session.branch_name),
+            ));
+        }
+        // The provider was just dropped (SIGKILL). Clear the rest of the resume
+        // state exactly like the force-reconnect block, then detach the session.
+        self.running_provider_pins.remove(&session.id);
+        self.pty_activity.remove(&session.id);
+        self.pty_input.remove(&session.id);
+        self.resume_fallback_candidates.remove(&session.id);
+        self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
+        Ok(WireStatus::new(
+            "info",
+            format!(
+                "Killed the running process for agent \"{}\". It is now detached — reconnect it from the agent menu.",
+                session.branch_name
+            ),
+        ))
     }
 
     /// Rename an agent session's display title, mirroring the title half of the
@@ -2442,9 +2498,10 @@ impl Engine {
             | WireCommand::SetChangesPaneVisible { .. }
             | WireCommand::ToggleRandomizedPetNameDefault {}
             | WireCommand::TogglePrBannerPosition {}
-            | WireCommand::ToggleGithubIntegration {} => {
+            | WireCommand::ToggleGithubIntegration {}
+            | WireCommand::KillSessionPty { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-github-integration are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-github-integration/kill-session-pty are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -3278,6 +3335,105 @@ mod tests {
             .expect("apply toggle back");
         assert!(!engine.github_integration_enabled);
         assert!(!engine.config.ui.github_integration);
+    }
+
+    #[test]
+    fn wire_kill_session_pty_deserializes() {
+        let json = r#"{"command":"kill_session_pty","args":{"session_id":"s1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::KillSessionPty {
+                session_id: "s1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn apply_wire_kill_session_pty_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::KillSessionPty {
+                session_id: "ghost".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    #[test]
+    fn apply_wire_kill_session_pty_not_running_is_idempotent_noop() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.sessions.push(session);
+
+        // No provider in the map → nothing to kill, but it still succeeds.
+        let outcome = engine
+            .apply_wire(WireCommand::KillSessionPty {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply kill");
+        let status = outcome.status.expect("a status");
+        assert!(
+            status.message.contains("is not running"),
+            "msg: {}",
+            status.message
+        );
+    }
+
+    #[test]
+    fn apply_wire_kill_session_pty_kills_and_detaches() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // Spawn a real `cat` PTY so the session counts as running.
+        let client = crate::pty::PtyClient::spawn_with_env(
+            "cat",
+            &[],
+            worktree.path(),
+            24,
+            80,
+            engine.config.ui.agent_scrollback_lines,
+            &[],
+        )
+        .expect("spawn cat provider");
+        engine.providers.insert("s1".to_string(), client);
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+
+        let outcome = engine
+            .apply_wire(WireCommand::KillSessionPty {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply kill");
+        let status = outcome.status.expect("a status");
+        assert!(
+            status.message.contains("Killed the running process"),
+            "msg: {}",
+            status.message
+        );
+        // PTY removed from the live map and the session detached (not deleted).
+        assert!(
+            !engine.providers.contains_key("s1"),
+            "provider must be dropped"
+        );
+        assert!(
+            engine.sessions.iter().any(|s| s.id == "s1"),
+            "the session row must survive the kill"
+        );
+        assert_eq!(
+            engine.sessions[0].status,
+            crate::model::SessionStatus::Detached,
+            "killed agent is detached, not deleted"
+        );
     }
 
     #[test]

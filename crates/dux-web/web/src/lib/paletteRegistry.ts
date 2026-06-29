@@ -15,6 +15,7 @@
 import {
   openAddProject,
   openGlobalEnv,
+  openKillRunning,
   openMacrosDialog,
   sortAgents,
   toggleChangesPane,
@@ -31,6 +32,7 @@ export const PALETTE_HANDLERS: Record<string, () => void> = {
   "add-project": () => openAddProject(),
   "configure-global-env": () => openGlobalEnv(),
   "edit-macros": () => openMacrosDialog(),
+  "kill-running": () => openKillRunning(),
   "reload-config": () => {
     configApi
       .reload()

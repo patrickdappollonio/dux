@@ -239,6 +239,11 @@ export interface DuxState {
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
   paletteOpen: boolean
+  // The kill-running modal (the Ctrl+K "kill-running" command). Lists every
+  // active agent and live companion terminal and force-kills each on demand
+  // (agents detach and can be reconnected; terminals are destroyed). The list is
+  // derived live from the spine, so it needs no state beyond this open flag.
+  killRunningOpen: boolean
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
@@ -392,6 +397,7 @@ let state: DuxState = {
   createAgentNamePending: false,
   createAgentPrInput: "",
   paletteOpen: false,
+  killRunningOpen: false,
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
@@ -2191,6 +2197,30 @@ export function toggleGithubIntegration(): void {
         e instanceof Error
           ? e.message
           : "Could not toggle GitHub integration.",
+      ),
+    )
+}
+
+// The kill-running modal (Ctrl+K "kill-running"). Open/close just flip the gate;
+// the dialog derives its rows from the spine.
+export function openKillRunning(): void {
+  setState({ killRunningOpen: true })
+}
+
+export function closeKillRunning(): void {
+  setState({ killRunningOpen: false })
+}
+
+// Force-kill one agent's PTY. The agent detaches (it is NOT deleted) and can be
+// reconnected; the spine refetch flips its row to detached. A success toast is
+// the engine's routed status; here we only surface a failure. Companion
+// terminals are killed through the existing `deleteTerminal`.
+export function killSessionPty(sessionId: string): void {
+  sessionsApi
+    .kill(sessionId)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not kill the agent.",
       ),
     )
 }

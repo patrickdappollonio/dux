@@ -326,9 +326,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::KillRunning,
         name: "kill-running",
         description: "Open a modal to kill running agents and companion terminals",
-        // TUI-only (audit decision): web kills runtimes via per-row delete +
-        // confirm, not a bulk kill modal.
-        surface: PaletteSurface::Tui,
+        // Web: opens KillRunningDialog, which lists active agents and live
+        // terminals and force-kills each (agents detach via
+        // WireCommand::KillSessionPty; terminals via DeleteTerminal).
+        surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::NewTerminal,
@@ -508,6 +509,7 @@ mod tests {
             "add-project",
             "configure-global-env",
             "edit-macros",
+            "kill-running",
             "reload-config",
             "sort-agents-by-created",
             "sort-agents-by-name",
