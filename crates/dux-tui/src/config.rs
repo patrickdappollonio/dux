@@ -648,18 +648,45 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.server.access_log),
         },
         ConfigEntry::Field {
-            key: "max_websocket_connections",
+            key: "max_websocket_events_connections",
             comment: Some(CommentSource::Static(
-                "# Maximum number of concurrent WebSocket connections to `dux server`.\n\
-                 # Each open browser tab or device holds one. Once this many are live,\n\
-                 # further connections are refused with HTTP 503 until a slot frees — a\n\
-                 # safety bound against connection exhaustion (a runaway reconnect loop,\n\
-                 # a tab left multiplying). The normal single-operator deployment uses a\n\
-                 # handful; raise it if you genuinely run many tabs/devices. 0 refuses\n\
-                 # all new connections. Changing this needs a server restart to take\n\
-                 # effect (a reload of the running server cannot resize the cap).",
+                "# Maximum number of concurrent EVENTS WebSocket (/ws) connections to\n\
+                 # `dux server`. This is the status/changed-files event stream every open\n\
+                 # browser tab holds. Once this many are live, further connections are\n\
+                 # refused with HTTP 503 until a slot frees: a safety bound against\n\
+                 # connection exhaustion (a runaway reconnect loop, a tab left\n\
+                 # multiplying). The normal single-operator deployment uses a handful;\n\
+                 # raise it if you genuinely run many tabs/devices. A value of 0\n\
+                 # PERMANENTLY blocks this connection class until the server restarts.\n\
+                 # Changing this needs a server restart to take effect (a reload of the\n\
+                 # running server cannot resize the cap).",
             )),
-            value_fn: |c| FieldValue::Usize(c.server.max_websocket_connections as usize),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_events_connections as usize),
+        },
+        ConfigEntry::Field {
+            key: "max_websocket_agent_connections",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of concurrent AGENT-PTY WebSocket connections to\n\
+                 # `dux server`. This is the embedded-terminal stream for an agent\n\
+                 # session. Once this many are live, further connections are refused with\n\
+                 # HTTP 503 until a slot frees. A value of 0 PERMANENTLY blocks this\n\
+                 # connection class until the server restarts. Changing this needs a\n\
+                 # server restart to take effect (a reload of the running server cannot\n\
+                 # resize the cap).",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_agent_connections as usize),
+        },
+        ConfigEntry::Field {
+            key: "max_websocket_terminal_connections",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of concurrent TERMINAL-PTY WebSocket connections to\n\
+                 # `dux server`. This is the standalone scratch-terminal stream. Once\n\
+                 # this many are live, further connections are refused with HTTP 503\n\
+                 # until a slot frees. A value of 0 PERMANENTLY blocks this connection\n\
+                 # class until the server restarts. Changing this needs a server restart\n\
+                 # to take effect (a reload of the running server cannot resize the cap).",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_terminal_connections as usize),
         },
         ConfigEntry::Blank,
         ConfigEntry::ServerAcme,
@@ -1289,7 +1316,9 @@ mod tests {
         assert!(rendered.contains("dangerously_listen_http = false"));
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
-        assert!(rendered.contains("max_websocket_connections = 128"));
+        assert!(rendered.contains("max_websocket_events_connections = 32"));
+        assert!(rendered.contains("max_websocket_agent_connections = 32"));
+        assert!(rendered.contains("max_websocket_terminal_connections = 64"));
         assert!(rendered.contains("[server.acme]"));
         assert!(rendered.contains("enabled = false"));
         assert!(rendered.contains("domains = []"));

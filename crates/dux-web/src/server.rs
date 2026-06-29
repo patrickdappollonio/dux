@@ -72,14 +72,24 @@ pub struct AppState {
     /// The access middleware checks this AND `console.is_active()` before
     /// emitting, so the flip and disabled-console paths never log.
     pub access_log: bool,
-    /// Caps concurrent WebSocket connections (`[server] max_websocket_connections`).
-    /// SHARED across EVERY WebSocket family — `/ws/events` (`ws_events_upgrade`) and
-    /// the per-PTY sockets (agent/terminal upgrades): each takes a permit before
-    /// upgrading and holds it for the socket's lifetime, so the cap bounds the
-    /// COMBINED live socket count, not each endpoint separately. When none are free
-    /// the upgrade is refused with HTTP 503. A cheap `Arc` clone so every request
-    /// hits the same permit pool.
-    pub ws_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Caps concurrent EVENTS WebSocket connections
+    /// (`[server] max_websocket_events_connections`). This is the `/ws/events`
+    /// status/changed-files stream (`ws_events_upgrade`). Each upgrade takes a
+    /// permit before upgrading and holds it for the socket's lifetime; when none
+    /// are free the upgrade is refused with HTTP 503. This class is sized and
+    /// exhausted INDEPENDENTLY of the agent and terminal PTY classes. A cheap `Arc`
+    /// clone so every request hits the same permit pool.
+    pub ws_events_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Caps concurrent AGENT-PTY WebSocket connections
+    /// (`[server] max_websocket_agent_connections`). The embedded-terminal stream
+    /// for an agent session. Sized and exhausted INDEPENDENTLY of the events and
+    /// terminal classes.
+    pub ws_agent_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Caps concurrent TERMINAL-PTY WebSocket connections
+    /// (`[server] max_websocket_terminal_connections`). The standalone
+    /// scratch-terminal stream. Sized and exhausted INDEPENDENTLY of the events and
+    /// agent classes.
+    pub ws_terminal_semaphore: Arc<tokio::sync::Semaphore>,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -178,10 +188,19 @@ pub struct RouterParams {
     /// Whether the per-request access log is on (`[server] access_log`). Off by
     /// default; the CLI serve paths set it from config.
     pub access_log: bool,
-    /// Cap on concurrent `/ws` connections (`[server] max_websocket_connections`).
-    /// Defaults to [`dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS`]; the
-    /// serve paths override it from config via [`with_max_websocket_connections`].
-    pub max_websocket_connections: u32,
+    /// Cap on concurrent EVENTS `/ws/events` connections
+    /// (`[server] max_websocket_events_connections`). Defaults to
+    /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS`]; the serve
+    /// paths override it from config via [`with_max_websocket_connections`].
+    pub max_websocket_events_connections: u32,
+    /// Cap on concurrent AGENT-PTY WebSocket connections
+    /// (`[server] max_websocket_agent_connections`). Defaults to
+    /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS`].
+    pub max_websocket_agent_connections: u32,
+    /// Cap on concurrent TERMINAL-PTY WebSocket connections
+    /// (`[server] max_websocket_terminal_connections`). Defaults to
+    /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS`].
+    pub max_websocket_terminal_connections: u32,
 }
 
 impl RouterParams {
@@ -195,7 +214,12 @@ impl RouterParams {
             secure_cookie: false,
             console: Console::noop(),
             access_log: false,
-            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_events_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            max_websocket_agent_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            max_websocket_terminal_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
         }
     }
 
@@ -208,7 +232,12 @@ impl RouterParams {
             secure_cookie: true,
             console: Console::noop(),
             access_log: false,
-            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_events_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            max_websocket_agent_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            max_websocket_terminal_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
         }
     }
 
@@ -221,11 +250,19 @@ impl RouterParams {
         self
     }
 
-    /// Set the concurrent-connection cap from `[server] max_websocket_connections`.
-    /// The serve paths call this so the configured value (not just the default)
-    /// bounds live sockets.
-    pub fn with_max_websocket_connections(mut self, max: u32) -> Self {
-        self.max_websocket_connections = max;
+    /// Set the per-class concurrent-connection caps from the three
+    /// `[server] max_websocket_*_connections` settings. The serve paths call this
+    /// so the configured values (not just the defaults) bound live sockets, each
+    /// class independently.
+    pub fn with_max_websocket_connections(
+        mut self,
+        events: u32,
+        agent: u32,
+        terminal: u32,
+    ) -> Self {
+        self.max_websocket_events_connections = events;
+        self.max_websocket_agent_connections = agent;
+        self.max_websocket_terminal_connections = terminal;
         self
     }
 }
@@ -248,7 +285,12 @@ pub fn build_router_with_recheck(
             secure_cookie: false,
             console: Console::noop(),
             access_log: false,
-            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_events_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            max_websocket_agent_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            max_websocket_terminal_connections:
+                dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
         },
     )
     .0
@@ -301,13 +343,28 @@ pub(crate) fn build_app_with_store<S>(
 where
     S: tower_sessions::SessionStore + Clone + 'static,
 {
-    // A zero cap is a valid-but-drastic setting ("refuse all new connections").
-    // Warn loudly at startup so an accidental 0 isn't a silent web-UI lock-out —
-    // every upgrade would 503 with no other clue (explicit failure over silence).
-    if params.max_websocket_connections == 0 {
+    // A zero cap is a valid-but-drastic per-class setting ("refuse all new
+    // connections of this class until restart"). Warn loudly at startup so an
+    // accidental 0 isn't a silent lock-out: every upgrade of that class would 503
+    // with no other clue (explicit failure over silence). The events class at 0
+    // makes the web UI unreachable; the PTY classes at 0 block only their stream.
+    if params.max_websocket_events_connections == 0 {
         dux_core::logger::warn(
-            "[server] max_websocket_connections = 0: every WebSocket upgrade will be \
-             refused with HTTP 503 and the web UI will be unreachable",
+            "[server] max_websocket_events_connections = 0: every events WebSocket \
+             upgrade will be refused with HTTP 503 and the web UI will be unreachable \
+             until the server restarts",
+        );
+    }
+    if params.max_websocket_agent_connections == 0 {
+        dux_core::logger::warn(
+            "[server] max_websocket_agent_connections = 0: every agent-PTY WebSocket \
+             upgrade will be refused with HTTP 503 until the server restarts",
+        );
+    }
+    if params.max_websocket_terminal_connections == 0 {
+        dux_core::logger::warn(
+            "[server] max_websocket_terminal_connections = 0: every terminal-PTY \
+             WebSocket upgrade will be refused with HTTP 503 until the server restarts",
         );
     }
     // The event bus and changed-files service are web-layer concerns built here.
@@ -338,8 +395,14 @@ where
         ws_recheck_period: params.ws_recheck_period,
         console: params.console,
         access_log: params.access_log,
-        ws_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            params.max_websocket_connections as usize,
+        ws_events_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            params.max_websocket_events_connections as usize,
+        )),
+        ws_agent_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            params.max_websocket_agent_connections as usize,
+        )),
+        ws_terminal_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            params.max_websocket_terminal_connections as usize,
         )),
         event_bus,
         changes,
@@ -655,24 +718,27 @@ async fn ws_recheck_user(state: &AppState, session: &Session) -> Option<String> 
     }
 }
 
-/// Acquire a connection-cap permit before a WS upgrade. `None` means the cap is
-/// exhausted (the caller responds 503); a refusal is logged here with `route` so an
-/// operator can see which endpoint hit the cap. The permit moves into the socket
-/// task and frees the slot when the task returns, so the cap bounds the COMBINED
-/// live socket count across every WS family (see [`AppState::ws_semaphore`]).
-/// Returns `Option` rather than `Result<_, Response>` so the large `Response` does
-/// not bloat the `Err` variant (clippy `result_large_err`).
+/// Acquire a connection-cap permit before a WS upgrade, from the per-class
+/// `semaphore` the caller passes (events, agent-PTY, or terminal-PTY). `None`
+/// means that class's cap is exhausted (the caller responds 503); a refusal is
+/// logged here with `route` and `cap_setting` so an operator can see which
+/// endpoint hit which cap. The permit moves into the socket task and frees the
+/// slot when the task returns, so each class bounds its own live socket count
+/// independently (see the `ws_*_semaphore` fields on [`AppState`]). Returns
+/// `Option` rather than `Result<_, Response>` so the large `Response` does not
+/// bloat the `Err` variant (clippy `result_large_err`).
 fn acquire_ws_permit(
-    state: &AppState,
+    semaphore: &Arc<tokio::sync::Semaphore>,
     peer_ip: std::net::IpAddr,
     route: &str,
+    cap_setting: &str,
 ) -> Option<tokio::sync::OwnedSemaphorePermit> {
-    match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
+    match Arc::clone(semaphore).try_acquire_owned() {
         Ok(permit) => Some(permit),
         Err(_) => {
             dux_core::logger::warn(&format!(
                 "[server] {route} upgrade refused for {peer_ip}: connection cap reached \
-                 (max_websocket_connections)"
+                 ({cap_setting})"
             ));
             None
         }
@@ -795,7 +861,12 @@ async fn ws_session_pty_upgrade(
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
     let recheck_user = ws_recheck_user(&state, &session).await;
-    let permit = match acquire_ws_permit(&state, peer.ip(), "/ws/sessions/:id/pty") {
+    let permit = match acquire_ws_permit(
+        &state.ws_agent_semaphore,
+        peer.ip(),
+        "/ws/sessions/:id/pty",
+        "max_websocket_agent_connections",
+    ) {
         Some(permit) => permit,
         None => {
             return (
@@ -866,7 +937,12 @@ async fn ws_terminal_pty_upgrade(
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
     let recheck_user = ws_recheck_user(&state, &session).await;
-    let permit = match acquire_ws_permit(&state, peer.ip(), "/ws/sessions/:id/terminals/:tid/pty") {
+    let permit = match acquire_ws_permit(
+        &state.ws_terminal_semaphore,
+        peer.ip(),
+        "/ws/sessions/:id/terminals/:tid/pty",
+        "max_websocket_terminal_connections",
+    ) {
         Some(permit) => permit,
         None => {
             return (
@@ -1243,14 +1319,14 @@ async fn ws_events_upgrade(
     } else {
         None
     };
-    let permit = match Arc::clone(&state.ws_semaphore).try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            dux_core::logger::warn(&format!(
-                "[server] /ws/events upgrade refused for {}: connection cap reached \
-                 (max_websocket_connections)",
-                peer.ip()
-            ));
+    let permit = match acquire_ws_permit(
+        &state.ws_events_semaphore,
+        peer.ip(),
+        "/ws/events",
+        "max_websocket_events_connections",
+    ) {
+        Some(permit) => permit,
+        None => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "too many WebSocket connections; try again shortly",
@@ -3437,6 +3513,50 @@ mod tests {
             serde_json::to_string(&catchup).unwrap(),
             r#"{"event":"session.changes","id":"s1"}"#,
             "cold-cache catch-up must omit rev so the client force-refetches"
+        );
+    }
+
+    #[test]
+    fn one_class_saturated_does_not_block_another() {
+        // Independence: exhausting one connection class must not starve another.
+        // Terminal cap is 0 (refuse all) while events cap is 1.
+        let events = Arc::new(tokio::sync::Semaphore::new(1));
+        let terminal = Arc::new(tokio::sync::Semaphore::new(0));
+        let ip = std::net::IpAddr::from([127, 0, 0, 1]);
+
+        // The saturated terminal class refuses (None).
+        assert!(
+            acquire_ws_permit(&terminal, ip, "/ws/.../terminals", "max_websocket_terminal")
+                .is_none(),
+            "a zero-cap terminal class must refuse"
+        );
+        // The independent events class still hands out a permit.
+        assert!(
+            acquire_ws_permit(&events, ip, "/ws/events", "max_websocket_events").is_some(),
+            "a non-zero events class must still acquire while terminal is saturated"
+        );
+    }
+
+    #[test]
+    fn permit_releases_on_drop() {
+        // Lifecycle: acquiring drops the available count; dropping recovers it.
+        let sem = Arc::new(tokio::sync::Semaphore::new(2));
+        let ip = std::net::IpAddr::from([127, 0, 0, 1]);
+        assert_eq!(sem.available_permits(), 2);
+
+        let permit = acquire_ws_permit(&sem, ip, "/ws/.../pty", "max_websocket_agent")
+            .expect("first permit");
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "available drops while a permit is held"
+        );
+
+        drop(permit);
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "available recovers when the permit drops"
         );
     }
 }

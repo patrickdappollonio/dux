@@ -301,11 +301,27 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
+    // The single WebSocket cap was split into three per-class caps; drop the
+    // obsolete key from any existing config block on every save so saves stop
+    // carrying it (mirrors the oneshot strip in `patch_providers`).
+    remove_table_key(doc, "server", "max_websocket_connections");
     patch_table_usize(
         doc,
         "server",
-        "max_websocket_connections",
-        config.server.max_websocket_connections as usize,
+        "max_websocket_events_connections",
+        config.server.max_websocket_events_connections as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_agent_connections",
+        config.server.max_websocket_agent_connections as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_terminal_connections",
+        config.server.max_websocket_terminal_connections as usize,
     );
 
     // --- [server.acme] ---
@@ -820,7 +836,9 @@ unknown_key = \"untouched\"
         config.server.dangerously_listen_http = true;
         config.server.color = "never".to_string();
         config.server.access_log = false;
-        config.server.max_websocket_connections = 42;
+        config.server.max_websocket_events_connections = 42;
+        config.server.max_websocket_agent_connections = 43;
+        config.server.max_websocket_terminal_connections = 44;
 
         write_config_plain(&config_path, &config).expect("write_config_plain");
 
@@ -836,7 +854,9 @@ unknown_key = \"untouched\"
         );
         assert_eq!(parsed.server.color, "never");
         assert!(!parsed.server.access_log);
-        assert_eq!(parsed.server.max_websocket_connections, 42);
+        assert_eq!(parsed.server.max_websocket_events_connections, 42);
+        assert_eq!(parsed.server.max_websocket_agent_connections, 43);
+        assert_eq!(parsed.server.max_websocket_terminal_connections, 44);
         // The deprecated `bind` key is never re-emitted by the patcher.
         assert!(
             !saved.contains("bind ="),

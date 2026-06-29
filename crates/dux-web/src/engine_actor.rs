@@ -251,10 +251,11 @@ pub struct AuthReloadContext {
 /// Compared fields mirror what the resolver consumes to bind: the LOCAL MODE
 /// `port`, the `tailscale_enabled` toggle, the FULL WEB MODE `listen_addrs`, and
 /// the entire `[server.acme]` section (any of its fields shifts the bound ports,
-/// the issued domains, or staging-vs-production). `max_websocket_connections` is
-/// also startup-bound: the `/ws` connection-cap semaphore is built ONCE in
-/// `build_app` and never resized on reload, so changing the cap needs a restart
-/// just like the listeners. `bind` is intentionally absent: it is deprecated and
+/// the issued domains, or staging-vs-production). The three per-class WebSocket
+/// caps (`max_websocket_events_connections`, `max_websocket_agent_connections`,
+/// `max_websocket_terminal_connections`) are also startup-bound: each connection-
+/// cap semaphore is built ONCE in `build_app` and never resized on reload, so
+/// changing any cap needs a restart just like the listeners. `bind` is intentionally absent: it is deprecated and
 /// migrated into `port`/`listen_addrs` on load, so a change to it surfaces through
 /// those fields. `insecure_allow_remote` is a gate input, not a bound value, so it
 /// cannot drift a live listener.
@@ -267,7 +268,9 @@ fn server_rebind_settings_changed(
     prev.port != next.port
         || prev.tailscale_enabled != next.tailscale_enabled
         || prev.listen_addrs != next.listen_addrs
-        || prev.max_websocket_connections != next.max_websocket_connections
+        || prev.max_websocket_events_connections != next.max_websocket_events_connections
+        || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
+        || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
         || a.enabled != b.enabled
         || a.domains != b.domains
         || a.email != b.email
@@ -1941,13 +1944,29 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_connections_change() {
-        // The /ws connection-cap semaphore is built once at startup, so changing
-        // the cap must surface as a restart-needed warning like the other
-        // startup-bound settings — not be silently swallowed by a live reload.
+    fn rebind_drift_detects_max_websocket_events_connections_change() {
+        // Each per-class connection-cap semaphore is built once at startup, so
+        // changing a cap must surface as a restart-needed warning like the other
+        // startup-bound settings, not be silently swallowed by a live reload.
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
-        next.max_websocket_connections += 1;
+        next.max_websocket_events_connections += 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_agent_connections_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_agent_connections += 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_terminal_connections_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_terminal_connections += 1;
         assert!(server_rebind_settings_changed(&prev, &next));
     }
 

@@ -146,10 +146,28 @@ pub struct EditorConfig {
     pub default: String,
 }
 
-/// Default cap on concurrent WebSocket connections — see
-/// [`ServerConfig::max_websocket_connections`]. Shared so the config default and
-/// the server's router default cannot drift apart.
-pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS: u32 = 128;
+/// Default cap on concurrent events (`/ws`) WebSocket connections; see
+/// [`ServerConfig::max_websocket_events_connections`]. Shared so the config
+/// default and the server's router default cannot drift apart.
+pub const DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS: u32 = 32;
+/// Default cap on concurrent agent-PTY WebSocket connections — see
+/// [`ServerConfig::max_websocket_agent_connections`].
+pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
+/// Default cap on concurrent terminal-PTY WebSocket connections — see
+/// [`ServerConfig::max_websocket_terminal_connections`].
+pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
+
+fn default_max_ws_events() -> u32 {
+    DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS
+}
+
+fn default_max_ws_agent() -> u32 {
+    DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS
+}
+
+fn default_max_ws_terminal() -> u32 {
+    DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -196,14 +214,32 @@ pub struct ServerConfig {
     /// Default true. The access log is console-only (never written to `dux.log`),
     /// so piping `dux server`'s stdout captures it.
     pub access_log: bool,
-    /// Maximum number of concurrent WebSocket (`/ws`) connections. Once this many
-    /// are live, further upgrade attempts are rejected with HTTP 503 until a slot
-    /// frees. A safety bound against connection exhaustion (a runaway tab loop, a
-    /// buggy reconnector); the trusted single-operator deployment normally uses a
-    /// handful. Default 128. A value of 0 is treated as "no new connections".
-    /// Changing this requires a server restart to take effect — the connection-cap
+    /// Maximum number of concurrent events (`/ws`) WebSocket connections. This is
+    /// the status/changed-files event stream every browser tab opens. Once this
+    /// many are live, further upgrade attempts are rejected with HTTP 503 until a
+    /// slot frees. Default 32. A value of 0 permanently blocks this connection
+    /// class until the server restarts. Changing this requires a server restart to
+    /// take effect: the connection-cap semaphore is built at startup and a config
+    /// reload cannot resize it.
+    #[serde(default = "default_max_ws_events")]
+    pub max_websocket_events_connections: u32,
+    /// Maximum number of concurrent agent-PTY WebSocket connections. This is the
+    /// embedded-terminal stream for an agent session. Once this many are live,
+    /// further upgrade attempts are rejected with HTTP 503 until a slot frees.
+    /// Default 32. A value of 0 permanently blocks this connection class until the
+    /// server restarts. Changing this requires a server restart to take effect:
+    /// the connection-cap semaphore is built at startup and a config reload cannot
+    /// resize it.
+    #[serde(default = "default_max_ws_agent")]
+    pub max_websocket_agent_connections: u32,
+    /// Maximum number of concurrent terminal-PTY WebSocket connections. This is the
+    /// standalone scratch-terminal stream. Once this many are live, further upgrade
+    /// attempts are rejected with HTTP 503 until a slot frees. Default 64. A value
+    /// of 0 permanently blocks this connection class until the server restarts.
+    /// Changing this requires a server restart to take effect: the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
-    pub max_websocket_connections: u32,
+    #[serde(default = "default_max_ws_terminal")]
+    pub max_websocket_terminal_connections: u32,
     pub acme: AcmeSettings,
 }
 
@@ -414,7 +450,9 @@ impl Default for ServerConfig {
             dangerously_listen_http: false,
             color: "auto".to_string(),
             access_log: true,
-            max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+            max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            max_websocket_terminal_connections: DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
             acme: AcmeSettings::default(),
         }
     }
@@ -939,16 +977,23 @@ pub fn provider_config(
 /// server must not mutate config (that's the TUI's canonical renderer).
 pub fn load_config(paths: &DuxPaths) -> Config {
     let mut config = match std::fs::read_to_string(&paths.config_path) {
-        Ok(raw) => match toml::from_str::<Config>(&raw) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                crate::logger::error(&format!(
-                    "failed to parse {}: {e}; using defaults",
-                    paths.config_path.display()
-                ));
-                Config::default()
+        Ok(raw) => {
+            // One-time migration notice: the single `[server] max_websocket_connections`
+            // cap was split into three per-class caps. The unknown key is ignored on
+            // load (ServerConfig has no deny_unknown_fields), so warn once so the
+            // operator knows their old value is no longer in effect.
+            warn_on_removed_max_websocket_connections(&raw);
+            match toml::from_str::<Config>(&raw) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    crate::logger::error(&format!(
+                        "failed to parse {}: {e}; using defaults",
+                        paths.config_path.display()
+                    ));
+                    Config::default()
+                }
             }
-        },
+        }
         Err(_) => Config::default(),
     };
     config.providers.ensure_defaults();
@@ -964,6 +1009,40 @@ pub fn load_config(paths: &DuxPaths) -> Config {
         ));
     }
     config
+}
+
+/// Warn once when a `config.toml` still carries the removed
+/// `[server] max_websocket_connections` key. Parses the raw TOML generically so a
+/// commented-out line never trips the warning, then logs the three replacements
+/// and the `=0` semantics change. The key itself is silently ignored on load (no
+/// `deny_unknown_fields`), so this is the only place the operator learns their old
+/// value stopped taking effect.
+fn warn_on_removed_max_websocket_connections(raw: &str) {
+    if raw_has_removed_max_websocket_connections(raw) {
+        crate::logger::warn(
+            "[server] max_websocket_connections has been removed and is being ignored. It \
+             was split into max_websocket_events_connections, \
+             max_websocket_agent_connections, and max_websocket_terminal_connections. Set \
+             those per-class caps instead; a value of 0 still means disable (refuse all \
+             new connections of that class until restart).",
+        );
+    }
+}
+
+/// Pure predicate behind the migration warning: true when the raw TOML has a
+/// `[server] max_websocket_connections` key. Parses generically so a commented-out
+/// line is not detected; a parse failure returns false (the loader surfaces the
+/// real parse error separately).
+fn raw_has_removed_max_websocket_connections(raw: &str) -> bool {
+    toml::from_str::<toml::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("server")
+                .and_then(toml::Value::as_table)
+                .map(|server| server.contains_key("max_websocket_connections"))
+        })
+        .unwrap_or(false)
 }
 
 /// Check whether a provider command is available on PATH.
@@ -2658,5 +2737,36 @@ users = []
             config.providers.commands.contains_key("claude"),
             "claude provider should be present via defaults after parse failure"
         );
+    }
+
+    #[test]
+    fn old_max_websocket_connections_key_still_loads_and_is_ignored() {
+        // Back-compat: the removed `max_websocket_connections` key parses without
+        // error because `ServerConfig` has no `#[serde(deny_unknown_fields)]` (TOML
+        // simply ignores unknown keys; this is not a `serde(default)` effect), and
+        // the three new split fields take their per-field defaults.
+        let toml = r#"[server]
+max_websocket_connections = 16
+"#;
+        let cfg: Config = toml::from_str(toml).expect("old config must still parse");
+        assert_eq!(cfg.server.max_websocket_events_connections, 32);
+        assert_eq!(cfg.server.max_websocket_agent_connections, 32);
+        assert_eq!(cfg.server.max_websocket_terminal_connections, 64);
+    }
+
+    #[test]
+    fn detects_removed_max_websocket_connections_key_for_migration_warning() {
+        assert!(raw_has_removed_max_websocket_connections(
+            "[server]\nmax_websocket_connections = 16\n"
+        ));
+        // A commented-out line must NOT trip the warning.
+        assert!(!raw_has_removed_max_websocket_connections(
+            "[server]\n# max_websocket_connections = 16\n"
+        ));
+        // The new split keys must NOT trip the warning.
+        assert!(!raw_has_removed_max_websocket_connections(
+            "[server]\nmax_websocket_events_connections = 16\n"
+        ));
+        assert!(!raw_has_removed_max_websocket_connections("[server]\n"));
     }
 }
