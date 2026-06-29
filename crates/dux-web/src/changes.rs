@@ -631,6 +631,7 @@ impl ChangesService {
                 id: Some(session_id.to_string()),
                 rev: Some(rev),
                 owner: None,
+                epoch: None,
             });
         }
     }

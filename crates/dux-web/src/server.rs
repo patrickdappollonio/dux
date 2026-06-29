@@ -785,20 +785,39 @@ struct PtyResizeFrame {
 /// recently ATTACHED connection owns sizing; a resize from a non-owner is ignored,
 /// which breaks the last-writer-wins feedback loop two viewers of one PTY would
 /// otherwise create. Lives in [`AppState`] so every per-PTY socket shares it.
+/// The owner map plus the monotonic ownership epoch, guarded together by ONE std
+/// Mutex so a fresh epoch is assigned in the SAME critical section that records a
+/// new owner. Bumping the epoch under the lock that serializes every owner write
+/// makes epochs monotonic in TRUE claim order even when two connections claim
+/// concurrently, so the `pty.owner` broadcast (emitted after the lock releases, and
+/// therefore freely reorderable by the runtime) can be deduped by epoch on the
+/// client without confusing which claim actually won (see `ptyOwnership.ts`).
+#[derive(Default)]
+struct OwnersState {
+    /// pty id -> the connection id that currently owns sizing+input.
+    map: std::collections::HashMap<String, u64>,
+    /// Bumped on every ownership CHANGE; the value handed to the caller and stamped
+    /// onto the emitted `pty.owner` so clients converge on the latest claim
+    /// regardless of broadcast arrival order. Never decreases within a process.
+    epoch: u64,
+}
+
 #[derive(Default)]
 struct PtySizeOwners {
-    owners: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    owners: std::sync::Mutex<OwnersState>,
     next_conn_id: std::sync::atomic::AtomicU64,
 }
 
 /// Outcome of [`PtySizeOwners::may_write`]: whether the connection may forward its
-/// stdin to the PTY (`allowed`), and whether the check itself NEWLY claimed an
-/// unowned PTY (`claimed_new`) so the caller emits exactly one `pty.owner` handover
-/// for that uncontested first write.
+/// stdin to the PTY (`allowed`), whether the check itself NEWLY claimed an unowned
+/// PTY (`claimed_new`) so the caller emits exactly one `pty.owner` handover for that
+/// uncontested first write, and the ownership `epoch` assigned for that new claim
+/// (`Some` iff `claimed_new`) so the emitted handover carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WriteClaim {
     allowed: bool,
     claimed_new: bool,
+    epoch: Option<u64>,
 }
 
 impl PtySizeOwners {
@@ -814,14 +833,19 @@ impl PtySizeOwners {
     /// wins, taking over from any prior owner. Attaching alone no longer claims:
     /// a backgrounded tab that attaches as a silent observer (sends no size) never
     /// steals ownership from the foregrounded device. Returns whether the owner
-    /// CHANGED, so the caller broadcasts a `pty.owner` signal only on a real
-    /// handover (a same-owner re-claim is silent).
-    fn claim(&self, pty_id: &str, conn_id: u64) -> bool {
-        self.owners
-            .lock()
-            .unwrap()
-            .insert(pty_id.to_string(), conn_id)
-            != Some(conn_id)
+    /// CHANGED, returning `Some(epoch)` with the new ownership epoch on a real
+    /// handover and `None` on a same-owner re-claim (so the caller broadcasts a
+    /// `pty.owner` only on a real handover, stamping the returned epoch onto it).
+    /// The epoch is assigned UNDER the owners lock, so it orders concurrent claims
+    /// by their true serialization order.
+    fn claim(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
+        let mut owners = self.owners.lock().unwrap();
+        if owners.map.get(pty_id) == Some(&conn_id) {
+            return None;
+        }
+        owners.map.insert(pty_id.to_string(), conn_id);
+        owners.epoch += 1;
+        Some(owners.epoch)
     }
 
     /// Whether `conn_id` is the current owner of `pty_id`. Unlike [`claim`] this
@@ -836,7 +860,7 @@ impl PtySizeOwners {
     /// [`release`]: PtySizeOwners::release
     #[cfg(test)]
     fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
-        self.owners.lock().unwrap().get(pty_id) == Some(&conn_id)
+        self.owners.lock().unwrap().map.get(pty_id) == Some(&conn_id)
     }
 
     /// Decide whether `conn_id` may write stdin to `pty_id`, resolving the gate
@@ -860,20 +884,24 @@ impl PtySizeOwners {
     /// [`claim`]: PtySizeOwners::claim
     fn may_write(&self, pty_id: &str, conn_id: u64) -> WriteClaim {
         let mut owners = self.owners.lock().unwrap();
-        match owners.get(pty_id) {
+        match owners.map.get(pty_id) {
             Some(&owner) if owner == conn_id => WriteClaim {
                 allowed: true,
                 claimed_new: false,
+                epoch: None,
             },
             Some(_) => WriteClaim {
                 allowed: false,
                 claimed_new: false,
+                epoch: None,
             },
             None => {
-                owners.insert(pty_id.to_string(), conn_id);
+                owners.map.insert(pty_id.to_string(), conn_id);
+                owners.epoch += 1;
                 WriteClaim {
                     allowed: true,
                     claimed_new: true,
+                    epoch: Some(owners.epoch),
                 }
             }
         }
@@ -884,8 +912,8 @@ impl PtySizeOwners {
     /// so a later attach is never clobbered.
     fn release(&self, pty_id: &str, conn_id: u64) {
         let mut owners = self.owners.lock().unwrap();
-        if owners.get(pty_id) == Some(&conn_id) {
-            owners.remove(pty_id);
+        if owners.map.get(pty_id) == Some(&conn_id) {
+            owners.map.remove(pty_id);
         }
     }
 }
@@ -1127,6 +1155,7 @@ async fn handle_pty_socket(
             id: Some(conn_id.to_string()),
             rev: None,
             owner: None,
+            epoch: None,
         },
     )
     .await;
@@ -1188,8 +1217,10 @@ async fn handle_pty_socket(
                 let pty_id = target.pty_id();
                 let claim = pty_size_owners.may_write(pty_id, conn_id);
                 if claim.allowed {
-                    if claim.claimed_new {
-                        bus.emit(pty_owner_event(pty_id, conn_id));
+                    // `epoch` is `Some` exactly when this write newly claimed an
+                    // unowned PTY, so emit one handover stamped with that epoch.
+                    if let Some(epoch) = claim.epoch {
+                        bus.emit(pty_owner_event(pty_id, conn_id, epoch));
                     }
                     engine.write_pty(pty_id.to_string(), bytes.to_vec());
                 } else {
@@ -1206,8 +1237,8 @@ async fn handle_pty_socket(
             // clients viewing this PTY flip to the read-only take-over placeholder.
             Message::Text(text) => {
                 if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
-                    if pty_size_owners.claim(target.pty_id(), conn_id) {
-                        bus.emit(pty_owner_event(target.pty_id(), conn_id));
+                    if let Some(epoch) = pty_size_owners.claim(target.pty_id(), conn_id) {
+                        bus.emit(pty_owner_event(target.pty_id(), conn_id, epoch));
                     }
                     engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
                 }
@@ -1234,13 +1265,18 @@ async fn handle_pty_socket(
 /// means this client is the owner; a different id flips it to the read-only
 /// take-over placeholder. The explicit id replaces the old timing/echo-counting
 /// heuristic, fixing the race where two devices claiming at once could both end up
-/// showing the placeholder while the server held a real owner.
-fn pty_owner_event(pty_id: &str, owner_conn_id: u64) -> Event {
+/// showing the placeholder while the server held a real owner. `epoch` is the
+/// monotonic ownership epoch assigned under the owners lock (see [`OwnersState`]);
+/// it orders concurrent handovers so a client can ignore an out-of-order broadcast
+/// and keep only the latest claim, since this event is emitted AFTER the lock
+/// releases and the runtime may reorder two near-simultaneous broadcasts.
+fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64) -> Event {
     Event::Resource {
         event: "pty.owner".to_string(),
         id: Some(pty_id.to_string()),
         rev: None,
         owner: Some(owner_conn_id.to_string()),
+        epoch: Some(epoch),
     }
 }
 
@@ -1253,6 +1289,7 @@ fn config_changed_event() -> Event {
         id: None,
         rev: None,
         owner: None,
+        epoch: None,
     }
 }
 
@@ -1288,6 +1325,7 @@ fn projects_changed_event() -> Event {
         id: None,
         rev: None,
         owner: None,
+        epoch: None,
     }
 }
 
@@ -1301,6 +1339,7 @@ fn sessions_changed_event() -> Event {
         id: None,
         rev: None,
         owner: None,
+        epoch: None,
     }
 }
 
@@ -1366,6 +1405,12 @@ struct WireEvent {
     /// [`pty_owner_event`]). Omitted from the wire for every other event.
     #[serde(skip_serializing_if = "Option::is_none")]
     owner: Option<String>,
+    /// The monotonic ownership epoch on a `pty.owner` handover (see
+    /// [`pty_owner_event`]). The client keeps only the highest epoch seen per pty
+    /// and ignores any older arrival, so a reordered broadcast cannot resurrect a
+    /// stale owner. Omitted from the wire for every other event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<u64>,
 }
 
 /// Outbound `/ws/events` status event: the one event carrying an inline payload
@@ -1513,6 +1558,7 @@ async fn handle_events_socket(
             id: Some(connection_id.clone()),
             rev: None,
             owner: None,
+            epoch: None,
         },
     )
     .await;
@@ -1586,6 +1632,7 @@ async fn handle_events_socket(
                     id,
                     rev,
                     owner,
+                    epoch,
                 }) => {
                     // Forward a resource event only if this connection holds the
                     // topic it is delivered on. `session.changes` rides the fine
@@ -1613,6 +1660,7 @@ async fn handle_events_socket(
                             id,
                             rev,
                             owner,
+                            epoch,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1634,6 +1682,7 @@ async fn handle_events_socket(
                                 id: Some(sid.to_string()),
                                 rev: changes.peek_rev(sid),
                                 owner: None,
+                                epoch: None,
                             };
                             if send_event(&sink, &frame).await.is_err() {
                                 sink_dead = true;
@@ -1655,6 +1704,7 @@ async fn handle_events_socket(
                             id: None,
                             rev: None,
                             owner: None,
+                            epoch: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1669,6 +1719,7 @@ async fn handle_events_socket(
                             id: None,
                             rev: None,
                             owner: None,
+                            epoch: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1680,6 +1731,7 @@ async fn handle_events_socket(
                             id: None,
                             rev: None,
                             owner: None,
+                            epoch: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1919,6 +1971,7 @@ fn catchup_frames(new_fine: &[String], changes: &ChangesService) -> Vec<WireEven
                 id: Some(sid.to_string()),
                 rev: changes.peek_rev(sid),
                 owner: None,
+                epoch: None,
             })
         })
         .collect()
@@ -3094,7 +3147,7 @@ mod tests {
         // an unowned PTY is a change.
         let conn_a = owners.next_conn_id();
         assert!(
-            owners.claim(pty, conn_a),
+            owners.claim(pty, conn_a).is_some(),
             "claiming an unowned PTY changes the owner"
         );
         assert!(
@@ -3104,7 +3157,10 @@ mod tests {
 
         // Second viewer claims: it takes over (most-recent claim wins).
         let conn_b = owners.next_conn_id();
-        assert!(owners.claim(pty, conn_b), "a takeover changes the owner");
+        assert!(
+            owners.claim(pty, conn_b).is_some(),
+            "a takeover changes the owner"
+        );
         assert!(
             owners.is_owner(pty, conn_b),
             "the later claimant owns the PTY"
@@ -3122,28 +3178,79 @@ mod tests {
         );
         // Now A's next claim takes the unowned PTY.
         assert!(
-            owners.claim(pty, conn_a),
+            owners.claim(pty, conn_a).is_some(),
             "claiming after a release changes the owner"
         );
         assert!(owners.is_owner(pty, conn_a));
     }
 
     /// `claim` reports whether the owner CHANGED so the handler emits `pty.owner`
-    /// only on a real handover: a fresh claim and a takeover are changes; a
-    /// same-owner re-claim (an owner re-asserting its size) is not.
+    /// only on a real handover: a fresh claim and a takeover are changes (returning
+    /// `Some(epoch)`); a same-owner re-claim (an owner re-asserting its size) is not
+    /// (returning `None`). The epoch increments on each ownership CHANGE and never
+    /// on a same-owner re-claim, so the epoch handed to `pty.owner` is monotonic in
+    /// true claim order — the property the client's out-of-order dedup relies on.
     #[test]
-    fn pty_size_claim_reports_owner_change() {
+    fn pty_size_claim_reports_owner_change_with_monotonic_epoch() {
         let owners = PtySizeOwners::default();
         let pty = "session-7";
         let conn_a = owners.next_conn_id();
         let conn_b = owners.next_conn_id();
 
-        assert!(owners.claim(pty, conn_a), "None -> A is a change");
-        assert!(
-            !owners.claim(pty, conn_a),
-            "A -> A (re-claim) is not a change"
+        let first = owners.claim(pty, conn_a);
+        assert_eq!(first, Some(1), "None -> A is the first ownership change");
+        assert_eq!(
+            owners.claim(pty, conn_a),
+            None,
+            "A -> A (re-claim) is not a change and assigns no epoch"
         );
-        assert!(owners.claim(pty, conn_b), "A -> B (takeover) is a change");
+        let second = owners.claim(pty, conn_b);
+        assert_eq!(
+            second,
+            Some(2),
+            "A -> B (takeover) is a change and increments the epoch"
+        );
+        assert!(
+            second.unwrap() > first.unwrap(),
+            "epochs are strictly monotonic across ownership changes"
+        );
+    }
+
+    /// The epoch is shared across PTYs from one monotonic counter and is bumped by
+    /// BOTH the size-frame `claim` path and the first-writer `may_write` path, so a
+    /// `pty.owner` from either source orders correctly against the other. Mixing the
+    /// two on different ptys still yields strictly increasing epochs.
+    #[test]
+    fn pty_owner_epoch_is_monotonic_across_claim_and_may_write() {
+        let owners = PtySizeOwners::default();
+        let conn_a = owners.next_conn_id();
+        let conn_b = owners.next_conn_id();
+
+        // A size-frame claim on one pty: epoch 1.
+        assert_eq!(owners.claim("pty-a", conn_a), Some(1));
+        // A first-writer claim on another pty (the `may_write` path): epoch 2.
+        let w = owners.may_write("pty-b", conn_b);
+        assert_eq!(
+            w,
+            WriteClaim {
+                allowed: true,
+                claimed_new: true,
+                epoch: Some(2),
+            },
+            "an unowned-PTY first write claims and takes the next epoch"
+        );
+        // A takeover back on the first pty: epoch 3 (still strictly increasing).
+        assert_eq!(owners.claim("pty-a", conn_b), Some(3));
+        // A same-owner re-write on pty-b does not advance the epoch and emits none.
+        assert_eq!(
+            owners.may_write("pty-b", conn_b),
+            WriteClaim {
+                allowed: true,
+                claimed_new: false,
+                epoch: None,
+            },
+            "the owner re-writing claims nothing and carries no epoch"
+        );
     }
 
     /// Owner-only input, exercising the ACTUAL gate the handler applies
@@ -3169,6 +3276,7 @@ mod tests {
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
+                epoch: None,
             },
             "the owner B's stdin is forwarded without re-claiming"
         );
@@ -3177,6 +3285,7 @@ mod tests {
             WriteClaim {
                 allowed: false,
                 claimed_new: false,
+                epoch: None,
             },
             "the non-owner A's stdin is dropped and does not claim ownership"
         );
@@ -3199,12 +3308,14 @@ mod tests {
         let conn_a = owners.next_conn_id();
         let conn_b = owners.next_conn_id();
 
-        // Unowned PTY: the first writer is allowed and NEWLY claims ownership.
+        // Unowned PTY: the first writer is allowed and NEWLY claims ownership,
+        // taking the first ownership epoch so its `pty.owner` handover is ordered.
         assert_eq!(
             owners.may_write(pty, conn_a),
             WriteClaim {
                 allowed: true,
                 claimed_new: true,
+                epoch: Some(1),
             },
             "an unowned PTY's first writer is allowed and claims ownership"
         );
@@ -3220,6 +3331,7 @@ mod tests {
             WriteClaim {
                 allowed: true,
                 claimed_new: false,
+                epoch: None,
             },
             "the owner writes again without re-claiming"
         );
@@ -3230,6 +3342,7 @@ mod tests {
             WriteClaim {
                 allowed: false,
                 claimed_new: false,
+                epoch: None,
             },
             "a non-owner's write is denied"
         );
@@ -3300,6 +3413,7 @@ mod tests {
                 id: None,
                 rev: None,
                 owner: None,
+                epoch: None,
             }
         );
 
@@ -3316,6 +3430,7 @@ mod tests {
                 id: None,
                 rev: None,
                 owner: None,
+                epoch: None,
             }
         );
     }
@@ -3564,10 +3679,45 @@ mod tests {
             id: Some("abc-123".into()),
             rev: None,
             owner: None,
+            epoch: None,
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
             r#"{"event":"connected","id":"abc-123"}"#
+        );
+    }
+
+    /// A `pty.owner` handover from the production `pty_owner_event` helper carries
+    /// BOTH the claimer's connection id (`owner`) and the ownership `epoch`, and the
+    /// wire frame built from it (exactly as the dispatch loop does) serializes both
+    /// so the client can compare the owner id and dedup by epoch.
+    #[test]
+    fn pty_owner_event_carries_owner_and_epoch_and_serializes() {
+        let ev = pty_owner_event("session-1", 42, 7);
+        let Event::Resource {
+            event,
+            id,
+            rev,
+            owner,
+            epoch,
+        } = ev;
+        assert_eq!(event, "pty.owner");
+        assert_eq!(id.as_deref(), Some("session-1"));
+        assert_eq!(rev, None);
+        assert_eq!(owner.as_deref(), Some("42"), "the claimer id is carried");
+        assert_eq!(epoch, Some(7), "the ownership epoch is carried");
+
+        let frame = WireEvent {
+            event,
+            id,
+            rev,
+            owner,
+            epoch,
+        };
+        assert_eq!(
+            serde_json::to_string(&frame).unwrap(),
+            r#"{"event":"pty.owner","id":"session-1","owner":"42","epoch":7}"#,
+            "the wire frame includes both owner and epoch (rev is omitted)"
         );
     }
 

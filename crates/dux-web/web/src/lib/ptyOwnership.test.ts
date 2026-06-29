@@ -5,6 +5,7 @@ import {
   isOwnerAfterHandover,
   notifyPtyOwner,
   onPtyOwner,
+  resetPtyOwnerEpochs,
 } from "./ptyOwnership"
 
 // Every `onPtyOwner` registration in a test is tracked here and torn down in
@@ -19,6 +20,9 @@ function track(off: () => void): () => void {
 afterEach(() => {
   vi.unstubAllGlobals()
   while (registeredOffs.length > 0) registeredOffs.pop()?.()
+  // Clear the per-pty epoch high-water marks so a case that records epochs cannot
+  // make a later case wrongly drop a handover as "stale".
+  resetPtyOwnerEpochs()
 })
 
 describe("isForeground", () => {
@@ -129,5 +133,92 @@ describe("pty.owner fan-out", () => {
     // Another device takes over -> we are demoted to the placeholder.
     notifyPtyOwner("session-1", "conn-other")
     expect(owner).toBe(false)
+  })
+})
+
+describe("pty.owner epoch dedup", () => {
+  it("ignores an out-of-order (older) handover so a stale owner cannot win", () => {
+    // The crux of the fix: the server assigns a monotonic epoch under its owners
+    // lock, but the broadcast is emitted after the lock releases and can be
+    // reordered. The map ends on owner=A (epoch 2), yet a client could receive the
+    // owner=B (epoch 1) broadcast LAST. Keeping only the highest epoch per pty
+    // makes the stale owner=B arrival a no-op, so the client stays on owner=A.
+    const seen: Array<string | undefined> = []
+    track(
+      onPtyOwner((id, owner) => {
+        if (id === "session-1") seen.push(owner)
+      }),
+    )
+
+    notifyPtyOwner("session-1", "conn-A", 2) // newer claim, applied
+    notifyPtyOwner("session-1", "conn-B", 1) // older broadcast arrives late
+    notifyPtyOwner("session-1", "conn-B", 2) // same epoch as applied: also ignored
+
+    expect(seen).toEqual(["conn-A"])
+  })
+
+  it("delivers a strictly-newer epoch and isolates dedup per pty id", () => {
+    const seen: Array<[string, string | undefined]> = []
+    track(onPtyOwner((id, owner) => seen.push([id, owner])))
+
+    notifyPtyOwner("a", "conn-a1", 5)
+    notifyPtyOwner("a", "conn-a2", 6) // strictly newer -> delivered
+    notifyPtyOwner("a", "conn-a-stale", 4) // older -> ignored
+    notifyPtyOwner("b", "conn-b1", 1) // different pty: its own counter -> delivered
+
+    expect(seen).toEqual([
+      ["a", "conn-a1"],
+      ["a", "conn-a2"],
+      ["b", "conn-b1"],
+    ])
+  })
+
+  it("always delivers a handover with no epoch (mixed-version degrade)", () => {
+    const seen: Array<string | undefined> = []
+    track(
+      onPtyOwner((id, owner) => {
+        if (id === "session-1") seen.push(owner)
+      }),
+    )
+    notifyPtyOwner("session-1", "conn-1") // no epoch
+    notifyPtyOwner("session-1", "conn-2") // no epoch, still delivered
+    expect(seen).toEqual(["conn-1", "conn-2"])
+  })
+
+  it("treats a handover arriving while own conn id is null as non-owner without crashing", () => {
+    // On reconnect a `pty.owner` over /ws/events can land before this client's new
+    // `connected` frame sets its id. With the id still null the ownership decision
+    // must safely resolve to non-owner (observe), never throw.
+    let owner = true
+    let myConnId: string | null = null
+    track(
+      onPtyOwner((id, ownerId) => {
+        if (id !== "session-1") return
+        owner = isOwnerAfterHandover(ownerId, myConnId)
+      }),
+    )
+
+    expect(() => notifyPtyOwner("session-1", "conn-self", 1)).not.toThrow()
+    expect(owner).toBe(false)
+
+    // Once the `connected` frame sets our id, a newer handover resolves correctly.
+    myConnId = "conn-self"
+    notifyPtyOwner("session-1", "conn-self", 2)
+    expect(owner).toBe(true)
+  })
+
+  it("resetPtyOwnerEpochs clears high-water marks so a post-restart epoch is not dropped", () => {
+    const seen: Array<string | undefined> = []
+    track(
+      onPtyOwner((id, owner) => {
+        if (id === "session-1") seen.push(owner)
+      }),
+    )
+    notifyPtyOwner("session-1", "conn-old", 9)
+    // Server restarts: its epoch counter restarts at 1. Without a reset this would
+    // be ignored as <= 9; the reconnect reset makes it deliver again.
+    resetPtyOwnerEpochs()
+    notifyPtyOwner("session-1", "conn-new", 1)
+    expect(seen).toEqual(["conn-old", "conn-new"])
   })
 })

@@ -236,6 +236,11 @@ export interface EventsServerMessage {
    *  that PTY compares it against its own PTY-socket connection id to decide
    *  ownership definitively (own id = owner, foreign id = read-only placeholder). */
   owner?: string
+  /** The monotonic ownership epoch on a `pty.owner` handover, assigned under the
+   *  server's owners lock so it reflects true claim order. The client keeps only
+   *  the highest epoch seen per pty and ignores any older arrival, so a reordered
+   *  broadcast cannot resurrect a stale owner. */
+  epoch?: number
   /** Status correlation key (`status`/`status_cleared`); null/absent = the
    *  anonymous slot. */
   key?: string | null

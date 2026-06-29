@@ -18,7 +18,7 @@ import { ordersMatch } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
-import { notifyPtyOwner } from "./ptyOwnership"
+import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { terminalsApi } from "./terminalsApi"
 import { browseApi } from "./browseApi"
@@ -516,7 +516,9 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   // The id is the pty id (session id for an agent, terminal id for a companion).
   // Delivered on the coarse `sessions` topic, subscribed at module load.
   if (ev.event === "pty.owner") {
-    if (typeof ev.id === "string") notifyPtyOwner(ev.id, ev.owner)
+    // Pass the ownership epoch so the fan-out can ignore an out-of-order (older)
+    // handover and converge on the latest claim regardless of arrival order.
+    if (typeof ev.id === "string") notifyPtyOwner(ev.id, ev.owner, ev.epoch)
     return
   }
   if (ev.event !== "session.changes") return
@@ -566,6 +568,12 @@ eventsSocket.onOpen = () => {
     // apply is idempotent.
     loadBootstrap()
     loadSpine()
+    // The server's ownership epoch counter restarts at zero if the server itself
+    // restarted during the outage; clear our per-pty high-water marks so a fresh
+    // post-restart `pty.owner` is not wrongly ignored as stale. A reconnect is the
+    // only path a restarted server's epochs reach us, and there is no `pty.owner`
+    // replay, so this can never drop a still-relevant in-flight handover.
+    resetPtyOwnerEpochs()
   }
   const id = state.selectedSessionId
   if (id === null) return
