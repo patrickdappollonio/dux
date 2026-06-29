@@ -723,15 +723,27 @@ impl App {
                 .inner(term_area);
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
-                .map(|(label, fg_cmd)| {
+                .enumerate()
+                .map(|(i, (label, fg_cmd))| {
                     let color = self.theme.session_active;
                     let mut spans = vec![Span::styled("● ", Style::default().fg(color))];
                     if let Some(cmd) = fg_cmd {
+                        // The running app's name is the row's label. Only when
+                        // another terminal runs the same app do we disambiguate
+                        // with the terminal's number ("vim (#1)"), mirroring the
+                        // web terminalTitle rule.
+                        let duplicate = terminal_render_data
+                            .iter()
+                            .enumerate()
+                            .any(|(j, (_, other))| j != i && other.as_deref() == Some(cmd));
                         spans.push(Span::styled(cmd.clone(), Style::default().fg(color)));
-                        spans.push(Span::styled(
-                            format!(" · {label}"),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        ));
+                        let suffix = terminal_dup_suffix(label, duplicate);
+                        if !suffix.is_empty() {
+                            spans.push(Span::styled(
+                                suffix,
+                                Style::default().fg(self.theme.provider_label_fg),
+                            ));
+                        }
                     } else {
                         spans.push(Span::styled(label.clone(), Style::default().fg(color)));
                     }
@@ -7016,6 +7028,30 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
     }
 }
 
+/// The trailing counter in a "Terminal N" label, used only to disambiguate two
+/// terminals running the same app (see `terminal_dup_suffix`). `None` for a
+/// label without a trailing number, which the engine never produces but keeps
+/// the helper total.
+fn terminal_number(label: &str) -> Option<u32> {
+    label.rsplit(' ').next()?.parse().ok()
+}
+
+/// The suffix appended after a running terminal's command in the left pane.
+/// Empty when the command is unique among the terminals shown together;
+/// otherwise " (#N)" using the terminal's counter so two terminals running the
+/// same app stay distinct ("vim (#1)", "vim (#2)"), falling back to the label
+/// in parentheses if it carries no number. Mirrors the web `terminalTitle`
+/// rule (crates/dux-web/web/src/lib/terminals.ts).
+fn terminal_dup_suffix(label: &str, duplicate: bool) -> String {
+    if !duplicate {
+        return String::new();
+    }
+    match terminal_number(label) {
+        Some(n) => format!(" (#{n})"),
+        None => format!(" ({label})"),
+    }
+}
+
 fn companion_terminal_status_meta(status: CompanionTerminalStatus) -> (&'static str, &'static str) {
     match status {
         CompanionTerminalStatus::NotLaunched => ("○", "not launched"),
@@ -8028,6 +8064,35 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn terminal_number_parses_trailing_counter() {
+        assert_eq!(terminal_number("Terminal 1"), Some(1));
+        assert_eq!(terminal_number("Terminal 12"), Some(12));
+    }
+
+    #[test]
+    fn terminal_number_is_none_without_a_trailing_number() {
+        assert_eq!(terminal_number("Terminal"), None);
+        assert_eq!(terminal_number("scratch"), None);
+    }
+
+    #[test]
+    fn terminal_dup_suffix_is_empty_for_a_unique_command() {
+        assert_eq!(terminal_dup_suffix("Terminal 1", false), "");
+    }
+
+    #[test]
+    fn terminal_dup_suffix_uses_the_counter_on_collision() {
+        // Two terminals running the same app are disambiguated by their number.
+        assert_eq!(terminal_dup_suffix("Terminal 1", true), " (#1)");
+        assert_eq!(terminal_dup_suffix("Terminal 2", true), " (#2)");
+    }
+
+    #[test]
+    fn terminal_dup_suffix_falls_back_to_the_label_without_a_number() {
+        assert_eq!(terminal_dup_suffix("scratch", true), " (scratch)");
     }
 
     #[test]
