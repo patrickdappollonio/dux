@@ -16,8 +16,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return { ...actual, useDux: () => mockState }
 })
 
-// The real store module boots on import (it reads localStorage and fires an auth
-// probe + reconnect timers). jsdom doesn't expose localStorage/fetch as bare
+// The real store module boots on import (it reads localStorage and fires the
+// bootstrap fetch + reconnect timers). jsdom doesn't expose localStorage/fetch as bare
 // globals, so stub them BEFORE the component (and the store behind it) loads, and
 // keep the boot off the network so these render tests stay hermetic.
 function installBootStubs() {

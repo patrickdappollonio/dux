@@ -14,7 +14,6 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
-bcrypt = "0.19"
 chrono = { version = "0.4.41", features = ["serde"] }
 rustix = { version = "1.1", features = ["termios", "process", "event", "stdio", "fs", "time"] }
 dux-core = { path = "crates/dux-core" }
@@ -32,21 +31,6 @@ libc = "0.2"
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
-tower-sessions = "0.15"
-# Built-in TLS via ACME (Let's Encrypt, HTTP-01). Runtime-agnostic: the
-# `AcmeState` stream must be polled for acquisition/renewal to progress (see
-# dux-web/src/tls.rs). Features: `tokio` (runtime glue), `axum` (gates the
-# `axum_acceptor` method, also pulls `tower` for the HTTP-01 challenge service),
-# `ring` (the rustls crypto provider), `webpki-roots` (CA roots for talking to
-# the ACME directory; required by `AcmeConfig::new`), `tls12` (TLS 1.2 support so
-# older browsers still connect). `ring` is chosen over the default `aws-lc-rs` so
-# the whole workspace uses a single, C-toolchain-free crypto provider. dux-core
-# never depends on this — TLS is a dux-web concern only.
-rustls-acme = { version = "0.15", default-features = false, features = ["tokio", "axum", "tower", "ring", "webpki-roots", "tls12"] }
-# Serves the HTTPS app router behind the rustls-acme acceptor with connect-info
-# preserved (per-IP rate limiting depends on it) and a `Handle` for graceful
-# shutdown. 0.8 targets axum 0.8.
-axum-server = "0.8"
 
 [profile.release]
 opt-level = "z"   # Optimize for size.

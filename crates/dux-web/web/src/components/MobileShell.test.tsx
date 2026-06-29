@@ -52,7 +52,6 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     selectedTarget: null,
     pendingSessionOrder: null,
     pendingProjectOrder: null,
-    auth: { phase: "disabled" },
     mobileScreen: "home",
     ...overrides,
   } as unknown as DuxState

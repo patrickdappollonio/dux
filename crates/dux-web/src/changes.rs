@@ -630,6 +630,8 @@ impl ChangesService {
                 event: "session.changes".to_string(),
                 id: Some(session_id.to_string()),
                 rev: Some(rev),
+                owner: None,
+                epoch: None,
             });
         }
     }
@@ -952,7 +954,7 @@ mod tests {
             .await
             .expect("event timeout")
             .expect("event");
-        let Event::Resource { event, id, rev } = ev;
+        let Event::Resource { event, id, rev, .. } = ev;
         assert_eq!(event, "session.changes");
         assert_eq!(id.as_deref(), Some("s1"));
         assert!(

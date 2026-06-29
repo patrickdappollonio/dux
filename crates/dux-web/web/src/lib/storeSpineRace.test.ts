@@ -40,11 +40,11 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // /api/me, /api/v1/bootstrap, and anything else: auth off / empty body.
+  // /api/v1/bootstrap and anything else: empty body.
   return {
     ok: true,
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
@@ -95,7 +95,6 @@ describe("loadSpine in-flight guard", () => {
     await waitForResolvers(1)
     spineResolvers[0](makeSpine({ sessions: [session("boot", "p1")] }))
     await vi.waitFor(() => {
-      expect(mod.getSnapshot().auth.phase).not.toBe("checking")
       expect(mod.getSnapshot().spine).not.toBeNull()
     })
 

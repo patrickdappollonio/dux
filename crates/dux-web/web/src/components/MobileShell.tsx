@@ -20,7 +20,6 @@ import {
   FolderOpen,
   GitFork,
   GitPullRequest,
-  LogOut,
   Pencil,
   Play,
   Plug,
@@ -75,7 +74,6 @@ import {
 } from "@/lib/reorder"
 import {
   createTerminal,
-  logout,
   mobileNavigate,
   openAddProject,
   openAgentEnv,
@@ -541,7 +539,6 @@ function HomeScreen() {
     selectedTarget,
     pendingSessionOrder,
     pendingProjectOrder,
-    auth,
   } = useDux()
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
@@ -582,17 +579,6 @@ function HomeScreen() {
         >
           <Search />
         </Button>
-        {auth.phase === "authed" ? (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-11 shrink-0"
-            aria-label={`Log out ${auth.username ?? ""}`.trim()}
-            onClick={() => void logout()}
-          >
-            <LogOut />
-          </Button>
-        ) : null}
       </header>
 
       {hasProjects ? (

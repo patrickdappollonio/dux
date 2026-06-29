@@ -41,7 +41,7 @@ const fetchMock = vi.fn(async (url: string) => {
   return {
     ok: true,
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
@@ -81,7 +81,6 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().bootstrap).not.toBeNull()
   })
   return mod

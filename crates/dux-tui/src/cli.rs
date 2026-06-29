@@ -272,6 +272,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
 
     // [server]
+    diff_str(
+        &mut changes,
+        "server.host",
+        &defaults.server.host,
+        &current.server.host,
+    );
     diff_u16(
         &mut changes,
         "server.port",
@@ -284,19 +290,13 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.tailscale_enabled,
         current.server.tailscale_enabled,
     );
-    let default_listen = defaults.server.listen_addrs.join(", ");
-    let current_listen = current.server.listen_addrs.join(", ");
+    let default_allowed = defaults.server.allowed_hosts.join(", ");
+    let current_allowed = current.server.allowed_hosts.join(", ");
     diff_str(
         &mut changes,
-        "server.listen_addrs",
-        &format!("[{default_listen}]"),
-        &format!("[{current_listen}]"),
-    );
-    diff_bool(
-        &mut changes,
-        "server.insecure_allow_remote",
-        defaults.server.insecure_allow_remote,
-        current.server.insecure_allow_remote,
+        "server.allowed_hosts",
+        &format!("[{default_allowed}]"),
+        &format!("[{current_allowed}]"),
     );
     diff_str(
         &mut changes,
@@ -312,66 +312,22 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
     diff_usize(
         &mut changes,
-        "server.max_websocket_connections",
-        defaults.server.max_websocket_connections as usize,
-        current.server.max_websocket_connections as usize,
+        "server.max_websocket_events_connections",
+        defaults.server.max_websocket_events_connections as usize,
+        current.server.max_websocket_events_connections as usize,
     );
-
-    // [server.acme]
-    diff_bool(
+    diff_usize(
         &mut changes,
-        "server.acme.enabled",
-        defaults.server.acme.enabled,
-        current.server.acme.enabled,
+        "server.max_websocket_agent_connections",
+        defaults.server.max_websocket_agent_connections as usize,
+        current.server.max_websocket_agent_connections as usize,
     );
-    let default_domains = defaults.server.acme.domains.join(", ");
-    let current_domains = current.server.acme.domains.join(", ");
-    diff_str(
+    diff_usize(
         &mut changes,
-        "server.acme.domains",
-        &format!("[{default_domains}]"),
-        &format!("[{current_domains}]"),
+        "server.max_websocket_terminal_connections",
+        defaults.server.max_websocket_terminal_connections as usize,
+        current.server.max_websocket_terminal_connections as usize,
     );
-    diff_str(
-        &mut changes,
-        "server.acme.email",
-        &defaults.server.acme.email,
-        &current.server.acme.email,
-    );
-    diff_u16(
-        &mut changes,
-        "server.acme.http_port",
-        defaults.server.acme.http_port,
-        current.server.acme.http_port,
-    );
-    diff_u16(
-        &mut changes,
-        "server.acme.https_port",
-        defaults.server.acme.https_port,
-        current.server.acme.https_port,
-    );
-    diff_bool(
-        &mut changes,
-        "server.acme.production",
-        defaults.server.acme.production,
-        current.server.acme.production,
-    );
-    diff_opt_str(
-        &mut changes,
-        "server.acme.cache_dir",
-        defaults.server.acme.cache_dir.as_deref(),
-        current.server.acme.cache_dir.as_deref(),
-    );
-
-    // [auth]
-    // Report only the configured user count, never the entries themselves —
-    // they embed bcrypt password hashes that must not be echoed to stdout.
-    if !current.auth.users.is_empty() {
-        changes.push(format!(
-            "auth.users: {} user(s) configured",
-            current.auth.users.len()
-        ));
-    }
 
     // [terminal]
     diff_str(

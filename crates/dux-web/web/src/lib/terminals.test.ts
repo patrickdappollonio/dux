@@ -59,7 +59,7 @@ describe("terminalForeground", () => {
 
 describe("terminalTitle", () => {
   it("shows just the label when idle", () => {
-    expect(terminalTitle(term({ foreground_cmd: null }))).toBe("Terminal 1")
+    expect(terminalTitle(term({ foreground_cmd: null }), [])).toBe("Terminal 1")
   })
 
   it("shows just the running app name when a command is running and is unique", () => {

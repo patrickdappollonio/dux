@@ -6,3 +6,6 @@ perf.data.old
 
 # Local-only branch catch-up notes (not for version control)
 docs/server-mode-summary.md
+
+# Subagent-driven-development scratch (briefs, reports, review packages)
+.superpowers/

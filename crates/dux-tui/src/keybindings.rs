@@ -1050,20 +1050,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
-    BindingDef {
-        action: Action::ServerAddUser,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
-    BindingDef {
-        action: Action::ServerRemoveUser,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
 ];
 
 const HELP_SECTION_ORDER: &[&str] = &[

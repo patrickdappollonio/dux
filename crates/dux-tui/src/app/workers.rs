@@ -1,7 +1,7 @@
 use std::sync::mpsc::Sender;
 
 use dux_core::engine::{
-    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView, AuthUserFinalOutcome,
+    AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, ResumeFallbackOutcome, StatusUpdate, WorktreeRemoval,
@@ -610,13 +610,6 @@ impl App {
                 self.apply_project_persistence_outcome(*boxed);
             }
 
-            EventReaction::AuthUsersOutcome {
-                outcome,
-                status_op_id,
-            } => {
-                self.apply_auth_users_outcome(outcome, status_op_id);
-            }
-
             EventReaction::StartupLogArrived { scope_label, log } => {
                 self.input_target = InputTarget::None;
                 self.terminal_selection = None;
@@ -787,28 +780,6 @@ impl App {
         let resolved = op.resolve(&outcome);
         self.apply_reaction(resolved.into_reaction());
         true
-    }
-
-    /// Resolve a web-UI login-user add against its handler-computed
-    /// [`AuthUserFinalOutcome`]. When the correlation id matches a stashed
-    /// [`HandlerStatusOp`] (the normal TUI add path), pop and resolve it into the
-    /// keyed final. Otherwise (no id, or an op the surface never minted) fall
-    /// back to building the `StatusUpdate` directly via
-    /// [`AuthUserFinalOutcome::into_status`] — the same tones and byte-identical
-    /// messages the resolver would produce.
-    pub(crate) fn apply_auth_users_outcome(
-        &mut self,
-        outcome: AuthUserFinalOutcome,
-        status_op_id: Option<String>,
-    ) {
-        if let Some(id) = &status_op_id
-            && let Some(op) = self.pending_auth_ops.remove(id)
-        {
-            let resolved = op.resolve(&outcome);
-            self.apply_reaction(resolved.into_reaction());
-            return;
-        }
-        self.apply_reaction(EventReaction::Status(outcome.into_status(status_op_id)));
     }
 
     pub(crate) fn apply_project_persistence_outcome(&mut self, outcome: ProjectPersistenceOutcome) {

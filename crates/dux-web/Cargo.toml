@@ -15,18 +15,6 @@ futures-util.workspace = true
 uuid.workspace = true
 # Wall-clock `HH:MM:SS` timestamps for the vite-style server console (console.rs).
 chrono.workspace = true
-tower-sessions.workspace = true
-rustls-acme.workspace = true
-axum-server.workspace = true
-# `hyper`'s `body::Incoming` names the request body type that axum-server's
-# `MakeService`/`SendService` bounds are written over, referenced in the generic
-# bounds of the shared HTTPS serve seam (`serve_https_with_acceptor`) so the
-# acceptor can be generic over the `axum_server::accept::Accept` contract that both
-# the production `AxumAcceptor` and the e2e's `RustlsAcceptor` satisfy.
-hyper = "1"
-# The tower-sessions `SessionStore`/`ExpiredDeletion` traits are `#[async_trait]`,
-# so the sweepable in-memory store that implements them needs the same macro.
-async-trait = "0.1"
 rust-embed = { version = "8", features = ["mime-guess", "debug-embed"] }
 # Decompress embedded assets on the fly for the rare client that doesn't accept
 # gzip (build.rs stores them gzipped to shrink the binary). Already in the lock.
@@ -39,22 +27,6 @@ flate2 = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
-# `__rustls-tls` adds the rustls WS connector so the TLS e2e can open wss:// over
-# the self-signed cert (and connect to the loopback IP SAN, avoiding any DNS).
-tokio-tungstenite = { workspace = true, features = ["__rustls-tls"] }
+tokio-tungstenite = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
-# `rustls-tls` lets the e2e trust the self-signed cert via add_root_certificate
-# and map the test domain to the loopback listener via resolve().
-reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "rustls-tls"] }
-# Self-signed certs for the TLS e2e suite: the injectable acceptor serves the
-# real app router over TLS without touching the network/ACME.
-rcgen = "0.13"
-# Build a rustls ServerConfig from the self-signed cert for the e2e harness.
-# `ring` matches the provider rustls-acme uses in production, so the test
-# crypto provider and the production one agree.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
-# `tls-rustls-no-provider` gives the e2e a plain `RustlsAcceptor`/`RustlsConfig`
-# that satisfies the SAME `axum_server::accept::Accept` seam the production
-# `AxumAcceptor` does, WITHOUT pulling aws-lc-rs (which would clash with the
-# ring provider). This is what makes the acceptor injectable for tests.
-axum-server = { workspace = true, features = ["tls-rustls-no-provider"] }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json"] }
