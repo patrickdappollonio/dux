@@ -193,9 +193,9 @@ async fn no_users_ws_open_without_auth() {
 
 #[tokio::test]
 async fn ws_connection_cap_rejects_extra_with_503() {
-    // Resource limit: with `max_websocket_connections = 1`, the first socket takes
-    // the only permit; a second upgrade is refused with HTTP 503 while the first
-    // is open, then succeeds once the first closes and frees the slot.
+    // Resource limit: with the events cap set to 1, the first socket takes the
+    // only permit; a second upgrade is refused with HTTP 503 while the first is
+    // open, then succeeds once the first closes and frees the slot.
     let tmp = tempfile::tempdir().unwrap();
     let paths = seed_paths(tmp.path());
     let mut engine = bootstrap_engine(&paths).unwrap();
@@ -209,12 +209,18 @@ async fn ws_connection_cap_rejects_extra_with_503() {
         },
     );
     let (handle, _join) = spawn_engine_thread(engine);
-    // Build the app with a cap of ONE (auth off, so no cookie dance).
+    // Build the app with an events cap of ONE (auth off, so no cookie dance).
+    // Agent/terminal caps stay at their defaults to prove the events class is
+    // bounded on its own.
     let app = dux_web::server::build_app(
         handle,
         shared_auth(&[], false),
         axum::Router::new(),
-        dux_web::server::RouterParams::plain_http().with_max_websocket_connections(1),
+        dux_web::server::RouterParams::plain_http().with_max_websocket_connections(
+            1,
+            dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+            dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
+        ),
     )
     .0;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

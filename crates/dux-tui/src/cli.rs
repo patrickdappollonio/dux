@@ -312,9 +312,21 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
     diff_usize(
         &mut changes,
-        "server.max_websocket_connections",
-        defaults.server.max_websocket_connections as usize,
-        current.server.max_websocket_connections as usize,
+        "server.max_websocket_events_connections",
+        defaults.server.max_websocket_events_connections as usize,
+        current.server.max_websocket_events_connections as usize,
+    );
+    diff_usize(
+        &mut changes,
+        "server.max_websocket_agent_connections",
+        defaults.server.max_websocket_agent_connections as usize,
+        current.server.max_websocket_agent_connections as usize,
+    );
+    diff_usize(
+        &mut changes,
+        "server.max_websocket_terminal_connections",
+        defaults.server.max_websocket_terminal_connections as usize,
+        current.server.max_websocket_terminal_connections as usize,
     );
 
     // [server.acme]
