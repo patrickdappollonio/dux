@@ -3086,4 +3086,65 @@ mod tests {
             .expect("bus recv");
         assert_eq!(ev, config_changed_event());
     }
+
+    /// End-to-end regression: saving macros through the engine actor (the
+    /// `PUT /api/v1/macros` path) must ALSO emit `config.changed` on the bus, just
+    /// like a reload does. The macro is written to disk and adopted in memory, but
+    /// without this signal a `config`-subscribed client never refetches bootstrap,
+    /// so the macro dialog reseeds from a stale list and the just-saved macro
+    /// appears to vanish. The eager-save config mutations (`UpdateMacros`,
+    /// `PersistGlobalEnv`, `SetChangesPaneVisible`) share this chain.
+    #[tokio::test]
+    async fn macro_save_emits_config_changed_on_the_bus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe();
+        let _h =
+            spawn_config_changed_forwarder(handle.subscribe_config_reloads(), Arc::clone(&bus));
+
+        // Save one macro wholesale, exactly as the REST verb does.
+        handle
+            .apply_wire(dux_core::wire::WireCommand::UpdateMacros {
+                entries: vec![dux_core::wire::WireMacroEntry {
+                    name: "greet".to_string(),
+                    text: "hi".to_string(),
+                    surface: "agent".to_string(),
+                }],
+            })
+            .await
+            .expect("update macros command");
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), bus_rx.recv())
+            .await
+            .expect("a macro save must emit config.changed")
+            .expect("bus recv");
+        assert_eq!(ev, config_changed_event());
+    }
+
+    /// The same chain for the workspace-wide env editor (`PUT /api/v1/global-env`):
+    /// it shares the macro path's gap, so persisting the env map must likewise emit
+    /// `config.changed` so clients refetch bootstrap.
+    #[tokio::test]
+    async fn global_env_save_emits_config_changed_on_the_bus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        let mut bus_rx = bus.subscribe();
+        let _h =
+            spawn_config_changed_forwarder(handle.subscribe_config_reloads(), Arc::clone(&bus));
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        handle
+            .apply_wire(dux_core::wire::WireCommand::PersistGlobalEnv { env })
+            .await
+            .expect("persist global env command");
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), bus_rx.recv())
+            .await
+            .expect("a global-env save must emit config.changed")
+            .expect("bus recv");
+        assert_eq!(ev, config_changed_event());
+    }
 }

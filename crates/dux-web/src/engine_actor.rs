@@ -1202,7 +1202,9 @@ pub(crate) fn run_engine_loop(
                     disconnected = true;
                     break;
                 }
-                Ok(req) => handle_request(&mut engine, req, &mut thread_status_tx),
+                Ok(req) => {
+                    handle_request(&mut engine, req, &mut thread_status_tx, &config_reload_tx)
+                }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -1334,9 +1336,20 @@ fn spine_fingerprints(engine: &Engine) -> (String, String) {
     (projects, sessions)
 }
 
-fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut StatusEmitter) {
+fn handle_request(
+    engine: &mut Engine,
+    req: EngineRequest,
+    status_tx: &mut StatusEmitter,
+    config_reload_tx: &broadcast::Sender<()>,
+) {
     match req {
         EngineRequest::ApplyWire(cmd, reply, origin) => {
+            // A config-static mutation (macros / global env / Changes-pane flag)
+            // eager-saves and adopts the change in place — there is no disk reload
+            // to drive the usual `config.changed` signal, so we fire it ourselves
+            // below once the command succeeds. Capture this BEFORE `cmd` is moved
+            // into `apply_wire`.
+            let mutates_config = cmd.mutates_config_static();
             // Tag every status this command mints with the originating
             // connection. The engine reads `current_origin` at each mint site
             // (the synchronous outcome, deferred busies/finals, worker busies);
@@ -1344,6 +1357,13 @@ fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut Statu
             engine.current_origin = origin;
             let res = engine.apply_wire(cmd).map_err(|e| e.to_string());
             engine.current_origin = StatusScope::All;
+            // On a successful config-static mutation, signal the web layer's
+            // forwarder so it emits `config.changed` and every `config`-subscribed
+            // client refetches `/api/v1/bootstrap`. Fire-and-forget: an `Err` only
+            // means no forwarder is listening (e.g. the TUI flip), which is fine.
+            if res.is_ok() && mutates_config {
+                let _ = config_reload_tx.send(());
+            }
             // ALSO route the synchronous command-result status through the shared
             // controller — broadcast to EVERY client and auto-cleared on the same
             // policy as engine statuses — instead of leaving it only on the
