@@ -1,15 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
-  PtyOwnershipTracker,
-  SELF_CLAIM_GRACE_MS,
   isForeground,
+  isOwnerAfterHandover,
   notifyPtyOwner,
   onPtyOwner,
 } from "./ptyOwnership"
 
+// Every `onPtyOwner` registration in a test is tracked here and torn down in
+// `afterEach` so the module-level listener set never leaks state across tests
+// (a stray listener from one case would otherwise fire in another).
+const registeredOffs: Array<() => void> = []
+function track(off: () => void): () => void {
+  registeredOffs.push(off)
+  return off
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
+  while (registeredOffs.length > 0) registeredOffs.pop()?.()
 })
 
 describe("isForeground", () => {
@@ -32,87 +41,93 @@ describe("isForeground", () => {
   })
 })
 
-describe("PtyOwnershipTracker", () => {
-  // A controllable clock so the grace window is exercised deterministically.
-  function trackerAt(clock: { t: number }) {
-    return new PtyOwnershipTracker(() => clock.t)
-  }
-
-  it("treats our own claim's echo as not a demotion, then demotes a later takeover", () => {
-    const clock = { t: 0 }
-    const tracker = trackerAt(clock)
-
-    // We claim (foreground attach / take-over) and the server echoes our own
-    // `pty.owner` back almost immediately: that is NOT a demotion.
-    tracker.noteLocalClaim()
-    clock.t = 50
-    expect(tracker.isDemotion()).toBe(false)
-
-    // A later `pty.owner` (another device took over) IS a demotion.
-    clock.t = 200
-    expect(tracker.isDemotion()).toBe(true)
+describe("isOwnerAfterHandover", () => {
+  // Ownership is now decided by comparing the handover's claimer id against this
+  // client's own PTY-socket connection id, not by a timing heuristic.
+  it("is the owner when the handover's owner id is our own connection id", () => {
+    expect(isOwnerAfterHandover("conn-7", "conn-7")).toBe(true)
   })
 
-  it("resolves a takeover that lands close after our own claim (count, not just time)", () => {
-    const clock = { t: 0 }
-    const tracker = trackerAt(clock)
-
-    // We claim at t=0; another device claims at t=500. Both echoes land inside the
-    // grace window, but in broadcast order: ours first (consumed), theirs second.
-    tracker.noteLocalClaim()
-    clock.t = 60
-    expect(tracker.isDemotion()).toBe(false) // our own echo, consumed
-    clock.t = 560
-    expect(tracker.isDemotion()).toBe(true) // their takeover, within grace but unmatched
+  it("is NOT the owner when the handover's owner id is another device's id", () => {
+    // The race the id comparison fixes: a foreign claim demotes us to the
+    // read-only placeholder definitively, regardless of broadcast ordering.
+    expect(isOwnerAfterHandover("conn-9", "conn-7")).toBe(false)
   })
 
-  it("does not let a stale (never-arriving) echo absorb a much-later takeover", () => {
-    const clock = { t: 0 }
-    const tracker = trackerAt(clock)
-
-    tracker.noteLocalClaim()
-    // Our echo never arrives; a genuine takeover lands well past the grace window.
-    clock.t = SELF_CLAIM_GRACE_MS + 1
-    expect(tracker.isDemotion()).toBe(true)
+  it("is NOT the owner before our own `connected` frame has set our id", () => {
+    expect(isOwnerAfterHandover("conn-7", null)).toBe(false)
   })
 
-  it("with no local claim, any owner event is a demotion", () => {
-    const tracker = new PtyOwnershipTracker(() => 1000)
-    expect(tracker.isDemotion()).toBe(true)
+  it("is NOT the owner when the event carried no owner id", () => {
+    expect(isOwnerAfterHandover(undefined, "conn-7")).toBe(false)
+  })
+
+  it("treats two distinct undefineds as non-ownership, not a match", () => {
+    // null connId vs undefined owner must never coincidentally read as "us".
+    expect(isOwnerAfterHandover(undefined, null)).toBe(false)
   })
 })
 
 describe("pty.owner fan-out", () => {
-  it("delivers to registered listeners and stops after unsubscribe", () => {
-    const seen: string[] = []
-    const off = onPtyOwner((id) => seen.push(id))
+  it("delivers pty id + owner id to listeners and stops after unsubscribe", () => {
+    const seen: Array<[string, string | undefined]> = []
+    const off = track(onPtyOwner((id, owner) => seen.push([id, owner])))
 
-    notifyPtyOwner("session-1")
-    notifyPtyOwner("term-9")
-    expect(seen).toEqual(["session-1", "term-9"])
+    notifyPtyOwner("session-1", "conn-1")
+    notifyPtyOwner("term-9", "conn-2")
+    expect(seen).toEqual([
+      ["session-1", "conn-1"],
+      ["term-9", "conn-2"],
+    ])
 
     off()
-    notifyPtyOwner("session-1")
-    expect(seen).toEqual(["session-1", "term-9"])
+    notifyPtyOwner("session-1", "conn-3")
+    expect(seen).toEqual([
+      ["session-1", "conn-1"],
+      ["term-9", "conn-2"],
+    ])
   })
 
   it("isolates listeners: a listener only reacts to its own pty id", () => {
-    const a: string[] = []
-    const b: string[] = []
-    const offA = onPtyOwner((id) => {
-      if (id === "a") a.push(id)
-    })
-    const offB = onPtyOwner((id) => {
-      if (id === "b") b.push(id)
-    })
+    const a: Array<string | undefined> = []
+    const b: Array<string | undefined> = []
+    track(
+      onPtyOwner((id, owner) => {
+        if (id === "a") a.push(owner)
+      }),
+    )
+    track(
+      onPtyOwner((id, owner) => {
+        if (id === "b") b.push(owner)
+      }),
+    )
 
-    notifyPtyOwner("a")
-    notifyPtyOwner("b")
-    notifyPtyOwner("a")
+    notifyPtyOwner("a", "conn-a1")
+    notifyPtyOwner("b", "conn-b1")
+    notifyPtyOwner("a", "conn-a2")
 
-    expect(a).toEqual(["a", "a"])
-    expect(b).toEqual(["b"])
-    offA()
-    offB()
+    expect(a).toEqual(["conn-a1", "conn-a2"])
+    expect(b).toEqual(["conn-b1"])
+  })
+
+  it("drives the ownership decision end to end (own claim vs foreign takeover)", () => {
+    // The realistic wiring: a view holds its own connection id and flips ownership
+    // by comparing each handover's owner id against it.
+    const myConnId = "conn-self"
+    let owner = true
+    track(
+      onPtyOwner((id, ownerId) => {
+        if (id !== "session-1") return
+        owner = isOwnerAfterHandover(ownerId, myConnId)
+      }),
+    )
+
+    // Our own claim echoes back -> we stay the owner.
+    notifyPtyOwner("session-1", "conn-self")
+    expect(owner).toBe(true)
+
+    // Another device takes over -> we are demoted to the placeholder.
+    notifyPtyOwner("session-1", "conn-other")
+    expect(owner).toBe(false)
   })
 })

@@ -508,13 +508,15 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     loadSpine()
     return
   }
-  // A `pty.owner` event means another connection claimed (took over) a PTY's
-  // sizing+input. Fan it out to the mounted terminal view for that pty id so it
-  // flips to the read-only take-over placeholder if it was the owner. The id is
-  // the pty id (session id for an agent, terminal id for a companion). Delivered
-  // on the coarse `sessions` topic, subscribed at module load.
+  // A `pty.owner` event means a connection claimed (took over, or first-claimed an
+  // unowned) PTY's sizing+input. Fan it out to the mounted terminal view for that
+  // pty id along with the claimer's connection id (`owner`); the view compares that
+  // against its own PTY-socket connection id to decide definitively whether it is
+  // the owner (stays interactive) or has been taken over (read-only placeholder).
+  // The id is the pty id (session id for an agent, terminal id for a companion).
+  // Delivered on the coarse `sessions` topic, subscribed at module load.
   if (ev.event === "pty.owner") {
-    if (typeof ev.id === "string") notifyPtyOwner(ev.id)
+    if (typeof ev.id === "string") notifyPtyOwner(ev.id, ev.owner)
     return
   }
   if (ev.event !== "session.changes") return

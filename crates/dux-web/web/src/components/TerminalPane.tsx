@@ -29,8 +29,8 @@ import {
   terminalPtyUrl,
 } from "@/lib/ptySocket"
 import {
-  PtyOwnershipTracker,
   isForeground,
+  isOwnerAfterHandover,
   onPtyOwner,
 } from "@/lib/ptyOwnership"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
@@ -168,19 +168,20 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // take-over placeholder (so two people can't fight over one prompt). This view
   // claims ownership on attach ONLY if the tab is foregrounded (a backgrounded
   // tab attaches as a silent observer). The server broadcasts a `pty.owner` signal
-  // on every handover; receiving one for this PTY (that is NOT our own claim
-  // echoing back) demotes us to the placeholder. `isOwnerRef` mirrors the state so
-  // the stable mount-effect closures (onData, the resize senders) read it live
-  // rather than capturing a stale value.
+  // carrying the claimer's connection id on every handover; we compare it against
+  // OUR PTY-socket connection id (`myConnIdRef`) to decide definitively whether the
+  // handover is our own claim (stay owner) or another device taking over (demote to
+  // placeholder). `isOwnerRef` mirrors the state so the stable mount-effect closures
+  // (onData, the resize senders) read it live rather than capturing a stale value.
   const [isOwner, setIsOwner] = useState(isForeground)
   // Mirror of `isOwner` for the stable mount-effect closures (onData, the resize
-  // senders) to read synchronously. Kept in sync only at the two mutation points
-  // (a take-over and a demotion handler), never written during render.
+  // senders) to read synchronously. Kept in sync only at the mutation points
+  // (a take-over and the handover handler), never written during render.
   const isOwnerRef = useRef(isOwner)
-  const ownershipRef = useRef<PtyOwnershipTracker | null>(null)
-  if (ownershipRef.current === null) {
-    ownershipRef.current = new PtyOwnershipTracker()
-  }
+  // This view's PTY-socket connection id, delivered as the socket's first
+  // `connected` frame (and re-issued on every reconnect). Compared against each
+  // `pty.owner` event's claimer id to decide ownership. Null until that frame lands.
+  const myConnIdRef = useRef<string | null>(null)
 
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
@@ -273,6 +274,12 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     )
     ptyRef.current = pty
     setActivePtySocket(pty)
+    // Record this socket's connection id (the socket's first `connected` frame, and
+    // again on every reconnect since the server allocates a fresh id per open) so
+    // the `pty.owner` handler can compare a handover's claimer id against ours.
+    pty.onConnected = (connId) => {
+      myConnIdRef.current = connId
+    }
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
     // the accessory bar transform a single typed char (Ctrl-chord, Alt/Meta
@@ -453,11 +460,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       fit.fit()
       lastRows = term.rows
       lastCols = term.cols
-      // Attaching while foregrounded claims ownership by sending our size; arm one
-      // expected `pty.owner` echo so the server's broadcast of our own claim is not
-      // misread as another device taking over. A backgrounded observer is not the
-      // owner, so the sends below no-op and no claim is armed.
-      if (isOwnerRef.current) ownershipRef.current?.noteLocalClaim()
+      // Attaching while foregrounded claims ownership by sending our size. The
+      // server broadcasts a `pty.owner` carrying our connection id; the handover
+      // handler recognises it as ours by id, so no echo bookkeeping is needed here.
+      // A backgrounded observer is not the owner, so the sends below no-op.
       // Force the agent to FULLY redraw at our size now that the first paint has
       // landed. A same-size resize is a kernel no-op (no SIGWINCH), so when the
       // PTY already matches this viewport the agent never repaints and the
@@ -595,21 +601,23 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     }
   }, [kind, id, sessionId])
 
-  // React to ownership handovers. The server broadcasts a `pty.owner` signal on
-  // every claim; the store fans it out by pty id. A signal for OUR pty that is not
-  // our own claim echoing back (the grace window in PtyOwnershipTracker) means
-  // another device took over, so demote this view to the read-only placeholder.
-  // Keyed by `id` (the pty id: session id for an agent, terminal id for a
-  // companion) so a focus switch re-subscribes for the new target.
+  // React to ownership handovers. The server broadcasts a `pty.owner` carrying the
+  // claimer's connection id; the store fans it out by pty id plus that owner id. For
+  // OUR pty we compare the owner id against our own PTY-socket connection id: an
+  // equal id confirms our own claim (stay the owner), a different id means another
+  // device took over (demote to the read-only placeholder). This definitive
+  // comparison replaces the old timing heuristic, so two devices claiming at once
+  // both converge on the same final owner instead of both falling to the placeholder.
+  // Keyed by `id` (the pty id: session id for an agent, terminal id for a companion)
+  // so a focus switch re-subscribes for the new target.
   useEffect(() => {
-    return onPtyOwner((ptyId) => {
+    return onPtyOwner((ptyId, ownerId) => {
       if (ptyId !== id) return
-      if (ownershipRef.current?.isDemotion()) {
-        // Flip the ref synchronously so an in-flight keystroke is gated off at
-        // once, then re-render into the take-over placeholder.
-        isOwnerRef.current = false
-        setIsOwner(false)
-      }
+      const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
+      // Flip the ref synchronously so an in-flight keystroke is gated by the new
+      // state at once, then re-render into the owner view or take-over placeholder.
+      isOwnerRef.current = mine
+      setIsOwner(mine)
     })
   }, [id])
 
@@ -661,15 +669,15 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Reclaim ownership from another device. Sending our current size IS the claim
   // server-side (most-recent claim wins), so the PTY snaps back to this viewport
   // and our input is forwarded again. Flip the ref synchronously (so the resize
-  // passes the owner gate before the state re-render lands) and note the local
-  // claim so the resulting `pty.owner` echo is recognised as ours, then refocus.
+  // passes the owner gate before the state re-render lands), then refocus. The
+  // server's resulting `pty.owner` carries our connection id, so the handover
+  // handler recognises it as ours by id and keeps us the owner.
   function takeOver() {
     isOwnerRef.current = true
     setIsOwner(true)
     const term = termRef.current
     const pty = ptyRef.current
     if (term && pty) {
-      ownershipRef.current?.noteLocalClaim()
       pty.sendResize(term.rows, term.cols)
     }
     term?.focus()
