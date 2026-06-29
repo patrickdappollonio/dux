@@ -258,7 +258,6 @@ fn plain_http_banner(
             ListenerRow {
                 label: label.to_string(),
                 url: format!("http://{addr}"),
-                note: None,
             }
         })
         .collect();

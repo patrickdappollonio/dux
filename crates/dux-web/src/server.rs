@@ -2796,9 +2796,9 @@ mod tests {
                 scope: StatusScope::All,
             },
             KeyedWireStatus {
-                key: Some("acme".into()),
+                key: Some("commit".into()),
                 tone: "info".into(),
-                message: "Certificate renewed.".into(),
+                message: "Changes committed.".into(),
                 scope: StatusScope::All,
             },
             KeyedWireStatus {
@@ -2811,7 +2811,7 @@ mod tests {
         let events = status_events(&snapshot, "conn");
         assert_eq!(events.len(), 3, "one event per open status entry");
         let keys: Vec<Option<&str>> = events.iter().map(|e| e.key.as_deref()).collect();
-        assert_eq!(keys, vec![Some("pull"), Some("acme"), None]);
+        assert_eq!(keys, vec![Some("pull"), Some("commit"), None]);
     }
 
     /// An entry with an empty message is filtered out (nothing to show).
@@ -2904,16 +2904,16 @@ mod tests {
                 scope: StatusScope::Connection("A".into()),
             },
             KeyedWireStatus {
-                key: Some("acme".into()),
+                key: Some("commit".into()),
                 tone: "info".into(),
-                message: "Certificate renewed.".into(),
+                message: "Changes committed.".into(),
                 scope: StatusScope::All,
             },
         ];
         // Connection B joins: it sees only the `All` status, not A's busy.
         let events = status_events(&snapshot, "B");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].key.as_deref(), Some("acme"));
+        assert_eq!(events[0].key.as_deref(), Some("commit"));
         // Connection A sees both (its own busy + the broadcast).
         assert_eq!(status_events(&snapshot, "A").len(), 2);
     }

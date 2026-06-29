@@ -53,7 +53,7 @@ pub enum EngineRequest {
         /// reach only the originating connection. `All` is the broadcast default.
         StatusScope,
     ),
-    /// A status from a non-engine producer (the ACME certificate-lifecycle task)
+    /// A status from a non-engine producer (the changed-files `ChangesService`)
     /// to broadcast through the shared status controller so it auto-clears and
     /// reaches every client, exactly like engine-originated statuses.
     EmitStatus(WireStatus),
