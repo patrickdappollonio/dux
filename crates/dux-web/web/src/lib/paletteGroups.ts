@@ -30,9 +30,12 @@ const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "configure-global-env": "Configuration",
   "edit-macros": "Configuration",
   "reload-config": "Configuration",
+  "toggle-github-integration": "Configuration",
+  "toggle-randomized-pet-name-default": "Configuration",
   "sort-agents-by-created": "View",
   "sort-agents-by-name": "View",
   "sort-agents-by-updated": "View",
+  "toggle-pr-banner-position": "View",
   "toggle-remove-git-pane": "View",
 }
 

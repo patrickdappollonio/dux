@@ -18,6 +18,9 @@ import {
   openMacrosDialog,
   sortAgents,
   toggleChangesPane,
+  toggleGithubIntegration,
+  togglePrBannerPosition,
+  toggleRandomizedPetNameDefault,
 } from "@/lib/store"
 import { configApi } from "@/lib/configApi"
 import { toast } from "sonner"
@@ -40,5 +43,8 @@ export const PALETTE_HANDLERS: Record<string, () => void> = {
   "sort-agents-by-created": () => sortAgents("created"),
   "sort-agents-by-name": () => sortAgents("name"),
   "sort-agents-by-updated": () => sortAgents("updated"),
+  "toggle-github-integration": () => toggleGithubIntegration(),
+  "toggle-pr-banner-position": () => togglePrBannerPosition(),
+  "toggle-randomized-pet-name-default": () => toggleRandomizedPetNameDefault(),
   "toggle-remove-git-pane": () => toggleChangesPane(),
 }

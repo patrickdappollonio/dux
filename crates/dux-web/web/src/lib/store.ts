@@ -2153,3 +2153,44 @@ export function toggleChangesPane(): void {
       )
     })
 }
+
+// The three Ctrl+K preference toggles (random pet-name default, PR banner
+// position, GitHub integration). Each is a parameterless server-side flip: the
+// server owns the value, persists it, and emits `config.changed` so the
+// refetched bootstrap reflects the new state. The success toast is the engine's
+// routed status; here we only surface a failure.
+export function toggleRandomizedPetNameDefault(): void {
+  configApi
+    .toggleRandomizedPetNameDefault()
+    .catch((e) =>
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not toggle the random pet-name default.",
+      ),
+    )
+}
+
+export function togglePrBannerPosition(): void {
+  configApi
+    .togglePrBannerPosition()
+    .catch((e) =>
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not move the PR banner.",
+      ),
+    )
+}
+
+export function toggleGithubIntegration(): void {
+  configApi
+    .toggleGithubIntegration()
+    .catch((e) =>
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not toggle GitHub integration.",
+      ),
+    )
+}

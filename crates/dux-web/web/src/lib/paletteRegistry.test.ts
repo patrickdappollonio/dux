@@ -27,6 +27,9 @@ const EXPECTED_WEB_COMMANDS = [
   "sort-agents-by-created",
   "sort-agents-by-name",
   "sort-agents-by-updated",
+  "toggle-github-integration",
+  "toggle-pr-banner-position",
+  "toggle-randomized-pet-name-default",
   "toggle-remove-git-pane",
 ]
 

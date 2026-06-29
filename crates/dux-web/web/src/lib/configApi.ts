@@ -46,4 +46,14 @@ export const configApi = {
     send("PUT", "/api/v1/ui/changes-pane", { visible }),
   // Reload config from disk (the "Reload config" palette command).
   reload: () => send("POST", "/api/v1/config/reload", {}),
+  // Flip the random pet-name default. Parameterless: the server owns the value
+  // and flips it, then emits `config.changed`.
+  toggleRandomizedPetNameDefault: () =>
+    send("POST", "/api/v1/defaults/toggle-randomized-pet-name", {}),
+  // Swap the PR banner between the top and bottom of the agent pane.
+  togglePrBannerPosition: () =>
+    send("POST", "/api/v1/ui/toggle-pr-banner-position", {}),
+  // Flip GitHub PR integration (and its engine-side PR-sync side effects).
+  toggleGithubIntegration: () =>
+    send("POST", "/api/v1/ui/toggle-github-integration", {}),
 }
