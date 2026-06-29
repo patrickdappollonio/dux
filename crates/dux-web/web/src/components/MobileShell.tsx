@@ -66,6 +66,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
+import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
 import {
   applyPendingOrders,
@@ -536,6 +537,7 @@ function ProjectGroupList({
 function HomeScreen() {
   const {
     spine,
+    bootstrap,
     selectedTarget,
     pendingSessionOrder,
     pendingProjectOrder,
@@ -561,13 +563,14 @@ function HomeScreen() {
     return project ? projectBranchDisplay(project) : null
   }
   const hasProjects = projects.length > 0 || sessions.length > 0
+  const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="flex shrink-0 items-center gap-2 border-b px-3 py-3">
         <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
-          <span className="font-semibold">dux</span>
+          <span className="truncate font-semibold">{instanceTitle}</span>
           <span className="text-sm text-muted-foreground">agent sessions</span>
         </div>
         <Button

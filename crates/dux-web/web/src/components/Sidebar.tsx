@@ -38,6 +38,7 @@ import {
 import { toast } from "sonner"
 import type * as React from "react"
 import { copyToClipboard } from "@/lib/clipboard"
+import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
 import { AgentBeam } from "@/components/AgentBeam"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
@@ -786,6 +787,8 @@ export function AppSidebar() {
     return project ? projectBranchDisplay(project) : null
   }
 
+  const instanceTitle = resolveInstanceTitle(bootstrap?.title)
+
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
@@ -793,8 +796,8 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg">
               <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
-              <div className="flex flex-1 flex-col gap-0.5 leading-none">
-                <span className="font-semibold">dux</span>
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
+                <span className="truncate font-semibold">{instanceTitle}</span>
                 <span className="text-sm text-sidebar-foreground/70">
                   {bootstrap?.dux_version}
                 </span>
