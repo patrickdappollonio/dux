@@ -102,7 +102,7 @@ async fn add_project(
 
     match state
         .engine
-        .apply_wire_scoped(cmd, scope_from_headers(&headers))
+        .apply_wire_scoped(cmd, scope_from_headers(&headers, &state.connections))
         .await
     {
         Ok(_) => {}
@@ -152,7 +152,7 @@ async fn remove_project(
         .engine
         .apply_wire_scoped(
             WireCommand::RemoveProject { project_id: id },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -190,7 +190,7 @@ async fn patch_project(
     if !project_exists(&state, &id).await {
         return unknown_project();
     }
-    let scope = scope_from_headers(&headers);
+    let scope = scope_from_headers(&headers, &state.connections);
 
     // Validate a provider SET up front, before dispatching any sub-command, so a bad
     // provider can never partially apply after auto-reopen/startup-command/env have
@@ -300,7 +300,7 @@ async fn reorder_projects(
             WireCommand::ReorderProjects {
                 project_ids: body.project_ids,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -326,7 +326,7 @@ async fn pull_project(
         .engine
         .apply_wire_scoped(
             WireCommand::PullProject { project_id: id },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -350,7 +350,7 @@ async fn checkout_default(
         .engine
         .apply_wire_scoped(
             WireCommand::CheckoutProjectDefaultBranch { project_id: id },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {

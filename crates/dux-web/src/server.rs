@@ -96,6 +96,12 @@ pub struct AppState {
     /// The most recently attached per-PTY socket owns sizing; a non-owner's resize
     /// frame is ignored (see [`PtySizeOwners`]).
     pty_size_owners: Arc<PtySizeOwners>,
+    /// The live-connection registry: every upgraded WebSocket (events + both PTY
+    /// families) records its server-minted id and class here on connect and removes
+    /// it on disconnect. Read by `scope_from_headers` to validate an inbound
+    /// `X-Connection-Id` (unknown id → broadcast) and by `count` for a later task's
+    /// per-class caps. A cheap `Arc` clone so every request/socket shares one map.
+    pub connections: Arc<crate::rest_common::ConnectionRegistry>,
 }
 
 /// Maximum size of a single inbound WebSocket message (text or binary). This
@@ -132,6 +138,27 @@ pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
 /// that a revoked user's open socket dies within a few seconds, long enough that
 /// the per-socket `Vec` scan under a brief read lock is negligible overhead.
 const WS_RECHECK_PERIOD: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Wall-clock cadence of the per-socket liveness ping. Every upgraded socket
+/// (events + both PTY families) sends a WebSocket Ping frame on this interval from
+/// inside its own `select!` loop; the peer (browser or proxy) auto-responds with a
+/// Pong at the protocol layer, so the ping both keeps an idle connection from being
+/// reaped by a NAT/proxy and surfaces a dead peer.
+///
+/// LIVENESS APPROACH (deliberately the smallest correct one — see the task brief's
+/// YAGNI note): this is a SEND-FAILURE reap, not a pong-deadline reap. A ping that
+/// fails to send (the TCP send buffer has backed up against a dead/half-open peer,
+/// or the socket is already closed) breaks the socket's loop, which drops the
+/// connection-cap permit and the `ConnectionGuard` (deregistering the id), freeing
+/// the slot. We do NOT track pong receipt against a grace window: doing so would
+/// add per-socket pong-timestamp state for marginal benefit on a trusted,
+/// single-tenant tool, and the brief explicitly permits the send-failure reap. The
+/// reuse of each socket's existing per-socket `select!` loop (the same place the
+/// user-revocation recheck already lives) keeps sinks out of the registry and
+/// avoids any lock-across-await. Upgradeable to a true pong-deadline reaper later
+/// if a half-open connection that still accepts buffered writes proves to be a
+/// problem in practice.
+const WS_LIVENESS_PING_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Knobs that differ between the plain-HTTP serve paths and the TLS (ACME) path.
 #[derive(Clone)]
@@ -318,6 +345,7 @@ where
         changes,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
         pty_size_owners: Arc::new(PtySizeOwners::default()),
+        connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
     };
 
     // HttpOnly and SameSite=Strict are the tower-sessions defaults but we set them
@@ -783,6 +811,7 @@ async fn ws_session_pty_upgrade(
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
     let bus = Arc::clone(&state.event_bus);
+    let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -798,6 +827,7 @@ async fn ws_session_pty_upgrade(
                 permit,
                 pty_size_owners,
                 bus,
+                connections,
             )
         })
         .into_response()
@@ -852,6 +882,7 @@ async fn ws_terminal_pty_upgrade(
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
     let bus = Arc::clone(&state.event_bus);
+    let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -867,6 +898,7 @@ async fn ws_terminal_pty_upgrade(
                 permit,
                 pty_size_owners,
                 bus,
+                connections,
             )
         })
         .into_response()
@@ -895,8 +927,23 @@ async fn handle_pty_socket(
     _permit: tokio::sync::OwnedSemaphorePermit,
     pty_size_owners: Arc<PtySizeOwners>,
     bus: Arc<EventBus>,
+    connections: Arc<crate::rest_common::ConnectionRegistry>,
 ) {
     console.client_connected(peer_ip);
+    // Register this PTY socket as a live connection (its class depends on which PTY
+    // family it streams), so the liveness reaper and per-class counts see it. The
+    // id is a fresh server UUID (PTY sockets carry no client-facing id of their
+    // own); the guard deregisters on every exit path.
+    let registry_id = uuid::Uuid::new_v4().to_string();
+    let conn_class = match &target {
+        PtyTarget::Agent(_) => crate::rest_common::ConnClass::AgentPty,
+        PtyTarget::Terminal(_) => crate::rest_common::ConnClass::TerminalPty,
+    };
+    connections.insert(registry_id.clone(), conn_class);
+    let _conn_guard = ConnectionGuard {
+        id: registry_id,
+        registry: Arc::clone(&connections),
+    };
     let (sink, mut stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
 
@@ -942,8 +989,20 @@ async fn handle_pty_socket(
         recheck.tick().await;
     }
 
+    // Liveness ping (every connection). Consume the immediate first tick so the
+    // first real ping waits a full period.
+    let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
+    ping.tick().await;
+
     loop {
         let msg = tokio::select! {
+            // Liveness ping: a failed send reaps a dead/half-open peer.
+            _ = ping.tick() => {
+                if send_ping(&sink).await.is_err() {
+                    break;
+                }
+                continue;
+            }
             _ = recheck.tick(), if recheck_user.is_some() => {
                 if !auth::is_enabled(&auth) {
                     // Gate downgraded to OFF: a loosening, not a revocation. Keep streaming.
@@ -1205,6 +1264,7 @@ async fn ws_events_upgrade(
     let engine = state.engine.clone();
     let bus = Arc::clone(&state.event_bus);
     let changes = Arc::clone(&state.changes);
+    let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -1219,6 +1279,7 @@ async fn ws_events_upgrade(
                 console,
                 peer_ip,
                 permit,
+                connections,
             )
         })
         .into_response()
@@ -1245,6 +1306,7 @@ async fn handle_events_socket(
     console: Console,
     peer_ip: std::net::IpAddr,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    connections: Arc<crate::rest_common::ConnectionRegistry>,
 ) {
     console.client_connected(peer_ip);
     // A server-assigned random id correlating REST actions with the statuses they
@@ -1252,6 +1314,14 @@ async fn handle_events_socket(
     // to the originating connection (`StatusScope::Connection`). The client echoes
     // it as the `X-Connection-Id` header on REST mutations. Never client-supplied.
     let connection_id = uuid::Uuid::new_v4().to_string();
+    // Register this id as a live connection so `scope_from_headers` validates the
+    // echoed `X-Connection-Id` against it. The guard deregisters on EVERY exit path
+    // (loop break or task cancellation), freeing the slot.
+    connections.insert(connection_id.clone(), crate::rest_common::ConnClass::Events);
+    let _conn_guard = ConnectionGuard {
+        id: connection_id.clone(),
+        registry: Arc::clone(&connections),
+    };
     let (sink, mut stream) = socket.split();
     let sink: SharedSink = Arc::new(tokio::sync::Mutex::new(sink));
     let mut bus_rx = bus.subscribe();
@@ -1301,8 +1371,20 @@ async fn handle_events_socket(
         recheck.tick().await;
     }
 
+    // Liveness ping (every connection). The first interval tick fires immediately;
+    // consume it so the first real ping waits a full period.
+    let mut ping = tokio::time::interval(WS_LIVENESS_PING_PERIOD);
+    ping.tick().await;
+
     loop {
         tokio::select! {
+            // Liveness ping: a failed send means a dead/half-open peer — break so
+            // the socket tears down and its permit + registry slot are freed.
+            _ = ping.tick() => {
+                if send_ping(&sink).await.is_err() {
+                    break;
+                }
+            }
             // User-revocation recheck (auth-on sockets only).
             _ = recheck.tick(), if recheck_user.is_some() => {
                 if !auth::is_enabled(&auth) {
@@ -1712,6 +1794,35 @@ fn status_events(snapshot: &[KeyedWireStatus], conn_id: &str) -> Vec<WireStatusE
 async fn send_binary(sink: &SharedSink, bytes: Vec<u8>) {
     let mut guard = sink.lock().await;
     let _ = guard.send(Message::Binary(bytes.into())).await;
+}
+
+/// Send one WebSocket Ping frame on `sink` for the liveness reaper. `Err(())` when
+/// the send fails (a dead/half-open peer or an already-closed socket), so the
+/// caller breaks its loop and the socket tears down (freeing its permit + registry
+/// slot). The peer auto-responds with a Pong at the protocol layer; we do not read
+/// the Pong (send-failure reap — see [`WS_LIVENESS_PING_PERIOD`]).
+async fn send_ping(sink: &SharedSink) -> Result<(), ()> {
+    let mut guard = sink.lock().await;
+    guard
+        .send(Message::Ping(Vec::new().into()))
+        .await
+        .map_err(|_| ())
+}
+
+/// Removes a live connection's id from the [`ConnectionRegistry`] on Drop, so the
+/// id is deregistered on EVERY socket exit path — the normal loop break AND task
+/// cancellation (a runtime shutdown drops the socket future at an `.await`). Mirrors
+/// the `InterestGuard` pattern. Holds an `Arc` clone of the registry so it outlives
+/// the socket task.
+struct ConnectionGuard {
+    id: String,
+    registry: Arc<crate::rest_common::ConnectionRegistry>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.registry.remove(&self.id);
+    }
 }
 
 #[cfg(test)]
