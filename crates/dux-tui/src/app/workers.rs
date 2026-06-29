@@ -1390,7 +1390,7 @@ pub(crate) fn run_create_agent_branch_inspection_job(
             let leading_branch = project
                 .leading_branch
                 .clone()
-                .unwrap_or_else(|| leading_branch_for_project(&repo_path, &current_branch));
+                .unwrap_or_else(|| leading_branch_for_project(&repo_path, Some(current_branch.as_str())));
             if !git::local_branch_exists(&repo_path, &leading_branch) {
                 return Err(format!(
                     "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",

@@ -264,8 +264,10 @@ pub fn pull_branch(repo_path: &Path, branch: &str) -> Result<()> {
 }
 
 pub fn switch_branch_if_needed(repo_path: &Path, branch: &str) -> Result<()> {
-    let current = current_branch(repo_path)?;
-    if current != branch {
+    // On a detached HEAD there is no current branch to compare against, so we
+    // simply switch. Only skip the switch when already on the target branch.
+    let current = current_branch_opt(repo_path)?;
+    if current.as_deref() != Some(branch) {
         switch_branch(repo_path, branch)?;
     }
     Ok(())
@@ -2488,6 +2490,16 @@ mod tests {
     fn current_branch_opt_errors_on_non_repo() {
         let tmp = tempfile::tempdir().unwrap(); // not a git repo
         assert!(current_branch_opt(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn switch_branch_if_needed_switches_from_detached_head() {
+        let tmp = init_test_repo();
+        let p = tmp.path().to_path_buf();
+        run_git(&p, &["checkout", "--detach", "HEAD"]);
+        // Must not error on detached HEAD; must end up on main.
+        switch_branch_if_needed(&p, "main").unwrap();
+        assert_eq!(current_branch_opt(&p).unwrap(), Some("main".to_string()));
     }
 
     #[test]

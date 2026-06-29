@@ -1244,7 +1244,7 @@ impl Engine {
             ),
         };
         let leading_branch =
-            crate::project_browser::leading_branch_for_project(&validated, &branch);
+            crate::project_browser::leading_branch_for_project(&validated, Some(branch.as_str()));
         let path_str = validated.to_string_lossy().to_string();
         let action = NonDefaultBranchAction::AddProject {
             path: path_str.clone(),
@@ -2079,7 +2079,7 @@ impl Engine {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 let branch = crate::git::current_branch(&validated)?;
                 let leading_branch =
-                    crate::project_browser::leading_branch_for_project(&validated, &branch);
+                    crate::project_browser::leading_branch_for_project(&validated, Some(branch.as_str()));
                 let path_str = validated.to_string_lossy().to_string();
                 let display_name = if name.trim().is_empty() {
                     validated
