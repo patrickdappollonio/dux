@@ -44,6 +44,7 @@ pub mod rest_common;
 pub mod server;
 pub mod session_actions;
 pub mod spine_routes;
+pub mod startup_logs;
 pub mod terminal_actions;
 pub mod tls;
 pub mod web_assets;

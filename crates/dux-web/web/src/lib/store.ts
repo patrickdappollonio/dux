@@ -38,6 +38,8 @@ import type {
   EventsServerMessage,
   MacroView,
   ProjectWorktreeEntryView,
+  StartupLogContent,
+  StartupLogEntry,
 } from "./types"
 
 // The currently-streamed target: either an agent session or one of its
@@ -165,6 +167,21 @@ export interface DuxState {
   discardTarget: DiscardTarget | null
   globalEnvOpen: boolean
   projectSettingsTarget: string | null
+  // The agent (session) whose startup-command / project-env editor is open, or
+  // null. Both edit the agent's PROJECT (env and startup command are
+  // project-scoped in dux — there is no per-agent env), surfaced from the agent
+  // menu for quick access (mirroring the TUI's per-agent palette commands). The
+  // dialog resolves the owning project from the session id.
+  agentStartupCommandTarget: string | null
+  agentEnvTarget: string | null
+  // The agent (session) whose startup-command log viewer is open, or null. The
+  // log files + the displayed file's contents are fetched over REST into the
+  // fields below when the viewer opens (mirroring the attach-worktree listing).
+  startupLogsTarget: string | null
+  startupLogsEntries: StartupLogEntry[]
+  startupLogsSelected: StartupLogContent | null
+  startupLogsLoading: boolean
+  startupLogsError: string | null
   // The project whose read-only info modal is open, or null (closed). Pure
   // presentation of existing ViewModel data — no wire command, no git read.
   projectInfoTarget: string | null
@@ -358,6 +375,13 @@ let state: DuxState = {
   discardTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
+  agentStartupCommandTarget: null,
+  agentEnvTarget: null,
+  startupLogsTarget: null,
+  startupLogsEntries: [],
+  startupLogsSelected: null,
+  startupLogsLoading: false,
+  startupLogsError: null,
   projectInfoTarget: null,
   addProjectOpen: false,
   browsePath: "",
@@ -1122,6 +1146,13 @@ function clearSessionScopedState(): Partial<DuxState> {
     changeProviderTarget: null,
     projectInfoTarget: null,
     projectSettingsTarget: null,
+    agentStartupCommandTarget: null,
+    agentEnvTarget: null,
+    startupLogsTarget: null,
+    startupLogsEntries: [],
+    startupLogsSelected: null,
+    startupLogsLoading: false,
+    startupLogsError: null,
     globalEnvOpen: false,
     attachWorktreeTarget: null,
     attachWorktreeEntries: [],
@@ -1631,6 +1662,112 @@ export function openProjectSettings(projectId: string): void {
 
 export function closeProjectSettings(): void {
   setState({ projectSettingsTarget: null })
+}
+
+// Open the agent-scoped startup-command editor. The target is the SESSION id; the
+// dialog resolves and edits that agent's PROJECT startup command (startup command
+// is project-scoped — there is no per-agent startup command).
+export function openAgentStartupCommand(sessionId: string): void {
+  setState({ agentStartupCommandTarget: sessionId })
+}
+
+export function closeAgentStartupCommand(): void {
+  setState({ agentStartupCommandTarget: null })
+}
+
+// Open the agent-scoped environment editor. The target is the SESSION id; the
+// dialog resolves and edits that agent's PROJECT env (env is project-scoped — it
+// applies to every agent and terminal in the project).
+export function openAgentEnv(sessionId: string): void {
+  setState({ agentEnvTarget: sessionId })
+}
+
+export function closeAgentEnv(): void {
+  setState({ agentEnvTarget: null })
+}
+
+// Open the startup-command log viewer for an agent and fetch its log files (with
+// the newest file's contents pre-loaded). A reply is ignored once the viewer has
+// closed or retargeted, so a late frame can't repopulate a stale viewer (the
+// browse/attach-worktree precedent).
+export function openStartupLogs(sessionId: string): void {
+  setState({
+    startupLogsTarget: sessionId,
+    startupLogsEntries: [],
+    startupLogsSelected: null,
+    startupLogsError: null,
+    startupLogsLoading: true,
+  })
+  sessionsApi
+    .startupLogs(sessionId)
+    .then((res) => {
+      if (state.startupLogsTarget !== sessionId) return
+      setState({
+        startupLogsEntries: res.entries,
+        startupLogsSelected: res.selected,
+        startupLogsError: null,
+        startupLogsLoading: false,
+      })
+    })
+    .catch((e) => {
+      if (state.startupLogsTarget !== sessionId) return
+      setState({
+        startupLogsLoading: false,
+        startupLogsError:
+          e instanceof Error
+            ? e.message
+            : "Could not load the startup command logs.",
+      })
+    })
+}
+
+// Switch the viewer to a different log file (fetches that file's contents).
+export function selectStartupLog(name: string): void {
+  const sessionId = state.startupLogsTarget
+  if (!sessionId) return
+  setState({ startupLogsLoading: true, startupLogsError: null })
+  sessionsApi
+    .startupLogContent(sessionId, name)
+    .then((res) => {
+      if (state.startupLogsTarget !== sessionId) return
+      setState({ startupLogsSelected: res, startupLogsLoading: false })
+    })
+    .catch((e) => {
+      if (state.startupLogsTarget !== sessionId) return
+      setState({
+        startupLogsLoading: false,
+        startupLogsError:
+          e instanceof Error
+            ? e.message
+            : "Could not read the startup command log.",
+      })
+    })
+}
+
+export function closeStartupLogs(): void {
+  setState({
+    startupLogsTarget: null,
+    startupLogsEntries: [],
+    startupLogsSelected: null,
+    startupLogsLoading: false,
+    startupLogsError: null,
+  })
+}
+
+// Re-run the agent's project startup command in its worktree (the TUI's
+// `rerun-startup-command-on-agent`). The server runs it off-thread and reports
+// busy/success/failure on the status stream — nothing to do here but fire the
+// command and surface a transport/validation error if the request is rejected.
+export function rerunStartupCommand(sessionId: string): void {
+  sessionsApi
+    .rerunStartupCommand(sessionId)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not rerun the startup command.",
+      ),
+    )
 }
 
 export function openProjectInfo(projectId: string): void {

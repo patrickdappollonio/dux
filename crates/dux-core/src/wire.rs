@@ -127,6 +127,15 @@ pub enum WireCommand {
         session_id: String,
         enabled: bool,
     },
+    /// Re-run the agent's project startup command in that agent's worktree,
+    /// mirroring the TUI's `rerun-startup-command-on-agent` palette command. The
+    /// wire layer resolves the session and its project server-side, merges the
+    /// global + project env, and runs the command off-thread (a keyed Busy →
+    /// final status pair flows back through `spawn_status_op`). Rejected when the
+    /// session/project is unknown or the project has no startup command.
+    RerunStartupCommand {
+        session_id: String,
+    },
     DeleteTerminal {
         terminal_id: String,
     },
@@ -643,6 +652,13 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::RerunStartupCommand { session_id } => {
+                let status = self.rerun_startup_command(&session_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 return Ok(WireCommandOutcome {
@@ -1033,6 +1049,81 @@ impl Engine {
             }
             other => Ok(wire_status_from_reaction(&other)),
         }
+    }
+
+    /// Re-run the agent's project startup command in that agent's worktree.
+    /// Mirrors the TUI's `rerun_startup_command_on_agent`: resolve the session and
+    /// its project, require a non-empty project startup command, merge global +
+    /// project env, then dispatch the blocking run off-thread via `spawn_status_op`
+    /// so a keyed Busy is shown now and replaced by the same-key success/failure
+    /// final when the command finishes. Returns the pending Busy as the wire
+    /// outcome; unknown session/project or a missing startup command is an `Err`
+    /// (surfaced by the REST handler as a 400 with the message).
+    fn rerun_startup_command(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Could not find the selected agent's project."))?;
+        let command = project
+            .startup_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Project \"{}\" does not have a startup command.",
+                    project.name
+                )
+            })?;
+
+        let paths = self.paths.clone();
+        let terminal = self.config.startup_command_terminal.clone();
+        let env =
+            crate::config::resolve_agent_env(&self.config.env, &project.env).unwrap_or_default();
+        let branch = session.branch_name.clone();
+        let success_name = project.name.clone();
+        let failure_name = project.name.clone();
+        let op = crate::engine::status_op(format!(
+            "Rerunning startup command for agent \"{branch}\"..."
+        ))
+        .on_success(move |_: &()| {
+            crate::engine::Final::info(format!(
+                "Startup command completed for project \"{success_name}\". Open the agent's startup command logs to view the latest run."
+            ))
+        })
+        .on_failure(move |err: &String| {
+            crate::engine::Final::error(format!(
+                "Startup command failed for project \"{failure_name}\": {err}. Open the startup command logs for details."
+            ))
+        });
+        let run = crate::startup::StartupCommandRun {
+            project,
+            session,
+            command,
+            terminal,
+            env,
+        };
+        let reaction = self.spawn_status_op(op, move || {
+            crate::startup::run_startup_command(&paths, run).status
+        });
+        // `spawn_status_op` returns the pending Busy as an `EventReaction::Status`;
+        // surface it as the wire outcome so the originating client shows the spinner
+        // (the same-key final follows over the status stream when the run ends).
+        Ok(wire_status_from_reaction(&reaction).unwrap_or_else(|| {
+            WireStatus::new(
+                "info",
+                format!("Rerunning startup command for agent \"{branch}\"..."),
+            )
+        }))
     }
 
     /// Switch a project's source checkout back to its default branch, mirroring
@@ -2219,13 +2310,14 @@ impl Engine {
             // reaching here means that interception broke.
             WireCommand::RenameSession { .. }
             | WireCommand::ReconnectSession { .. }
+            | WireCommand::RerunStartupCommand { .. }
             | WireCommand::CheckoutProjectDefaultBranch { .. }
             | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::SetChangesPaneVisible { .. } => {
                 unreachable!(
-                    "rename/reconnect/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -2576,6 +2668,94 @@ mod tests {
             WireCommand::PullProject {
                 project_id: "p1".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn wire_rerun_startup_command_deserializes() {
+        let json = r#"{"command":"rerun_startup_command","args":{"session_id":"s1"}}"#;
+        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cmd,
+            WireCommand::RerunStartupCommand {
+                session_id: "s1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn wire_rerun_startup_command_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::RerunStartupCommand {
+                session_id: "ghost".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
+
+    #[test]
+    fn wire_rerun_startup_command_without_startup_command_errors() {
+        let (mut engine, _tmp) = test_engine();
+        // sample_project has startup_command = None.
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let err = engine
+            .apply_wire(WireCommand::RerunStartupCommand {
+                session_id: "s1".to_string(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("does not have a startup command"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_rerun_startup_command_runs_and_reports_busy_then_final() {
+        let (mut engine, _tmp) = test_engine();
+        // A real worktree directory the command can `cd` into.
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let mut project = sample_project("p1", "/repo");
+        project.startup_command = Some("printf hi".to_string());
+        engine.projects.push(project);
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().into_owned();
+        engine.sessions.push(session);
+
+        // The dispatch returns the pending Busy immediately.
+        let outcome = engine
+            .apply_wire(WireCommand::RerunStartupCommand {
+                session_id: "s1".to_string(),
+            })
+            .expect("dispatch ok");
+        let busy = outcome.status.expect("a busy status");
+        assert!(
+            busy.message.contains("Rerunning startup command"),
+            "busy: {}",
+            busy.message
+        );
+
+        // The off-thread run finishes and ships its keyed final via StatusOpCompleted.
+        let event = engine
+            .worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("status-op completion event");
+        match event {
+            crate::worker::WorkerEvent::StatusOpCompleted { resolved } => {
+                // Same key correlates the busy and its final.
+                assert_eq!(resolved.key, busy.key.expect("busy carries a key"));
+            }
+            _ => panic!("expected a StatusOpCompleted worker event"),
+        }
+
+        // The run wrote a log file under the agent's startup-command-log dir.
+        let logs = crate::startup::list_agent_logs(&engine.paths, "p1", "s1").expect("list logs");
+        assert!(
+            !logs.is_empty(),
+            "expected a startup command log to be written"
         );
     }
 

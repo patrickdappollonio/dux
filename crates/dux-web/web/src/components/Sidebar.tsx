@@ -23,13 +23,17 @@ import {
   GitFork,
   GitPullRequest,
   Pencil,
+  Play,
   Plug,
   Plus,
   RefreshCw,
   RotateCcw,
+  ScrollText,
+  SquareChevronRight,
   SquareTerminal,
   Terminal,
   Trash2,
+  Variable,
 } from "lucide-react"
 import { toast } from "sonner"
 import type * as React from "react"
@@ -98,15 +102,19 @@ import {
 import {
   createTerminal,
   openAddProject,
+  openAgentEnv,
+  openAgentStartupCommand,
   openChangeProvider,
   openEditor,
   openDelete,
   openDeleteTerminal,
   openForkAgent,
   openRename,
+  openStartupLogs,
   reconnectSession,
   reorderProjects,
   reorderSessions,
+  rerunStartupCommand,
   selectSession,
   selectTerminal,
   setSidebarWidth,
@@ -379,6 +387,28 @@ function SessionSubItem({
               <DropdownMenuItem onClick={() => createTerminal(session.id)}>
                 <SquareTerminal />
                 New terminal
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {/* Startup command + env: these are project-scoped (no per-agent
+                  env in dux), surfaced here for quick per-agent access mirroring
+                  the TUI's palette commands. The dialogs make the project scope
+                  explicit. "Rerun" runs the project startup command in THIS
+                  agent's worktree; "logs" views its captured output. */}
+              <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
+                <SquareChevronRight />
+                Configure startup command…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
+                <Variable />
+                Configure environment variables…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
+                <Play />
+                Rerun startup command
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
+                <ScrollText />
+                Startup command logs…
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem

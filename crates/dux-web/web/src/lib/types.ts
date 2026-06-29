@@ -84,6 +84,27 @@ export interface SessionView {
   updated_at: string
 }
 
+/** One startup-command log file for an agent (see `GET /sessions/:id/startup-logs`). */
+export interface StartupLogEntry {
+  name: string
+  /** RFC 3339 last-modified time, or null when unavailable. */
+  modified_at: string | null
+}
+
+/** A startup-command log file's name + full contents. */
+export interface StartupLogContent {
+  name: string
+  content: string
+}
+
+/** The startup-command log listing for an agent: every log file (newest first)
+ * plus the newest file's contents pre-loaded (`selected` is null when there are
+ * no logs yet). */
+export interface StartupLogsList {
+  entries: StartupLogEntry[]
+  selected: StartupLogContent | null
+}
+
 export interface DirEntryView {
   path: string
   label: string
