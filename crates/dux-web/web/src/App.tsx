@@ -13,6 +13,7 @@ import { CommandPalette } from "@/components/CommandPalette"
 import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
 import { EditorOverlay } from "@/components/EditorOverlay"
+import { ConfigEditorDialog } from "@/components/ConfigEditorDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { KillRunningDialog } from "@/components/KillRunningDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
@@ -216,6 +217,7 @@ function GlobalOverlays() {
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
       <KillRunningDialog />
+      <ConfigEditorDialog />
       <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
       <MacrosDialog />

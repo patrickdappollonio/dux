@@ -22,6 +22,7 @@ beforeAll(() => {
 const EXPECTED_WEB_COMMANDS = [
   "add-project",
   "configure-global-env",
+  "edit-config",
   "edit-macros",
   "kill-running",
   "reload-config",

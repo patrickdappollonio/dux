@@ -56,4 +56,24 @@ export const configApi = {
   // Flip GitHub PR integration (and its engine-side PR-sync side effects).
   toggleGithubIntegration: () =>
     send("POST", "/api/v1/ui/toggle-github-integration", {}),
+  // Read the raw config.toml text for the Monaco editor. Returns the file
+  // verbatim (or the plain render of the running config if none exists yet).
+  readRawConfig: async (): Promise<string> => {
+    let resp: Response
+    try {
+      resp = await fetch("/api/v1/config/raw", { credentials: "same-origin" })
+    } catch {
+      throw new Error("Could not reach the server.")
+    }
+    if (!resp.ok) {
+      const detail = (await resp.text().catch(() => "")).trim()
+      throw new Error(detail || `request failed (${resp.status})`)
+    }
+    const body = (await resp.json()) as { content: string }
+    return body.content
+  },
+  // Validate + write the raw config.toml text. A 400 (invalid TOML) throws with
+  // the server's parse message so the editor can surface it inline.
+  writeRawConfig: (content: string) =>
+    send("PUT", "/api/v1/config/raw", { content }),
 }

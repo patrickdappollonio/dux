@@ -29,6 +29,7 @@ export type PaletteGroup = (typeof PALETTE_GROUP_ORDER)[number]
 const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "add-project": "Projects",
   "configure-global-env": "Configuration",
+  "edit-config": "Configuration",
   "edit-macros": "Configuration",
   "reload-config": "Configuration",
   "toggle-github-integration": "Configuration",

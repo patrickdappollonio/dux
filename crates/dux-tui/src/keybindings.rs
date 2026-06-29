@@ -929,6 +929,16 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
+    // Web-only palette command (no TUI key, no TUI listing): it joins the shared
+    // palette registry by Action but `EditConfig`'s surface is `Web`, so the TUI
+    // never lists or dispatches it.
+    BindingDef {
+        action: Action::EditConfig,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
     BindingDef {
         action: Action::NewTerminal,
         default_keys: &[],
@@ -2001,16 +2011,12 @@ mod tests {
             .filter_map(|b| Some((b.palette_name?, b.palette_description?)))
             .collect();
 
-        // Every TUI-surfaced core command appears in the listing, with matching
-        // name + description, and has a BINDING_DEFS action entry.
+        // Every core command (TUI, Web, or Both) has a BINDING_DEFS action entry
+        // to join on; the TUI-surfaced ones additionally appear in the runtime
+        // listing with matching name + description. Web-only commands (e.g.
+        // `edit-config`) intentionally do NOT appear in the TUI listing.
         let mut tui_count = 0usize;
         for cmd in palette::PALETTE_COMMANDS {
-            assert!(
-                matches!(cmd.surface, PaletteSurface::Tui | PaletteSurface::Both),
-                "unexpected Web-only palette command \"{}\": today every web \
-                 palette command also surfaces in the TUI",
-                cmd.name
-            );
             assert!(
                 BINDING_DEFS.iter().any(|d| d.action == cmd.action),
                 "core palette command \"{}\" has no BINDING_DEFS entry to join on",
@@ -2039,6 +2045,19 @@ mod tests {
             tui_count,
             "the runtime palette listing has entries not present (TUI-surfaced) \
              in the core registry"
+        );
+
+        // `edit-config` is the first (and currently only) Web-only palette
+        // command: registered, surfaced on Web, and intentionally absent from the
+        // TUI listing (the TUI has no Monaco editor).
+        let edit_config = palette::PALETTE_COMMANDS
+            .iter()
+            .find(|c| c.name == "edit-config")
+            .expect("edit-config is registered in the palette");
+        assert_eq!(edit_config.surface, PaletteSurface::Web);
+        assert!(
+            !listed.contains_key("edit-config"),
+            "edit-config is Web-only and must not appear in the TUI listing"
         );
     }
 

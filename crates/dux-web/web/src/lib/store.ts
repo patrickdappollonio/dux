@@ -244,6 +244,16 @@ export interface DuxState {
   // (agents detach and can be reconnected; terminals are destroyed). The list is
   // derived live from the spine, so it needs no state beyond this open flag.
   killRunningOpen: boolean
+  // The Monaco config.toml editor (Ctrl+K "edit-config"). `configEditorOpen`
+  // gates the modal; the raw text is fetched into `configEditorContent` on open
+  // so the editor seeds from a settled value (no set-state-in-effect).
+  // `configEditorLoading` drives the load spinner; `configEditorError` shows the
+  // server's inline validation/parse message when a save is rejected, WITHOUT
+  // closing the modal so the user can fix the TOML.
+  configEditorOpen: boolean
+  configEditorContent: string
+  configEditorLoading: boolean
+  configEditorError: string | null
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
@@ -398,6 +408,10 @@ let state: DuxState = {
   createAgentPrInput: "",
   paletteOpen: false,
   killRunningOpen: false,
+  configEditorOpen: false,
+  configEditorContent: "",
+  configEditorLoading: false,
+  configEditorError: null,
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
@@ -2223,4 +2237,62 @@ export function killSessionPty(sessionId: string): void {
         e instanceof Error ? e.message : "Could not kill the agent.",
       ),
     )
+}
+
+// The Monaco config.toml editor (Ctrl+K "edit-config"). Open fetches the raw
+// file text into the store so the editor seeds from a settled value; a late
+// reply is ignored if the user already closed the modal.
+export function openConfigEditor(): void {
+  setState({
+    configEditorOpen: true,
+    configEditorLoading: true,
+    configEditorError: null,
+    configEditorContent: "",
+  })
+  configApi
+    .readRawConfig()
+    .then((content) => {
+      if (!state.configEditorOpen) return
+      setState({ configEditorContent: content, configEditorLoading: false })
+    })
+    .catch((e) => {
+      if (!state.configEditorOpen) return
+      setState({
+        configEditorLoading: false,
+        configEditorError:
+          e instanceof Error ? e.message : "Could not read config.toml.",
+      })
+    })
+}
+
+export function closeConfigEditor(): void {
+  setState({
+    configEditorOpen: false,
+    configEditorContent: "",
+    configEditorLoading: false,
+    configEditorError: null,
+  })
+}
+
+// Save the edited config.toml. The server validates the TOML before writing: a
+// rejection (invalid TOML) surfaces inline via `configEditorError` and keeps the
+// modal open so the user can fix it. On a successful write we adopt it with the
+// existing reload (best-effort — the file is already persisted), close, and toast.
+export function saveConfigEditor(content: string): void {
+  setState({ configEditorError: null })
+  configApi
+    .writeRawConfig(content)
+    .then(() => {
+      // The write succeeded; adopt it via the existing reload. Best-effort: the
+      // file is already on disk, so a reload hiccup should not block the close.
+      void configApi.reload().catch(() => {})
+      closeConfigEditor()
+      toast.success("Saved config.toml and reloaded it.")
+    })
+    .catch((e) => {
+      setState({
+        configEditorError:
+          e instanceof Error ? e.message : "Could not save config.toml.",
+      })
+    })
 }
