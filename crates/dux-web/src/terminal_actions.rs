@@ -24,7 +24,7 @@ use serde::Serialize;
 use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
-use crate::rest_common::{id_within_bound, scope_from_headers};
+use crate::rest_common::{id_within_bound, scope_from_headers, unknown_session};
 use crate::server::AppState;
 
 /// The gated companion-terminal routes. Both are nested under `/sessions/:id` so
@@ -94,17 +94,13 @@ async fn delete_terminal(
         .engine
         .apply_wire_scoped(
             WireCommand::DeleteTerminal { terminal_id: tid },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
-}
-
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 fn unknown_terminal() -> Response {

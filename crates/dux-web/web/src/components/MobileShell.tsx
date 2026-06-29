@@ -192,15 +192,19 @@ function selectTerminalAndOpen(terminalId: string, sessionId: string): void {
 // action spaced away from the row tap target.
 function TerminalRow({
   terminal,
+  siblings,
   sessionId,
   active,
 }: {
   terminal: SessionView["terminals"][number]
+  siblings: readonly SessionView["terminals"][number][]
   sessionId: string
   active: boolean
 }) {
-  // Title follows the TUI precedence: foreground command if running, else label.
-  const title = terminalTitle(terminal)
+  // Title is the foreground command when one is running, otherwise the stable
+  // "Terminal N" label; a sibling running the same app adds the terminal's
+  // number ("vim (#1)") so the rows stay distinct.
+  const title = terminalTitle(terminal, siblings)
   return (
     <div className="flex items-center gap-1 pl-6">
       <Button
@@ -331,6 +335,7 @@ function SessionRow({
         <TerminalRow
           key={terminal.id}
           terminal={terminal}
+          siblings={session.terminals}
           sessionId={session.id}
           active={
             selectedTarget?.kind === "terminal" &&

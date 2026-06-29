@@ -54,10 +54,18 @@ impl App {
             }
         };
         logger::info(&format!("attempting to add project {}", path.display()));
-        let branch = git::current_branch(&path)?;
-        let leading_branch = leading_branch_for_project(&path, Some(branch.as_str()));
+        let branch = git::current_branch_opt(&path)?.unwrap_or_default();
+        let leading_branch =
+            leading_branch_for_project(&path, (!branch.is_empty()).then_some(branch.as_str()));
 
-        if let Some(kind) = git::branch_warning_kind(&path, &branch) {
+        // A detached HEAD (empty branch string) is not "on a non-default
+        // branch" -- there is no branch to compare. Skip the warning so the
+        // user does not see a misleading Heuristic dialog when adding a
+        // detached-HEAD repo.
+        if let Some(kind) = (!branch.is_empty())
+            .then(|| git::branch_warning_kind(&path, &branch))
+            .flatten()
+        {
             // Default the checkbox to on for the confident path so hitting
             // Enter resolves the warning in the way users typically want —
             // "switch to main, then add". The heuristic path ignores this

@@ -8,7 +8,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -382,6 +382,25 @@ impl Drop for PtyWriter {
     }
 }
 
+/// Shared subscriber list: id-tagged senders fanned out by the PTY reader loop.
+type SubscriberList = Arc<Mutex<Vec<(u64, std::sync::mpsc::Sender<Vec<u8>>)>>>;
+
+/// RAII guard returned by [`PtyClient::subscribe`] and
+/// [`PtyClient::subscribe_with_repaint`]. Dropping it immediately removes the
+/// subscriber from the fan-out list without waiting for the next PTY output.
+pub struct PtyViewerGuard {
+    id: u64,
+    subs: SubscriberList,
+}
+
+impl Drop for PtyViewerGuard {
+    fn drop(&mut self) {
+        if let Ok(mut subs) = self.subs.lock() {
+            subs.retain(|(id, _)| *id != self.id);
+        }
+    }
+}
+
 /// A PTY-based client that spawns a CLI tool in a pseudo-terminal and keeps a
 /// full terminal grid with scrollback using `alacritty_terminal`.
 pub struct PtyClient {
@@ -414,17 +433,13 @@ pub struct PtyClient {
     /// bytes are dropped on overflow.
     pending_bytes: Arc<Mutex<PendingIngest>>,
     /// Live raw-byte subscribers (web clients). Each receives a clone of every
-    /// chunk read from the PTY, independent of TUI scrollback pause. Senders
-    /// that have hung up are pruned by the reader loop.
-    ///
-    /// Pruning is reactive: a hung-up `Sender` is only dropped on the next chunk
-    /// read from the PTY (`retain` in the reader loop). The web forwarder's
-    /// `tx.is_closed()` poll bounds the stale-`Sender` window to one output cycle,
-    /// so against a quiet PTY a closed subscriber lingers harmlessly until the next
-    /// byte arrives. A fully-proactive RAII unsubscribe (a guard that removes its
-    /// `Sender` on drop) would prune immediately regardless of PTY traffic; it is a
-    /// deferred future hardening, not required for correctness given the poll above.
-    subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>>,
+    /// chunk read from the PTY, independent of TUI scrollback pause. Each entry
+    /// is tagged with a stable id so the RAII [`PtyViewerGuard`] can remove its
+    /// own slot on drop without waiting for the next PTY output. The reader loop
+    /// also prunes hung-up senders reactively as a backstop.
+    subscribers: SubscriberList,
+    /// Monotonically increasing counter used to assign unique ids to subscribers.
+    next_sub_id: AtomicU64,
     /// Handle to the background reader thread. Joined in `Drop` (after the
     /// child is killed and reaped) so the thread does not outlive the client.
     reader_thread: Option<thread::JoinHandle<()>>,
@@ -505,8 +520,7 @@ impl PtyClient {
         let received_data = Arc::new(AtomicBool::new(false));
         let scroll_paused = Arc::new(AtomicBool::new(false));
         let pending_bytes = Arc::new(Mutex::new(PendingIngest::default()));
-        let subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let subscribers: SubscriberList = Arc::new(Mutex::new(Vec::new()));
 
         let terminal_ref = Arc::clone(&terminal);
         let exited_ref = Arc::clone(&exited);
@@ -544,6 +558,7 @@ impl PtyClient {
             scroll_paused,
             pending_bytes,
             subscribers,
+            next_sub_id: AtomicU64::new(0),
             reader_thread: Some(reader_thread),
         })
     }
@@ -559,7 +574,7 @@ impl PtyClient {
         received_data: Arc<AtomicBool>,
         scroll_paused: Arc<AtomicBool>,
         pending_bytes: Arc<Mutex<PendingIngest>>,
-        subscribers: Arc<Mutex<Vec<std::sync::mpsc::Sender<Vec<u8>>>>>,
+        subscribers: SubscriberList,
     ) {
         let mut buf = [0u8; 4096];
         loop {
@@ -577,7 +592,7 @@ impl PtyClient {
                     if let Ok(mut subs) = subscribers.lock()
                         && !subs.is_empty()
                     {
-                        subs.retain(|tx| tx.send(data.to_vec()).is_ok());
+                        subs.retain(|(_, tx)| tx.send(data.to_vec()).is_ok());
                     }
 
                     // Fast-path check: if paused, buffer instead of parsing.
@@ -658,15 +673,23 @@ impl PtyClient {
         terminal.snapshot()
     }
 
-    /// Subscribe to the live raw-byte stream. The returned receiver gets a clone
-    /// of every chunk read from the PTY from now on. Drop it to unsubscribe.
-    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    /// Subscribe to the live raw-byte stream. Returns a [`PtyViewerGuard`] and a
+    /// `Receiver`. The receiver gets a clone of every chunk read from the PTY
+    /// from now on. Dropping the guard immediately removes this subscriber from
+    /// the fan-out list; the receiver will observe disconnection on the next
+    /// `recv` or `try_recv` call after the guard is dropped.
+    pub fn subscribe(&self) -> (PtyViewerGuard, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::channel();
+        let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
         self.subscribers
             .lock()
             .expect("subscribers mutex poisoned")
-            .push(tx);
-        rx
+            .push((id, tx));
+        let guard = PtyViewerGuard {
+            id,
+            subs: Arc::clone(&self.subscribers),
+        };
+        (guard, rx)
     }
 
     /// Subscribe and also return a synthesized ANSI repaint of the current
@@ -675,12 +698,17 @@ impl PtyClient {
     /// is taken, so no bytes are lost; a newly-connecting client may briefly see
     /// a few bytes both in the repaint and the first streamed chunk — harmless
     /// and self-correcting for redraw-heavy TUIs.
-    pub fn subscribe_with_repaint(&self) -> (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
-        let rx = self.subscribe();
+    ///
+    /// Returns `(guard, repaint_bytes, receiver)`. Hold the guard for the
+    /// connection's lifetime; dropping it removes the subscriber immediately.
+    pub fn subscribe_with_repaint(
+        &self,
+    ) -> (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let (guard, rx) = self.subscribe();
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
         let repaint = terminal.reconnect_repaint();
         drop(terminal);
-        (repaint, rx)
+        (guard, repaint, rx)
     }
 
     /// Fill `target` with the current terminal viewport, reusing its `cells`
@@ -2956,5 +2984,43 @@ mod tests {
         // Verify the clone is still alive (i.e. this was a real test of the hazard,
         // not one where Rust happened to drop `_clone` before `writer`).
         drop(_clone);
+    }
+
+    /// Dropping the guard removes the subscriber immediately, before any PTY
+    /// output arrives. The receiver must observe disconnection via `Err`.
+    #[test]
+    fn dropping_the_guard_removes_subscriber_without_output() {
+        let args = vec!["-c".to_string(), "cat".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+        let (guard, rx) = client.subscribe();
+        drop(guard);
+        // No PTY output is produced. The sender was removed by the guard's Drop,
+        // so the channel is now disconnected and recv() must return Err.
+        assert!(
+            rx.recv().is_err(),
+            "receiver should observe disconnection after guard is dropped"
+        );
+    }
+
+    /// Dropping one guard removes only its subscriber; the other remains live.
+    #[test]
+    fn dropping_one_guard_keeps_the_other_subscriber() {
+        let args = vec!["-c".to_string(), "cat".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+        let (g1, rx1) = client.subscribe();
+        let (_g2, rx2) = client.subscribe();
+        drop(g1);
+        // The first subscriber's channel is disconnected.
+        assert!(
+            rx1.recv().is_err(),
+            "rx1 should observe disconnection after g1 is dropped"
+        );
+        // The second subscriber is still alive: no output, so Empty.
+        assert!(
+            matches!(rx2.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "rx2 should still be live (Empty), not disconnected"
+        );
     }
 }

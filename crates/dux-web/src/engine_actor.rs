@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
-use dux_core::pty::PtyClient;
+use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, StatusScope, StatusTone,
 };
@@ -21,9 +21,11 @@ use dux_core::wire::{WireCommand, WireCommandOutcome, WireStatus};
 use dux_core::worker::AgentLaunchKind;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
-/// A PTY subscription: an initial repaint snapshot plus the live byte stream the caller
-/// forwards. (PTY bytes never travel through the request channel.)
-pub type PtySubscription = (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>);
+/// A PTY subscription: an RAII unsubscribe guard, an initial repaint snapshot,
+/// and the live byte stream the caller forwards. Drop the guard to detach
+/// immediately without waiting for the next PTY output.
+/// (PTY bytes never travel through the request channel.)
+pub type PtySubscription = (PtyViewerGuard, Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>);
 
 /// Which half of the projects/sessions spine changed since the last tick. The
 /// engine loop fingerprints the projected spine each tick and fires the matching
@@ -159,14 +161,21 @@ fn pty_for<'a>(engine: &'a Engine, id: &str) -> Option<&'a PtyClient> {
 
 const TICK: Duration = Duration::from_millis(50);
 
-/// Run the spine fingerprint/cache check every Nth tick rather than every tick,
-/// so idle serialization cost drops ~5x (one projection+serialize per ~250ms
-/// instead of per 50ms). Time-based transitions — notably the `working` idle flip
-/// when an agent stops streaming — are still detected within this window, and
-/// every real mutation still fires its coarse event within ~250ms. A per-mutation
-/// version counter would let the check run only on actual changes, but that is
-/// far more invasive and drift-prone; this throttle is the safe mitigation.
+/// Consider running the spine fingerprint/cache check every Nth tick rather than
+/// every tick (one decision per ~250ms instead of per 50ms). Whether the check
+/// actually serializes the spine on a given interval is then gated further by
+/// the change signals below ([`SpineCheck::maybe_check`]): an idle interval with
+/// no mutation, no streaming transition, and no backstop does ZERO work.
 const SPINE_CHECK_TICK_INTERVAL: u64 = 5;
+
+/// Slow self-healing backstop: every ~40 ticks (~2s) the spine check runs the
+/// fingerprint compare UNCONDITIONALLY, regardless of the change signals. This is
+/// defense-in-depth, NOT a claim that the version bumps are exhaustive: if a
+/// future loop-level spine mutator is added without a matching version bump (the
+/// adversarial review found the spine has several loop mutators, not the two the
+/// original design assumed), its change is still picked up within ~2s instead of
+/// being lost until an unrelated change happens to fire the gate.
+const SPINE_BACKSTOP_TICK_INTERVAL: u32 = 40;
 
 /// Per-iteration control for [`run_engine_loop`]. Checked once at the top of
 /// every outer loop iteration: `Continue` runs another tick, `Exit` stops the
@@ -212,10 +221,12 @@ pub(crate) struct ActorLoopEnds {
 /// compared field equal and triggers no warning.
 ///
 /// Compared fields: the bind `host` and `port`, the `tailscale_enabled` toggle,
-/// and the `allowed_hosts` host-guard list. `max_websocket_connections` is also
-/// startup-bound (the `/ws` connection-cap semaphore is built ONCE in `build_app`
-/// and never resized on reload). The deprecated `bind` field is migrated into
-/// `host`/`port` on load, so a change to it surfaces through those fields.
+/// and the `allowed_hosts` host-guard list. The three per-class WebSocket caps
+/// (`max_websocket_events_connections`, `max_websocket_agent_connections`,
+/// `max_websocket_terminal_connections`) are also startup-bound (each
+/// connection-cap semaphore is built ONCE in `build_app` and never resized on
+/// reload). The deprecated `bind` field is migrated into `host`/`port` on load,
+/// so a change to it surfaces through those fields.
 fn server_rebind_settings_changed(
     prev: &dux_core::config::ServerConfig,
     next: &dux_core::config::ServerConfig,
@@ -224,7 +235,9 @@ fn server_rebind_settings_changed(
         || prev.port != next.port
         || prev.tailscale_enabled != next.tailscale_enabled
         || prev.allowed_hosts != next.allowed_hosts
-        || prev.max_websocket_connections != next.max_websocket_connections
+        || prev.max_websocket_events_connections != next.max_websocket_events_connections
+        || prev.max_websocket_agent_connections != next.max_websocket_agent_connections
+        || prev.max_websocket_terminal_connections != next.max_websocket_terminal_connections
 }
 
 /// Extract the reloaded `Config` from a reload follow-up reaction, consuming it.
@@ -811,19 +824,28 @@ pub(crate) fn run_engine_loop(
     );
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
-    // Last-seen fingerprints of the two spine halves, so a coarse
-    // `projects.changed` / `sessions.changed` event fires only when the projection
-    // actually changes (not every idle tick). Initialized from the current state so
-    // the first tick does not emit a spurious change for an unchanged spine.
-    let (mut prev_projects_fp, mut prev_sessions_fp) = spine_fingerprints(&engine);
-    // Cache of the whole-spine JSON served to `GET /api/v1/spine`. Rebuilt only
-    // when a fingerprint check detects a real change (below), so per-client reads
-    // clone the cached string instead of re-projecting + re-serializing the spine.
-    // Seeded now so a request before the first change still serves a valid body.
-    let mut spine_json_cache =
-        serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+    // Change-gated spine check (fingerprints, cached `/spine` JSON, backstop
+    // accumulator). Seeded from the current state so the first tick does not emit
+    // a spurious change for an unchanged spine and a `/spine` read before the
+    // first change still serves a valid body.
+    let mut spine_check = SpineCheck::new(&engine);
+    // In-memory spine mutation version: bumped after each loop-level spine mutator
+    // (apply_wire / a CreateTerminal request, worker-event drain, a changed
+    // terminal-foreground refresh, a non-empty PTY prune). The spine check runs
+    // the serialize only when this (or `streaming_version`) moved since its last
+    // pass, so idle ticks cost nothing.
+    let mut mutation_version: u64 = 0;
+    // In-memory streaming-transition version: bumped whenever any agent's
+    // time-derived `is_agent_streaming()` flag flips (see
+    // `poll_streaming_transitions`), which a mutation counter cannot observe.
+    let mut streaming_version: u64 = 0;
+    // Per-agent last-seen streaming flag, carried across ticks so transitions can
+    // be detected O(1) without re-deriving history each tick.
+    let mut prev_streaming: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
     // Tick counter for throttling the spine fingerprint/cache check (see
-    // SPINE_CHECK_TICK_INTERVAL) so it runs ~every 250ms rather than every tick.
+    // SPINE_CHECK_TICK_INTERVAL) so it is evaluated ~every 250ms rather than every
+    // tick.
     let mut tick_count: u64 = 0;
     loop {
         // Caller-driven exit (the flip's status screen asked to stop). Checked
@@ -837,6 +859,10 @@ pub(crate) fn run_engine_loop(
         // into `engine.providers`, which resolves pending subscribes below.
         while let Ok(event) = engine.worker_rx.try_recv() {
             let reaction = engine.process_worker_event(event);
+            // Bump #2: a worker event can insert/remove a provider, flip a session
+            // status, or apply a project mutation — all spine state. Bump
+            // unconditionally; the fingerprint compare stays the precise emit gate.
+            mutation_version = mutation_version.wrapping_add(1);
             for status in dux_core::wire::wire_statuses_from_reaction(&reaction) {
                 let _ = thread_status_tx.send(status);
             }
@@ -972,15 +998,34 @@ pub(crate) fn run_engine_loop(
         // poll site for the other surface; the two never run at once).
         engine.poll_pty_activity();
 
+        // Track per-agent streaming transitions. The `working` flag is time-derived
+        // (it flips off once AGENT_STREAMING_WINDOW lapses), so a mutation counter
+        // cannot see it; this O(1) poll bumps `streaming_version` on any flip so the
+        // spine check opens on idle->working / working->idle.
+        poll_streaming_transitions(&engine, &mut prev_streaming, &mut streaming_version);
+
         // Refresh companion-terminal foreground commands so the spine's
         // `foreground_cmd` tracks what's running. The engine throttles this by
         // wall-clock (~2s), so calling it every tick is cheap.
-        engine.refresh_terminal_foregrounds();
+        //
+        // Bump #3: only when the refresh actually changed a `foreground_cmd` (a
+        // throttled no-op or an unchanged probe returns false), so a quiet terminal
+        // does not reopen the gate every interval.
+        if engine.refresh_terminal_foregrounds() {
+            mutation_version = mutation_version.wrapping_add(1);
+        }
 
         // Reap agent/terminal PTYs whose child process exited so they stop
         // lingering in `providers`/`companion_terminals` and disappear from the
         // spine, broadcasting a status for each so web clients learn.
-        for pruned in engine.prune_exited_ptys() {
+        //
+        // Bump #4: only when something was actually pruned (the returned Vec is
+        // non-empty), since a prune that found nothing left the spine untouched.
+        let pruned = engine.prune_exited_ptys();
+        if !pruned.is_empty() {
+            mutation_version = mutation_version.wrapping_add(1);
+        }
+        for pruned in pruned {
             let status = match pruned.kind {
                 PrunedPtyKind::Agent => {
                     WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
@@ -1022,31 +1067,19 @@ pub(crate) fn run_engine_loop(
         });
 
         // The projects/sessions/sidebar spine is signaled via coarse events.
-        // Fingerprint each half and emit only the
-        // changed side(s). A failed send means no web forwarder is listening (e.g.
-        // the TUI flip), which is fine. Throttled to every Nth tick (see
-        // SPINE_CHECK_TICK_INTERVAL) so idle serialization cost drops ~5x; every
-        // real change still fires its coarse event within the throttle window.
+        // Evaluated every Nth tick (see SPINE_CHECK_TICK_INTERVAL); the actual
+        // fingerprint serialize runs only when a change signal moved or the
+        // backstop fired (see SpineCheck::maybe_check), so idle ticks cost nothing.
+        // A failed send means no web forwarder is listening (e.g. the TUI flip),
+        // which is fine.
         tick_count = tick_count.wrapping_add(1);
         if tick_count.is_multiple_of(SPINE_CHECK_TICK_INTERVAL) {
-            let (projects_fp, sessions_fp) = spine_fingerprints(&engine);
-            let mut spine_changed = false;
-            if projects_fp != prev_projects_fp {
-                prev_projects_fp = projects_fp;
-                let _ = spine_change_tx.send(SpineChange::Projects);
-                spine_changed = true;
-            }
-            if sessions_fp != prev_sessions_fp {
-                prev_sessions_fp = sessions_fp;
-                let _ = spine_change_tx.send(SpineChange::Sessions);
-                spine_changed = true;
-            }
-            // Refresh the cached `GET /api/v1/spine` JSON only when a half actually
-            // changed, so the common case (no change) skips the full serialization.
-            if spine_changed {
-                spine_json_cache =
-                    serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
-            }
+            spine_check.maybe_check(
+                &engine,
+                mutation_version,
+                streaming_version,
+                &spine_change_tx,
+            );
         }
 
         let mut disconnected = false;
@@ -1058,7 +1091,7 @@ pub(crate) fn run_engine_loop(
                 Ok(EngineRequest::SpineJson(reply)) => {
                     // Serve the loop-local cache (handled here, not in
                     // `handle_request`, which has no access to it).
-                    let _ = reply.send(spine_json_cache.clone());
+                    let _ = reply.send(spine_check.spine_json_cache.clone());
                 }
                 Ok(EngineRequest::Shutdown(reply)) => {
                     // Trip the teardown flag first so any PTY forwarders exit
@@ -1073,7 +1106,22 @@ pub(crate) fn run_engine_loop(
                     disconnected = true;
                     break;
                 }
-                Ok(req) => handle_request(&mut engine, req, &mut thread_status_tx),
+                Ok(req) => {
+                    // Bump #1: the spine-mutating requests handled here. `ApplyWire`
+                    // is the named loop chokepoint; `CreateTerminal` also mutates the
+                    // spine (it adds a companion terminal to a session's terminal
+                    // list). Detect before the move; the fingerprint compare stays the
+                    // precise emit gate. (Other arms are reads or non-spine writes;
+                    // any genuinely missed mutator is still caught by the backstop.)
+                    let mutates = matches!(
+                        req,
+                        EngineRequest::ApplyWire(..) | EngineRequest::CreateTerminal(..)
+                    );
+                    handle_request(&mut engine, req, &mut thread_status_tx);
+                    if mutates {
+                        mutation_version = mutation_version.wrapping_add(1);
+                    }
+                }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -1203,6 +1251,139 @@ fn spine_fingerprints(engine: &Engine) -> (String, String) {
     let projects = serde_json::to_string(&spine.projects).unwrap_or_else(|_| "[]".to_string());
     let sessions = serde_json::to_string(&spine.sessions).unwrap_or_else(|_| "[]".to_string());
     (projects, sessions)
+}
+
+/// Loop-local state for the change-gated spine check and its self-healing
+/// backstop. Holds the last-seen fingerprints of the two spine halves, the cached
+/// whole-spine JSON for `GET /api/v1/spine`, the version values last compared
+/// against, and the backstop tick accumulator.
+///
+/// The gate's job is to skip the (relatively expensive) project + serialize on
+/// idle intervals: it runs [`spine_fingerprints`] only when a change signal moved
+/// since the last check, or the backstop fired. The fingerprint compare remains
+/// the PRECISE emit gate — it never emits a coarse event for an unchanged half —
+/// so the version signals only need to be a conservative "something might have
+/// changed" hint, never a false negative for a covered mutator.
+struct SpineCheck {
+    prev_projects_fp: String,
+    prev_sessions_fp: String,
+    /// Cached `GET /api/v1/spine` body, rebuilt only when a half actually changes.
+    spine_json_cache: String,
+    /// The `mutation_version` value at the last fingerprint compare.
+    last_checked_mutation: u64,
+    /// The `streaming_version` value at the last fingerprint compare.
+    last_checked_streaming: u64,
+    /// Ticks accumulated toward the next backstop fire. Counted in real ticks
+    /// (incremented by [`SPINE_CHECK_TICK_INTERVAL`] per call, since
+    /// [`SpineCheck::maybe_check`] runs once per interval) and reset when the
+    /// backstop fires.
+    ticks_since_backstop: u32,
+    /// Test-only count of how many times the gate actually ran the serialize.
+    /// This is the seam that lets a test assert "idle intervals serialized zero
+    /// times" as a positive fact rather than inferring it from "no event fired".
+    #[cfg(test)]
+    fp_call_count: u64,
+}
+
+impl SpineCheck {
+    fn new(engine: &Engine) -> Self {
+        let (prev_projects_fp, prev_sessions_fp) = spine_fingerprints(engine);
+        let spine_json_cache =
+            serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+        Self {
+            prev_projects_fp,
+            prev_sessions_fp,
+            spine_json_cache,
+            last_checked_mutation: 0,
+            last_checked_streaming: 0,
+            ticks_since_backstop: 0,
+            #[cfg(test)]
+            fp_call_count: 0,
+        }
+    }
+
+    /// Called once per [`SPINE_CHECK_TICK_INTERVAL`] ticks. Runs the fingerprint
+    /// compare (the serialize) only when `mutation_version` or `streaming_version`
+    /// moved since the last check, OR the slow backstop fired. On a real change to
+    /// either half, sends the matching coarse [`SpineChange`] and rebuilds the
+    /// cached spine JSON. Idle intervals return immediately, doing zero work.
+    fn maybe_check(
+        &mut self,
+        engine: &Engine,
+        mutation_version: u64,
+        streaming_version: u64,
+        spine_change_tx: &broadcast::Sender<SpineChange>,
+    ) {
+        self.ticks_since_backstop = self
+            .ticks_since_backstop
+            .saturating_add(SPINE_CHECK_TICK_INTERVAL as u32);
+        let signalled = mutation_version != self.last_checked_mutation
+            || streaming_version != self.last_checked_streaming;
+        let backstop = self.ticks_since_backstop >= SPINE_BACKSTOP_TICK_INTERVAL;
+        if !signalled && !backstop {
+            return;
+        }
+        self.last_checked_mutation = mutation_version;
+        self.last_checked_streaming = streaming_version;
+        if backstop {
+            self.ticks_since_backstop = 0;
+        }
+        #[cfg(test)]
+        {
+            self.fp_call_count += 1;
+        }
+
+        let (projects_fp, sessions_fp) = spine_fingerprints(engine);
+        let mut spine_changed = false;
+        if projects_fp != self.prev_projects_fp {
+            self.prev_projects_fp = projects_fp;
+            let _ = spine_change_tx.send(SpineChange::Projects);
+            spine_changed = true;
+        }
+        if sessions_fp != self.prev_sessions_fp {
+            self.prev_sessions_fp = sessions_fp;
+            let _ = spine_change_tx.send(SpineChange::Sessions);
+            spine_changed = true;
+        }
+        // Refresh the cached `GET /api/v1/spine` JSON only when a half actually
+        // changed, so the common case (no change) skips the full serialization.
+        if spine_changed {
+            self.spine_json_cache =
+                serde_json::to_string(&engine.spine()).unwrap_or_else(|_| "{}".to_string());
+        }
+    }
+}
+
+/// Track each agent's `is_agent_streaming()` value and bump `*streaming_version`
+/// on any transition. The streaming flag is time-derived (it flips to `false`
+/// once [`dux_core::engine::AGENT_STREAMING_WINDOW`] elapses with no new output),
+/// so a mutation counter cannot observe it — this poll is the only way the gate
+/// learns the `working` projection changed.
+///
+/// O(1)-per-agent and allocation-free on the hot path: it walks the existing
+/// `pty_activity` map (the complete set of possibly-streaming sessions — an agent
+/// with no recent activity is never streaming), compares against the carried
+/// `prev_streaming` map, and bumps on a differing or first-seen value. Entries
+/// for agents that left `pty_activity` (session teardown, prune) are dropped via
+/// `retain` so the map cannot grow without bound. No sort, no per-tick `Vec`.
+fn poll_streaming_transitions(
+    engine: &Engine,
+    prev_streaming: &mut std::collections::HashMap<String, bool>,
+    streaming_version: &mut u64,
+) {
+    for session_id in engine.pty_activity.keys() {
+        let now = engine.is_agent_streaming(session_id);
+        match prev_streaming.get(session_id) {
+            Some(&was) if was == now => {}
+            _ => {
+                *streaming_version = streaming_version.wrapping_add(1);
+                prev_streaming.insert(session_id.clone(), now);
+            }
+        }
+    }
+    if prev_streaming.len() > engine.pty_activity.len() {
+        prev_streaming.retain(|id, _| engine.pty_activity.contains_key(id));
+    }
 }
 
 fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut StatusEmitter) {
@@ -1818,13 +1999,29 @@ mod tests {
     }
 
     #[test]
-    fn rebind_drift_detects_max_websocket_connections_change() {
-        // The /ws connection-cap semaphore is built once at startup, so changing
-        // the cap must surface as a restart-needed warning like the other
-        // startup-bound settings — not be silently swallowed by a live reload.
+    fn rebind_drift_detects_max_websocket_events_connections_change() {
+        // Each per-class connection-cap semaphore is built once at startup, so
+        // changing a cap must surface as a restart-needed warning like the other
+        // startup-bound settings, not be silently swallowed by a live reload.
         let prev = dux_core::config::ServerConfig::default();
         let mut next = prev.clone();
-        next.max_websocket_connections += 1;
+        next.max_websocket_events_connections += 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_agent_connections_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_agent_connections += 1;
+        assert!(server_rebind_settings_changed(&prev, &next));
+    }
+
+    #[test]
+    fn rebind_drift_detects_max_websocket_terminal_connections_change() {
+        let prev = dux_core::config::ServerConfig::default();
+        let mut next = prev.clone();
+        next.max_websocket_terminal_connections += 1;
         assert!(server_rebind_settings_changed(&prev, &next));
     }
 
@@ -1836,5 +2033,208 @@ mod tests {
         let mut next = prev.clone();
         next.color = "never".to_string();
         assert!(!server_rebind_settings_changed(&prev, &next));
+    }
+
+    // -----------------------------------------------------------------------
+    // Change-gated spine check + self-healing backstop (Task 9)
+    //
+    // These drive the gating logic (`SpineCheck`, `poll_streaming_transitions`)
+    // directly rather than through the async actor thread, so they are
+    // deterministic, allocation-free of real sleeps where it matters, and
+    // immune to the parallel-test races a shared global call counter would have
+    // suffered. `SpineCheck::fp_call_count` (a cfg(test) field) is the seam: it
+    // counts how many times the gate actually ran `spine_fingerprints` (the
+    // serialize), so "the serialize was skipped" is a positive assertion, not an
+    // inference from "no event fired".
+    // -----------------------------------------------------------------------
+
+    fn seed_session(paths: &DuxPaths, id: &str) {
+        let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_session(&sample_session(
+                id,
+                "p1",
+                "feat",
+                paths.root.to_string_lossy().as_ref(),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn idle_ticks_do_not_serialize_the_spine() {
+        // With no command, worker event, or streaming transition bumping the
+        // versions, and before the backstop interval, the gate must NEVER call
+        // `spine_fingerprints` — proving idle ticks cost zero serialization.
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (tx, _rx) = broadcast::channel::<SpineChange>(64);
+        let mut check = SpineCheck::new(&engine);
+
+        // Run every spine-check interval that fits before the backstop would fire.
+        let intervals_before_backstop =
+            (SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32) - 1;
+        for _ in 0..intervals_before_backstop {
+            check.maybe_check(&engine, 0, 0, &tx);
+        }
+        assert_eq!(
+            check.fp_call_count, 0,
+            "idle ticks must not serialize the spine"
+        );
+    }
+
+    #[test]
+    fn backstop_emits_a_change_that_bypassed_the_version() {
+        // A spine mutation that did NOT bump the version (the seam for any future
+        // loop mutator added without a bump) must still be detected and emitted
+        // once the slow self-healing backstop fires.
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
+        let mut check = SpineCheck::new(&engine);
+
+        // Mutate the sessions spine WITHOUT touching the version counters.
+        for s in engine.sessions.iter_mut() {
+            if s.id == "s1" {
+                s.title = Some("renamed-out-of-band".to_string());
+            }
+        }
+
+        // Drive exactly up to the backstop interval. The version never changed,
+        // so the only thing that can run the compare is the backstop.
+        let intervals_to_backstop = SPINE_BACKSTOP_TICK_INTERVAL / SPINE_CHECK_TICK_INTERVAL as u32;
+        for _ in 0..intervals_to_backstop {
+            check.maybe_check(&engine, 0, 0, &tx);
+        }
+        assert!(
+            check.fp_call_count >= 1,
+            "the backstop must run the fingerprint compare even with no version bump"
+        );
+
+        let mut saw_sessions = false;
+        while let Ok(c) = rx.try_recv() {
+            if c == SpineChange::Sessions {
+                saw_sessions = true;
+            }
+        }
+        assert!(
+            saw_sessions,
+            "the backstop must emit the change that bypassed the version"
+        );
+    }
+
+    #[test]
+    fn streaming_transition_triggers_a_check() {
+        // The time-derived `working` flag cannot be observed by a mutation
+        // counter, so a dedicated O(1) streaming counter tracks each agent's
+        // `is_agent_streaming()` value and bumps on every transition. Back-date
+        // pty_activity past AGENT_STREAMING_WINDOW (mirroring the engine's
+        // hysteresis tests) to flip it deterministically with no real sleep.
+        use dux_core::engine::AGENT_STREAMING_WINDOW;
+
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+
+        let mut prev_streaming: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
+        let mut streaming_version = 0u64;
+
+        // Fresh activity → streaming. First observation is a transition.
+        engine
+            .pty_activity
+            .insert("s1".to_string(), std::time::Instant::now());
+        poll_streaming_transitions(&engine, &mut prev_streaming, &mut streaming_version);
+        let after_first = streaming_version;
+        assert_eq!(
+            after_first, 1,
+            "first streaming observation bumps the counter"
+        );
+
+        // Still streaming → no transition, no bump.
+        poll_streaming_transitions(&engine, &mut prev_streaming, &mut streaming_version);
+        assert_eq!(
+            streaming_version, after_first,
+            "a steady streaming agent must not bump the counter every tick"
+        );
+
+        // Back-date past the window → streaming flips to idle: a transition.
+        engine.pty_activity.insert(
+            "s1".to_string(),
+            std::time::Instant::now()
+                - (AGENT_STREAMING_WINDOW + std::time::Duration::from_millis(50)),
+        );
+        poll_streaming_transitions(&engine, &mut prev_streaming, &mut streaming_version);
+        assert_eq!(
+            streaming_version,
+            after_first + 1,
+            "a streaming->idle transition must bump the counter"
+        );
+
+        // And the gate opens: the changed streaming_version makes the next
+        // interval run the fingerprint compare.
+        let (tx, _rx) = broadcast::channel::<SpineChange>(64);
+        let mut check = SpineCheck::new(&engine);
+        check.maybe_check(&engine, 0, streaming_version, &tx);
+        assert_eq!(
+            check.fp_call_count, 1,
+            "a streaming_version change must open the gate"
+        );
+    }
+
+    #[test]
+    fn prune_exit_triggers_a_check_within_one_interval() {
+        // A quiet agent/terminal exit flows through prune_exited_ptys, which
+        // returns the pruned entry -> the loop bumps the mutation version -> the
+        // very next spine-check interval emits the change, far before the 2s
+        // backstop.
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        // A companion terminal backed by a command that exits immediately, so
+        // prune_exited_ptys reaps it deterministically.
+        engine.config.terminal.command = "true".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+
+        let (tx, mut rx) = broadcast::channel::<SpineChange>(64);
+        // Seed the fingerprint WHILE the terminal is present so its removal is a
+        // real diff.
+        let mut check = SpineCheck::new(&engine);
+
+        // Wait for the child to exit, then prune (the loop's #4 mutator).
+        let mut mutation_version = 0u64;
+        let mut bumped = false;
+        for _ in 0..300 {
+            if !engine.prune_exited_ptys().is_empty() {
+                mutation_version += 1;
+                bumped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(bumped, "the quiet terminal must exit and be pruned");
+
+        // A SINGLE spine-check interval later (one maybe_check), the bump opens
+        // the gate. The backstop needs many more intervals, so this proves the
+        // bump path, not the backstop.
+        check.maybe_check(&engine, mutation_version, 0, &tx);
+        assert_eq!(
+            check.fp_call_count, 1,
+            "the prune bump must open the gate on the next interval"
+        );
+
+        let mut saw_sessions = false;
+        while let Ok(c) = rx.try_recv() {
+            if c == SpineChange::Sessions {
+                saw_sessions = true;
+            }
+        }
+        assert!(
+            saw_sessions,
+            "pruning the exited terminal must emit SpineChange::Sessions"
+        );
     }
 }

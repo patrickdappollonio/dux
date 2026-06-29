@@ -328,3 +328,45 @@ describe("changes slice — reconnect", () => {
     )
   })
 })
+
+describe("changes slice — subscribe catch-up", () => {
+  // The server sends a `session.changes` frame immediately after a client
+  // subscribes to a fine topic. When the server's cache is cold it omits `rev`.
+  // The client must treat `rev === undefined` as a force-refetch so the changes
+  // pane converges even when no rev comparison is possible.
+
+  it("a revless session.changes event triggers loadChanges regardless of the current rev", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    // First fetch resolves: the pane is loaded with rev 7.
+    pendingChanges[0].d.resolve(
+      changesResponse({ rev: 7, staged: [], unstaged: [] }),
+    )
+    await tick()
+    expect(mod.getSnapshot().changes.rev).toBe(7)
+
+    const before = pendingChanges.length
+    // The server's subscribe catch-up carries no rev (cold cache). The store
+    // must NOT short-circuit on `undefined >= 7` and must call loadChanges.
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    expect(pendingChanges.length).toBe(
+      before + 1,
+      "a revless catch-up must trigger a refetch even when a rev is already held",
+    )
+  })
+
+  it("a revless session.changes event also triggers loadChanges from the loading phase", async () => {
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    // The initial fetch is still in-flight (loading phase, rev = 0).
+    expect(mod.getSnapshot().changes.phase).toBe("loading")
+
+    const before = pendingChanges.length
+    // The subscribe catch-up arrives before the initial fetch resolves.
+    mod.eventsSocket.onEvent({ event: "session.changes", id: "s1" })
+    expect(pendingChanges.length).toBe(
+      before + 1,
+      "a revless catch-up must trigger a second fetch even in the loading phase",
+    )
+  })
+})

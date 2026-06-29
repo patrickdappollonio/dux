@@ -131,17 +131,20 @@ import type { SessionView, TerminalView } from "@/lib/types"
 // Bot icon (provider shown as text).
 function TerminalSubItem({
   terminal,
+  siblings,
   sessionId,
   active,
 }: {
   terminal: TerminalView
+  siblings: readonly TerminalView[]
   sessionId: string
   active: boolean
 }) {
-  // Title follows the TUI precedence: the foreground command if one is running,
-  // otherwise the static label. The static label rides along as the `title`
-  // tooltip so "Terminal 1" stays discoverable when a command is shown.
-  const title = terminalTitle(terminal)
+  // Title is the foreground command when one is running, otherwise the stable
+  // "Terminal N" label. When a sibling runs the same app the title gains the
+  // terminal's number ("vim (#1)") so the two rows stay distinct. The full
+  // "Terminal N" label still rides along as the hover tooltip below.
+  const title = terminalTitle(terminal, siblings)
   return (
     <SidebarMenuSubItem
       className={cn(
@@ -440,6 +443,7 @@ function SessionSubItem({
             <TerminalSubItem
               key={terminal.id}
               terminal={terminal}
+              siblings={session.terminals}
               sessionId={session.id}
               active={
                 selectedTarget?.kind === "terminal" &&

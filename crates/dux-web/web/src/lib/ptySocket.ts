@@ -5,7 +5,9 @@
 // server routes that PTY's bytes here with no per-message addressing.
 //
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
-//   - On (re)open the server sends ONE Binary frame replaying the buffered
+//   - On (re)open the server sends a Text `connected` frame FIRST carrying this
+//     socket's connection id: `{"event":"connected","id":"<connId>"}`.
+//   - Then the server sends ONE Binary frame replaying the buffered
 //     scrollback/repaint; feed it straight to xterm like any other byte chunk.
 //   - server→client Binary = raw PTY bytes (write to xterm).
 //   - client→server Binary = PTY stdin (xterm `onData`).
@@ -51,6 +53,17 @@ export class PtySocket {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private closedByUser = false
   private bytesCb: (bytes: Uint8Array) => void = () => {}
+  // This socket's server-assigned connection id, delivered as the first Text frame
+  // (`{event:"connected", id}`) on every (re)open (the server allocates a fresh id
+  // per open). Null until that frame arrives. The terminal view compares it against
+  // the `owner` field of each `pty.owner` event to decide ownership definitively
+  // (see `ptyOwnership.ts`).
+  private connId: string | null = null
+
+  // Fired with this socket's connection id each time the `connected` frame lands.
+  // Lets the terminal view track which connection id is "us" for the ownership
+  // comparison, re-issued on every reconnect.
+  onConnected: (id: string) => void = () => {}
 
   // Fired after each (re)open. The server replays scrollback as the first Binary
   // frame on every open, so the consumer uses this to re-arm its first-frame
@@ -74,6 +87,11 @@ export class PtySocket {
     this.bytesCb = cb
   }
 
+  // This socket's current connection id, or null before the `connected` frame.
+  get connectionId(): string | null {
+    return this.connId
+  }
+
   // A deliberate, user-initiated (re)entry: reset the reconnect bookkeeping so a
   // fresh connect never inherits a stale backoff. Mirrors `EventsSocket.connect`.
   connect(): void {
@@ -93,10 +111,24 @@ export class PtySocket {
     }
 
     ws.onmessage = (event) => {
-      // Only Binary frames carry PTY bytes; the server sends no text to clients
-      // on this socket. The scrollback replay arrives as an ordinary Binary frame.
+      // Binary frames carry PTY bytes (the scrollback replay arrives as an ordinary
+      // Binary frame too). The ONLY Text frame the server sends is the opening
+      // `connected` handshake carrying this socket's connection id; record it for
+      // the ownership comparison and notify the consumer.
       if (event.data instanceof ArrayBuffer) {
         this.bytesCb(new Uint8Array(event.data))
+        return
+      }
+      if (typeof event.data === "string") {
+        try {
+          const frame = JSON.parse(event.data) as { event?: string; id?: string }
+          if (frame.event === "connected" && typeof frame.id === "string") {
+            this.connId = frame.id
+            this.onConnected(frame.id)
+          }
+        } catch {
+          // A malformed control frame is not fatal to the byte stream; ignore it.
+        }
       }
     }
 
