@@ -903,14 +903,16 @@ pub fn provider_config(
         })
 }
 
-/// Validate that `s` parses as a complete [`Config`] — the same `toml::from_str`
-/// check [`load_config`] performs — returning a user-facing error message on
-/// failure. The web's raw config editor calls this to reject invalid TOML before
-/// it overwrites `config.toml`. The parsed value is discarded: validation only.
-pub fn validate_config_str(s: &str) -> Result<(), String> {
-    toml::from_str::<Config>(s)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+/// Parse and validate `s` as a complete [`Config`] — the same `toml::from_str`
+/// check [`load_config`] performs — returning the parsed value on success or a
+/// user-facing error message on failure. The web's raw config editor calls this
+/// to reject invalid TOML before it overwrites `config.toml`; it also uses the
+/// returned value to compare security-sensitive sections against the running
+/// config. Note the returned value is the raw parse (no provider defaults
+/// applied); callers that want to *adopt* the config should reload from disk via
+/// [`load_config`] so provider defaults are reapplied consistently.
+pub fn validate_config_str(s: &str) -> Result<Config, String> {
+    toml::from_str::<Config>(s).map_err(|e| e.to_string())
 }
 
 /// Load config for a read-only consumer (the web server). Reads `config.toml` if

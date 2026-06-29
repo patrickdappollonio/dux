@@ -144,8 +144,11 @@ pub enum EngineRequest {
     ),
     /// Read the raw `config.toml` text off the engine thread for the Monaco
     /// config editor. Replies with the file's contents verbatim, or the canonical
-    /// plain render of the running config when the file does not exist yet.
-    ReadRawConfig(oneshot::Sender<String>),
+    /// plain render of the running config when the file does not exist yet. A
+    /// non-`NotFound` read error (permission denied, I/O failure) is an `Err` so
+    /// the editor refuses to open with wrong content rather than silently showing
+    /// (and letting the user save) a blank/default over their real config.
+    ReadRawConfig(oneshot::Sender<Result<String, String>>),
     /// Validate and write raw `config.toml` text from the Monaco editor. Parses
     /// the text as a `Config` first (rejecting invalid TOML), flushes any pending
     /// managed writes so they cannot clobber it, then atomically writes the file
@@ -770,9 +773,10 @@ impl EngineHandle {
     }
 
     /// Read the raw `config.toml` text for the Monaco config editor (or the plain
-    /// render of the running config if the file is missing). Empty string if the
-    /// engine thread is gone.
-    pub async fn read_raw_config(&self) -> String {
+    /// render of the running config if the file is missing). `Err` on a read
+    /// failure or a dead engine thread, so the editor never opens on blank
+    /// content the user could save over their real config.
+    pub async fn read_raw_config(&self) -> Result<String, String> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
@@ -780,9 +784,10 @@ impl EngineHandle {
             .await
             .is_err()
         {
-            return String::new();
+            return Err("the engine is not available".to_string());
         }
-        rx.await.unwrap_or_default()
+        rx.await
+            .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
     }
 
     /// Validate and write raw `config.toml` text from the Monaco editor. Returns
@@ -1436,8 +1441,9 @@ fn handle_request(
 ) {
     match req {
         EngineRequest::ApplyWire(cmd, reply, origin) => {
-            // A config-static mutation (macros / global env / Changes-pane flag)
-            // eager-saves and adopts the change in place — there is no disk reload
+            // A config-static mutation (macros / global env / Changes-pane flag /
+            // preference toggles) saves (eager or lazy) and adopts the change in
+            // place — there is no disk reload
             // to drive the usual `config.changed` signal, so we fire it ourselves
             // below once the command succeeds. Capture this BEFORE `cmd` is moved
             // into `apply_wire`.
@@ -1582,30 +1588,74 @@ fn handle_request(
         }
         EngineRequest::ReadRawConfig(reply) => {
             // Verbatim file (comments + unknown keys intact) so the editor shows
-            // exactly what is on disk; fall back to the plain render of the
-            // running config when no file exists yet.
-            let raw = std::fs::read_to_string(&engine.paths.config_path)
-                .unwrap_or_else(|_| dux_core::config_write::render_config_plain(&engine.config));
-            let _ = reply.send(raw);
-        }
-        EngineRequest::WriteRawConfig(content, reply) => {
-            let result = match dux_core::config::validate_config_str(&content) {
-                Ok(()) => {
-                    // Flush pending managed writes so a coalesced lazy save cannot
-                    // clobber the raw write, then persist the user's text verbatim.
-                    engine.config_writer.flush();
-                    dux_core::config_write::write_config_atomic(
-                        &engine.paths.config_path,
-                        &content,
-                        dux_core::config_write::Durability::Fsync,
-                    )
-                    .map_err(|e| format!("Could not write config.toml: {e}"))
+            // exactly what is on disk. Only a genuinely-missing file falls back to
+            // the plain render of the running config; any other read error
+            // (permission, I/O) is surfaced so the editor never opens on blank
+            // content the user could then save over their real config.
+            let result = match std::fs::read_to_string(&engine.paths.config_path) {
+                Ok(raw) => Ok(raw),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(dux_core::config_write::render_config_plain(&engine.config))
                 }
-                Err(e) => Err(format!("config.toml is not valid: {e}")),
+                Err(e) => Err(format!("Could not read config.toml: {e}")),
             };
             let _ = reply.send(result);
         }
+        EngineRequest::WriteRawConfig(content, reply) => {
+            let _ = reply.send(write_raw_config_on_engine(
+                engine,
+                &content,
+                config_reload_tx,
+            ));
+        }
     }
+}
+
+/// Validate, persist, and adopt a raw `config.toml` edit from the web Monaco
+/// editor, all on the engine thread. Runs as a free function (not an inline
+/// closure) so the `?` short-circuits read cleanly. On success the running
+/// config matches disk before this returns and a `config.changed` signal has
+/// fired; on any failure nothing is written.
+fn write_raw_config_on_engine(
+    engine: &mut Engine,
+    content: &str,
+    config_reload_tx: &broadcast::Sender<()>,
+) -> Result<(), String> {
+    let parsed = dux_core::config::validate_config_str(content)
+        .map_err(|e| format!("config.toml is not valid: {e}"))?;
+    // The web editor must not silently weaken the server perimeter: [server]
+    // host/allowed_hosts only take effect at restart, so a change here would
+    // persist unreviewed. Reject perimeter edits.
+    if parsed.server.host != engine.config.server.host
+        || parsed.server.allowed_hosts != engine.config.server.allowed_hosts
+    {
+        return Err(
+            "Server host/allowed_hosts cannot be changed from the web editor; \
+             edit config.toml directly and restart."
+                .to_string(),
+        );
+    }
+    // Flush pending managed writes so a coalesced lazy save cannot clobber the
+    // raw write, then persist the user's text verbatim.
+    engine.config_writer.flush();
+    dux_core::config_write::write_config_atomic(
+        &engine.paths.config_path,
+        content,
+        dux_core::config_write::Durability::Fsync,
+    )
+    // Don't leak the absolute config-dir path to the client: return the
+    // underlying OS error without the path-annotated context.
+    .map_err(|e| format!("Could not write config.toml: {}", e.root_cause()))?;
+    // Adopt the new config in place so engine.config matches disk BEFORE we
+    // return — this closes the window where a concurrent toggle's save would
+    // serialize the stale in-memory config back over the just-written file.
+    // Reload from disk (reapplies provider defaults, matching ReloadConfig),
+    // then signal clients to refetch the bootstrap; no separate reload
+    // round-trip is needed.
+    let reloaded = dux_core::config::load_config(&engine.paths);
+    let _ = engine.apply_reloaded_config(reloaded);
+    let _ = config_reload_tx.send(());
+    Ok(())
 }
 
 /// Handle a `SubscribePty` request. If the provider already exists, reply

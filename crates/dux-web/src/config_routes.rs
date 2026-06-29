@@ -57,7 +57,12 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/config/raw",
-            get(read_raw_config).put(write_raw_config),
+            // A config.toml is a few KB; 256 KB is generous. The cap stops a
+            // client from streaming a multi-MB body that the engine thread would
+            // then parse and fsync.
+            get(read_raw_config)
+                .put(write_raw_config)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
         )
 }
 
@@ -185,10 +190,14 @@ struct WriteRawConfigBody {
 }
 
 /// `GET /api/v1/config/raw`. Return the raw `config.toml` text for the Monaco
-/// editor. Reading is gated like every other config route but takes no body.
+/// editor. Reading is gated like every other config route but takes no body. A
+/// read failure (permission/IO, or the engine being gone) is a `503` so the
+/// editor surfaces an error instead of opening on blank content.
 async fn read_raw_config(State(state): State<AppState>) -> Response {
-    let content = state.engine.read_raw_config().await;
-    Json(RawConfigBody { content }).into_response()
+    match state.engine.read_raw_config().await {
+        Ok(content) => Json(RawConfigBody { content }).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
+    }
 }
 
 /// `PUT /api/v1/config/raw`. Validate (`toml::from_str::<Config>`) and write the

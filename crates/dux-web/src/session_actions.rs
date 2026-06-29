@@ -484,6 +484,11 @@ async fn rerun_startup_command(
 /// reconnected. Unknown session → 404; an agent that is not running is a
 /// successful no-op. Companion terminals are killed through the existing
 /// `DELETE /api/v1/sessions/:id/terminals/:tid`.
+///
+/// Note: unlike the git-mutation routes, this does NOT call `resolve_worktree` —
+/// killing a PTY needs no worktree on disk (a hung agent whose worktree was
+/// removed must still be killable). The engine's own unknown-session error is
+/// the existence check, mapped to 404 here.
 async fn kill_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -491,9 +496,6 @@ async fn kill_session(
 ) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
-    }
-    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
     }
     match state
         .engine
@@ -504,6 +506,9 @@ async fn kill_session(
         .await
     {
         Ok(_) => StatusCode::OK.into_response(),
+        // The engine returns "unknown session: …" when the row is gone (e.g. a
+        // concurrent delete); surface that as 404, not a generic 400.
+        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }

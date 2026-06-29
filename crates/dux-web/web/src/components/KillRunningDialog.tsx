@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useMemo, useRef } from "react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -31,21 +31,37 @@ export function KillRunningDialog() {
 
   const sessions = spine?.sessions ?? []
   // Agents with a live PTY are exactly the "active" ones (the PTY-removed states
-  // are "detached"/"exited"). Killing moves them to detached.
-  const agents = sessions.filter((s) => s.status === "active")
-  // Every companion-terminal row in the spine is a live PTY (terminals are never
-  // persisted/detached — existence == running).
-  const terminals = sessions.flatMap((s) =>
-    s.terminals.map((terminal) => ({ session: s, terminal })),
+  // are "detached"/"exited"). Killing moves them to detached. Every
+  // companion-terminal row in the spine is a live PTY (terminals are never
+  // persisted/detached — existence == running). Memoized on the spine so these
+  // lists aren't reallocated on every unrelated store update.
+  const agents = useMemo(
+    () => sessions.filter((s) => s.status === "active"),
+    [sessions],
+  )
+  const terminals = useMemo(
+    () =>
+      sessions.flatMap((s) =>
+        s.terminals.map((terminal) => ({ session: s, terminal })),
+      ),
+    [sessions],
   )
   const nothingRunning = agents.length === 0 && terminals.length === 0
 
-  // If everything has been killed (or exited) while the modal is open, close it
-  // so the user isn't left staring at an empty list.
+  // Auto-close ONLY when the list goes from populated to empty while open (the
+  // user killed the last runtime), never on an open that starts empty — that
+  // would flash the modal shut before the "Nothing is running." state is read.
+  const wasPopulated = useRef(false)
   useEffect(() => {
-    if (killRunningOpen && nothingRunning) {
-      closeKillRunning()
+    if (!killRunningOpen) {
+      wasPopulated.current = false
+      return
     }
+    if (!nothingRunning) {
+      wasPopulated.current = true
+      return
+    }
+    if (wasPopulated.current) closeKillRunning()
   }, [killRunningOpen, nothingRunning])
 
   function handleOpenChange(open: boolean) {

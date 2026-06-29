@@ -2858,6 +2858,10 @@ impl App {
                         self.engine.running_provider_pins.remove(session_id);
                         self.engine.pty_activity.remove(session_id);
                         self.engine.pty_input.remove(session_id);
+                        // Match the canonical teardown in Engine::kill_session_pty:
+                        // dropping the provider without clearing this would leak the
+                        // entry (it's keyed only off the now-removed provider).
+                        self.engine.resume_fallback_candidates.remove(session_id);
                         self.engine
                             .mark_session_status(session_id, SessionStatus::Detached);
                         killed_agents += 1;
