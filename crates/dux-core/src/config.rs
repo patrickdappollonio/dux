@@ -204,6 +204,12 @@ pub struct ServerConfig {
     /// Changing this requires a server restart to take effect — the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
     pub max_websocket_connections: u32,
+    /// WEB-ONLY display name for this dux instance. Drives the browser tab
+    /// `<title>` and the brand wordmark in the web projects pane (the version
+    /// line stays directly below it). Set a distinct value per instance — e.g.
+    /// "dux #1" / "dux (prod)" — to tell several dux tabs apart at a glance.
+    /// Default "dux". An empty/whitespace value falls back to "dux" in the UI.
+    pub title: String,
     pub acme: AcmeSettings,
 }
 
@@ -415,6 +421,7 @@ impl Default for ServerConfig {
             color: "auto".to_string(),
             access_log: true,
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            title: "dux".to_string(),
             acme: AcmeSettings::default(),
         }
     }
@@ -2479,6 +2486,23 @@ github_integration = false
         assert!(config.server.listen_addrs.is_empty());
         assert!(config.server.bind.is_none());
         assert!(!config.server.insecure_allow_remote);
+    }
+
+    #[test]
+    fn server_title_defaults_to_dux_and_parses_override() {
+        // No [server] section: title defaults to the product name.
+        let default: Config = toml::from_str("").expect("empty config should parse");
+        assert_eq!(default.server.title, "dux");
+
+        // An explicit title (e.g. to tell multiple instances apart) round-trips.
+        let config: Config = toml::from_str(
+            r#"
+[server]
+title = "dux #1"
+"#,
+        )
+        .expect("config with [server] title should parse");
+        assert_eq!(config.server.title, "dux #1");
     }
 
     #[test]
