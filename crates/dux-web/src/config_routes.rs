@@ -11,6 +11,10 @@
 //! - `PUT  /api/v1/global-env`       — replace the workspace-wide env map.
 //! - `PUT  /api/v1/ui/changes-pane`  — set the Changes-pane visibility flag.
 //! - `POST /api/v1/config/reload`    — re-read `config.toml` from disk.
+//! - `POST /api/v1/defaults/toggle-randomized-pet-name` — flip the random
+//!   pet-name default.
+//! - `POST /api/v1/ui/toggle-pr-banner-position` — swap the PR banner top/bottom.
+//! - `POST /api/v1/ui/toggle-github-integration` — flip GitHub PR integration.
 //!
 //! On a successful config change the engine emits a `config.changed` event (via
 //! the Phase 2 forwarder in `server.rs`), so subscribed clients refetch
@@ -39,6 +43,18 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/global-env", put(persist_global_env))
         .route("/api/v1/ui/changes-pane", put(set_changes_pane))
         .route("/api/v1/config/reload", post(reload_config))
+        .route(
+            "/api/v1/defaults/toggle-randomized-pet-name",
+            post(toggle_randomized_pet_name_default),
+        )
+        .route(
+            "/api/v1/ui/toggle-pr-banner-position",
+            post(toggle_pr_banner_position),
+        )
+        .route(
+            "/api/v1/ui/toggle-github-integration",
+            post(toggle_github_integration),
+        )
 }
 
 // ── Macros ───────────────────────────────────────────────────────────────────
@@ -115,6 +131,39 @@ async fn set_changes_pane(
 /// so no `Json` extractor — a config reload re-reads `config.toml` from disk.
 async fn reload_config(State(state): State<AppState>, headers: HeaderMap) -> Response {
     dispatch(&state, &headers, WireCommand::ReloadConfig {}).await
+}
+
+// ── Preference toggles ───────────────────────────────────────────────────────
+//
+// These mirror the TUI palette toggles. Each is a parameterless POST: the server
+// owns the current value and flips it (so two surfaces never disagree about the
+// "next" state), persists, and emits `config.changed` so every client refetches
+// the bootstrap document. The frontend confirms via the routed status toast.
+
+/// `POST /api/v1/defaults/toggle-randomized-pet-name`. Flip the random pet-name
+/// default (`defaults.enable_randomized_pet_name_by_default`).
+async fn toggle_randomized_pet_name_default(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    dispatch(
+        &state,
+        &headers,
+        WireCommand::ToggleRandomizedPetNameDefault {},
+    )
+    .await
+}
+
+/// `POST /api/v1/ui/toggle-pr-banner-position`. Swap the PR banner between the
+/// top and bottom of the agent pane (`ui.pr_banner_position`).
+async fn toggle_pr_banner_position(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    dispatch(&state, &headers, WireCommand::TogglePrBannerPosition {}).await
+}
+
+/// `POST /api/v1/ui/toggle-github-integration`. Flip GitHub PR integration
+/// (`ui.github_integration`) and its engine-side PR-sync side effects.
+async fn toggle_github_integration(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    dispatch(&state, &headers, WireCommand::ToggleGithubIntegration {}).await
 }
 
 // ── Shared dispatch ─────────────────────────────────────────────────────────────
@@ -214,5 +263,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn preference_toggles_accept_a_post_with_no_body() {
+        for uri in [
+            "/api/v1/defaults/toggle-randomized-pet-name",
+            "/api/v1/ui/toggle-pr-banner-position",
+            "/api/v1/ui/toggle-github-integration",
+        ] {
+            let (_tmp, app) = router_no_auth();
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "POST {uri}");
+        }
     }
 }

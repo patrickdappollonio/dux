@@ -429,24 +429,27 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ToggleGithubIntegration,
         name: "toggle-github-integration",
         description: "Toggle GitHub PR integration",
-        // TUI-only: no wire command or web UI exists to toggle this globally.
-        surface: PaletteSurface::Tui,
+        // Web: WireCommand::ToggleGithubIntegration flips ui.github_integration
+        // and drives the engine's PR-sync side effects.
+        surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::ToggleRandomizedPetNameDefault,
         name: "toggle-randomized-pet-name-default",
         description: "Toggle whether new agent prompts start with a random pet name",
-        // TUI-only: no wire command or web UI exists to toggle this default
-        // (the web new-agent dialog has its own per-open randomize checkbox).
-        surface: PaletteSurface::Tui,
+        // Web: WireCommand::ToggleRandomizedPetNameDefault flips the default; the
+        // web new-agent dialog still has its own per-open randomize checkbox,
+        // seeded from this default.
+        surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::TogglePrBannerPosition,
         name: "toggle-pr-banner-position",
         description: "Move PR banner between top and bottom of agent pane",
-        // TUI-only: no wire command exists; the web reads pr_banner_position
-        // from config and mobile always pins it to the top.
-        surface: PaletteSurface::Tui,
+        // Web: WireCommand::TogglePrBannerPosition flips ui.pr_banner_position;
+        // the web hides this entry when GitHub PRs are unavailable (no banner to
+        // move) and mobile always pins the banner to the top.
+        surface: PaletteSurface::Both,
     },
     PaletteCommand {
         action: Action::ForceReconnectAgent,
@@ -509,6 +512,9 @@ mod tests {
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",
+            "toggle-github-integration",
+            "toggle-pr-banner-position",
+            "toggle-randomized-pet-name-default",
             "toggle-remove-git-pane",
         ];
         let mut actual: Vec<&str> = web_palette_commands().map(|c| c.name).collect();

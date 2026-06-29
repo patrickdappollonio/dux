@@ -49,8 +49,15 @@ export function CommandPalette() {
   // ViewModel projects the Web/Both subset (id + description, canonical order);
   // we render each entry whose id has a web handler, bucketed into app-menu
   // groups (Configuration / View / Projects) for the menu-like feel.
+  // Hide the PR-banner-position toggle when GitHub PRs are unavailable
+  // (integration off, or `gh` not installed/authed): there is no banner to
+  // move, so moving it is meaningless. `gh_available` is the composite the
+  // server already projects (it is false whenever integration is off).
+  const ghAvailable = bootstrap?.gh_available ?? false
   const paletteCommands = (bootstrap?.palette_commands ?? []).filter(
-    (cmd) => cmd.id in PALETTE_HANDLERS
+    (cmd) =>
+      cmd.id in PALETTE_HANDLERS &&
+      (cmd.id !== "toggle-pr-banner-position" || ghAvailable)
   )
   const commandGroups = groupPaletteCommands(paletteCommands)
 
@@ -75,13 +82,20 @@ export function CommandPalette() {
               <CommandItem
                 key={cmd.id}
                 value={`${cmd.id} ${cmd.description}`}
-                // Two aligned columns (tabwriter-style): a fixed-width command
-                // name so every description starts at the same x across rows.
-                className="grid cursor-pointer grid-cols-[12rem_minmax(0,1fr)] items-baseline gap-3"
+                // Three aligned columns (tabwriter-style): a fixed-width command
+                // name so every description starts at the same x across rows,
+                // then a trailing `auto` column. That last column is load-bearing:
+                // `CommandItem` always appends an (invisible, opacity-0) checked-
+                // state CheckIcon after its children, so a 2-column grid orphaned
+                // it onto an implicit SECOND grid row — doubling every row's
+                // height with nothing visible. Giving it a home column keeps rows
+                // single-line. `items-center` (not baseline) vertically centers
+                // the monospace id against the description.
+                className="grid cursor-pointer grid-cols-[12rem_minmax(0,1fr)_auto] items-center gap-3"
                 onSelect={() => runPaletteCommand(cmd.id)}
               >
-                <span className="truncate font-medium">{cmd.id}</span>
-                <span className="truncate text-muted-foreground">
+                <span className="truncate font-mono text-xs">{cmd.id}</span>
+                <span className="truncate text-sm text-muted-foreground">
                   {cmd.description}
                 </span>
               </CommandItem>

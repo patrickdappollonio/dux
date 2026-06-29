@@ -180,6 +180,24 @@ pub enum WireCommand {
     SetChangesPaneVisible {
         visible: bool,
     },
+    /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
+    /// mirroring the TUI's `toggle-randomized-pet-name-default` palette command.
+    /// The server is the source of truth, so this is a parameterless toggle: the
+    /// engine reads the current value and flips it (two rapid clicks cancel out,
+    /// matching the TUI). A low-stakes preference, so the write is lazy.
+    ToggleRandomizedPetNameDefault {},
+    /// Flip `ui.pr_banner_position` between "top" and "bottom" and persist it,
+    /// mirroring the TUI's `toggle-pr-banner-position` palette command. The next
+    /// `config.changed` refetch carries the new value so the web moves the PR
+    /// banner lane. Low-stakes preference, lazy write.
+    TogglePrBannerPosition {},
+    /// Flip `ui.github_integration` and persist it, mirroring the TUI's
+    /// `toggle-github-integration` palette command. Beyond the config flag this
+    /// drives the engine's PR-sync side effects (start/stop background PR refresh,
+    /// clear cached PR statuses) so the running server actually starts or stops
+    /// talking to `gh`. The write is eager because the user wants to know if
+    /// persisting the toggle failed.
+    ToggleGithubIntegration {},
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
     AddProject {
@@ -399,6 +417,9 @@ impl WireCommand {
             WireCommand::UpdateMacros { .. }
                 | WireCommand::PersistGlobalEnv { .. }
                 | WireCommand::SetChangesPaneVisible { .. }
+                | WireCommand::ToggleRandomizedPetNameDefault {}
+                | WireCommand::TogglePrBannerPosition {}
+                | WireCommand::ToggleGithubIntegration {}
         )
     }
 }
@@ -705,6 +726,27 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::ToggleRandomizedPetNameDefault {} => {
+                let status = self.toggle_randomized_pet_name_default();
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
+            WireCommand::TogglePrBannerPosition {} => {
+                let status = self.toggle_pr_banner_position();
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
+            WireCommand::ToggleGithubIntegration {} => {
+                let status = self.toggle_github_integration();
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::AddProject { .. } => {
                 // The direct add (no branch-checkout step) is the primary web add
                 // path. Like the inline checkout-add in `drive_add_project_followup`,
@@ -771,6 +813,73 @@ impl Engine {
             "Changes pane hidden. Reopen it from the command palette or the Changes menu."
         };
         WireStatus::new("info", message.to_string())
+    }
+
+    /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
+    /// mirroring the TUI's `toggle-randomized-pet-name-default` handler. The
+    /// server owns the value, so this reads-and-flips (no client-supplied bool);
+    /// the write is lazy because it is a low-stakes preference.
+    fn toggle_randomized_pet_name_default(&mut self) -> WireStatus {
+        let next = !self.config.defaults.enable_randomized_pet_name_by_default;
+        self.config.defaults.enable_randomized_pet_name_by_default = next;
+        self.config_writer.save_lazy(self.config.clone());
+        let message = if next {
+            "Random pet-name default enabled. New agents start with a random pet name. Toggle it back from the command palette."
+        } else {
+            "Random pet-name default disabled. New agents start with an empty name. Toggle it back from the command palette."
+        };
+        WireStatus::new("info", message.to_string())
+    }
+
+    /// Flip `ui.pr_banner_position` between "top" and "bottom" and persist it,
+    /// mirroring the TUI's `toggle-pr-banner-position` handler. Any value other
+    /// than "bottom" is treated as "top" (so an unexpected/legacy string moves to
+    /// "bottom" on first toggle). Low-stakes preference, lazy write.
+    fn toggle_pr_banner_position(&mut self) -> WireStatus {
+        let next = if self.config.ui.pr_banner_position == "bottom" {
+            "top"
+        } else {
+            "bottom"
+        };
+        self.config.ui.pr_banner_position = next.to_string();
+        self.config_writer.save_lazy(self.config.clone());
+        WireStatus::new(
+            "info",
+            format!("PR banner moved to the {next} of the agent pane."),
+        )
+    }
+
+    /// Flip `ui.github_integration` and persist it, mirroring the TUI's
+    /// `toggle-github-integration` handler. Besides the config flag, this drives
+    /// the engine's PR-sync side effects so the running server actually starts or
+    /// stops polling `gh`: enabling (when `gh` is available) re-derives the
+    /// sync set, kicks an initial refresh, and arms the sync flag; disabling
+    /// clears cached PR statuses and disarms it. The write is eager so a persist
+    /// failure is surfaced to the user (the toggle still applies this session).
+    fn toggle_github_integration(&mut self) -> WireStatus {
+        use std::sync::atomic::Ordering;
+
+        let next = !self.github_integration_enabled;
+        self.github_integration_enabled = next;
+        self.config.ui.github_integration = next;
+        if next && matches!(self.gh_status, crate::model::GhStatus::Available) {
+            self.update_pr_sync_sessions();
+            self.spawn_initial_pr_refresh();
+            self.pr_sync_enabled.store(true, Ordering::Relaxed);
+        } else if !next {
+            self.pr_statuses.clear();
+            self.pr_sync_enabled.store(false, Ordering::Relaxed);
+        }
+        let state = if next { "enabled" } else { "disabled" };
+        match self.config_writer.save_eager(self.config.clone()) {
+            Ok(()) => WireStatus::new("info", format!("GitHub integration {state}.")),
+            Err(err) => WireStatus::new(
+                "error",
+                format!(
+                    "GitHub integration {state} this session, but saving to config failed: {err}"
+                ),
+            ),
+        }
     }
 
     /// Rename an agent session's display title, mirroring the title half of the
@@ -2330,9 +2439,12 @@ impl Engine {
             | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
-            | WireCommand::SetChangesPaneVisible { .. } => {
+            | WireCommand::SetChangesPaneVisible { .. }
+            | WireCommand::ToggleRandomizedPetNameDefault {}
+            | WireCommand::TogglePrBannerPosition {}
+            | WireCommand::ToggleGithubIntegration {} => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-github-integration are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -3065,6 +3177,107 @@ mod tests {
             .apply_wire(WireCommand::SetChangesPaneVisible { visible: true })
             .expect("apply idempotent");
         assert!(engine.config.ui.show_changes_pane);
+    }
+
+    #[test]
+    fn wire_toggle_commands_deserialize() {
+        for (json, expected) in [
+            (
+                r#"{"command":"toggle_randomized_pet_name_default","args":{}}"#,
+                WireCommand::ToggleRandomizedPetNameDefault {},
+            ),
+            (
+                r#"{"command":"toggle_pr_banner_position","args":{}}"#,
+                WireCommand::TogglePrBannerPosition {},
+            ),
+            (
+                r#"{"command":"toggle_github_integration","args":{}}"#,
+                WireCommand::ToggleGithubIntegration {},
+            ),
+        ] {
+            let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
+            assert_eq!(cmd, expected);
+        }
+    }
+
+    #[test]
+    fn apply_wire_toggle_randomized_pet_name_default_flips_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        let start = engine.config.defaults.enable_randomized_pet_name_by_default;
+
+        engine
+            .apply_wire(WireCommand::ToggleRandomizedPetNameDefault {})
+            .expect("apply toggle");
+        assert_eq!(
+            engine.config.defaults.enable_randomized_pet_name_by_default, !start,
+            "in-memory value must flip immediately"
+        );
+
+        engine.config_writer.flush();
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains(&format!(
+                "enable_randomized_pet_name_by_default = {}",
+                !start
+            )),
+            "flushed config must carry the flipped value, got:\n{disk}"
+        );
+
+        // A second toggle returns to the starting value (the server owns state).
+        engine
+            .apply_wire(WireCommand::ToggleRandomizedPetNameDefault {})
+            .expect("apply toggle back");
+        assert_eq!(
+            engine.config.defaults.enable_randomized_pet_name_by_default,
+            start
+        );
+    }
+
+    #[test]
+    fn apply_wire_toggle_pr_banner_position_swaps_top_and_bottom() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.pr_banner_position = "top".to_string();
+
+        engine
+            .apply_wire(WireCommand::TogglePrBannerPosition {})
+            .expect("apply toggle");
+        assert_eq!(engine.config.ui.pr_banner_position, "bottom");
+
+        engine
+            .apply_wire(WireCommand::TogglePrBannerPosition {})
+            .expect("apply toggle back");
+        assert_eq!(engine.config.ui.pr_banner_position, "top");
+
+        engine.config_writer.flush();
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains("pr_banner_position = \"top\""),
+            "flushed config must carry the position, got:\n{disk}"
+        );
+    }
+
+    #[test]
+    fn apply_wire_toggle_github_integration_flips_flag() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = false;
+        engine.config.ui.github_integration = false;
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("apply toggle");
+        assert!(engine.github_integration_enabled, "runtime flag flips on");
+        assert!(
+            engine.config.ui.github_integration,
+            "config flag flips on in lockstep with the runtime flag"
+        );
+
+        engine
+            .apply_wire(WireCommand::ToggleGithubIntegration {})
+            .expect("apply toggle back");
+        assert!(!engine.github_integration_enabled);
+        assert!(!engine.config.ui.github_integration);
     }
 
     #[test]
