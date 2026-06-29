@@ -1236,15 +1236,23 @@ impl Engine {
             .validate_project_add_path(path)
             .map_err(|e| anyhow::anyhow!(e))?;
         let branch = crate::git::current_branch_opt(&validated)?;
-        let default_branch = match branch
-            .as_deref()
-            .and_then(|b| crate::git::branch_warning_kind(&validated, b))
-        {
-            Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
-            _ => anyhow::bail!(
-                "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
-                validated.display()
-            ),
+        let default_branch = match branch.as_deref() {
+            // On a normal HEAD: require a Known default (Heuristic is rejected).
+            Some(current) => match crate::git::branch_warning_kind(&validated, current) {
+                Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
+                _ => anyhow::bail!(
+                    "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
+                    validated.display()
+                ),
+            },
+            // On a detached HEAD: try origin/HEAD directly before giving up.
+            None => match crate::git::remote_default_branch(&validated) {
+                Some(default) => default,
+                None => anyhow::bail!(
+                    "HEAD is detached and no remote default branch (origin/HEAD) is \
+                         configured; check out a branch first."
+                ),
+            },
         };
         let leading_branch =
             crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
@@ -3796,6 +3804,78 @@ mod tests {
         assert!(
             engine.pending_web_add_project_ops.contains_key(key),
             "the add-project op must be registered under its busy key"
+        );
+    }
+
+    // Helper: detach HEAD on a path (requires at least one commit).
+    fn detach_head(repo: &std::path::Path) {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_string_lossy().as_ref(),
+                "checkout",
+                "--detach",
+                "HEAD",
+            ])
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git checkout --detach HEAD failed");
+    }
+
+    #[test]
+    fn add_project_checkout_default_on_detached_with_origin_head_uses_remote_default() {
+        // A cloned repo has origin/HEAD set. Detach HEAD, then verify the command
+        // succeeds by falling back to the remote default branch.
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        detach_head(&work);
+        let (mut engine, _tmp) = test_engine();
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: work.to_string_lossy().into_owned(),
+                name: "Detached".to_string(),
+            })
+            .expect("should succeed: origin/HEAD resolves to main");
+        let status = outcome.status.expect("busy status");
+        assert_eq!(status.tone, "busy");
+        assert!(
+            status.message.contains("main"),
+            "busy message should reference the remote default branch 'main', got: {}",
+            status.message
+        );
+        // Drive the chain to confirm success.
+        let statuses = drive_add_project_chain(&mut engine);
+        let final_status = statuses.last().expect("final status");
+        assert_eq!(
+            final_status.tone, "info",
+            "expected success, got: {:?}",
+            final_status
+        );
+    }
+
+    #[test]
+    fn add_project_checkout_default_on_detached_without_origin_head_returns_clear_error() {
+        // A local-only repo (no remote) on detached HEAD: no origin/HEAD to fall back
+        // to, so the command must bail with a message mentioning "detached".
+        let repo = init_repo_on_feature_branch("main");
+        detach_head(repo.path());
+        let (mut engine, _tmp) = test_engine();
+
+        let err = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: String::new(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("detached"),
+            "expected 'detached' in error, got: {err}"
+        );
+        assert!(
+            engine.projects.is_empty(),
+            "no project should be added on error"
         );
     }
 
