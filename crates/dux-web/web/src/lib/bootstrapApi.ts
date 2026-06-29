@@ -32,6 +32,10 @@ export interface Bootstrap {
   randomize_agent_names_by_default: boolean
   /** Whether the new-agent-from-PR flow is available (GitHub integration + `gh`). */
   gh_available: boolean
+  /** Raw `config.ui.github_integration` flag (distinct from `gh_available`, the
+   * composite). The palette hides the PR-banner-position command when this is
+   * false — i.e. when integration is OFF, not merely when `gh` is unreachable. */
+  github_integration: boolean
   /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below
    * the terminal, anything else above. (Server sends a free string; the two
    * known values are the only ones the UI branches on.) */

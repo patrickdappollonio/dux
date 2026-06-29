@@ -1376,6 +1376,13 @@ mod tests {
             validate_config_str("this is = = not valid toml").is_err(),
             "garbage must be rejected"
         );
+        // Structurally-valid TOML with a wrong-typed field must also be rejected
+        // (deserialization failure, not just a parse failure) — otherwise the web
+        // editor would accept a value the engine can't load.
+        assert!(
+            validate_config_str("[ui]\nagent_scrollback_lines = \"lots\"\n").is_err(),
+            "a string for a numeric field must be rejected"
+        );
     }
 
     #[cfg(target_os = "macos")]

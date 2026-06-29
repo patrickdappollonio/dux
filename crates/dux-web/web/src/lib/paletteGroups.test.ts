@@ -62,7 +62,6 @@ describe("paletteGroups", () => {
     expect(grouped.map((g) => g.group)).toEqual([
       "Configuration",
       "View",
-      "Runtime",
       "Projects",
     ])
   })

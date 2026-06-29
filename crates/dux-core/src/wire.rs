@@ -3333,9 +3333,14 @@ mod tests {
 
     #[test]
     fn apply_wire_toggle_github_integration_flips_flag() {
+        use std::sync::atomic::Ordering;
+
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = false;
         engine.config.ui.github_integration = false;
+        // gh present so the enable path arms PR sync (the side effect, not just
+        // the flag, is what we want to cover).
+        engine.gh_status = crate::model::GhStatus::Available;
 
         engine
             .apply_wire(WireCommand::ToggleGithubIntegration {})
@@ -3345,12 +3350,21 @@ mod tests {
             engine.config.ui.github_integration,
             "config flag flips on in lockstep with the runtime flag"
         );
+        assert!(
+            engine.pr_sync_enabled.load(Ordering::Relaxed),
+            "enabling with gh available must arm PR sync"
+        );
 
         engine
             .apply_wire(WireCommand::ToggleGithubIntegration {})
             .expect("apply toggle back");
         assert!(!engine.github_integration_enabled);
         assert!(!engine.config.ui.github_integration);
+        assert!(
+            !engine.pr_sync_enabled.load(Ordering::Relaxed),
+            "disabling must disarm PR sync and clear cached PR statuses"
+        );
+        assert!(engine.pr_statuses.is_empty());
     }
 
     #[test]
@@ -3424,6 +3438,11 @@ mod tests {
         .expect("spawn cat provider");
         engine.providers.insert("s1".to_string(), client);
         engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+        engine.mark_session_desired_running("s1", true);
+        // Seed an auxiliary resume-state map the kill must also clear.
+        engine
+            .pty_input
+            .insert("s1".to_string(), std::time::Instant::now());
 
         let outcome = engine
             .apply_wire(WireCommand::KillSessionPty {
@@ -3449,6 +3468,14 @@ mod tests {
             engine.sessions[0].status,
             crate::model::SessionStatus::Detached,
             "killed agent is detached, not deleted"
+        );
+        // The auxiliary resume state must be cleared so a later reconnect starts
+        // clean, and desired_running cleared so startup auto-reopen won't relaunch
+        // the agent the user explicitly killed.
+        assert!(!engine.pty_input.contains_key("s1"));
+        assert!(
+            !engine.sessions[0].desired_running,
+            "an explicit kill clears desired_running"
         );
     }
 
