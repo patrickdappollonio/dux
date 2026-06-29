@@ -399,7 +399,9 @@ impl ChangesService {
     }
 
     /// The cached `rev` for a session, if any. Used by the `/ws/events` lag
-    /// catch-up to stamp the synthetic `session.changes` frame.
+    /// catch-up and subscribe catch-up to stamp the synthetic `session.changes`
+    /// frame. Returns `None` for a cold cache; the caller serialises that as an
+    /// absent `rev` field, which the client treats as a force-refetch.
     pub fn peek_rev(&self, session_id: &str) -> Option<u64> {
         let cache = lock(&self.cache);
         match cache.get(session_id) {
@@ -407,6 +409,22 @@ impl ChangesService {
             Some(Cached::Err { rev, .. }) => Some(*rev),
             None => None,
         }
+    }
+
+    /// Seed the cache with a known `rev` for `session_id`. Test-only: lets
+    /// server-level unit tests assert subscribe catch-up behaviour without
+    /// spinning up a git repo or a real poller compute.
+    #[cfg(test)]
+    pub fn seed_rev_for_test(&self, session_id: &str, rev: u64) {
+        let mut cache = lock(&self.cache);
+        cache.insert(
+            session_id.to_string(),
+            Cached::Ok {
+                rev,
+                generation: 0,
+                prev: (vec![], vec![]),
+            },
+        );
     }
 
     /// Single-flight wrapper around [`Self::compute`]. Exactly one compute runs per
@@ -612,6 +630,8 @@ impl ChangesService {
                 event: "session.changes".to_string(),
                 id: Some(session_id.to_string()),
                 rev: Some(rev),
+                owner: None,
+                epoch: None,
             });
         }
     }
@@ -934,7 +954,7 @@ mod tests {
             .await
             .expect("event timeout")
             .expect("event");
-        let Event::Resource { event, id, rev } = ev;
+        let Event::Resource { event, id, rev, .. } = ev;
         assert_eq!(event, "session.changes");
         assert_eq!(id.as_deref(), Some("s1"));
         assert!(

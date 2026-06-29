@@ -10,6 +10,7 @@ import { ordersMatch } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
+import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { terminalsApi } from "./terminalsApi"
 import { browseApi } from "./browseApi"
@@ -492,6 +493,19 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     loadSpine()
     return
   }
+  // A `pty.owner` event means a connection claimed (took over, or first-claimed an
+  // unowned) PTY's sizing+input. Fan it out to the mounted terminal view for that
+  // pty id along with the claimer's connection id (`owner`); the view compares that
+  // against its own PTY-socket connection id to decide definitively whether it is
+  // the owner (stays interactive) or has been taken over (read-only placeholder).
+  // The id is the pty id (session id for an agent, terminal id for a companion).
+  // Delivered on the coarse `sessions` topic, subscribed at module load.
+  if (ev.event === "pty.owner") {
+    // Pass the ownership epoch so the fan-out can ignore an out-of-order (older)
+    // handover and converge on the latest claim regardless of arrival order.
+    if (typeof ev.id === "string") notifyPtyOwner(ev.id, ev.owner, ev.epoch)
+    return
+  }
   if (ev.event !== "session.changes") return
   const id = ev.id
   if (id === undefined || id !== state.selectedSessionId) return
@@ -535,6 +549,12 @@ eventsSocket.onOpen = () => {
     // apply is idempotent.
     loadBootstrap()
     loadSpine()
+    // The server's ownership epoch counter restarts at zero if the server itself
+    // restarted during the outage; clear our per-pty high-water marks so a fresh
+    // post-restart `pty.owner` is not wrongly ignored as stale. A reconnect is the
+    // only path a restarted server's epochs reach us, and there is no `pty.owner`
+    // replay, so this can never drop a still-relevant in-flight handover.
+    resetPtyOwnerEpochs()
   }
   const id = state.selectedSessionId
   if (id === null) return

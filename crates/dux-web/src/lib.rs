@@ -316,9 +316,13 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
-    // Capture the connection cap and allowed hosts before the engine moves into
+    // Capture the connection caps and allowed hosts before the engine moves into
     // the actor thread. Both are read-only config values the router builder needs.
-    let max_ws_connections = engine.config.server.max_websocket_connections;
+    let max_ws_caps = (
+        engine.config.server.max_websocket_events_connections,
+        engine.config.server.max_websocket_agent_connections,
+        engine.config.server.max_websocket_terminal_connections,
+    );
     let engine_allowed_hosts = engine.config.server.allowed_hosts.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -378,7 +382,7 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
             axum::Router::new(),
             RouterParams::plain_http()
                 .with_console(console.clone(), access_log)
-                .with_max_websocket_connections(max_ws_connections)
+                .with_max_websocket_connections(max_ws_caps.0, max_ws_caps.1, max_ws_caps.2)
                 .with_host_allowlist(bound_ips, engine_allowed_hosts.clone()),
         );
 
@@ -627,7 +631,11 @@ pub fn serve_with_engine(
         .map(|a| a.ip())
         .collect();
     let flip_allowed_hosts = engine.config.server.allowed_hosts.clone();
-    let flip_max_ws = engine.config.server.max_websocket_connections;
+    let flip_max_ws = (
+        engine.config.server.max_websocket_events_connections,
+        engine.config.server.max_websocket_agent_connections,
+        engine.config.server.max_websocket_terminal_connections,
+    );
 
     // The std listeners travel through the flip (the TUI bound them BEFORE tearing
     // down, so there is no rebind race); tokio needs them non-blocking. Adoption
@@ -692,7 +700,7 @@ pub fn serve_with_engine(
                 // in the panel, and access() never reaches emit() to be captured
                 // anyway) while the WS handlers feed lifecycle events into the ring.
                 .with_console(console.clone(), false)
-                .with_max_websocket_connections(flip_max_ws)
+                .with_max_websocket_connections(flip_max_ws.0, flip_max_ws.1, flip_max_ws.2)
                 .with_host_allowlist(flip_bound_ips, flip_allowed_hosts),
         )
     };

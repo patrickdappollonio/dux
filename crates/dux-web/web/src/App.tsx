@@ -58,12 +58,17 @@ function InsetHeader() {
     ? spine?.projects.find((p) => p.id === session.project_id)
     : undefined
   // When a companion terminal is focused, surface it as a third crumb. The crumb
-  // text follows the TUI precedence (foreground command if running, else label).
+  // text is the foreground command when one is running (disambiguated with the
+  // terminal's number if a sibling runs the same app), otherwise the stable
+  // "Terminal N" label.
   const terminal =
     selectedTarget?.kind === "terminal"
       ? session?.terminals.find((t) => t.id === selectedTarget.terminalId)
       : undefined
-  const terminalLabel = terminal ? terminalTitle(terminal) : undefined
+  const terminalLabel =
+    terminal && session
+      ? terminalTitle(terminal, session.terminals)
+      : undefined
 
   // The header details, mirroring the TUI: a flat `key: value` list joined by a
   // single separator. `terminal` only appears when a companion terminal is the
