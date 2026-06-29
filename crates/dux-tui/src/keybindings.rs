@@ -576,16 +576,6 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[(HintContext::Files, "Commit")],
     },
     BindingDef {
-        action: Action::GenerateCommitMessage,
-        default_keys: &[key!(ctrl - g)],
-        scopes: &[BindingScope::Files],
-        help: Some(HelpEntry {
-            section: "Files pane",
-            description: "Generate AI commit message",
-        }),
-        hint_contexts: &[(HintContext::Files, "AI msg")],
-    },
-    BindingDef {
         action: Action::DiscardChanges,
         default_keys: &[key!(ctrl - d)],
         scopes: &[BindingScope::Files],

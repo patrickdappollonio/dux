@@ -49,7 +49,6 @@ pub enum Action {
     OpenDiff,
     StageUnstage,
     CommitChanges,
-    GenerateCommitMessage,
     DiscardChanges,
     EngageCommitInput,
     PushToRemote,
@@ -154,7 +153,6 @@ impl Action {
             Action::OpenDiff => "open_diff",
             Action::StageUnstage => "stage_unstage",
             Action::CommitChanges => "commit_changes",
-            Action::GenerateCommitMessage => "generate_commit_message",
             Action::DiscardChanges => "discard_changes",
             Action::EngageCommitInput => "engage_commit_input",
             Action::PushToRemote => "push_to_remote",
@@ -271,7 +269,6 @@ impl Action {
             Action::OpenDiff => "Open the selected file's diff.",
             Action::StageUnstage => "Stage or unstage the selected file.",
             Action::CommitChanges => "Commit staged changes.",
-            Action::GenerateCommitMessage => "Generate an AI commit message.",
             Action::DiscardChanges => "Discard changes to the selected file.",
             Action::EngageCommitInput => "Open the commit message editor.",
             Action::PushToRemote => "Push to remote.",
@@ -390,7 +387,6 @@ impl Action {
             Action::OpenDiff
             | Action::StageUnstage
             | Action::CommitChanges
-            | Action::GenerateCommitMessage
             | Action::DiscardChanges
             | Action::EngageCommitInput
             | Action::PushToRemote

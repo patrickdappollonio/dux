@@ -258,19 +258,6 @@ pub enum WorkerEvent {
         /// different worktree's contents.
         worktree: PathBuf,
     },
-    /// A one-shot commit-message run succeeded. Carries the session it was
-    /// generated for so the result lands in the matching commit dialog and never
-    /// leaks into another session's draft (two web dialogs / rapid switches).
-    CommitMessageGenerated {
-        session_id: String,
-        message: String,
-    },
-    /// A one-shot commit-message run failed. Carries the session so a failure can
-    /// be scoped to the dialog that requested it.
-    CommitMessageFailed {
-        session_id: String,
-        error: String,
-    },
     /// A `spawn_status_op` worker finished and carried back its resolved final
     /// (the success/failure message or a clear, already keyed).
     StatusOpCompleted {

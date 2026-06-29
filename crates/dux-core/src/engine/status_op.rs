@@ -72,8 +72,8 @@ pub struct ResolvedFinal {
     pub outcome: Final,
     /// Delivery audience captured at dispatch time (before the worker thread
     /// spawned, while `Engine::current_origin` was still set). Defaults to
-    /// [`StatusScope::All`]; the deferred-op mint sites set it so a push/pull/
-    /// commit-message final reaches only the originating connection. Copied
+    /// [`StatusScope::All`]; the deferred-op mint sites set it so a push/pull
+    /// final reaches only the originating connection. Copied
     /// onto the emitted [`StatusUpdate`] in [`Self::into_reaction`] (by the time
     /// the worker completes, `current_origin` has been reset, so the scope must
     /// travel here rather than be re-read).

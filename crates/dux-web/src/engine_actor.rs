@@ -25,17 +25,6 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 /// forwards. (PTY bytes never travel through the request channel.)
 pub type PtySubscription = (Vec<u8>, std::sync::mpsc::Receiver<Vec<u8>>);
 
-/// A generated commit message broadcast to every connected client. Carries the
-/// originating session id so a client routes it to the matching commit dialog
-/// and never lets one session's message clobber another's draft (two web dialogs
-/// or a rapid session switch). The failure path rides the status stream as a
-/// generic toast, so only the successful message needs scoping here.
-#[derive(Clone, Debug)]
-pub struct CommitMessageEvent {
-    pub session_id: String,
-    pub message: String,
-}
-
 /// Which half of the projects/sessions spine changed since the last tick. The
 /// engine loop fingerprints the projected spine each tick and fires the matching
 /// variant; the web layer's forwarder turns it into a coarse `projects.changed` /
@@ -190,14 +179,6 @@ pub(crate) struct ActorLoopEnds {
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_tx: watch::Sender<Vec<KeyedWireStatus>>,
-    commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
-    /// Per-session connect snapshot of the last generated commit message, keyed by
-    /// session id. A map (not a single global slot) so a message generated for one
-    /// session can never evict another's: two open commit dialogs, or a rapid
-    /// session switch, each keep their own draft. Each entry is stamped with the
-    /// `Instant` it was generated so [`COMMIT_SNAPSHOT_TTL`] bounds staleness.
-    commit_snapshot_tx:
-        watch::Sender<std::collections::HashMap<String, (CommitMessageEvent, Instant)>>,
     /// Fires `()` once per successful config reload so the web layer can emit a
     /// `config.changed` event on its event bus (clients then refetch
     /// `/api/v1/bootstrap`). Broadcast — the web forwarder is the only listener,
@@ -317,27 +298,6 @@ fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::c
 /// internal safety ceiling, not a preference.
 const REQ_CHANNEL_CAPACITY: usize = 1024;
 
-/// How long a generated commit message stays deliverable as a connect snapshot.
-/// Long enough to cover a slow one-shot generation plus a reconnect blip, short
-/// enough that an old, already-used message never silently pre-fills a freshly
-/// opened commit dialog. See [`EngineHandle::commit_message_snapshot`].
-const COMMIT_SNAPSHOT_TTL: Duration = Duration::from_secs(90);
-
-/// Return a single snapshot entry's message only if it is younger than `ttl`.
-/// Pure (takes `now`) so the TTL boundary is unit-testable without sleeping. Uses
-/// a saturating age so a clock that appears to go backwards yields age 0 (treated
-/// as fresh) rather than panicking. Takes `Option<&entry>` so a `HashMap::get`
-/// result feeds straight in.
-fn fresh_commit_snapshot(
-    slot: Option<&(CommitMessageEvent, Instant)>,
-    ttl: Duration,
-    now: Instant,
-) -> Option<CommitMessageEvent> {
-    slot.and_then(|(event, generated_at)| {
-        (now.saturating_duration_since(*generated_at) < ttl).then(|| event.clone())
-    })
-}
-
 /// Build the actor channels and split them into the caller-facing
 /// [`EngineHandle`] and the loop-side [`ActorLoopEnds`]. Both server entry
 /// points (the dedicated engine thread and the in-process flip) call this so
@@ -366,18 +326,6 @@ pub(crate) fn build_actor_channels_with_auth(
     let (status_tx, _status_rx) = broadcast::channel::<WireStatus>(256);
     let (status_clear_tx, _status_clear_rx) = broadcast::channel::<Option<String>>(256);
     let (status_snapshot_tx, status_snapshot_rx) = watch::channel::<Vec<KeyedWireStatus>>(vec![]);
-    let (commit_msg_tx, _commit_msg_rx) = broadcast::channel::<CommitMessageEvent>(64);
-    // The commit-message snapshot mirrors the status snapshot watch: it holds the
-    // LAST generated message (or `None` before any), stamped with the `Instant` it
-    // was generated, so a client that reconnected after generation completed — or
-    // in the connect/subscribe gap — still receives it once on connect (see
-    // `commit_message_snapshot`). The timestamp bounds staleness: the snapshot is
-    // only delivered while it is younger than `COMMIT_SNAPSHOT_TTL`, so an old,
-    // already-used message never pre-fills a freshly opened dialog. Live delivery
-    // stays on `commit_msg_tx` (broadcast).
-    let (commit_snapshot_tx, commit_snapshot_rx) = watch::channel::<
-        std::collections::HashMap<String, (CommitMessageEvent, Instant)>,
-    >(std::collections::HashMap::new());
     // Config-reload notifier: the loop fires `()` on each successful reload and the
     // web layer's forwarder turns it into a `config.changed` event. A small buffer
     // is plenty — reloads are rare and the forwarder drains promptly.
@@ -395,8 +343,6 @@ pub(crate) fn build_actor_channels_with_auth(
             status_tx: status_tx.clone(),
             status_clear_tx: status_clear_tx.clone(),
             status_snapshot_rx,
-            commit_msg_tx: commit_msg_tx.clone(),
-            commit_snapshot_rx,
             config_reload_tx: config_reload_tx.clone(),
             spine_change_tx: spine_change_tx.clone(),
             shutdown_flag: Arc::clone(&shutdown_flag),
@@ -407,8 +353,6 @@ pub(crate) fn build_actor_channels_with_auth(
             status_tx,
             status_clear_tx,
             status_snapshot_tx,
-            commit_msg_tx,
-            commit_snapshot_tx,
             config_reload_tx,
             spine_change_tx,
             shutdown_flag,
@@ -450,9 +394,6 @@ pub struct EngineHandle {
     status_tx: broadcast::Sender<WireStatus>,
     status_clear_tx: broadcast::Sender<Option<String>>,
     status_snapshot_rx: watch::Receiver<Vec<KeyedWireStatus>>,
-    commit_msg_tx: broadcast::Sender<CommitMessageEvent>,
-    commit_snapshot_rx:
-        watch::Receiver<std::collections::HashMap<String, (CommitMessageEvent, Instant)>>,
     /// Notifies on each successful config reload (see [`ActorLoopEnds`]). The web
     /// layer subscribes via [`EngineHandle::subscribe_config_reloads`] and re-emits
     /// a `config.changed` event so clients refetch `/api/v1/bootstrap`.
@@ -511,7 +452,6 @@ impl EngineHandle {
     /// a `Status` frame so it sees all active toasts immediately — e.g. a
     /// "Launching agent…" Busy that hasn't resolved yet — instead of a blank
     /// line until the next live update. An empty `Vec` means nothing is showing.
-    /// Mirrors `commit_message_snapshots` for the commit lane.
     pub fn status_snapshot(&self) -> Vec<KeyedWireStatus> {
         self.status_snapshot_rx.borrow().clone()
     }
@@ -548,38 +488,6 @@ impl EngineHandle {
                  (tone={tone}, key={key:?})"
             ));
         }
-    }
-
-    pub fn subscribe_commit_messages(&self) -> broadcast::Receiver<CommitMessageEvent> {
-        self.commit_msg_tx.subscribe()
-    }
-
-    /// The last generated commit message for ONE session, or `None` if none has
-    /// been produced for it OR the last one is older than [`COMMIT_SNAPSHOT_TTL`].
-    /// Backs `GET /api/v1/sessions/:id/commit-message`. The per-session map means a
-    /// later message for a DIFFERENT session can never evict this one. The TTL
-    /// bounds staleness so an old, already-used message never pre-fills a freshly
-    /// opened dialog.
-    pub fn commit_message_for(&self, session_id: &str) -> Option<CommitMessageEvent> {
-        fresh_commit_snapshot(
-            self.commit_snapshot_rx.borrow().get(session_id),
-            COMMIT_SNAPSHOT_TTL,
-            Instant::now(),
-        )
-    }
-
-    /// Every fresh per-session commit-message snapshot. A client connecting after
-    /// generation completed — or in the connect/subscribe gap — reads these once so
-    /// a reconnect during a commit flow still fills each session's draft. Stale
-    /// entries (older than [`COMMIT_SNAPSHOT_TTL`]) are filtered out. Mirrors
-    /// `status_snapshot` for the commit lane, now one entry per session.
-    pub fn commit_message_snapshots(&self) -> Vec<CommitMessageEvent> {
-        let now = Instant::now();
-        self.commit_snapshot_rx
-            .borrow()
-            .values()
-            .filter_map(|entry| fresh_commit_snapshot(Some(entry), COMMIT_SNAPSHOT_TTL, now))
-            .collect()
     }
 
     pub async fn apply_wire(&self, command: WireCommand) -> Result<WireCommandOutcome, String> {
@@ -929,8 +837,6 @@ pub(crate) fn run_engine_loop(
         status_tx: thread_status_tx,
         status_clear_tx,
         status_snapshot_tx,
-        commit_msg_tx: thread_commit_tx,
-        commit_snapshot_tx,
         config_reload_tx,
         spine_change_tx,
         shutdown_flag,
@@ -1049,48 +955,6 @@ pub(crate) fn run_engine_loop(
                     "error",
                     format!("Saved to the database, but config.toml could not be updated: {e:#}"),
                 ));
-            }
-
-            // A one-shot commit-message worker completed: push the generated
-            // message to subscribed web clients. The user-facing status (a
-            // success-clear or a keyed error) now rides the worker's separate
-            // StatusOpCompleted event, surfaced generically by the
-            // `wire_statuses_from_reaction` drain (errors) and the `ClearStatus`
-            // handler (success-clear) above — so this match keeps only the
-            // domain work (broadcasting the draft). Handled via `&reaction` so it
-            // coexists with the borrows above and stays before the by-value
-            // consume below.
-            if let EventReaction::CommitMessageGenerated {
-                session_id,
-                message,
-            } = &reaction
-            {
-                let event = CommitMessageEvent {
-                    session_id: session_id.clone(),
-                    message: message.clone(),
-                };
-                // Update the connect snapshot BEFORE the live broadcast so a
-                // client subscribing in the gap sees a consistent watch value.
-                // The Instant stamps generation time for the snapshot TTL. Keyed by
-                // session id so a second session's message can't evict this one.
-                //
-                // Prune on insert so the map stays bounded on a long-running
-                // server: drop entries past the TTL (their reads already return
-                // `None`) and entries whose session no longer exists (deleted
-                // agents would otherwise linger until their TTL elapsed). The
-                // `engine` borrow gives the live session set; the entry we are
-                // about to add is re-inserted after, so it survives this pass.
-                let now = Instant::now();
-                let live: std::collections::HashSet<&str> =
-                    engine.sessions.iter().map(|s| s.id.as_str()).collect();
-                commit_snapshot_tx.send_modify(|map| {
-                    map.retain(|sid, (_, at)| {
-                        now.saturating_duration_since(*at) < COMMIT_SNAPSHOT_TTL
-                            && live.contains(sid.as_str())
-                    });
-                    map.insert(event.session_id.clone(), (event.clone(), now));
-                });
-                let _ = thread_commit_tx.send(event);
             }
 
             // A reload worker re-read config.toml; apply the new config to the
@@ -1803,189 +1667,6 @@ mod tests {
         assert!(
             delivered,
             "command status was not broadcast to live clients"
-        );
-    }
-
-    #[test]
-    fn commit_snapshot_respects_ttl() {
-        let now = Instant::now();
-        let event = CommitMessageEvent {
-            session_id: "s1".to_string(),
-            message: "a generated commit message".to_string(),
-        };
-        // Fresh (age 0) → delivered.
-        let fresh = (event.clone(), now);
-        assert!(fresh_commit_snapshot(Some(&fresh), COMMIT_SNAPSHOT_TTL, now).is_some());
-        // Just inside the TTL → still delivered.
-        let inside = (event.clone(), now);
-        let near_edge = now + COMMIT_SNAPSHOT_TTL - Duration::from_secs(1);
-        assert!(fresh_commit_snapshot(Some(&inside), COMMIT_SNAPSHOT_TTL, near_edge).is_some());
-        // Older than the TTL → dropped, so it can't pre-fill a fresh dialog.
-        let stale = (event, now);
-        let past_edge = now + COMMIT_SNAPSHOT_TTL + Duration::from_secs(1);
-        assert!(fresh_commit_snapshot(Some(&stale), COMMIT_SNAPSHOT_TTL, past_edge).is_none());
-        // No snapshot at all → None.
-        assert!(fresh_commit_snapshot(None, COMMIT_SNAPSHOT_TTL, now).is_none());
-    }
-
-    #[tokio::test]
-    async fn commit_message_reaches_snapshot_and_broadcast() {
-        // A generated commit message is published on BOTH the connect snapshot (so
-        // a client that reconnected after generation completed still receives it)
-        // AND the live broadcast (so an already-connected client gets it at once).
-        // Mirrors the status snapshot/broadcast split.
-        let (_tmp, paths) = temp_paths();
-        // Seed s1 and s2 as real sessions so the on-insert prune (which drops
-        // entries whose session is no longer in the engine) keeps both snapshots.
-        {
-            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
-            for id in ["s1", "s2"] {
-                store
-                    .upsert_session(&sample_session(
-                        id,
-                        "p1",
-                        "feat",
-                        paths.root.to_string_lossy().as_ref(),
-                    ))
-                    .unwrap();
-            }
-        }
-        let engine = bootstrap_engine(&paths).expect("bootstrap");
-        // Clone the worker sender before the engine moves into its thread so the
-        // test can inject the event the one-shot commit run would normally post.
-        let worker_tx = engine.worker_tx.clone();
-        let (handle, _join) = spawn_engine_thread(engine);
-
-        // Nothing generated yet → the connect snapshot is empty.
-        assert!(handle.commit_message_for("s1").is_none());
-        assert!(handle.commit_message_snapshots().is_empty());
-
-        // Subscribe to the live broadcast before injecting so we prove live
-        // delivery, not just the snapshot (a regression dropping the broadcast send
-        // but keeping the snapshot update would otherwise pass).
-        let mut commit_rx = handle.subscribe_commit_messages();
-
-        worker_tx
-            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
-                session_id: "s1".to_string(),
-                message: "a generated commit message".to_string(),
-            })
-            .expect("inject worker event");
-
-        // Live broadcast delivers it to connected clients…
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let delivered = loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(200), commit_rx.recv())
-                .await
-            {
-                Ok(Ok(ev))
-                    if ev.session_id == "s1" && ev.message == "a generated commit message" =>
-                {
-                    break true;
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break false,
-                Ok(Err(_)) | Err(_) => {}
-            }
-            if std::time::Instant::now() >= deadline {
-                break false;
-            }
-        };
-        assert!(
-            delivered,
-            "commit message was not broadcast to live clients"
-        );
-
-        // …and the connect snapshot now holds it (set before the broadcast, so it
-        // is guaranteed present once the broadcast has been observed) for a client
-        // that connects after generation.
-        let snap = handle
-            .commit_message_for("s1")
-            .expect("snapshot holds the generated message");
-        assert_eq!(snap.session_id, "s1");
-        assert_eq!(snap.message, "a generated commit message");
-        // A DIFFERENT session's message must not evict this one (per-session map).
-        worker_tx
-            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
-                session_id: "s2".to_string(),
-                message: "another session's message".to_string(),
-            })
-            .expect("inject second worker event");
-        // Wait for s2 to land, then confirm s1 is still present and distinct.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while handle.commit_message_for("s2").is_none() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert_eq!(
-            handle.commit_message_for("s1").map(|e| e.message),
-            Some("a generated commit message".to_string()),
-            "s2's generated message must not evict s1's snapshot"
-        );
-        assert_eq!(
-            handle.commit_message_for("s2").map(|e| e.message),
-            Some("another session's message".to_string()),
-        );
-    }
-
-    #[tokio::test]
-    async fn commit_snapshot_prunes_dead_session_entries_on_insert() {
-        // The per-session commit-message snapshot prunes on every insert so it
-        // cannot grow unbounded on a long-running server: an entry whose session is
-        // no longer in the engine is dropped when the next message lands.
-        let (_tmp, paths) = temp_paths();
-        {
-            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
-            store
-                .upsert_session(&sample_session(
-                    "live",
-                    "p1",
-                    "feat",
-                    paths.root.to_string_lossy().as_ref(),
-                ))
-                .unwrap();
-        }
-        let engine = bootstrap_engine(&paths).expect("bootstrap");
-        let worker_tx = engine.worker_tx.clone();
-        let (handle, _join) = spawn_engine_thread(engine);
-
-        // A message for a session NOT in the engine still lands (the actor doesn't
-        // validate the id), standing in for an entry left behind by a since-deleted
-        // session.
-        worker_tx
-            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
-                session_id: "ghost".to_string(),
-                message: "stale".to_string(),
-            })
-            .expect("inject ghost event");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while handle.commit_message_for("ghost").is_none() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(
-            handle.commit_message_for("ghost").is_some(),
-            "the ghost entry should land before the pruning insert"
-        );
-
-        // The next message (for a live session) prunes the dead "ghost" entry.
-        worker_tx
-            .send(dux_core::worker::WorkerEvent::CommitMessageGenerated {
-                session_id: "live".to_string(),
-                message: "fresh".to_string(),
-            })
-            .expect("inject live event");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while handle.commit_message_for("live").is_none() && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-
-        assert!(
-            handle.commit_message_for("ghost").is_none(),
-            "the dead-session entry must be pruned when the next message is inserted"
-        );
-        assert_eq!(
-            handle.commit_message_for("live").map(|e| e.message),
-            Some("fresh".to_string()),
-            "a live session's freshly inserted message survives the prune"
         );
     }
 

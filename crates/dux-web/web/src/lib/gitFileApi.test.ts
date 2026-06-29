@@ -43,11 +43,14 @@ describe("git REST client targets /api/v1/git/*", () => {
     )
   })
 
-  it("commit POSTs /api/v1/git/commit", async () => {
+  it("commit POSTs /api/v1/git/commit with the typed message", async () => {
     await git.commit("s1", "msg")
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/git/commit",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ session_id: "s1", message: "msg" }),
+      }),
     )
   })
 })

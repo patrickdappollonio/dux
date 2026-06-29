@@ -168,9 +168,7 @@ Each macro can be scoped to the agent pane, the companion terminal, or both.
 
 ### Git Integration
 
-The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write commit messages, push, and pull, all without leaving dux.
-
-**AI commit messages:** Stage your changes, hit a key, and dux sends the diff to your provider in oneshot mode. It drafts a commit message using Conventional Commits, you tweak it (or don't), and commit. The prompt is customizable once in `config.toml` for the whole app.
+The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write your commit message, push, and pull, all without leaving dux. Want help wording it? Just ask your agent in its terminal to draft the commit for you.
 
 **PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface.
 

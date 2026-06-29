@@ -120,17 +120,6 @@ describe("sessionsApi", () => {
     expect(c.body).toEqual({ project_id: "p1", session_ids: ["s2", "s1"] })
   })
 
-  it("generateCommitMessage POSTs the commit-message trigger (no body)", async () => {
-    const fetchMock = stubOkFetch(202)
-    await sessionsApi.generateCommitMessage("s1")
-    const c = lastCall(fetchMock)
-    expect(c.url).toBe("/api/v1/sessions/s1/commit-message")
-    expect(c.method).toBe("POST")
-    expect(c.body).toBeUndefined()
-    // Still scoped even without a JSON body.
-    expect(c.headers["x-connection-id"]).toBe("conn-123")
-  })
-
   it("throws a typed SessionsApiError carrying status + message on non-2xx", async () => {
     stubOkFetch(409, null)
     vi.stubGlobal(

@@ -14,8 +14,6 @@
 //! - `POST   /api/v1/sessions/:id/reconnect`       — relaunch (`{force}`).
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
-//! - `POST   /api/v1/sessions/:id/commit-message`  — trigger async generation (202).
-//! - `GET    /api/v1/sessions/:id/commit-message`  — fetch the latest generated one.
 
 use axum::{
     Json, Router,
@@ -49,10 +47,6 @@ pub fn routes() -> Router<AppState> {
             patch(patch_session).delete(delete_session),
         )
         .route("/api/v1/sessions/{id}/reconnect", post(reconnect_session))
-        .route(
-            "/api/v1/sessions/{id}/commit-message",
-            post(generate_commit_message).get(get_commit_message),
-        )
 }
 
 // ── Create ───────────────────────────────────────────────────────────────────
@@ -466,61 +460,6 @@ async fn reorder_sessions(
     {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
-}
-
-// ── Commit message (trigger + fetch) ─────────────────────────────────────────
-
-async fn generate_commit_message(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
-    }
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::GenerateCommitMessage { session_id: id },
-            scope_from_headers(&headers),
-        )
-        .await
-    {
-        // 202: the generation runs as a one-shot worker; the result arrives later
-        // as a `session.commit_message` event, then `GET .../commit-message`.
-        Ok(_) => StatusCode::ACCEPTED.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
-}
-
-#[derive(Serialize)]
-struct CommitMessageBody {
-    session_id: String,
-    message: String,
-}
-
-async fn get_commit_message(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
-        return resp;
-    }
-    match state.engine.commit_message_for(&id) {
-        Some(event) => Json(CommitMessageBody {
-            session_id: event.session_id,
-            message: event.message,
-        })
-        .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            "no generated commit message for this session",
-        )
-            .into_response(),
     }
 }
 

@@ -83,9 +83,7 @@ pub fn write_config_secure(path: &Path, contents: &str) -> Result<()> {
     write_config_atomic(path, contents, Durability::Fsync)
 }
 
-use crate::config::{
-    AcmeSettings, Config, MacrosConfig, OneshotOutput, ProjectConfig, ProvidersConfig,
-};
+use crate::config::{AcmeSettings, Config, MacrosConfig, ProjectConfig, ProvidersConfig};
 
 /// Patch an EXISTING `config.toml` in place, preserving the user's comments,
 /// formatting, and any keys this writer doesn't manage. Reads the file, applies
@@ -177,12 +175,9 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "start_directory",
         config.defaults.start_directory.as_deref(),
     );
-    patch_table_opt_multiline(
-        doc,
-        "defaults",
-        "commit_prompt",
-        config.defaults.commit_prompt.as_deref(),
-    );
+    // The AI commit-message feature was removed; drop its now-obsolete prompt key
+    // from any existing config so saves stop carrying it forward.
+    remove_table_key(doc, "defaults", "commit_prompt");
     patch_table_bool(
         doc,
         "defaults",
@@ -393,29 +388,6 @@ fn patch_table_opt_str(doc: &mut DocumentMut, section: &str, key: &str, value: O
     table[key] = toml_edit::value(value.unwrap_or(""));
 }
 
-fn patch_table_opt_multiline(doc: &mut DocumentMut, section: &str, key: &str, value: Option<&str>) {
-    let table = ensure_table(doc, section);
-    match value {
-        Some(s) => {
-            // Build a tiny TOML document with a triple-quoted string and extract
-            // the parsed value so the repr uses the multiline form.
-            let escaped = escape_toml_multiline(s);
-            let snippet = format!("v = \"\"\"\n{escaped}\"\"\"");
-            if let Ok(mini) = snippet.parse::<DocumentMut>()
-                && let Some(item) = mini.get("v")
-            {
-                table[key] = item.clone();
-                return;
-            }
-            // Fallback: regular string (newlines escaped as \n).
-            table[key] = toml_edit::value(s);
-        }
-        None => {
-            table[key] = toml_edit::value("");
-        }
-    }
-}
-
 fn patch_table_u16(doc: &mut DocumentMut, section: &str, key: &str, value: u16) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(i64::from(value));
@@ -514,17 +486,10 @@ fn patch_providers(doc: &mut DocumentMut, providers: &ProvidersConfig) {
             tbl["resume_wait_timeout_ms"] = toml_edit::value(timeout_ms as i64);
         }
 
-        let mut oneshot = Array::new();
-        for a in &config.oneshot_args {
-            oneshot.push(a.as_str());
-        }
-        tbl["oneshot_args"] = toml_edit::value(oneshot);
-
-        let output = match config.oneshot_output {
-            OneshotOutput::Stdout => "stdout",
-            OneshotOutput::Tempfile => "tempfile",
-        };
-        tbl["oneshot_output"] = toml_edit::value(output);
+        // The AI commit-message feature was removed; drop the obsolete oneshot
+        // keys from any existing provider block so saves stop carrying them.
+        tbl.remove("oneshot_args");
+        tbl.remove("oneshot_output");
 
         if let Some(hint) = &config.install_hint {
             tbl["install_hint"] = toml_edit::value(hint.as_str());

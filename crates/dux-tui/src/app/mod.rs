@@ -43,7 +43,6 @@ use crate::model::{
     SessionStatus, SessionSurface,
 };
 
-use crate::provider;
 use crate::pty::PtyClient;
 use crate::pty::TerminalSnapshot;
 use crate::statusline::{BUSY_TIMEOUT, KeyedStatusController, StatusTone};

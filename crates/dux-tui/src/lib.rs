@@ -22,8 +22,7 @@ pub use server_screen::{ServerScreenTick, ServerStatusScreen};
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.
 pub(crate) use dux_core::{
-    browser, editor, git, io_retry, lockfile, logger, model, provider, pty, startup, statusline,
-    storage,
+    browser, editor, git, io_retry, lockfile, logger, model, pty, startup, statusline, storage,
 };
 
 use std::path::Path;

@@ -30,8 +30,8 @@ analytics, no JSON-RPC, no background uploads.
 ### Which AI tools can I use?
 
 Claude Code, Codex, OpenCode, and Copilot are wired in out of the box, and any
-other CLI that supports an interactive session and a headless one-shot mode can
-be added. See [Custom CLI Agents](/docs/custom-agents).
+other CLI that runs an interactive session in a terminal can be added. See
+[Custom CLI Agents](/docs/custom-agents).
 
 ### How do I add my own CLI as an agent?
 

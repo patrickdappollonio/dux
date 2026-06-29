@@ -55,11 +55,6 @@ pub fn changes_topic(session_id: &str) -> String {
     format!("session:{session_id}:changes")
 }
 
-/// The fine topic a session's commit-message-ready signal is delivered on.
-pub fn commit_message_topic(session_id: &str) -> String {
-    format!("session:{session_id}:commit-message")
-}
-
 /// Extract the session id from a `session:<id>:changes` topic, or `None` if the
 /// topic is not a session-changes topic. `<id>` may itself contain colons, so we
 /// strip the fixed prefix/suffix rather than splitting on `:`.
@@ -67,16 +62,6 @@ pub fn session_id_from_changes_topic(topic: &str) -> Option<&str> {
     topic
         .strip_prefix("session:")
         .and_then(|rest| rest.strip_suffix(":changes"))
-        .filter(|id| !id.is_empty())
-}
-
-/// Extract the session id from a `session:<id>:commit-message` topic, or `None`
-/// if the topic is not a commit-message topic. `<id>` may itself contain colons,
-/// so we strip the fixed prefix/suffix rather than splitting on `:`.
-pub fn session_id_from_commit_message_topic(topic: &str) -> Option<&str> {
-    topic
-        .strip_prefix("session:")
-        .and_then(|rest| rest.strip_suffix(":commit-message"))
         .filter(|id| !id.is_empty())
 }
 
@@ -166,24 +151,6 @@ mod tests {
         let t = changes_topic("s1");
         assert_eq!(t, "session:s1:changes");
         assert_eq!(session_id_from_changes_topic(&t), Some("s1"));
-    }
-
-    #[test]
-    fn commit_message_topic_round_trips() {
-        let t = commit_message_topic("s1");
-        assert_eq!(t, "session:s1:commit-message");
-        assert_eq!(session_id_from_commit_message_topic(&t), Some("s1"));
-        // A changes topic is not a commit-message topic, and vice versa.
-        assert_eq!(
-            session_id_from_commit_message_topic(&changes_topic("s1")),
-            None
-        );
-        assert_eq!(session_id_from_changes_topic(&t), None);
-        // An id containing a colon is preserved (we strip prefix/suffix, not split).
-        assert_eq!(
-            session_id_from_commit_message_topic("session:a:b:commit-message"),
-            Some("a:b")
-        );
     }
 
     #[test]

@@ -123,9 +123,6 @@ pub enum WireCommand {
     PullProject {
         project_id: String,
     },
-    GenerateCommitMessage {
-        session_id: String,
-    },
     ToggleAgentAutoReopen {
         session_id: String,
         enabled: bool,
@@ -1902,9 +1899,6 @@ impl Engine {
                         project.name,
                     ),
                 }
-            }
-            WireCommand::GenerateCommitMessage { session_id } => {
-                Command::GenerateCommitMessage { session_id }
             }
             WireCommand::ToggleAgentAutoReopen {
                 session_id,
@@ -3817,34 +3811,6 @@ mod tests {
     }
 
     #[test]
-    fn wire_generate_commit_message_deserializes() {
-        let json = r#"{"command":"generate_commit_message","args":{"session_id":"s1"}}"#;
-        let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(
-            cmd,
-            WireCommand::GenerateCommitMessage {
-                session_id: "s1".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn wire_to_command_generate_commit_message_maps_to_command() {
-        let (engine, _tmp) = test_engine();
-        let cmd = engine
-            .wire_to_command(WireCommand::GenerateCommitMessage {
-                session_id: "s1".to_string(),
-            })
-            .expect("reconstruct");
-        match cmd {
-            Command::GenerateCommitMessage { session_id } => {
-                assert_eq!(session_id, "s1");
-            }
-            _ => panic!("expected Command::GenerateCommitMessage variant"),
-        }
-    }
-
-    #[test]
     fn wire_watch_changed_files_deserializes_with_string_id() {
         let json = r#"{"command":"watch_changed_files","args":{"session_id":"s1"}}"#;
         let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
@@ -3958,190 +3924,6 @@ mod tests {
 
         assert!(engine.watched_session_id.is_none());
         assert!(engine.unstaged_files.is_empty());
-    }
-
-    /// Stage a file in `repo` so `git diff --cached` has content.
-    fn stage_file(repo: &std::path::Path) {
-        let ok = std::process::Command::new("git")
-            .args(["add", "a.txt"])
-            .current_dir(repo)
-            .status()
-            .expect("spawn git add")
-            .success();
-        assert!(ok, "git add failed");
-    }
-
-    #[test]
-    fn apply_generate_commit_message_returns_busy_with_staged_diff() {
-        let repo = init_repo();
-        stage_file(repo.path());
-        let (mut engine, _tmp) = test_engine();
-        let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().into_owned();
-        engine.sessions.push(session);
-
-        let reaction = engine
-            .apply(Command::GenerateCommitMessage {
-                session_id: "s1".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Busy);
-                assert!(
-                    update.message.contains("Generating an AI commit message"),
-                    "unexpected message: {}",
-                    update.message
-                );
-            }
-            _ => panic!("expected Busy Status reaction"),
-        }
-    }
-
-    #[test]
-    fn apply_generate_commit_message_errors_with_nothing_staged() {
-        // init_repo writes a.txt but does NOT stage it, so the cached diff is empty.
-        // The staged-diff read now runs on the worker thread (off the engine
-        // thread), so the synchronous reaction is Busy and the "nothing staged"
-        // error arrives as a CommitMessageFailed worker event.
-        let repo = init_repo();
-        let (mut engine, _tmp) = test_engine();
-        let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().into_owned();
-        engine.sessions.push(session);
-
-        let reaction = engine
-            .apply(Command::GenerateCommitMessage {
-                session_id: "s1".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Busy);
-                assert!(
-                    update.message.contains("Generating an AI commit message"),
-                    "unexpected busy message: {}",
-                    update.message
-                );
-            }
-            _ => panic!("expected Busy Status reaction"),
-        }
-
-        // The empty-diff check now happens on the spawned worker; wait for it.
-        // Each terminal path emits a StatusOpCompleted (resolving the busy)
-        // ALONGSIDE the domain event, so the StatusOpCompleted arrives first.
-        let status_event = engine
-            .worker_rx
-            .recv_timeout(std::time::Duration::from_secs(8))
-            .expect("status-op completion event");
-        match status_event {
-            WorkerEvent::StatusOpCompleted { resolved } => {
-                assert!(
-                    matches!(resolved.outcome, crate::engine::Final::Message { .. }),
-                    "empty-diff resolves to an error message, not a clear"
-                );
-            }
-            _ => panic!("expected WorkerEvent::StatusOpCompleted first"),
-        }
-        let event = engine
-            .worker_rx
-            .recv_timeout(std::time::Duration::from_secs(8))
-            .expect("worker event");
-        match event {
-            WorkerEvent::CommitMessageFailed { session_id, error } => {
-                assert_eq!(session_id, "s1");
-                assert!(
-                    error.contains("No staged changes"),
-                    "unexpected error: {error}"
-                );
-            }
-            _ => panic!("expected WorkerEvent::CommitMessageFailed"),
-        }
-    }
-
-    #[test]
-    fn apply_generate_commit_message_unknown_session_errors() {
-        let (mut engine, _tmp) = test_engine();
-        let reaction = engine
-            .apply(Command::GenerateCommitMessage {
-                session_id: "ghost".to_string(),
-            })
-            .expect("apply");
-        match reaction {
-            EventReaction::Status(update) => {
-                assert_eq!(update.tone, StatusTone::Error);
-                assert!(update.message.contains("Unknown session"));
-            }
-            _ => panic!("expected Error Status reaction"),
-        }
-    }
-
-    /// The one-shot completion tags the result with the originating session id so
-    /// the message routes to the matching commit dialog (the CF2 anti-misroute
-    /// invariant: a generate for session "s1" must surface as
-    /// `CommitMessageGenerated { session_id: "s1", .. }`, never untagged or for
-    /// another session). The provider is overridden to a deterministic `echo` so
-    /// the run is hermetic (no real AI binary on PATH).
-    #[test]
-    fn generate_commit_message_worker_event_carries_session_id() {
-        let repo = init_repo();
-        stage_file(repo.path());
-        let (mut engine, _tmp) = test_engine();
-        // Deterministic one-shot: ignore the prompt, print a fixed marker.
-        engine.config.providers.commands.insert(
-            "claude".to_string(),
-            crate::config::ProviderCommandConfig {
-                command: "bash".to_string(),
-                oneshot_args: vec!["-c".to_string(), "echo SCOPED-COMMIT-MSG".to_string()],
-                ..Default::default()
-            },
-        );
-        let mut session = sample_session("s1", "p1", "feat");
-        session.worktree_path = repo.path().to_string_lossy().into_owned();
-        engine.sessions.push(session);
-
-        let reaction = engine
-            .apply(Command::GenerateCommitMessage {
-                session_id: "s1".to_string(),
-            })
-            .expect("apply");
-        assert!(matches!(reaction, EventReaction::Status(_)));
-
-        // The one-shot runs on a spawned thread; wait for its WorkerEvents. The
-        // success path emits a StatusOpCompleted (a Final::Clear — the draft is
-        // the real output) ALONGSIDE the CommitMessageGenerated domain event,
-        // and the StatusOpCompleted arrives first.
-        let status_event = engine
-            .worker_rx
-            .recv_timeout(std::time::Duration::from_secs(8))
-            .expect("status-op completion event");
-        match status_event {
-            WorkerEvent::StatusOpCompleted { resolved } => {
-                assert_eq!(
-                    resolved.outcome,
-                    crate::engine::Final::Clear,
-                    "success clears the busy with no replacement message"
-                );
-            }
-            _ => panic!("expected WorkerEvent::StatusOpCompleted first"),
-        }
-        let event = engine
-            .worker_rx
-            .recv_timeout(std::time::Duration::from_secs(8))
-            .expect("worker event");
-        match event {
-            WorkerEvent::CommitMessageGenerated {
-                session_id,
-                message,
-            } => {
-                assert_eq!(session_id, "s1", "result must be tagged with its session");
-                assert!(
-                    message.contains("SCOPED-COMMIT-MSG"),
-                    "unexpected message: {message}"
-                );
-            }
-            _ => panic!("expected WorkerEvent::CommitMessageGenerated"),
-        }
     }
 
     /// Like `init_repo`, but also stages and commits the file so HEAD exists
@@ -5763,7 +5545,7 @@ mod tests {
         // remote and reach the parse stage. The worker shells out to `gh`, which
         // may be absent in CI — the test only asserts the SYNCHRONOUS busy status
         // and that the worker channel receives a PullRequestResolved event
-        // (success or failure), mirroring the GenerateCommitMessage test pattern.
+        // (success or failure).
         let repo = init_repo_with_commit();
         let run = |args: &[&str]| {
             let _ = std::process::Command::new("git")

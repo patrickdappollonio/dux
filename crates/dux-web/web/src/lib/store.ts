@@ -318,14 +318,6 @@ function changesTopic(sessionId: string): string {
   return `session:${sessionId}:changes`
 }
 
-// The `/ws/events` topic for one session's generated commit message. The server
-// gates LIVE `session.commit_message` delivery on this exact subscription, so the
-// commit dialog must subscribe while open or a message generated mid-connection
-// is dropped and the dialog's spinner hangs forever.
-function commitMessageTopic(sessionId: string): string {
-  return `session:${sessionId}:commit-message`
-}
-
 // A cleared changed-files slice (nothing selected, no data).
 function emptyChanges(): ChangesSlice {
   return {
@@ -431,7 +423,7 @@ const wsScheme = location.protocol === "https:" ? "wss:" : "ws:"
 // The single JSON socket for the whole app (`/ws/events`), separate from the
 // per-PTY byte sockets (`lib/ptySocket.ts`). Since the Phase 6 cutover it carries
 // EVERYTHING the retired `/ws`/`DuxSocket` used to: resource-change events
-// (changed files, spine, config, commit-message) AND the control frames
+// (changed files, spine, config) AND the control frames
 // (`connected` id, `status`/`status_cleared` toasts). It also owns the
 // connection-state UX (the status-bar indicator + auth recovery). Exported so
 // tests can drive its callbacks / inspect its interest set; connected/closed on
@@ -471,14 +463,6 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   // Dismiss the toast whose id matches the cleared key (anonymous slot when null).
   if (ev.event === "status_cleared") {
     toast.dismiss(ev.key ?? ANON_TOAST_ID)
-    return
-  }
-  // A new generated commit message is ready for one session. Refetch it over REST
-  // and, if it matches the open commit dialog's target, fill the draft. The
-  // on-connect snapshot is delivered the same way (a `session.commit_message` per
-  // session with a pending message), so this one handler covers both.
-  if (ev.event === "session.commit_message") {
-    if (typeof ev.id === "string") loadCommitMessage(ev.id)
     return
   }
   // A `config.changed` event invalidates the bootstrap document (the server's
@@ -967,28 +951,6 @@ function showStatusToast(
   else toast.success(message, opts) // info/success
 }
 
-// Fetch the latest generated commit message for a session (triggered by a
-// `session.commit_message` event) and fill the open commit dialog's draft when
-// it matches. Applied ONLY when the dialog targets this session AND the draft is
-// still empty: that mirrors the old live+snapshot behavior in one rule — the
-// live case has an empty draft (the user just asked to generate), and the
-// on-connect snapshot must never clobber an in-progress edit or fill a dialog the
-// user never asked to generate into. A 404 (nothing generated) and any other
-// error are dropped silently — this is a passive enrichment, not a user action.
-function loadCommitMessage(sessionId: string): void {
-  if (state.commitTarget !== sessionId || state.commitDraft !== "") return
-  sessionsApi
-    .commitMessage(sessionId)
-    .then((body) => {
-      if (state.commitTarget === sessionId && state.commitDraft === "") {
-        setState({ commitDraft: body.message })
-      }
-    })
-    .catch(() => {
-      // No message yet (404) or a transient error — leave the draft empty.
-    })
-}
-
 // Boot the auth-state machine, THEN connect the events socket. With auth on and
 // no session, the gated `/ws/events` upgrade 401s; a blind boot connect would
 // just burn the reconnect
@@ -1205,12 +1167,6 @@ export async function logout(): Promise<void> {
   const prevSession = state.selectedSessionId
   if (prevSession !== null) {
     eventsSocket.unsubscribe([changesTopic(prevSession)])
-  }
-  // Drop an open commit dialog's commit-message subscription too, so a later
-  // login doesn't re-subscribe a stale session's topic on reconnect.
-  const prevCommit = state.commitTarget
-  if (prevCommit !== null) {
-    eventsSocket.unsubscribe([commitMessageTopic(prevCommit)])
   }
   eventsSocket.close()
   try {
@@ -1481,44 +1437,15 @@ export function discardFile(sessionId: string, path: string): void {
 }
 
 export function openCommit(sessionId: string): void {
-  // Subscribe to this session's commit-message topic BEFORE opening so a message
-  // generated while connected is delivered live (the server gates live delivery
-  // on exactly this subscription). If a dialog was already open for a different
-  // session (reopened without an explicit close), drop its stale subscription.
-  const prev = state.commitTarget
-  if (prev !== null && prev !== sessionId) {
-    eventsSocket.unsubscribe([commitMessageTopic(prev)])
-  }
-  eventsSocket.subscribe([commitMessageTopic(sessionId)])
   setState({ commitTarget: sessionId, commitDraft: "" })
 }
 
 export function closeCommit(): void {
-  // Drop the commit-message subscription for the session the dialog targeted so
-  // we don't keep an open interest (and re-subscribe it on reconnect) once the
-  // dialog is closed.
-  const prev = state.commitTarget
-  if (prev !== null) eventsSocket.unsubscribe([commitMessageTopic(prev)])
   setState({ commitTarget: null, commitDraft: "" })
 }
 
 export function setCommitDraft(text: string): void {
   setState({ commitDraft: text })
-}
-
-export function generateCommitMessage(sessionId: string): void {
-  // Only the trigger is REST. The generated message arrives asynchronously as a
-  // `session.commit_message` event on `/ws/events` (the open commit dialog is
-  // subscribed to its topic via `openCommit`); `loadCommitMessage` then GETs it
-  // and fills the draft. A 4xx/5xx from the trigger has no async status, so
-  // surface it as a toast here.
-  sessionsApi
-    .generateCommitMessage(sessionId)
-    .catch((e) =>
-      toast.error(
-        e instanceof Error ? e.message : "Could not generate a commit message.",
-      ),
-    )
 }
 
 // Open the code-editor overlay for a session. Selecting the session first points

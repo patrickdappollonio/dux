@@ -158,8 +158,6 @@ fn retired_stock_gemini() -> ProviderCommandConfig {
         args: Vec::new(),
         resume_args: Some(vec!["--resume".to_string()]),
         resume_wait_timeout_ms: None,
-        oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
-        oneshot_output: OneshotOutput::Stdout,
         install_hint: Some("brew install gemini-cli".to_string()),
         forward_scroll: None,
     }
@@ -310,14 +308,12 @@ enum FieldValue {
     U16(u16),
     Usize(usize),
     Bool(bool),
-    MultilineStr(Option<String>),
     StrList(Vec<String>),
 }
 
-/// A comment source: static string or dynamically built.
+/// A comment source.
 enum CommentSource {
     Static(&'static str),
-    Dynamic(String),
 }
 
 /// One entry in the config file layout.
@@ -354,7 +350,7 @@ enum ConfigEntry {
     Macros,
 }
 
-fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
+fn config_schema() -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),
         ConfigEntry::Comment(
@@ -376,16 +372,6 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
                 "# Starting directory for the project browser.",
             )),
             value_fn: |c| FieldValue::OptStr(c.defaults.start_directory.clone()),
-        },
-        ConfigEntry::Blank,
-        ConfigEntry::Field {
-            key: "commit_prompt",
-            comment: Some(CommentSource::Dynamic(format!(
-                "# Prompt sent to the AI provider when generating commit messages ({generate_commit_key}).\n\
-                 # The staged diff is appended automatically after the prompt text.\n\
-                 # This is app-wide; projects do not carry their own commit prompts.",
-            ))),
-            value_fn: |c| FieldValue::MultilineStr(c.defaults.commit_prompt.clone()),
         },
         ConfigEntry::Blank,
         ConfigEntry::Field {
@@ -685,9 +671,8 @@ fn config_schema(generate_commit_key: &str) -> Vec<ConfigEntry> {
 }
 
 fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings) -> String {
-    let generate_commit_key = bindings.label_for(crate::keybindings::Action::GenerateCommitMessage);
     let mut out = String::new();
-    for entry in config_schema(&generate_commit_key) {
+    for entry in config_schema() {
         match entry {
             ConfigEntry::Comment(text) => {
                 out.push_str(text);
@@ -705,7 +690,6 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                 if let Some(c) = comment {
                     match c {
                         CommentSource::Static(s) => out.push_str(s),
-                        CommentSource::Dynamic(s) => out.push_str(&s),
                     }
                     out.push('\n');
                 }
@@ -727,13 +711,6 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
                     }
                     FieldValue::Bool(b) => {
                         let _ = writeln!(out, "{key} = {b}");
-                    }
-                    FieldValue::MultilineStr(Some(s)) => {
-                        let escaped = dux_core::config_write::escape_toml_multiline(&s);
-                        let _ = writeln!(out, "{key} = \"\"\"\n{escaped}\"\"\"");
-                    }
-                    FieldValue::MultilineStr(None) => {
-                        let _ = writeln!(out, "{key} = \"\"");
                     }
                     FieldValue::StrList(list) => {
                         let _ = writeln!(out, "{key} = {}", render_string_list(&list));
@@ -1183,18 +1160,6 @@ fn render_provider_config(out: &mut String, name: &str, config: &ProviderCommand
         "resume_wait_timeout_ms = {}\n",
         config.resume_wait_timeout_ms.unwrap_or(0)
     ));
-    out.push_str("# Oneshot args for non-interactive use (e.g. AI commit messages).\n");
-    out.push_str("# Placeholders: {prompt} = the prompt text, {tempfile} = temp file path.\n");
-    out.push_str(&format!(
-        "oneshot_args = {}\n",
-        render_string_list(&config.oneshot_args)
-    ));
-    let output_str = match config.oneshot_output {
-        OneshotOutput::Stdout => "stdout",
-        OneshotOutput::Tempfile => "tempfile",
-    };
-    out.push_str("# Where to read the provider's oneshot response: \"stdout\" or \"tempfile\".\n");
-    out.push_str(&format!("oneshot_output = \"{output_str}\"\n"));
     if let Some(hint) = &config.install_hint {
         out.push_str("# Hint shown to the user when the provider command is not found on PATH.\n");
         out.push_str(&format!(
@@ -1289,8 +1254,14 @@ mod tests {
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
         assert!(rendered.contains("[providers.copilot]"));
-        assert!(rendered.contains("oneshot_args = "));
-        assert!(rendered.contains("oneshot_output = "));
+        assert!(
+            !rendered.contains("oneshot_args"),
+            "the removed AI-commit oneshot keys must no longer be rendered"
+        );
+        assert!(
+            !rendered.contains("oneshot_output"),
+            "the removed AI-commit oneshot keys must no longer be rendered"
+        );
         assert!(rendered.contains("resume_args = "));
         assert!(rendered.contains("[terminal]"));
         assert!(rendered.contains("command = "));
@@ -1341,8 +1312,10 @@ mod tests {
         assert!(rendered.contains("show_terminal_keys = true"));
         assert!(rendered.contains("move_down = "));
         assert!(rendered.contains("quit = "));
-        assert!(rendered.contains("commit_prompt = \"\"\""));
-        assert!(rendered.contains("Conventional Commits"));
+        assert!(
+            !rendered.contains("commit_prompt"),
+            "the removed AI-commit prompt key must no longer be rendered"
+        );
     }
 
     #[test]
@@ -1487,6 +1460,47 @@ leading_branch = "main"
             Some("codex")
         );
         assert_eq!(parsed.projects[0].leading_branch.as_deref(), Some("main"));
+    }
+
+    /// The AI commit-message feature was removed, but an existing user config may
+    /// still carry its now-obsolete keys: `defaults.commit_prompt` and the
+    /// per-provider `oneshot_args` / `oneshot_output`. Loading must tolerate them
+    /// (the structs are `#[serde(default)]`, never `deny_unknown_fields`) instead
+    /// of erroring, so an upgrade does not break startup.
+    #[test]
+    fn config_with_removed_ai_commit_keys_still_loads() {
+        let parsed: Config = toml::from_str(
+            r#"
+[defaults]
+provider = "claude"
+commit_prompt = """
+Write a commit message for the staged diff.
+"""
+
+[providers.claude]
+command = "claude"
+oneshot_args = ["--bare", "-p", "{prompt}"]
+oneshot_output = "stdout"
+
+[providers.codex]
+command = "codex"
+oneshot_args = ["exec", "-o", "{tempfile}", "{prompt}"]
+oneshot_output = "tempfile"
+"#,
+        )
+        .expect("a config carrying the removed AI-commit keys must still load");
+
+        // The surviving provider fields parse normally; the obsolete keys are
+        // simply ignored.
+        assert_eq!(parsed.defaults.provider, "claude");
+        assert_eq!(
+            parsed.providers.get("claude").map(|c| c.command.as_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            parsed.providers.get("codex").map(|c| c.command.as_str()),
+            Some("codex")
+        );
     }
 
     #[test]
@@ -1850,8 +1864,6 @@ dangerous = true
             args: vec!["--interactive".to_string()],
             resume_args: Some(vec!["--resume".to_string(), "--last".to_string()]),
             resume_wait_timeout_ms: Some(2_000),
-            oneshot_args: Vec::new(),
-            oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: None,
         };
@@ -1866,8 +1878,6 @@ dangerous = true
             args: vec!["--interactive".to_string()],
             resume_args: None,
             resume_wait_timeout_ms: None,
-            oneshot_args: Vec::new(),
-            oneshot_output: OneshotOutput::Stdout,
             install_hint: None,
             forward_scroll: None,
         };
@@ -1885,8 +1895,6 @@ dangerous = true
                     args: Vec::new(),
                     resume_args: None,
                     resume_wait_timeout_ms: None,
-                    oneshot_args: Vec::new(),
-                    oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
                     forward_scroll: None,
                 },
@@ -1914,8 +1922,6 @@ dangerous = true
                     args: Vec::new(),
                     resume_args: Some(Vec::new()),
                     resume_wait_timeout_ms: None,
-                    oneshot_args: Vec::new(),
-                    oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
                     forward_scroll: None,
                 },
@@ -2007,84 +2013,11 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn default_commit_prompt_uses_system_default() {
-        let mut config = Config::default();
-        config.defaults.commit_prompt = Some("custom system prompt".to_string());
-        assert_eq!(config.default_commit_prompt(), "custom system prompt");
-
-        // Empty system prompt falls back to hardcoded constant.
-        config.defaults.commit_prompt = Some(String::new());
-        assert_eq!(config.default_commit_prompt(), DEFAULT_COMMIT_PROMPT);
-
-        // None falls back to hardcoded constant.
-        config.defaults.commit_prompt = None;
-        assert_eq!(config.default_commit_prompt(), DEFAULT_COMMIT_PROMPT);
-    }
-
-    #[test]
-    fn multiline_string_with_triple_quotes_roundtrips() {
-        let mut config = Config::default();
-        config.defaults.commit_prompt =
-            Some("Use triple \"\"\" quotes in your prompt.".to_string());
-        let rendered = render_config_default(&config);
-        let parsed: Config = toml::from_str(&rendered).expect("should parse back");
-        assert_eq!(
-            parsed.defaults.commit_prompt.as_deref(),
-            Some("Use triple \"\"\" quotes in your prompt."),
-        );
-    }
-
-    #[test]
-    fn config_comment_uses_dynamic_keybinding_label() {
-        let rendered = render_default_config();
-        // The default binding for GenerateCommitMessage is Ctrl-g.
-        assert!(
-            rendered.contains("(Ctrl-g)"),
-            "config comment should include the dynamic keybinding label"
-        );
-        assert!(
-            !rendered.contains("(Ctrl+G)"),
-            "config comment should NOT contain hardcoded Ctrl+G"
-        );
-    }
-
-    #[test]
-    fn default_claude_oneshot_uses_bare_and_no_tools() {
-        let providers = default_provider_commands();
-        let claude = &providers[0].1;
-        assert!(
-            claude.oneshot_args.contains(&"--bare".to_string()),
-            "claude oneshot_args should include --bare"
-        );
-        assert!(
-            claude.oneshot_args.contains(&"--tools".to_string()),
-            "claude oneshot_args should include --tools flag"
-        );
-        // --tools is followed by an empty string to disable all tools
-        let tools_idx = claude
-            .oneshot_args
-            .iter()
-            .position(|a| a == "--tools")
-            .unwrap();
-        assert_eq!(
-            claude.oneshot_args[tools_idx + 1],
-            "",
-            "--tools should be followed by empty string to disable tools"
-        );
-        assert!(
-            claude.oneshot_args.contains(&"--max-turns".to_string()),
-            "claude oneshot_args should include --max-turns"
-        );
-    }
-
-    #[test]
-    fn default_opencode_oneshot_uses_run_subcommand() {
+    fn default_opencode_provider_uses_continue_resume() {
         let providers = default_provider_commands();
         let opencode = providers.iter().find(|(n, _)| *n == "opencode").unwrap();
         let cfg = &opencode.1;
         assert_eq!(cfg.command, "opencode");
-        assert_eq!(cfg.oneshot_args, vec!["run", "{prompt}"]);
-        assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
         assert!(cfg.resume_args.is_some());
     }
 
@@ -2149,16 +2082,11 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn default_copilot_oneshot_uses_prompt_flag_with_allow_all_tools() {
+    fn default_copilot_provider_disables_resume() {
         let providers = default_provider_commands();
         let copilot = providers.iter().find(|(n, _)| *n == "copilot").unwrap();
         let cfg = &copilot.1;
         assert_eq!(cfg.command, "copilot");
-        assert_eq!(
-            cfg.oneshot_args,
-            vec!["-p", "{prompt}", "--allow-all-tools"]
-        );
-        assert!(matches!(cfg.oneshot_output, OneshotOutput::Stdout));
         assert_eq!(cfg.resume_args, None);
         assert!(!cfg.supports_session_resume());
     }
@@ -2173,8 +2101,6 @@ oneshot_output = "stdout"
                     args: Vec::new(),
                     resume_args: Some(vec!["--continue".to_string()]),
                     resume_wait_timeout_ms: None,
-                    oneshot_args: vec!["-p".to_string(), "{prompt}".to_string()],
-                    oneshot_output: OneshotOutput::Stdout,
                     install_hint: None,
                     forward_scroll: None,
                 },
