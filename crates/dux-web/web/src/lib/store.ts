@@ -29,6 +29,7 @@ import {
   type SessionChangesResponse,
 } from "./changesApi"
 import { type Bootstrap, fetchBootstrap } from "./bootstrapApi"
+import { resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
 import type {
   BranchWarningView,
@@ -669,6 +670,13 @@ function applyBootstrap(b: Bootstrap): void {
         ? null
         : state.changesPaneOverride,
   })
+  // Reflect the configured instance name in the browser tab. Guarded because the
+  // store also runs under the Node test environment, where `document` is absent
+  // unless a test stubs it. Runs on first load and on every config.changed
+  // refetch, so a live rename updates the tab without a reload.
+  if (typeof document !== "undefined") {
+    document.title = resolveInstanceTitle(b.title)
+  }
 }
 
 // Monotonic sequence for spine loads. Two rapid `sessions.changed`/
