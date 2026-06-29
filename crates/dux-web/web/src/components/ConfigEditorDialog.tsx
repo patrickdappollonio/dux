@@ -10,7 +10,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { closeConfigEditor, saveConfigEditor, useDux } from "@/lib/store"
+import {
+  closeConfigEditor,
+  openConfigEditor,
+  saveConfigEditor,
+  useDux,
+} from "@/lib/store"
 
 // The form body is mounted only once the raw config has loaded, so its lazy
 // `useState` initializer seeds the editor from a settled value (no
@@ -80,6 +85,21 @@ export function ConfigEditorDialog() {
           <p className="py-12 text-center text-sm text-muted-foreground">
             Loading config.toml…
           </p>
+        ) : configEditorError && !configEditorContent ? (
+          // Load failed (no content). Never render an editable, Save-enabled
+          // editor here — saving its blank content would overwrite the real
+          // config.toml. Show the error and a Retry instead.
+          <div className="flex flex-col gap-4 py-8">
+            <p className="text-center text-sm text-destructive">
+              {configEditorError}
+            </p>
+            <DialogFooter>
+              <Button variant="outline" onClick={closeConfigEditor}>
+                Cancel
+              </Button>
+              <Button onClick={() => openConfigEditor()}>Retry</Button>
+            </DialogFooter>
+          </div>
         ) : (
           <ConfigEditorForm
             initial={configEditorContent}

@@ -2179,40 +2179,26 @@ export function toggleChangesPane(): void {
 // server owns the value, persists it, and emits `config.changed` so the
 // refetched bootstrap reflects the new state. The success toast is the engine's
 // routed status; here we only surface a failure.
+function fireToggle(call: Promise<unknown>, fallback: string): void {
+  call.catch((e) => toast.error(e instanceof Error ? e.message : fallback))
+}
+
 export function toggleRandomizedPetNameDefault(): void {
-  configApi
-    .toggleRandomizedPetNameDefault()
-    .catch((e) =>
-      toast.error(
-        e instanceof Error
-          ? e.message
-          : "Could not toggle the random pet-name default.",
-      ),
-    )
+  fireToggle(
+    configApi.toggleRandomizedPetNameDefault(),
+    "Could not toggle the random pet-name default.",
+  )
 }
 
 export function togglePrBannerPosition(): void {
-  configApi
-    .togglePrBannerPosition()
-    .catch((e) =>
-      toast.error(
-        e instanceof Error
-          ? e.message
-          : "Could not move the PR banner.",
-      ),
-    )
+  fireToggle(configApi.togglePrBannerPosition(), "Could not move the PR banner.")
 }
 
 export function toggleGithubIntegration(): void {
-  configApi
-    .toggleGithubIntegration()
-    .catch((e) =>
-      toast.error(
-        e instanceof Error
-          ? e.message
-          : "Could not toggle GitHub integration.",
-      ),
-    )
+  fireToggle(
+    configApi.toggleGithubIntegration(),
+    "Could not toggle GitHub integration.",
+  )
 }
 
 // The kill-running modal (Ctrl+K "kill-running"). Open/close just flip the gate;
@@ -2240,9 +2226,14 @@ export function killSessionPty(sessionId: string): void {
 }
 
 // The Monaco config.toml editor (Ctrl+K "edit-config"). Open fetches the raw
-// file text into the store so the editor seeds from a settled value; a late
-// reply is ignored if the user already closed the modal.
+// file text into the store so the editor seeds from a settled value. The
+// monotonic epoch makes each open session unique: a fetch reply is applied only
+// if its epoch still matches, so an open-close-open (or Retry) within the fetch
+// round-trip can't seed the editor with a previous session's stale content.
+let configEditorEpoch = 0
+
 export function openConfigEditor(): void {
+  const epoch = ++configEditorEpoch
   setState({
     configEditorOpen: true,
     configEditorLoading: true,
@@ -2252,11 +2243,11 @@ export function openConfigEditor(): void {
   configApi
     .readRawConfig()
     .then((content) => {
-      if (!state.configEditorOpen) return
+      if (configEditorEpoch !== epoch) return
       setState({ configEditorContent: content, configEditorLoading: false })
     })
     .catch((e) => {
-      if (!state.configEditorOpen) return
+      if (configEditorEpoch !== epoch) return
       setState({
         configEditorLoading: false,
         configEditorError:
@@ -2266,6 +2257,8 @@ export function openConfigEditor(): void {
 }
 
 export function closeConfigEditor(): void {
+  // Bump the epoch so any in-flight open fetch is ignored when it resolves.
+  configEditorEpoch++
   setState({
     configEditorOpen: false,
     configEditorContent: "",
@@ -2283,11 +2276,11 @@ export function saveConfigEditor(content: string): void {
   configApi
     .writeRawConfig(content)
     .then(() => {
-      // The write succeeded; adopt it via the existing reload. Best-effort: the
-      // file is already on disk, so a reload hiccup should not block the close.
-      void configApi.reload().catch(() => {})
+      // The server validates, writes, adopts the new config in place, and emits
+      // `config.changed` as part of this one request — there is no separate
+      // reload to wait on, so the toast states only what actually happened.
       closeConfigEditor()
-      toast.success("Saved config.toml and reloaded it.")
+      toast.success("Saved config.toml.")
     })
     .catch((e) => {
       setState({

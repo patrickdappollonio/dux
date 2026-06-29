@@ -413,10 +413,12 @@ pub enum WireCommand {
 
 impl WireCommand {
     /// True for the commands that mutate config-static state surfaced in the
-    /// bootstrap document — the macro set, the workspace-wide env map, and the
-    /// Changes-pane visibility flag. These eager-save to `config.toml` and adopt
-    /// the change into the running config in place (no disk reload), so the web
-    /// layer must fire a `config.changed` event after one succeeds for connected
+    /// bootstrap document — the macro set, the workspace-wide env map, the
+    /// Changes-pane visibility flag, and the three preference toggles. These
+    /// save to `config.toml` (eager for github-integration, lazy for the
+    /// low-stakes preferences) and adopt the change into the running config in
+    /// place (no disk reload), so the web layer must fire a `config.changed`
+    /// event after one succeeds for connected
     /// clients to refetch `/api/v1/bootstrap`. Without it the change persists but
     /// the UI keeps showing — and reseeds dialogs from — a stale snapshot (e.g. a
     /// just-saved macro appears to vanish). `ReloadConfig` is intentionally NOT
@@ -872,12 +874,25 @@ impl Engine {
     /// the engine's PR-sync side effects so the running server actually starts or
     /// stops polling `gh`: enabling (when `gh` is available) re-derives the
     /// sync set, kicks an initial refresh, and arms the sync flag; disabling
-    /// clears cached PR statuses and disarms it. The write is eager so a persist
-    /// failure is surfaced to the user (the toggle still applies this session).
+    /// clears cached PR statuses and disarms it. The eager save runs FIRST: if it
+    /// fails nothing is mutated, so the engine never ends up half-changed against
+    /// a config that did not persist.
     fn toggle_github_integration(&mut self) -> WireStatus {
         use std::sync::atomic::Ordering;
 
         let next = !self.github_integration_enabled;
+        let state = if next { "enabled" } else { "disabled" };
+        // Persist a candidate config first; only mutate runtime state + PR sync
+        // once the write succeeds.
+        let mut candidate = self.config.clone();
+        candidate.ui.github_integration = next;
+        if let Err(err) = self.config_writer.save_eager(candidate) {
+            let verb = if next { "enable" } else { "disable" };
+            return WireStatus::new(
+                "error",
+                format!("Could not {verb} GitHub integration: saving to config failed: {err}"),
+            );
+        }
         self.github_integration_enabled = next;
         self.config.ui.github_integration = next;
         if next && matches!(self.gh_status, crate::model::GhStatus::Available) {
@@ -888,16 +903,12 @@ impl Engine {
             self.pr_statuses.clear();
             self.pr_sync_enabled.store(false, Ordering::Relaxed);
         }
-        let state = if next { "enabled" } else { "disabled" };
-        match self.config_writer.save_eager(self.config.clone()) {
-            Ok(()) => WireStatus::new("info", format!("GitHub integration {state}.")),
-            Err(err) => WireStatus::new(
-                "error",
-                format!(
-                    "GitHub integration {state} this session, but saving to config failed: {err}"
-                ),
-            ),
-        }
+        let detail = if next {
+            "dux now syncs pull-request status in the background. Toggle it off from the command palette."
+        } else {
+            "Background PR syncing stopped and cached statuses cleared. Toggle it back on from the command palette."
+        };
+        WireStatus::new("info", format!("GitHub integration {state}. {detail}"))
     }
 
     /// Force-kill one running agent's PTY without deleting its session or
@@ -906,7 +917,8 @@ impl Engine {
     /// marks the session Detached so it can be reconnected later. The per-tick
     /// spine diff notices the status change and fires `sessions.changed`, so
     /// connected clients refetch and the agent shows as detached. Unknown session
-    /// is an `Err` (→ 400); an agent that is not running is an idempotent no-op.
+    /// is an `Err` (the REST handler maps it to 404); an agent that is not running
+    /// is an idempotent no-op.
     fn kill_session_pty(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
         let session = self
             .sessions
@@ -929,6 +941,10 @@ impl Engine {
         self.pty_input.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
         self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
+        // An explicit kill means the user no longer wants this agent running, so
+        // clear desired_running — otherwise the TUI's startup auto-reopen would
+        // relaunch the agent the user just killed.
+        self.mark_session_desired_running(&session.id, false);
         Ok(WireStatus::new(
             "info",
             format!(
