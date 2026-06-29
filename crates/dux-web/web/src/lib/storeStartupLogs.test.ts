@@ -31,7 +31,7 @@ const LIST_BODY = {
   selected: { name: "b.log", content: "content of b.log" },
 }
 
-const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
   const ok = (json: unknown, status = 200) =>
     ({

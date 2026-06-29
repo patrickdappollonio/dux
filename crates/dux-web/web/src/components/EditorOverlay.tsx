@@ -470,8 +470,10 @@ function EditorBody({
       {/* Header: open file path, view toggle, dirty indicator, actions. */}
       <div className="flex items-center gap-2 border-b px-3 py-2">
         <FileCode2 className="size-4 shrink-0 text-muted-foreground" />
+        {/* <bdi> LTR isolate: keeps a leading bidi-neutral char in a dotfile
+            path (".github/...") from being reordered to the end by direction:rtl. */}
         <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
-          {openPath ?? "Select a file"}
+          <bdi dir="ltr">{openPath ?? "Select a file"}</bdi>
         </span>
         {/* Dirty dot kept OUTSIDE the truncating span so it can't be clipped on
             a long path; sr-only text announces the state to screen readers. */}
@@ -665,9 +667,11 @@ function EditorBody({
                       {changedMap.has(p) && (
                         <FileStatusIcon status={changedMap.get(p)!} />
                       )}
-                      {/* Full path → start-ellipsize so the filename stays visible. */}
+                      {/* Full path → start-ellipsize so the filename stays visible.
+                          <bdi> LTR isolate keeps a leading "." (dotfile path) from
+                          being reordered to the end by direction:rtl. */}
                       <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
-                        {p}
+                        <bdi dir="ltr">{p}</bdi>
                       </span>
                     </button>
                   ))

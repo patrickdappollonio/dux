@@ -127,8 +127,15 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   const scrollbackRef = useRef(
     bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
   )
-  scrollbackRef.current =
-    bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+  // Keep the ref current as the bootstrap document arrives or changes, without
+  // writing it during render (React forbids ref writes in render) and without
+  // making it a dependency of the terminal mount effect (which would recreate
+  // the terminal). The terminal reads this ref lazily on (re)connect, so an
+  // after-commit update lands in time for the first attach.
+  useEffect(() => {
+    scrollbackRef.current =
+      bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+  }, [bootstrap?.agent_scrollback_lines])
   const session =
     kind === "agent"
       ? spine?.sessions.find((s) => s.id === id)
