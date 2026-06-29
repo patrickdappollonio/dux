@@ -1445,7 +1445,35 @@ async fn handle_events_socket(
             next = stream.next() => match next {
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(frame) = serde_json::from_str::<EventsClientFrame>(text.as_str()) {
-                        apply_events_frame(&frame, &mut interest.subscribed, &engine, &bus).await;
+                        let new_fine =
+                            apply_events_frame(&frame, &mut interest.subscribed, &engine, &bus)
+                                .await;
+                        // Per-subscribe catch-up: for each newly-registered fine
+                        // topic, send a `session.changes` frame immediately so the
+                        // client does not miss an event that landed between its REST
+                        // refetch and this subscription registering. Mirrors the
+                        // Lagged recovery block above. `peek_rev` returns `None`
+                        // for a cold cache, which serialises to an absent `rev`
+                        // field; the client treats that as a force-refetch — correct.
+                        let mut sink_dead = false;
+                        for topic in &new_fine {
+                            if let Some(sid) =
+                                event_bus::session_id_from_changes_topic(topic)
+                            {
+                                let catchup = WireEvent {
+                                    event: "session.changes".to_string(),
+                                    id: Some(sid.to_string()),
+                                    rev: changes.peek_rev(sid),
+                                };
+                                if send_event(&sink, &catchup).await.is_err() {
+                                    sink_dead = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if sink_dead {
+                            break;
+                        }
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
@@ -1486,12 +1514,19 @@ impl Drop for InterestGuard {
 /// `drop_interest` only on a genuine removal). Validates a `session:<id>:changes`
 /// subscription against a live session before registering interest, and enforces
 /// the per-frame and per-connection topic caps.
+///
+/// Returns the set of `session:<id>:changes` fine topics that were **newly
+/// inserted** by this frame. Coarse topics (sessions/projects/config) are not
+/// returned — they are intentionally left to the client's existing `onOpen`
+/// refetch. The caller uses the returned set to send one `session.changes`
+/// catch-up frame per newly-subscribed session, closing the race window between
+/// a client's REST refetch and its subscription registering.
 async fn apply_events_frame(
     frame: &EventsClientFrame,
     subscribed: &mut std::collections::HashSet<String>,
     engine: &EngineHandle,
     bus: &EventBus,
-) {
+) -> Vec<String> {
     // Process unsubscribes FIRST — they only ever shrink state, so they are always
     // safe to honor (even on an otherwise-rejected oversized frame) and a frame
     // carrying both makes room under the cap before the subscribes run.
@@ -1507,8 +1542,10 @@ async fn apply_events_frame(
             "/ws/events subscribe frame rejected: {} topics exceeds the {MAX_EVENT_TOPICS_PER_FRAME} cap",
             frame.subscribe.len()
         ));
-        return;
+        return Vec::new();
     }
+
+    let mut new_fine_topics = Vec::new();
 
     for topic in &frame.subscribe {
         if subscribed.len() >= MAX_EVENT_TOPICS_PER_CONN {
@@ -1545,6 +1582,10 @@ async fn apply_events_frame(
                 }
                 if subscribed.insert(topic.clone()) {
                     bus.add_interest(topic);
+                    // Collect for the per-subscribe catch-up emitted at the
+                    // caller, closing the race window between a REST refetch
+                    // and the subscription registering.
+                    new_fine_topics.push(topic.clone());
                 }
             }
             // A coarse topic (sessions/projects/config): tracked for forwarding,
@@ -1554,6 +1595,8 @@ async fn apply_events_frame(
             }
         }
     }
+
+    new_fine_topics
 }
 
 /// Serialize and send one `/ws/events` resource frame as a text message.
@@ -3085,5 +3128,98 @@ mod tests {
             .expect("a config reload must emit config.changed")
             .expect("bus recv");
         assert_eq!(ev, config_changed_event());
+    }
+
+    // --- subscribe catch-up ---
+
+    /// Subscribing to `session:<id>:changes` when the ChangesService cache is
+    /// warm (`peek_rev` returns `Some(N)`) causes `apply_events_frame` to return
+    /// the newly-inserted fine topic, and the resulting catch-up frame carries
+    /// rev N. This tests the full contract: the right topic is returned, the
+    /// cached rev is read, and the serialised frame matches what the client
+    /// expects.
+    #[tokio::test]
+    async fn subscribe_emits_catchup_with_current_rev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        // Seed the cache so peek_rev("s1") == Some(42).
+        let changes = ChangesService::new(handle.clone(), Arc::clone(&bus));
+        changes.seed_rev_for_test("s1", 42);
+        assert_eq!(
+            changes.peek_rev("s1"),
+            Some(42),
+            "pre-condition: cache is warm"
+        );
+
+        let mut subscribed = std::collections::HashSet::new();
+        let frame = EventsClientFrame {
+            subscribe: vec![event_bus::changes_topic("s1")],
+            unsubscribe: vec![],
+        };
+        let new_fine = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+
+        // The topic was newly inserted and returned for catch-up.
+        assert_eq!(
+            new_fine,
+            vec![event_bus::changes_topic("s1")],
+            "the newly-inserted fine topic must be returned"
+        );
+
+        // The catch-up frame the caller emits must carry the cached rev.
+        let catchup = WireEvent {
+            event: "session.changes".to_string(),
+            id: Some("s1".to_string()),
+            rev: changes.peek_rev("s1"),
+        };
+        assert_eq!(
+            serde_json::to_string(&catchup).unwrap(),
+            r#"{"event":"session.changes","id":"s1","rev":42}"#,
+            "warm-cache catch-up must carry the current rev"
+        );
+    }
+
+    /// Subscribing when the cache is cold (`peek_rev` returns `None`) still
+    /// causes `apply_events_frame` to return the fine topic, and the resulting
+    /// catch-up frame omits `rev` (serialised as absent). The client treats an
+    /// absent `rev` as a force-refetch, so the changes pane converges even for
+    /// a session whose cache has not been populated yet.
+    #[tokio::test]
+    async fn subscribe_cold_cache_emits_revless_catchup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let bus = Arc::new(EventBus::new());
+        // No seed: the cache is empty, so peek_rev returns None.
+        let changes = ChangesService::new(handle.clone(), Arc::clone(&bus));
+        assert_eq!(
+            changes.peek_rev("s1"),
+            None,
+            "pre-condition: cache must be cold"
+        );
+
+        let mut subscribed = std::collections::HashSet::new();
+        let frame = EventsClientFrame {
+            subscribe: vec![event_bus::changes_topic("s1")],
+            unsubscribe: vec![],
+        };
+        let new_fine = apply_events_frame(&frame, &mut subscribed, &handle, &bus).await;
+
+        assert_eq!(
+            new_fine,
+            vec![event_bus::changes_topic("s1")],
+            "the newly-inserted fine topic must be returned even for a cold cache"
+        );
+
+        // The catch-up frame must omit `rev` when peek_rev returns None.
+        let catchup = WireEvent {
+            event: "session.changes".to_string(),
+            id: Some("s1".to_string()),
+            rev: changes.peek_rev("s1"), // None
+        };
+        assert_eq!(
+            serde_json::to_string(&catchup).unwrap(),
+            r#"{"event":"session.changes","id":"s1"}"#,
+            "cold-cache catch-up must omit rev so the client force-refetches"
+        );
     }
 }
