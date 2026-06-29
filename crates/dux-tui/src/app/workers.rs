@@ -1379,18 +1379,21 @@ pub(crate) fn run_create_agent_branch_inspection_job(
     status_op_id: Option<String>,
 ) {
     let repo_path = PathBuf::from(&project.path);
-    let result = git::current_branch(&repo_path)
+    let result = git::current_branch_opt(&repo_path)
         .map_err(|err| {
             format!(
                 "Couldn't inspect the current branch for project \"{}\": {err:#}",
                 project.name
             )
         })
-        .and_then(|current_branch| {
+        .and_then(|maybe_branch| {
+            // On a detached HEAD, `maybe_branch` is None; pass None so
+            // `leading_branch_for_project` falls back to the remote default or "main".
+            let cur = maybe_branch.as_deref();
             let leading_branch = project
                 .leading_branch
                 .clone()
-                .unwrap_or_else(|| leading_branch_for_project(&repo_path, Some(current_branch.as_str())));
+                .unwrap_or_else(|| leading_branch_for_project(&repo_path, cur));
             if !git::local_branch_exists(&repo_path, &leading_branch) {
                 return Err(format!(
                     "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",
@@ -1398,7 +1401,7 @@ pub(crate) fn run_create_agent_branch_inspection_job(
                 ));
             }
             Ok(CreateAgentBranchInspection {
-                current_branch,
+                current_branch: maybe_branch.unwrap_or_default(),
                 leading_branch,
             })
         });
