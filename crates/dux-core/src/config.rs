@@ -1033,7 +1033,10 @@ fn warn_on_removed_max_websocket_connections(raw: &str) {
 /// `[server] max_websocket_connections` key. Parses generically so a commented-out
 /// line is not detected; a parse failure returns false (the loader surfaces the
 /// real parse error separately).
-fn raw_has_removed_max_websocket_connections(raw: &str) -> bool {
+///
+/// `pub(crate)` so `config_write` can check the same condition on the write/strip
+/// path (where the TUI saves config) and emit the warning there too.
+pub(crate) fn raw_has_removed_max_websocket_connections(raw: &str) -> bool {
     toml::from_str::<toml::Value>(raw)
         .ok()
         .and_then(|value| {
