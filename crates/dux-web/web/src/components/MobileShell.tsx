@@ -163,7 +163,12 @@ function SessionActions({ session }: { session: SessionView }) {
         Startup command logs…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
+      {/* Destructive action, isolated. Tinted red (dim at rest, bright on hover)
+          to match the desktop sidebar's Delete item — see the CLAUDE.md
+          web-UI menu tenet; the confirmation dialog still gates it. */}
       <DropdownMenuItem
+        variant="destructive"
+        className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
         onClick={() => openDelete(session.id)}
       >
         <Trash2 />

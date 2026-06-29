@@ -1,11 +1,15 @@
 import { useState } from "react"
 import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
   Check,
   Ellipsis,
   EllipsisVertical,
+  GitCommitVertical,
   Loader2,
   Minus,
   MousePointerClick,
+  PanelRightClose,
   Pencil,
   Plus,
   RefreshCw,
@@ -355,6 +359,7 @@ export function ChangedFiles() {
                   onClick={() => openCommit(selectedSessionId)}
                   disabled={changed.staged.length === 0}
                 >
+                  <GitCommitVertical />
                   Commit…
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -367,6 +372,7 @@ export function ChangedFiles() {
                       )
                   }}
                 >
+                  <ArrowUpFromLine />
                   Push
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -379,16 +385,17 @@ export function ChangedFiles() {
                       )
                   }}
                 >
+                  <ArrowDownToLine />
                   Pull
                 </DropdownMenuItem>
                 {/* Hide the Changes pane entirely (desktop only) — mirrors the
                     TUI's remove-git-pane and the Ctrl+K "toggle-remove-git-pane"
-                    command; the default comes from config.ui.show_changes_pane.
-                    No icon, matching the iconless actions above. */}
+                    command; the default comes from config.ui.show_changes_pane. */}
                 {!isMobile ? (
                   <>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => toggleChangesPane()}>
+                      <PanelRightClose />
                       Hide Changes pane
                     </DropdownMenuItem>
                   </>
