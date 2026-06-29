@@ -18,8 +18,11 @@ export const DEFAULT_FAVICON_HREF = "/favicon.svg"
 // contains a known-safe `stroke` and never relies on CSS keyword support. Values
 // are the Tailwind 500 shades (violet is the dux brand colour) for a familiar
 // palette; extend deliberately and keep every value a plain `#rrggbb`.
+/** The dux brand colour; also the safe fallback stroke for the clamp below. */
+const BRAND_VIOLET = "#863bff"
+
 const FAVICON_COLORS: Record<string, string> = {
-  violet: "#863bff",
+  violet: BRAND_VIOLET,
   purple: "#a855f7",
   blue: "#3b82f6",
   sky: "#0ea5e9",
@@ -71,8 +74,12 @@ export function resolveFavicon(
 
   // Same-origin absolute path. Validate through the URL parser against a sentinel
   // origin and require the result to STAY same-origin, so a value the browser
-  // would normalize to another host — `//host`, or `/\host` (backslashes become
-  // slashes) — is rejected instead of silently loading cross-origin.
+  // would normalize to another host (`//host`, or `/\host` where backslashes
+  // become slashes) is rejected instead of silently loading cross-origin. The
+  // href is returned verbatim (not the parser's normalized form): the browser
+  // re-applies the same normalization against the real origin when it loads the
+  // favicon, and normalizing here (e.g. to `pathname`) would drop the leading
+  // path context and could itself become protocol-relative.
   if (value.startsWith("/")) {
     try {
       const sentinel = "https://dux.invalid"
@@ -97,7 +104,7 @@ export function outlineFaviconDataUri(color: string): string {
   // `resolveFavicon` never produces a non-hex colour, but a future/mistaken
   // caller falls back to the brand colour rather than letting an unsanitized
   // string break out of the `stroke` attribute.
-  const stroke = HEX_RE.test(color) ? color : FAVICON_COLORS.violet
+  const stroke = HEX_RE.test(color) ? color : BRAND_VIOLET
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${DUX_LOGO_VIEWBOX}">` +
     `<path d="${DUX_LOGO_PATH}" fill="none" stroke="${stroke}" stroke-width="2.5" stroke-linejoin="round"/>` +
