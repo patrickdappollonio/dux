@@ -57,10 +57,11 @@ pub fn run_create_agent_job(
                         project.name
                     ),
                 });
-                let leading_branch = project
-                    .leading_branch
-                    .clone()
-                    .unwrap_or_else(|| project.current_branch.clone());
+                let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
+                    let cur = (!project.current_branch.is_empty())
+                        .then_some(project.current_branch.as_str());
+                    crate::project_browser::leading_branch_for_project(&repo_path, cur)
+                });
                 if let Err(err) = git::switch_branch_if_needed(&repo_path, &leading_branch)
                     .and_then(|_| {
                         if git::has_tracked_changes(&repo_path)? {
@@ -92,10 +93,11 @@ pub fn run_create_agent_job(
             // coincidentally match an existing branch.
             let attach_existing =
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
-            let leading_branch = project
-                .leading_branch
-                .clone()
-                .unwrap_or_else(|| project.current_branch.clone());
+            let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
+                let cur =
+                    (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
+                crate::project_browser::leading_branch_for_project(&repo_path, cur)
+            });
             if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                     "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",

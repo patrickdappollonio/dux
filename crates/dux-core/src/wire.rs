@@ -1235,8 +1235,11 @@ impl Engine {
         let validated = self
             .validate_project_add_path(path)
             .map_err(|e| anyhow::anyhow!(e))?;
-        let branch = crate::git::current_branch(&validated)?;
-        let default_branch = match crate::git::branch_warning_kind(&validated, &branch) {
+        let branch = crate::git::current_branch_opt(&validated)?;
+        let default_branch = match branch
+            .as_deref()
+            .and_then(|b| crate::git::branch_warning_kind(&validated, b))
+        {
             Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
             _ => anyhow::bail!(
                 "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
@@ -1244,7 +1247,7 @@ impl Engine {
             ),
         };
         let leading_branch =
-            crate::project_browser::leading_branch_for_project(&validated, Some(branch.as_str()));
+            crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
         let path_str = validated.to_string_lossy().to_string();
         let action = NonDefaultBranchAction::AddProject {
             path: path_str.clone(),
@@ -2077,9 +2080,9 @@ impl Engine {
                 let validated = self
                     .validate_project_add_path(&path)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let branch = crate::git::current_branch(&validated)?;
+                let branch = crate::git::current_branch_opt(&validated)?;
                 let leading_branch =
-                    crate::project_browser::leading_branch_for_project(&validated, Some(branch.as_str()));
+                    crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
                 let path_str = validated.to_string_lossy().to_string();
                 let display_name = if name.trim().is_empty() {
                     validated
@@ -2100,7 +2103,7 @@ impl Engine {
                     auto_reopen_agents: None,
                     startup_command: None,
                     env: std::collections::BTreeMap::new(),
-                    current_branch: branch,
+                    current_branch: branch.unwrap_or_default(),
                     branch_status: ProjectBranchStatus::Unknown,
                     path_missing: false,
                     created_at: Some(chrono::Utc::now()),
