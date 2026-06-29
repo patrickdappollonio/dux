@@ -865,6 +865,25 @@ unknown_key = \"untouched\"
     }
 
     #[test]
+    fn patch_config_file_round_trips_title_with_toml_specials() {
+        // The in-place patcher is the production save hot-path. Exercise its
+        // read-parse-apply-write cycle from an existing [server] block with a
+        // title containing a quote and a backslash, locking in the same escaping
+        // contract the plain writer is held to.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[server]\ntitle = \"old\"\n").expect("write initial");
+
+        let mut config = Config::default();
+        config.server.title = r#"dux "prod" \ lab"#.to_string();
+
+        patch_config_file(&config_path, &config).expect("patch");
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.server.title, r#"dux "prod" \ lab"#);
+    }
+
+    #[test]
     fn write_config_plain_round_trips_acme_settings() {
         // LESSON from the [server] slice: every managed field needs an
         // apply_patches entry or a plain/recover write silently drops it. Guard
