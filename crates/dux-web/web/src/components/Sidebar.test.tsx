@@ -6,8 +6,8 @@ import { SidebarProvider } from "@/components/ui/sidebar"
 import type { DuxState } from "@/lib/store"
 
 // Control exactly what the store hands the component: override only `useDux`
-// (keeping every other real store export intact) so the brand-block wiring —
-// `bootstrap.title` → `resolveInstanceTitle` → the rendered wordmark — is
+// (keeping every other real store export intact) so the brand-block wiring
+// (`bootstrap.title` to `resolveInstanceTitle` to the rendered wordmark) is
 // exercised end to end. This guards against a regression that silently swaps the
 // title for another field (e.g. the version) or re-hardcodes "dux".
 let mockState: DuxState

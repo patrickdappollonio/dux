@@ -206,8 +206,8 @@ pub struct ServerConfig {
     pub max_websocket_connections: u32,
     /// WEB-ONLY display name for this dux instance. Drives the browser tab
     /// `<title>` and the brand wordmark in the web projects pane (the version
-    /// line stays directly below it). Set a distinct value per instance — e.g.
-    /// "dux #1" / "dux (prod)" — to tell several dux tabs apart at a glance.
+    /// line stays directly below it). Set a distinct value per instance (e.g.
+    /// "dux #1" or "dux (prod)") to tell several dux tabs apart at a glance.
     /// Default "dux". An empty/whitespace value falls back to "dux" in the UI.
     pub title: String,
     /// WEB-ONLY favicon for this dux instance, so several dux tabs are easy to
