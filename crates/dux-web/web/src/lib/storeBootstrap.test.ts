@@ -205,5 +205,18 @@ describe("bootstrap slice", () => {
       await loadStore()
       expect(document.title).toBe("dux")
     })
+
+    it("updates the tab title live on a config.changed rename", async () => {
+      bootstrapBody = makeBootstrap({ title: "first" })
+      const mod = await loadStore()
+      expect(document.title).toBe("first")
+
+      // The server's config was edited and reloaded with a new instance name.
+      bootstrapBody = makeBootstrap({ title: "renamed" })
+      mod.eventsSocket.onEvent({ event: "config.changed" })
+      await vi.waitFor(() => {
+        expect(document.title).toBe("renamed")
+      })
+    })
   })
 })

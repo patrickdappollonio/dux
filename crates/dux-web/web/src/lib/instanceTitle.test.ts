@@ -26,4 +26,9 @@ describe("resolveInstanceTitle", () => {
     // tab title at the first newline while a nowrap span would show a space.
     expect(resolveInstanceTitle("dux\nlab")).toBe("dux lab")
   })
+
+  it("collapses internal tabs and mixed control-whitespace runs to one space", () => {
+    expect(resolveInstanceTitle("dux\tlab")).toBe("dux lab")
+    expect(resolveInstanceTitle("dux\r\n\tlab")).toBe("dux lab")
+  })
 })

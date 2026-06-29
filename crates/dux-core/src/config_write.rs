@@ -848,6 +848,23 @@ unknown_key = \"untouched\"
     }
 
     #[test]
+    fn write_config_plain_round_trips_title_with_toml_specials() {
+        // The instance title is free-form user text. Lock in the escaping contract
+        // so a future toml_edit bump or patcher refactor can't silently emit a
+        // value with an unescaped quote/backslash that fails to re-parse.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut config = Config::default();
+        config.server.title = r#"dux "prod" \ lab"#.to_string();
+
+        write_config_plain(&config_path, &config).expect("write_config_plain");
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.server.title, r#"dux "prod" \ lab"#);
+    }
+
+    #[test]
     fn write_config_plain_round_trips_acme_settings() {
         // LESSON from the [server] slice: every managed field needs an
         // apply_patches entry or a plain/recover write silently drops it. Guard
