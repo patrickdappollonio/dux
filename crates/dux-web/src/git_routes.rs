@@ -43,6 +43,12 @@ struct CommitOp {
     message: String,
 }
 
+/// Maximum number of Unicode scalar values in a commit message.
+/// Git itself accepts messages up to ARG_MAX (~2 MiB on Linux), but very long
+/// messages are almost always accidental. 64 KiB is generous for any real
+/// commit message and guards against runaway clients.
+const MAX_COMMIT_MSG_LEN: usize = 65_536;
+
 /// The gated git-mutation routes, merged into the authenticated sub-router. These
 /// are path-keyed: the session id is the `:id` path segment under
 /// `/api/v1/sessions/:id/git/*`, validated by `id_within_bound` and then resolved
@@ -231,6 +237,13 @@ async fn commit(
     if op.message.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "commit message is empty").into_response();
     }
+    if op.message.chars().count() > MAX_COMMIT_MSG_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("commit message exceeds the {MAX_COMMIT_MSG_LEN}-character limit"),
+        )
+            .into_response();
+    }
     let session_id = id.clone();
     let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
@@ -301,5 +314,63 @@ fn apply_wire_response(result: Result<dux_core::wire::WireCommandOutcome, String
     match result {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    use crate::test_support::router_no_auth;
+
+    fn json_req(method: &str, uri: &str, body: &str) -> Request<axum::body::Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_over_length_message_with_400() {
+        let (_tmp, app) = router_no_auth();
+        // Build a message one character over the cap using 'a' (1-byte ASCII
+        // so chars().count() == len(), making the boundary explicit).
+        let long_msg = "a".repeat(MAX_COMMIT_MSG_LEN + 1);
+        let body = format!(r#"{{"message":"{long_msg}"}}"#);
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/abc123/git/commit",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn commit_accepts_message_at_exactly_the_length_cap() {
+        let (_tmp, app) = router_no_auth();
+        let ok_msg = "a".repeat(MAX_COMMIT_MSG_LEN);
+        let body = format!(r#"{{"message":"{ok_msg}"}}"#);
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/abc123/git/commit",
+                &body,
+            ))
+            .await
+            .unwrap();
+        // The session does not exist so we get 404, not 400 -- meaning the
+        // length gate was passed and the handler reached the worktree lookup.
+        assert_ne!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "length gate must not fire at cap"
+        );
     }
 }
