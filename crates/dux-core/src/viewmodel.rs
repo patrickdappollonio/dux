@@ -58,6 +58,13 @@ pub struct BootstrapView {
     /// The web dialog hides/disables its "From PR" mode with a quiet explanation
     /// when false, matching the TUI's gating of the `new-agent-from-pr` command.
     pub gh_available: bool,
+    /// Mirrors the raw `config.ui.github_integration` flag — distinct from
+    /// `gh_available`, which is the composite (integration on AND `gh`
+    /// installed/authed). The web hides the PR-banner-position palette command
+    /// when integration is off, independent of whether `gh` is currently
+    /// reachable (a banner the user can't currently see is still a real
+    /// preference once `gh` comes back).
+    pub github_integration: bool,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
@@ -397,6 +404,7 @@ impl Engine {
                 .defaults
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
+            github_integration: self.config.ui.github_integration,
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
@@ -987,6 +995,7 @@ mod tests {
             "dux_version",
             "randomize_agent_names_by_default",
             "gh_available",
+            "github_integration",
             "pr_banner_position",
             "agent_scrollback_lines",
             "show_changes_pane",

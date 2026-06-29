@@ -17,7 +17,6 @@ import type { PaletteCommandView } from "@/lib/types"
 export const PALETTE_GROUP_ORDER = [
   "Configuration",
   "View",
-  "Runtime",
   "Projects",
 ] as const
 
@@ -39,7 +38,9 @@ const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "sort-agents-by-updated": "View",
   "toggle-pr-banner-position": "View",
   "toggle-remove-git-pane": "View",
-  "kill-running": "Runtime",
+  // A runtime action rather than a true "view" concern, but grouped here to
+  // avoid a single-command group; revisit if more runtime commands arrive.
+  "kill-running": "View",
 }
 
 // The ids that carry a group mapping — exported for the coverage test's REVERSE

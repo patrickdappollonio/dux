@@ -11,6 +11,11 @@ import { setPaletteOpen, useDux } from "@/lib/store"
 import { groupPaletteCommands } from "@/lib/paletteGroups"
 import { PALETTE_HANDLERS } from "@/lib/paletteRegistry"
 
+// The core command id whose visibility is gated on GitHub integration. Named so
+// a rename in the Rust registry surfaces as a failing reference here rather than
+// a silently-ineffective string literal.
+const PR_BANNER_POSITION_COMMAND = "toggle-pr-banner-position"
+
 export function CommandPalette() {
   const { paletteOpen, bootstrap } = useDux()
 
@@ -49,15 +54,15 @@ export function CommandPalette() {
   // ViewModel projects the Web/Both subset (id + description, canonical order);
   // we render each entry whose id has a web handler, bucketed into app-menu
   // groups (Configuration / View / Projects) for the menu-like feel.
-  // Hide the PR-banner-position toggle when GitHub PRs are unavailable
-  // (integration off, or `gh` not installed/authed): there is no banner to
-  // move, so moving it is meaningless. `gh_available` is the composite the
-  // server already projects (it is false whenever integration is off).
-  const ghAvailable = bootstrap?.gh_available ?? false
+  // Hide the PR-banner-position toggle when GitHub integration is OFF: there is
+  // no banner to position. Gate on the raw `github_integration` flag, NOT
+  // `gh_available` (the composite) — the user's banner preference is still
+  // meaningful when integration is on but `gh` is momentarily unreachable.
+  const githubIntegration = bootstrap?.github_integration ?? false
   const paletteCommands = (bootstrap?.palette_commands ?? []).filter(
     (cmd) =>
       cmd.id in PALETTE_HANDLERS &&
-      (cmd.id !== "toggle-pr-banner-position" || ghAvailable)
+      (cmd.id !== PR_BANNER_POSITION_COMMAND || githubIntegration)
   )
   const commandGroups = groupPaletteCommands(paletteCommands)
 

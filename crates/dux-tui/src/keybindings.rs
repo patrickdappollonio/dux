@@ -2047,18 +2047,28 @@ mod tests {
              in the core registry"
         );
 
-        // `edit-config` is the first (and currently only) Web-only palette
-        // command: registered, surfaced on Web, and intentionally absent from the
-        // TUI listing (the TUI has no Monaco editor).
-        let edit_config = palette::PALETTE_COMMANDS
-            .iter()
-            .find(|c| c.name == "edit-config")
-            .expect("edit-config is registered in the palette");
-        assert_eq!(edit_config.surface, PaletteSurface::Web);
-        assert!(
-            !listed.contains_key("edit-config"),
-            "edit-config is Web-only and must not appear in the TUI listing"
-        );
+        // Structural guard restored as an allowlist: every Web-only palette
+        // command must be a deliberate, known exception (the TUI has no surface
+        // for it). A new Web-only command added without updating this list fails
+        // here — the same alarm the old "no Web-only commands" assertion gave,
+        // but now allowing intentional exceptions. Web-only commands are also
+        // intentionally absent from the TUI listing.
+        const KNOWN_WEB_ONLY: &[&str] = &["edit-config"];
+        for cmd in palette::PALETTE_COMMANDS {
+            if cmd.surface == PaletteSurface::Web {
+                assert!(
+                    KNOWN_WEB_ONLY.contains(&cmd.name),
+                    "unexpected Web-only palette command \"{}\": add it to KNOWN_WEB_ONLY \
+                     if intentional (did you mean PaletteSurface::Both?)",
+                    cmd.name
+                );
+                assert!(
+                    !listed.contains_key(cmd.name),
+                    "Web-only command \"{}\" must not appear in the TUI listing",
+                    cmd.name
+                );
+            }
+        }
     }
 
     #[test]

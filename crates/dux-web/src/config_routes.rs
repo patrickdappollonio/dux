@@ -331,6 +331,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_then_write_round_trips_with_200() {
+        let (_tmp, app) = router_no_auth();
+        // Read the current raw config and confirm the body carries `content`.
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/config/raw")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(get.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let content = parsed["content"]
+            .as_str()
+            .expect("read body must carry a content string")
+            .to_string();
+        assert!(!content.is_empty(), "content must not be empty");
+
+        // Write it back unchanged: valid TOML with an unchanged [server] section,
+        // so the happy path returns 200 (exercises the Ok arm + adoption).
+        let body = serde_json::json!({ "content": content }).to_string();
+        let put = app
+            .oneshot(json_req("PUT", "/api/v1/config/raw", &body))
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn write_raw_config_rejects_invalid_toml_with_400() {
         let (_tmp, app) = router_no_auth();
         let resp = app

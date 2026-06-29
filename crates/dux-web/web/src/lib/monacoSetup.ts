@@ -36,6 +36,39 @@ self.MonacoEnvironment = {
 }
 loader.config({ monaco })
 
+// Monaco ships no TOML grammar (it is not one of the basic-languages), so a
+// path of `config.toml` would otherwise fall back to plaintext. Register a
+// minimal Monarch tokenizer for the config editor: comments, table headers,
+// keys, strings, numbers, and booleans. Highlighting only — no language service.
+if (!monaco.languages.getLanguages().some((l) => l.id === "toml")) {
+  monaco.languages.register({ id: "toml", extensions: [".toml"], aliases: ["TOML"] })
+  const toml: monaco.languages.IMonarchLanguage = {
+    tokenizer: {
+      root: [
+        [/#.*$/, "comment"],
+        [/^\s*\[\[?[^\]]*\]\]?/, "type"],
+        [/[A-Za-z0-9_.-]+(?=\s*=)/, "variable"],
+        [/=/, "operator"],
+        [/"""/, { token: "string", next: "@mlstring" }],
+        [/"/, { token: "string", next: "@string" }],
+        [/'[^']*'/, "string"],
+        [/\b(?:true|false)\b/, "keyword"],
+        [/[+-]?\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?/, "number"],
+      ],
+      string: [
+        [/[^"\\]+/, "string"],
+        [/\\./, "string.escape"],
+        [/"/, { token: "string", next: "@pop" }],
+      ],
+      mlstring: [
+        [/"""/, { token: "string", next: "@pop" }],
+        [/./, "string"],
+      ],
+    },
+  }
+  monaco.languages.setMonarchTokensProvider("toml", toml)
+}
+
 export { monaco }
 
 // The Monaco language id for a file path, derived from the grammars actually
