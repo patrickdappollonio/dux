@@ -14,6 +14,7 @@ import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
 import { EditorOverlay } from "@/components/EditorOverlay"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
+import { KillRunningDialog } from "@/components/KillRunningDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
@@ -214,6 +215,7 @@ function GlobalOverlays() {
       <ChangeProviderDialog />
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
+      <KillRunningDialog />
       <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
       <MacrosDialog />

@@ -106,6 +106,10 @@ export const sessionsApi = {
     request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/reconnect`, {
       force,
     }),
+  // Force-kill the agent's running PTY (it detaches; it is NOT deleted). Used by
+  // the kill-running modal. A non-2xx throws.
+  kill: (id: string) =>
+    request<void>("POST", `/api/v1/sessions/${encodeURIComponent(id)}/kill`),
   reorder: (projectId: string, sessionIds: string[]) =>
     request<void>("POST", "/api/v1/sessions/reorder", {
       project_id: projectId,
