@@ -125,7 +125,7 @@ async fn reload_config(State(state): State<AppState>, headers: HeaderMap) -> Res
 async fn dispatch(state: &AppState, headers: &HeaderMap, cmd: WireCommand) -> Response {
     match state
         .engine
-        .apply_wire_scoped(cmd, scope_from_headers(headers))
+        .apply_wire_scoped(cmd, scope_from_headers(headers, &state.connections))
         .await
     {
         Ok(_) => StatusCode::OK.into_response(),
@@ -139,7 +139,7 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     fn json_req(method: &str, uri: &str, body: &str) -> Request<axum::body::Body> {
         Request::builder()
@@ -214,24 +214,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn config_mutations_are_gated() {
-        let cases: [(&str, &str, &str); 4] = [
-            ("PUT", "/api/v1/macros", r#"{"entries":[]}"#),
-            ("PUT", "/api/v1/global-env", r#"{"env":{}}"#),
-            ("PUT", "/api/v1/ui/changes-pane", r#"{"visible":true}"#),
-            ("POST", "/api/v1/config/reload", "{}"),
-        ];
-        for (method, uri, body) in cases {
-            let (_tmp, app) = router_with_auth();
-            let resp = app.oneshot(json_req(method, uri, body)).await.unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{method} {uri} must be gated"
-            );
-        }
     }
 }

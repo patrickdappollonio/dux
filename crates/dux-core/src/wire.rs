@@ -518,15 +518,6 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
             .label
             .as_ref()
             .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\"."))),
-        // The web never initiates a login-user add (TUI/config-only by design),
-        // so `status_op_id` is `None` here; build the final status directly,
-        // keyed if the id is ever present so it replaces a matching busy.
-        EventReaction::AuthUsersOutcome {
-            outcome,
-            status_op_id,
-        } => Some(WireStatus::from_update(
-            &outcome.clone().into_status(status_op_id.clone()),
-        )),
         _ => None,
     }
 }
@@ -540,14 +531,6 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
     match reaction {
         EventReaction::Status(update) => vec![WireStatus::from_update(update)],
         EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
-        // See `wire_status_from_reaction`: the web never drives an auth-user add,
-        // but a deferred replay could surface one — translate it for completeness.
-        EventReaction::AuthUsersOutcome {
-            outcome,
-            status_op_id,
-        } => vec![WireStatus::from_update(
-            &outcome.clone().into_status(status_op_id.clone()),
-        )],
         // Create-kind launch finals (success / startup-error / persist-fail /
         // launch-fail) are resolved ENGINE-SIDE against the shared
         // `Engine::pending_create_ops` op and ride alongside the launch View as a
@@ -1256,16 +1239,27 @@ impl Engine {
         let validated = self
             .validate_project_add_path(path)
             .map_err(|e| anyhow::anyhow!(e))?;
-        let branch = crate::git::current_branch(&validated)?;
-        let default_branch = match crate::git::branch_warning_kind(&validated, &branch) {
-            Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
-            _ => anyhow::bail!(
-                "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
-                validated.display()
-            ),
+        let branch = crate::git::current_branch_opt(&validated)?;
+        let default_branch = match branch.as_deref() {
+            // On a normal HEAD: require a Known default (Heuristic is rejected).
+            Some(current) => match crate::git::branch_warning_kind(&validated, current) {
+                Some(crate::worker::BranchWarningKind::Known { default_branch }) => default_branch,
+                _ => anyhow::bail!(
+                    "Cannot determine a default branch to check out for \"{}\". Switch branches in your terminal and retry.",
+                    validated.display()
+                ),
+            },
+            // On a detached HEAD: try origin/HEAD directly before giving up.
+            None => match crate::git::remote_default_branch(&validated) {
+                Some(default) => default,
+                None => anyhow::bail!(
+                    "HEAD is detached and no remote default branch (origin/HEAD) is \
+                         configured; check out a branch first."
+                ),
+            },
         };
         let leading_branch =
-            crate::project_browser::leading_branch_for_project(&validated, &branch);
+            crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
         let path_str = validated.to_string_lossy().to_string();
         let action = NonDefaultBranchAction::AddProject {
             path: path_str.clone(),
@@ -2098,9 +2092,9 @@ impl Engine {
                 let validated = self
                     .validate_project_add_path(&path)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                let branch = crate::git::current_branch(&validated)?;
+                let branch = crate::git::current_branch_opt(&validated)?;
                 let leading_branch =
-                    crate::project_browser::leading_branch_for_project(&validated, &branch);
+                    crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
                 let path_str = validated.to_string_lossy().to_string();
                 let display_name = if name.trim().is_empty() {
                     validated
@@ -2121,7 +2115,7 @@ impl Engine {
                     auto_reopen_agents: None,
                     startup_command: None,
                     env: std::collections::BTreeMap::new(),
-                    current_branch: branch,
+                    current_branch: branch.unwrap_or_default(),
                     branch_status: ProjectBranchStatus::Unknown,
                     path_missing: false,
                     created_at: Some(chrono::Utc::now()),
@@ -3814,6 +3808,78 @@ mod tests {
         assert!(
             engine.pending_web_add_project_ops.contains_key(key),
             "the add-project op must be registered under its busy key"
+        );
+    }
+
+    // Helper: detach HEAD on a path (requires at least one commit).
+    fn detach_head(repo: &std::path::Path) {
+        let ok = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_string_lossy().as_ref(),
+                "checkout",
+                "--detach",
+                "HEAD",
+            ])
+            .status()
+            .expect("spawn git")
+            .success();
+        assert!(ok, "git checkout --detach HEAD failed");
+    }
+
+    #[test]
+    fn add_project_checkout_default_on_detached_with_origin_head_uses_remote_default() {
+        // A cloned repo has origin/HEAD set. Detach HEAD, then verify the command
+        // succeeds by falling back to the remote default branch.
+        let (_origin, _clone, work) = clone_repo_on_feature_branch("main");
+        detach_head(&work);
+        let (mut engine, _tmp) = test_engine();
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: work.to_string_lossy().into_owned(),
+                name: "Detached".to_string(),
+            })
+            .expect("should succeed: origin/HEAD resolves to main");
+        let status = outcome.status.expect("busy status");
+        assert_eq!(status.tone, "busy");
+        assert!(
+            status.message.contains("main"),
+            "busy message should reference the remote default branch 'main', got: {}",
+            status.message
+        );
+        // Drive the chain to confirm success.
+        let statuses = drive_add_project_chain(&mut engine);
+        let final_status = statuses.last().expect("final status");
+        assert_eq!(
+            final_status.tone, "info",
+            "expected success, got: {:?}",
+            final_status
+        );
+    }
+
+    #[test]
+    fn add_project_checkout_default_on_detached_without_origin_head_returns_clear_error() {
+        // A local-only repo (no remote) on detached HEAD: no origin/HEAD to fall back
+        // to, so the command must bail with a message mentioning "detached".
+        let repo = init_repo_on_feature_branch("main");
+        detach_head(repo.path());
+        let (mut engine, _tmp) = test_engine();
+
+        let err = engine
+            .apply_wire(WireCommand::AddProjectCheckoutDefault {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: String::new(),
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("detached"),
+            "expected 'detached' in error, got: {err}"
+        );
+        assert!(
+            engine.projects.is_empty(),
+            "no project should be added on error"
         );
     }
 

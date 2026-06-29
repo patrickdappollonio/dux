@@ -5,19 +5,12 @@ import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
 import { projectsApi, type PatchProjectBody } from "./projectsApi"
 import { sessionsApi, SessionsApiError } from "./sessionsApi"
-import {
-  type AuthState,
-  type MeBody,
-  loginErrorMessage,
-  LOGIN_NETWORK_MESSAGE,
-  parseRetryAfter,
-  phaseFromMe,
-  unreachableRetryDelay,
-} from "./auth"
+
 import { ordersMatch } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
+import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { terminalsApi } from "./terminalsApi"
 import { browseApi } from "./browseApi"
@@ -134,16 +127,10 @@ export interface DuxState {
   // falls back to a sensible default (empty list / true / the scrollback
   // default) so nothing crashes in that pre-load window.
   bootstrap: Bootstrap | null
+  // Set to true synchronously when boot runs (at module load). Tests wait on
+  // this as a settled signal instead of the old auth.phase guard.
+  booted: boolean
   conn: ConnState
-  // The login/auth-state machine. Starts "checking" while the boot `/api/me`
-  // round-trip is in flight; resolves to "disabled" (auth off — today's UX),
-  // "authed" (a valid session), "anonymous" (auth on, no session → the login
-  // screen), or "unreachable" (the boot probe network-failed → the retrying
-  // reconnect screen; the store auto-retries). The app shell only renders once
-  // the phase is "disabled" or "authed", so the WS connect (issued the moment we
-  // learn auth is off or we're authed) always precedes the terminal's first
-  // subscribe. See `bootAuth` below.
-  auth: AuthState
   selectedTarget: SelectedTarget | null
   // Derived from `selectedTarget`: the owning session id. Session-scoped UI
   // (breadcrumb, changed files, statusbar) reads this so it keeps working
@@ -363,8 +350,8 @@ function loadingChanges(sessionId: string): ChangesSlice {
 let state: DuxState = {
   spine: null,
   bootstrap: null,
+  booted: false,
   conn: "connecting",
-  auth: { phase: "checking", username: null, error: null, pending: false },
   selectedTarget: null,
   selectedSessionId: null,
   terminalEpoch: 0,
@@ -449,9 +436,8 @@ const wsScheme = location.protocol === "https:" ? "wss:" : "ws:"
 // EVERYTHING the retired `/ws`/`DuxSocket` used to: resource-change events
 // (changed files, spine, config) AND the control frames
 // (`connected` id, `status`/`status_cleared` toasts). It also owns the
-// connection-state UX (the status-bar indicator + auth recovery). Exported so
-// tests can drive its callbacks / inspect its interest set; connected/closed on
-// boot/login/logout.
+// connection-state UX (the status-bar indicator). Exported so tests can drive
+// its callbacks / inspect its interest set; connected on boot.
 export const eventsSocket = new EventsSocket(
   `${wsScheme}//${location.host}/ws/events`,
 )
@@ -507,6 +493,19 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
     loadSpine()
     return
   }
+  // A `pty.owner` event means a connection claimed (took over, or first-claimed an
+  // unowned) PTY's sizing+input. Fan it out to the mounted terminal view for that
+  // pty id along with the claimer's connection id (`owner`); the view compares that
+  // against its own PTY-socket connection id to decide definitively whether it is
+  // the owner (stays interactive) or has been taken over (read-only placeholder).
+  // The id is the pty id (session id for an agent, terminal id for a companion).
+  // Delivered on the coarse `sessions` topic, subscribed at module load.
+  if (ev.event === "pty.owner") {
+    // Pass the ownership epoch so the fan-out can ignore an out-of-order (older)
+    // handover and converge on the latest claim regardless of arrival order.
+    if (typeof ev.id === "string") notifyPtyOwner(ev.id, ev.owner, ev.epoch)
+    return
+  }
   if (ev.event !== "session.changes") return
   const id = ev.id
   if (id === undefined || id !== state.selectedSessionId) return
@@ -523,10 +522,10 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   }
 }
 
-// The connect-driver (bootAuth / login) kicks off the very first bootstrap+spine
-// load alongside `eventsSocket.connect()`, so the first `onOpen` that follows
-// must NOT re-fetch them or it would duplicate that initial load. Each driver
-// sets this flag right before connecting; the first `onOpen` consumes it. Every
+// The `boot()` driver kicks off the very first bootstrap+spine load alongside
+// `eventsSocket.connect()`, so the first `onOpen` that follows must NOT re-fetch
+// them or it would duplicate that initial load. The driver sets this flag right
+// before connecting; the first `onOpen` consumes it. Every
 // later (RE-connect) open leaves it false and so always retries — crucially, even
 // when the FIRST load FAILED: keying the retry off `state.bootstrap !== null`
 // (the old guard) stranded a failed first fetch as null forever, so every
@@ -540,10 +539,6 @@ let skipNextEventsOnOpenLoad = false
 // outage would otherwise leave stale providers/macros/UI flags until the next
 // config edit. The selected session's changes are also recovered when one is set.
 eventsSocket.onOpen = () => {
-  // A genuine successful open clears the auth-recheck storm guard (see
-  // `recheckAuthAfterFailure` / `MAX_AUTH_RECONNECT_CYCLES`): the socket is
-  // healthy again, so a future failure starts the bounded cadence fresh.
-  authReconnectCycles = 0
   if (skipNextEventsOnOpenLoad) {
     // First open after a boot/login load: skip the duplicate fetch this once.
     skipNextEventsOnOpenLoad = false
@@ -554,6 +549,12 @@ eventsSocket.onOpen = () => {
     // apply is idempotent.
     loadBootstrap()
     loadSpine()
+    // The server's ownership epoch counter restarts at zero if the server itself
+    // restarted during the outage; clear our per-pty high-water marks so a fresh
+    // post-restart `pty.owner` is not wrongly ignored as stale. A reconnect is the
+    // only path a restarted server's epochs reach us, and there is no `pty.owner`
+    // replay, so this can never drop a still-relevant in-flight handover.
+    resetPtyOwnerEpochs()
   }
   const id = state.selectedSessionId
   if (id === null) return
@@ -855,63 +856,6 @@ eventsSocket.onConn = (conn) => {
   // Changed files no longer ride this socket: the `/ws/events` channel owns the
   // per-session subscription and re-establishes it on its own reconnect (see
   // `eventsSocket.onOpen`, which also refetches). There is nothing to re-arm here.
-  // When the socket gives up (the reconnect loop exhausted its attempts) while
-  // we believe we're authed, the cause may be a session that expired or was
-  // revoked server-side: the gated `/ws` upgrade now 401s, which the browser
-  // surfaces as an error+close, never an open — so the loop fails. Re-check
-  // `/api/me`; a 401 means we really are logged out, so flip to the login screen
-  // instead of showing the dead "Reconnect" UX. A still-authed `/api/me` means
-  // it was a genuine network blip, so we leave "failed" in place (the user can
-  // hit Reconnect). Event-driven: this fires only on the terminal "failed" edge.
-  if (conn === "failed" && state.auth.phase === "authed") {
-    void recheckAuthAfterFailure()
-  }
-}
-
-// Bound the authed reconnect loop. Each terminal "failed" while authed triggers
-// `recheckAuthAfterFailure`, which (for any non-401 result) auto-restarts the
-// socket via `connect()` — and `connect()` resets the socket's own attempt
-// counter. If the WS UPGRADE keeps failing for a NON-auth reason (a proxy that
-// drops the `Upgrade` header, a TLS problem), that is an unbounded storm:
-// 4 attempts → failed → recheck → connect → reset → repeat, hammering the
-// server forever. Cap the consecutive auto-restarts; past the cap we stop
-// auto-connecting and leave the app "failed" with the manual Reconnect
-// affordance (which always works — it calls `connect()` directly). A genuine
-// successful open resets the counter (see `eventsSocket.onOpen`).
-const MAX_AUTH_RECONNECT_CYCLES = 3
-let authReconnectCycles = 0
-
-// After the WS reconnect loop fails while authed, re-verify the session. A 401
-// means the session is gone (expired/revoked): drop to the login screen. Any
-// other outcome (still authed, or the probe itself failed) is treated as a
-// transient network problem and left as "failed" so the Reconnect affordance
-// stands. Never connects the socket here beyond the bounded auto-restart above —
-// the manual Reconnect button always works regardless.
-async function recheckAuthAfterFailure(): Promise<void> {
-  try {
-    const resp = await fetch("/api/me", { credentials: "same-origin" })
-    if (resp.status === 401) {
-      // The session is gone — stop the events channel too (it shares the auth
-      // gate and would otherwise keep retrying a 401 upgrade).
-      eventsSocket.close()
-      setState({
-        auth: { phase: "anonymous", username: null, error: null, pending: false },
-      })
-    } else {
-      // Still authed: a genuine network blip, not a logout. The events socket
-      // exhausted its own reconnect budget alongside the PTY socket, so restart
-      // it (connect() resets closedByUser/attempts/delay, safe on an exhausted
-      // socket) — otherwise changed-files invalidations would stay dead until
-      // the user manually reconnects. BUT bound the auto-restarts: a persistent
-      // non-auth upgrade failure would otherwise loop forever. Past the cap we
-      // stop auto-connecting and leave "failed" in place for a manual Reconnect.
-      authReconnectCycles += 1
-      if (authReconnectCycles > MAX_AUTH_RECONNECT_CYCLES) return
-      eventsSocket.connect()
-    }
-  } catch {
-    // Probe failed too — keep "failed"; this was a network problem, not a logout.
-  }
 }
 
 // Since Phase 6 there is no `command_result`/`error` frame: every action is a
@@ -975,241 +919,19 @@ function showStatusToast(
   else toast.success(message, opts) // info/success
 }
 
-// Boot the auth-state machine, THEN connect the events socket. With auth on and
-// no session, the gated `/ws/events` upgrade 401s; a blind boot connect would
-// just burn the reconnect
-// loop down to "failed" before the user ever logs in. So we first ask `/api/me`
-// who we are:
-//   - auth disabled OR a valid session → set the phase, THEN connect (today's UX
-//     for the disabled case; an authed user lands straight in the app). The
-//     connect is synchronous within this resolution, so it still happens exactly
-//     once and is in flight before React renders the shell — the app shell is
-//     gated behind the non-"checking" phase, so the focused TerminalPane never
-//     mounts (and never issues its first `subscribe`, which would be dropped on a
-//     non-OPEN socket) until after this connect is issued.
-//   - 401 → "anonymous"; the login screen renders and NO socket connect happens
-//     until a successful login.
-//   - the fetch itself REJECTS (server down/restarting, including an auth-OFF
-//     deployment mid-flip) → "unreachable", and we auto-retry with capped
-//     backoff. We deliberately do NOT fall back to "anonymous" here: a login
-//     form whose submit would also network-fail is a worse UX than an honest
-//     "can't reach the server, retrying" state, and an auth-OFF deployment has
-//     no login at all. A retry that resolves proceeds exactly like a fresh boot
-//     (disabled/authed → connect; 401 → anonymous), so the user never has to
-//     reload by hand.
-//
-// The retry loop is a module-level timer (the popstate/socket precedent), NOT a
-// React effect — `bootAuth` reschedules itself on each failure and clears the
-// timer the moment a probe resolves. `retryAttempt` counts failures so the
-// backoff schedule (see `unreachableRetryDelay`) advances; a successful probe
-// resets it so a later outage starts the cadence over.
-let bootRetryTimer: ReturnType<typeof setTimeout> | null = null
-let bootRetryAttempt = 0
-
-async function bootAuth(): Promise<void> {
-  try {
-    const resp = await fetch("/api/me", { credentials: "same-origin" })
-    let body: MeBody | null = null
-    if (resp.status === 200) {
-      body = (await resp.json().catch(() => null)) as MeBody | null
-    }
-    // A probe resolved: cancel any pending retry and reset the cadence.
-    if (bootRetryTimer !== null) {
-      clearTimeout(bootRetryTimer)
-      bootRetryTimer = null
-    }
-    bootRetryAttempt = 0
-    const { phase, username } = phaseFromMe(resp.status, body)
-    setState({ auth: { phase, username, error: null, pending: false } })
-    if (phase === "disabled" || phase === "authed") {
-      // This driver owns the initial load below, so the first `onOpen` must not
-      // duplicate it (every later reconnect still retries — see the flag's docs).
-      skipNextEventsOnOpenLoad = true
-      eventsSocket.connect()
-      // Fetch the build-static bootstrap document alongside the initial connect.
-      // It is invalidated thereafter by `config.changed` over `/ws/events`.
-      loadBootstrap()
-      // Fetch the workspace spine (projects/sessions/sidebar) too. Invalidated
-      // thereafter by `projects.changed`/`sessions.changed` over `/ws/events`.
-      loadSpine()
-    }
-  } catch {
-    // Network failure: show the honest unreachable state and schedule a retry.
-    setState({
-      auth: { phase: "unreachable", username: null, error: null, pending: false },
-    })
-    scheduleBootRetry()
-  }
+// Boot: connect the events socket and fetch the initial workspace data. No
+// /api/me round-trip is needed -- the server is a trusted-local tool with no
+// login gate. Setting booted synchronously lets tests use it as a settled signal.
+function boot(): void {
+  setState({ booted: true })
+  // This driver owns the initial load, so the first onOpen must not duplicate it
+  // (every later reconnect still retries -- see the flag's docs).
+  skipNextEventsOnOpenLoad = true
+  eventsSocket.connect()
+  loadBootstrap()
+  loadSpine()
 }
-
-// Arm the next auto-retry of `bootAuth` after the capped-backoff delay for the
-// current attempt count. Guarded so overlapping triggers (e.g. a manual "Retry
-// now" while a timer is already armed) don't stack timers.
-function scheduleBootRetry(): void {
-  if (bootRetryTimer !== null) return
-  const delay = unreachableRetryDelay(bootRetryAttempt)
-  bootRetryAttempt += 1
-  bootRetryTimer = setTimeout(() => {
-    bootRetryTimer = null
-    void bootAuth()
-  }, delay)
-}
-
-// Manual "Retry now" from the unreachable screen. Cancel the pending backoff
-// timer and probe immediately; `bootAuth` reschedules if it fails again.
-export function retryBoot(): void {
-  if (bootRetryTimer !== null) {
-    clearTimeout(bootRetryTimer)
-    bootRetryTimer = null
-  }
-  void bootAuth()
-}
-
-void bootAuth()
-
-// Attempt a login. On success the phase flips to "authed" and the socket
-// connects (the one connect for the auth-on path). A 401 surfaces the generic
-// invalid-credentials message; a 429 surfaces a throttle message naming the
-// Retry-After window; a network error surfaces a reachability message. The
-// `pending` flag drives the submit button while the request is in flight.
-export async function login(username: string, password: string): Promise<void> {
-  setState({ auth: { ...state.auth, error: null, pending: true } })
-  try {
-    const resp = await fetch("/api/login", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    })
-    if (resp.status === 200) {
-      const body = (await resp.json().catch(() => null)) as MeBody | null
-      const name =
-        body && typeof body.username === "string" ? body.username : username
-      setState({
-        auth: { phase: "authed", username: name, error: null, pending: false },
-      })
-      // This driver owns the initial load below; the first `onOpen` skips it (see
-      // the flag's docs) while later reconnects still retry.
-      skipNextEventsOnOpenLoad = true
-      eventsSocket.connect()
-      // Fetch the bootstrap document and the workspace spine for this freshly
-      // authed session, mirroring the boot path (after auth resolves, alongside
-      // the connect).
-      loadBootstrap()
-      loadSpine()
-      return
-    }
-    const retryAfter =
-      resp.status === 429
-        ? parseRetryAfter(resp.headers.get("retry-after"))
-        : undefined
-    setState({
-      auth: {
-        ...state.auth,
-        error: loginErrorMessage(resp.status, retryAfter),
-        pending: false,
-      },
-    })
-  } catch {
-    setState({
-      auth: { ...state.auth, error: LOGIN_NETWORK_MESSAGE, pending: false },
-    })
-  }
-}
-
-// The patch that wipes every piece of session-scoped state back to its initial
-// value. Logout MUST apply this so the previous user's data does not leak into
-// the next login's connect window: the app shell is unmounted while anonymous,
-// but the store is a module-level singleton that survives a logout/login cycle,
-// so a stale ViewModel, selection, draft, or open dialog would otherwise flash
-// (or worse, expose another user's data) the instant the next session connects
-// and before the first fresh ViewModel arrives. Auth is reset separately by the
-// caller; everything below is the session-scoped surface. `pendingOrders` is
-// folded in explicitly here so it is never left dangling either.
-function clearSessionScopedState(): Partial<DuxState> {
-  return {
-    // The spine (projects/sessions/sidebar) is workspace data — clear it so the
-    // next login never flashes the previous session's sidebar before its first
-    // fetch lands.
-    spine: null,
-    selectedTarget: null,
-    selectedSessionId: null,
-    editorTarget: null,
-    commitTarget: null,
-    commitDraft: "",
-    // Every dialog/modal target, reset to closed.
-    deleteTarget: null,
-    deleteTerminalTarget: null,
-    discardTarget: null,
-    renameTarget: null,
-    renameDraft: "",
-    changeProviderTarget: null,
-    projectInfoTarget: null,
-    projectSettingsTarget: null,
-    agentStartupCommandTarget: null,
-    agentEnvTarget: null,
-    startupLogsTarget: null,
-    startupLogsEntries: [],
-    startupLogsSelected: null,
-    startupLogsLoading: false,
-    startupLogsError: null,
-    globalEnvOpen: false,
-    attachWorktreeTarget: null,
-    attachWorktreeEntries: [],
-    attachWorktreeLoading: false,
-    checkoutDefaultBranchTarget: null,
-    removeProjectTarget: null,
-    addProjectOpen: false,
-    projectPathInspection: null,
-    // The new-agent / fork / from-PR name dialog group.
-    createAgentTarget: null,
-    createAgentDraft: "",
-    createAgentRandomize: false,
-    createAgentGeneratedName: null,
-    createAgentNamePending: false,
-    createAgentPrInput: "",
-    paletteOpen: false,
-    macrosDialogOpen: false,
-    macrosDraft: [],
-    mobileScreen: "home",
-    // Optimistic reorder overlays — explicitly cleared (was incidental before).
-    pendingSessionOrder: null,
-    pendingProjectOrder: null,
-    // Any in-flight create-focus intent dies with the session, so a create
-    // submitted before logout never yanks focus into the next login's workspace.
-    pendingCreateFocus: null,
-    // The changed-files slice is session-scoped data — clear it so the next
-    // login never flashes the previous user's changes.
-    changes: emptyChanges(),
-  }
-}
-
-// Log out: tell the server to destroy the session, deliberately disconnect the
-// events socket (suppressing the reconnect loop — `eventsSocket.close()` sets the
-// closed-by-user flag), wipe all session-scoped state (so nothing from this user
-// leaks into the next login — see `clearSessionScopedState`), and drop to the
-// login screen. The server call is best-effort: even if it fails we still tear
-// down the client-side session view, since the cookie is HttpOnly and the gate
-// re-checks every request anyway.
-export async function logout(): Promise<void> {
-  // Drop the selected session's fine topic from the interest set before closing
-  // so a later login doesn't re-subscribe a stale session on reconnect (coarse
-  // topics persist). The unsubscribe only mutates the set here (socket closing).
-  const prevSession = state.selectedSessionId
-  if (prevSession !== null) {
-    eventsSocket.unsubscribe([changesTopic(prevSession)])
-  }
-  eventsSocket.close()
-  try {
-    await fetch("/api/logout", { method: "POST", credentials: "same-origin" })
-  } catch {
-    // Ignore — the local teardown below is what matters for the UI.
-  }
-  setState({
-    ...clearSessionScopedState(),
-    auth: { phase: "anonymous", username: null, error: null, pending: false },
-  })
-}
+boot()
 
 // Hardware/browser Back for the mobile shell. Registered ONCE at module scope
 // (never in a React effect) so it survives re-renders and shell switches. The

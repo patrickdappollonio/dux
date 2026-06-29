@@ -602,14 +602,14 @@ mod tests {
         c.set(t0, None, StatusTone::Info, "Saved.");
         c.set(t0, Some("commit".into()), StatusTone::Info, "Committed.");
         // Warning/error do not auto-clear.
-        c.set(t0, Some("acme".into()), StatusTone::Error, "ACME error.");
+        c.set(t0, Some("push".into()), StatusTone::Error, "Push error.");
         let changes = c.tick(t0 + Duration::from_secs(6), Duration::from_secs(20));
         // Both Info entries cleared; the error persists.
         assert_eq!(changes.cleared_keys.len(), 2);
         assert!(changes.cleared_keys.contains(&None));
         assert!(changes.cleared_keys.contains(&Some("commit".to_string())));
         assert_eq!(c.snapshot().len(), 1);
-        assert_eq!(c.snapshot()[0].key.as_deref(), Some("acme"));
+        assert_eq!(c.snapshot()[0].key.as_deref(), Some("push"));
     }
 
     #[test]

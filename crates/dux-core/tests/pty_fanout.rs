@@ -29,7 +29,7 @@ fn subscriber_receives_live_pty_bytes() {
     // `cat` echoes stdin back to stdout. Subscribe BEFORE writing so there is no
     // race against the streamed output.
     let client = PtyClient::spawn("cat", &[], Path::new("/"), 24, 80, 1000).expect("spawn cat");
-    let rx = client.subscribe();
+    let (_guard, rx) = client.subscribe();
     client.write_bytes(b"ping-fanout\n").expect("write");
 
     let seen = drain_until(&rx, "ping-fanout", Duration::from_secs(5));
@@ -54,7 +54,7 @@ fn repaint_contains_current_screen_contents() {
     .expect("spawn printf");
     std::thread::sleep(Duration::from_millis(400));
 
-    let (repaint, _rx) = client.subscribe_with_repaint();
+    let (_guard, repaint, _rx) = client.subscribe_with_repaint();
     let text = String::from_utf8_lossy(&repaint);
     assert!(
         text.contains("repaint-content"),

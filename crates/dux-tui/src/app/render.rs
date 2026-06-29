@@ -723,15 +723,27 @@ impl App {
                 .inner(term_area);
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
-                .map(|(label, fg_cmd)| {
+                .enumerate()
+                .map(|(i, (label, fg_cmd))| {
                     let color = self.theme.session_active;
                     let mut spans = vec![Span::styled("● ", Style::default().fg(color))];
                     if let Some(cmd) = fg_cmd {
+                        // The running app's name is the row's label. Only when
+                        // another terminal runs the same app do we disambiguate
+                        // with the terminal's number ("vim (#1)"), mirroring the
+                        // web terminalTitle rule.
+                        let duplicate = terminal_render_data
+                            .iter()
+                            .enumerate()
+                            .any(|(j, (_, other))| j != i && other.as_deref() == Some(cmd));
                         spans.push(Span::styled(cmd.clone(), Style::default().fg(color)));
-                        spans.push(Span::styled(
-                            format!(" · {label}"),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        ));
+                        let suffix = terminal_dup_suffix(label, duplicate);
+                        if !suffix.is_empty() {
+                            spans.push(Span::styled(
+                                suffix,
+                                Style::default().fg(self.theme.provider_label_fg),
+                            ));
+                        }
                     } else {
                         spans.push(Span::styled(label.clone(), Style::default().fg(color)));
                     }
@@ -5695,209 +5707,8 @@ impl App {
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::None;
             }
-            PromptState::ServerAddUserName { input } => {
-                let input = input.clone();
-                self.render_server_add_user_name(frame, &input);
-            }
-            PromptState::ServerAddUserPassword {
-                username, input, ..
-            } => {
-                let username = username.clone();
-                let input = input.clone();
-                self.render_server_add_user_password(frame, &username, &input);
-            }
-            PromptState::ServerRemoveUser {
-                usernames,
-                selected,
-            } => {
-                let usernames = usernames.clone();
-                let selected = *selected;
-                self.render_server_remove_user(frame, &usernames, selected);
-            }
             PromptState::None => {}
         }
-    }
-
-    /// Render a single-line text-input dialog: a title, a label, a bordered
-    /// input box (masked when `input.is_masked()`), and a confirm/cancel hint.
-    /// Shared by the two `server-add-user` steps.
-    fn render_single_input_dialog(
-        &mut self,
-        frame: &mut Frame,
-        title: &str,
-        label: &str,
-        input: &TextInput,
-    ) {
-        self.render_dim_overlay(frame);
-        let dialog_width = 62.min(frame.area().width.max(1));
-        let area = centered_rect_exact(dialog_width, 8, frame.area());
-        self.clear_overlay_area(frame, area);
-
-        let outer = self.themed_overlay_block(title);
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [label_area, input_area, _, hint_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(3),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .areas(inner);
-
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(self.theme.input_label_fg),
-        )))
-        .render(label_area, frame.buffer_mut());
-
-        // Build the display string honoring masking, then place the cursor.
-        let display_text = input.display_text();
-        let display: Vec<char> = display_text.chars().collect();
-        let cursor_chars = input.text[..input.cursor.min(input.text.len())]
-            .chars()
-            .count();
-        let line = if cursor_chars < display.len() {
-            let before: String = display[..cursor_chars].iter().collect();
-            let cursor_char = display[cursor_chars].to_string();
-            let rest: String = display[cursor_chars + 1..].iter().collect();
-            Line::from(vec![
-                Span::raw(format!(" {before}")),
-                Span::styled(
-                    cursor_char,
-                    Style::default()
-                        .fg(self.theme.input_cursor_fg)
-                        .bg(self.theme.input_cursor_bg),
-                ),
-                Span::raw(rest),
-            ])
-        } else {
-            let all: String = display.iter().collect();
-            Line::from(vec![
-                Span::raw(format!(" {all}")),
-                Span::styled(
-                    " ",
-                    Style::default()
-                        .fg(self.theme.input_cursor_fg)
-                        .bg(self.theme.input_cursor_bg),
-                ),
-            ])
-        };
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(Style::default().fg(self.theme.overlay_border));
-        Paragraph::new(line)
-            .block(input_block)
-            .render(input_area, frame.buffer_mut());
-
-        let confirm_key = self.bindings.label_for(Action::Confirm);
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut hints = vec![Span::raw(" ")];
-        hints.extend(self.theme.key_badge_default(&confirm_key));
-        hints.push(Span::styled(
-            " confirm  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        hints.extend(self.theme.key_badge_default(&close_key));
-        hints.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::None;
-    }
-
-    fn render_server_add_user_name(&mut self, frame: &mut Frame, input: &TextInput) {
-        self.render_single_input_dialog(frame, "Add Web Login User", "Username:", input);
-    }
-
-    fn render_server_add_user_password(
-        &mut self,
-        frame: &mut Frame,
-        username: &str,
-        input: &TextInput,
-    ) {
-        let title = format!("Set Password for \"{username}\"");
-        self.render_single_input_dialog(frame, &title, "Password (hidden):", input);
-    }
-
-    fn render_server_remove_user(
-        &mut self,
-        frame: &mut Frame,
-        usernames: &[String],
-        selected: usize,
-    ) {
-        self.render_dim_overlay(frame);
-        let dialog_width = 62.min(frame.area().width.max(1));
-        // Title + list rows + spacer + hint, bounded so a long user list still
-        // fits the screen.
-        let list_height = (usernames.len() as u16).clamp(1, 12);
-        let area = centered_rect_exact(dialog_width, list_height + 4, frame.area());
-        self.clear_overlay_area(frame, area);
-
-        let outer = self.themed_overlay_block("Remove Web Login User");
-        let inner = outer.inner(area);
-        outer.render(area, frame.buffer_mut());
-
-        let [list_area, _, hint_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(list_height),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .areas(inner);
-
-        let rows: Vec<Line> = usernames
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                if i == selected {
-                    Line::from(Span::styled(
-                        format!(" ▸ {name}"),
-                        Style::default()
-                            .fg(self.theme.input_cursor_fg)
-                            .bg(self.theme.input_cursor_bg)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                } else {
-                    Line::from(Span::styled(
-                        format!("   {name}"),
-                        Style::default().fg(self.theme.text_fg),
-                    ))
-                }
-            })
-            .collect();
-        Paragraph::new(rows).render(list_area, frame.buffer_mut());
-
-        let move_key = self
-            .bindings
-            .combined_label(Action::MoveDown, Action::MoveUp);
-        let confirm_key = self.bindings.label_for(Action::Confirm);
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut hints = vec![Span::raw(" ")];
-        if !move_key.is_empty() {
-            hints.extend(self.theme.key_badge_default(&move_key));
-            hints.push(Span::styled(
-                " move  ",
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
-        hints.extend(self.theme.key_badge_default(&confirm_key));
-        hints.push(Span::styled(
-            " remove  ",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        hints.extend(self.theme.key_badge_default(&close_key));
-        hints.push(Span::styled(
-            " cancel",
-            Style::default().fg(self.theme.hint_desc_fg),
-        ));
-        Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-        self.overlay_layout.active = OverlayMouseLayout::None;
     }
 
     fn render_edit_macros(&mut self, frame: &mut Frame) {
@@ -7016,6 +6827,30 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
     }
 }
 
+/// The trailing counter in a "Terminal N" label, used only to disambiguate two
+/// terminals running the same app (see `terminal_dup_suffix`). `None` for a
+/// label without a trailing number, which the engine never produces but keeps
+/// the helper total.
+fn terminal_number(label: &str) -> Option<u32> {
+    label.rsplit(' ').next()?.parse().ok()
+}
+
+/// The suffix appended after a running terminal's command in the left pane.
+/// Empty when the command is unique among the terminals shown together;
+/// otherwise " (#N)" using the terminal's counter so two terminals running the
+/// same app stay distinct ("vim (#1)", "vim (#2)"), falling back to the label
+/// in parentheses if it carries no number. Mirrors the web `terminalTitle`
+/// rule (crates/dux-web/web/src/lib/terminals.ts).
+fn terminal_dup_suffix(label: &str, duplicate: bool) -> String {
+    if !duplicate {
+        return String::new();
+    }
+    match terminal_number(label) {
+        Some(n) => format!(" (#{n})"),
+        None => format!(" ({label})"),
+    }
+}
+
 fn companion_terminal_status_meta(status: CompanionTerminalStatus) -> (&'static str, &'static str) {
     match status {
         CompanionTerminalStatus::NotLaunched => ("○", "not launched"),
@@ -8028,6 +7863,35 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn terminal_number_parses_trailing_counter() {
+        assert_eq!(terminal_number("Terminal 1"), Some(1));
+        assert_eq!(terminal_number("Terminal 12"), Some(12));
+    }
+
+    #[test]
+    fn terminal_number_is_none_without_a_trailing_number() {
+        assert_eq!(terminal_number("Terminal"), None);
+        assert_eq!(terminal_number("scratch"), None);
+    }
+
+    #[test]
+    fn terminal_dup_suffix_is_empty_for_a_unique_command() {
+        assert_eq!(terminal_dup_suffix("Terminal 1", false), "");
+    }
+
+    #[test]
+    fn terminal_dup_suffix_uses_the_counter_on_collision() {
+        // Two terminals running the same app are disambiguated by their number.
+        assert_eq!(terminal_dup_suffix("Terminal 1", true), " (#1)");
+        assert_eq!(terminal_dup_suffix("Terminal 2", true), " (#2)");
+    }
+
+    #[test]
+    fn terminal_dup_suffix_falls_back_to_the_label_without_a_number() {
+        assert_eq!(terminal_dup_suffix("scratch", true), " (scratch)");
     }
 
     #[test]

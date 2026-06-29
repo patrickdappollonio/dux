@@ -324,6 +324,13 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     .await
     .expect("connect");
     let _ = ws.next().await; // initial repaint (binary)
+    // Claim sizing+input ownership by sending a size frame first: stdin from a
+    // non-owner is dropped (the per-PTY active-owner model), and a freshly
+    // attached socket owns nothing until it sends its size, exactly as the real
+    // client does on a foreground attach.
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.to_string()))
+        .await
+        .expect("send resize claim");
     ws.send(Message::Binary(b"dux-flip-marker\n".to_vec()))
         .await
         .expect("send pty input");
