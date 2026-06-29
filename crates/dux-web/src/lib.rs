@@ -270,6 +270,24 @@ fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
     result
 }
 
+/// Safety note shown when the server is reachable on the tailnet (loopback
+/// primary + a best-effort Tailscale leg). Exported so the TUI flip path in
+/// `crates/dux/src/main.rs` can reference the same text without a separate
+/// copy.
+pub const SAFETY_NOTE_TAILNET: &str = "Reachable by other devices on your tailnet (no login). \
+     Disable with tailscale_enabled = false under [server].";
+
+/// Safety note shown when the server is bound on a required non-loopback
+/// (public/LAN) address. Exported alongside [`SAFETY_NOTE_TAILNET`] so both
+/// operator-facing strings live in one place.
+pub const SAFETY_NOTE_PUBLIC: &str = "Reachable on your network with NO login. \
+     Anyone who can reach this address controls your agents and worktrees. \
+     Put it behind Tailscale or a trusted reverse proxy.";
+
+/// Suffix appended to [`SAFETY_NOTE_PUBLIC`] when a Tailscale best-effort leg
+/// is ALSO bound alongside the required public/LAN primary.
+pub const SAFETY_NOTE_TAILSCALE_ALSO_BOUND: &str = " (The Tailscale address is bound too.)";
+
 /// Operator-facing safety note based on the bound addresses' reachability.
 /// Returns None when the server is loopback-only (nothing to warn about).
 /// Uses highest-severity-wins: a required non-loopback primary yields the LAN
@@ -279,21 +297,14 @@ pub fn safety_note(addrs: &[PlanAddr]) -> Option<String> {
         addrs.iter().map(|a| (a.addr(), a.is_required())).collect();
     match reachability(&pairs) {
         Reachability::LoopbackOnly => None,
-        Reachability::Tailscale => Some(
-            "Reachable by other devices on your tailnet (no login). \
-             Disable with tailscale_enabled = false under [server]."
-                .to_string(),
-        ),
+        Reachability::Tailscale => Some(SAFETY_NOTE_TAILNET.to_string()),
         Reachability::Public => {
             let has_tailscale = pairs
                 .iter()
                 .any(|(addr, required)| !addr.ip().is_loopback() && !required);
-            let mut msg = "Reachable on your network with NO login. \
-                Anyone who can reach this address controls your agents and worktrees. \
-                Put it behind Tailscale or a trusted reverse proxy."
-                .to_string();
+            let mut msg = SAFETY_NOTE_PUBLIC.to_string();
             if has_tailscale {
-                msg.push_str(" (The Tailscale address is bound too.)");
+                msg.push_str(SAFETY_NOTE_TAILSCALE_ALSO_BOUND);
             }
             Some(msg)
         }
