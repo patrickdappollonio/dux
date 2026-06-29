@@ -84,6 +84,11 @@ pub enum Action {
     ToggleMarked,
     // Palette-only (no direct keybinding)
     KillRunning,
+    /// Web-only: open the Monaco config.toml editor. Has no TUI behavior (the
+    /// TUI edits config via `dux config` and the configure-* commands), but it
+    /// still needs an `Action` + a palette-only binding so it can join the shared
+    /// palette registry. See `PaletteSurface::Web`.
+    EditConfig,
     NewTerminal,
     RenameSession,
     DeleteProject,
@@ -180,6 +185,7 @@ impl Action {
             Action::ToggleSelection => "toggle_selection",
             Action::ToggleMarked => "toggle_marked",
             Action::KillRunning => "kill_running",
+            Action::EditConfig => "edit_config",
             Action::NewTerminal => "new_terminal",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
@@ -296,6 +302,7 @@ impl Action {
             Action::KillRunning => {
                 "Open the kill-running modal for agents and companion terminals."
             }
+            Action::EditConfig => "Edit config.toml in an editor.",
             Action::RenameSession => "Rename the selected agent session.",
             Action::DeleteProject => "Remove the selected project and its sessions.",
             Action::RemoveProject => "Remove project from app (keeps files on disk).",
@@ -409,6 +416,7 @@ impl Action {
             | Action::ToggleSelection
             | Action::ToggleMarked => Some("Overlays"),
             Action::KillRunning
+            | Action::EditConfig
             | Action::NewTerminal
             | Action::RenameSession
             | Action::DeleteProject

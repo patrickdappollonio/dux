@@ -27,9 +27,9 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{post, put},
+    routing::{get, post, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use dux_core::wire::{WireCommand, WireMacroEntry};
 
@@ -54,6 +54,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/ui/toggle-github-integration",
             post(toggle_github_integration),
+        )
+        .route(
+            "/api/v1/config/raw",
+            get(read_raw_config).put(write_raw_config),
         )
 }
 
@@ -166,6 +170,42 @@ async fn toggle_github_integration(State(state): State<AppState>, headers: Heade
     dispatch(&state, &headers, WireCommand::ToggleGithubIntegration {}).await
 }
 
+// ── Raw config editor (Monaco) ───────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct RawConfigBody {
+    /// The raw `config.toml` text, verbatim from disk (or the plain render of the
+    /// running config when no file exists yet).
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct WriteRawConfigBody {
+    content: String,
+}
+
+/// `GET /api/v1/config/raw`. Return the raw `config.toml` text for the Monaco
+/// editor. Reading is gated like every other config route but takes no body.
+async fn read_raw_config(State(state): State<AppState>) -> Response {
+    let content = state.engine.read_raw_config().await;
+    Json(RawConfigBody { content }).into_response()
+}
+
+/// `PUT /api/v1/config/raw`. Validate (`toml::from_str::<Config>`) and write the
+/// raw `config.toml` text verbatim. `200 OK` on success; `400` with the parse/IO
+/// error otherwise. The engine adopts the change when the frontend follows with
+/// `POST /api/v1/config/reload`, which re-reads the file and emits
+/// `config.changed`.
+async fn write_raw_config(
+    State(state): State<AppState>,
+    Json(body): Json<WriteRawConfigBody>,
+) -> Response {
+    match state.engine.write_raw_config(body.content).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 // ── Shared dispatch ─────────────────────────────────────────────────────────────
 
 /// Dispatch a config-mutating wire command, scoping its status toasts to the
@@ -263,6 +303,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn read_raw_config_returns_ok() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/config/raw")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn write_raw_config_rejects_invalid_toml_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "PUT",
+                "/api/v1/config/raw",
+                r#"{"content":"this is = = not valid toml"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

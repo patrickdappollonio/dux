@@ -142,6 +142,16 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<(dux_core::config::DuxPaths, String)>>,
     ),
+    /// Read the raw `config.toml` text off the engine thread for the Monaco
+    /// config editor. Replies with the file's contents verbatim, or the canonical
+    /// plain render of the running config when the file does not exist yet.
+    ReadRawConfig(oneshot::Sender<String>),
+    /// Validate and write raw `config.toml` text from the Monaco editor. Parses
+    /// the text as a `Config` first (rejecting invalid TOML), flushes any pending
+    /// managed writes so they cannot clobber it, then atomically writes the file
+    /// verbatim. The caller adopts the change via the existing config reload.
+    /// `Ok(())` on success; `Err(message)` for a parse or IO failure.
+    WriteRawConfig(String, oneshot::Sender<Result<(), String>>),
     /// Gracefully wind down every running PTY (SIGTERM the children so CLIs can
     /// save state for a later resume), then stop the engine thread. Replies once
     /// the wind-down completes so the server can finish exiting.
@@ -757,6 +767,38 @@ impl EngineHandle {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    /// Read the raw `config.toml` text for the Monaco config editor (or the plain
+    /// render of the running config if the file is missing). Empty string if the
+    /// engine thread is gone.
+    pub async fn read_raw_config(&self) -> String {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::ReadRawConfig(tx))
+            .await
+            .is_err()
+        {
+            return String::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Validate and write raw `config.toml` text from the Monaco editor. Returns
+    /// `Err(message)` for invalid TOML, an IO failure, or a dead engine thread.
+    pub async fn write_raw_config(&self, content: String) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::WriteRawConfig(content, tx))
+            .await
+            .is_err()
+        {
+            return Err("the engine is not available".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
     }
 }
 
@@ -1537,6 +1579,31 @@ fn handle_request(
                 .find(|s| s.id == session_id)
                 .map(|session| (engine.paths.clone(), session.project_id.clone()));
             let _ = reply.send(context);
+        }
+        EngineRequest::ReadRawConfig(reply) => {
+            // Verbatim file (comments + unknown keys intact) so the editor shows
+            // exactly what is on disk; fall back to the plain render of the
+            // running config when no file exists yet.
+            let raw = std::fs::read_to_string(&engine.paths.config_path)
+                .unwrap_or_else(|_| dux_core::config_write::render_config_plain(&engine.config));
+            let _ = reply.send(raw);
+        }
+        EngineRequest::WriteRawConfig(content, reply) => {
+            let result = match dux_core::config::validate_config_str(&content) {
+                Ok(()) => {
+                    // Flush pending managed writes so a coalesced lazy save cannot
+                    // clobber the raw write, then persist the user's text verbatim.
+                    engine.config_writer.flush();
+                    dux_core::config_write::write_config_atomic(
+                        &engine.paths.config_path,
+                        &content,
+                        dux_core::config_write::Durability::Fsync,
+                    )
+                    .map_err(|e| format!("Could not write config.toml: {e}"))
+                }
+                Err(e) => Err(format!("config.toml is not valid: {e}")),
+            };
+            let _ = reply.send(result);
         }
     }
 }

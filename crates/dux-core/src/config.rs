@@ -903,6 +903,16 @@ pub fn provider_config(
         })
 }
 
+/// Validate that `s` parses as a complete [`Config`] — the same `toml::from_str`
+/// check [`load_config`] performs — returning a user-facing error message on
+/// failure. The web's raw config editor calls this to reject invalid TOML before
+/// it overwrites `config.toml`. The parsed value is discarded: validation only.
+pub fn validate_config_str(s: &str) -> Result<(), String> {
+    toml::from_str::<Config>(s)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Load config for a read-only consumer (the web server). Reads `config.toml` if
 /// present and parses it; on a missing file or parse error, falls back to defaults
 /// (logging the error). Always applies provider defaults. Unlike the TUI's
@@ -1350,6 +1360,21 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn validate_config_str_accepts_a_full_render_and_rejects_garbage() {
+        // The canonical plain render of the default config must round-trip
+        // through the validator (this is exactly what the web editor writes).
+        let rendered = crate::config_write::render_config_plain(&Config::default());
+        assert!(
+            validate_config_str(&rendered).is_ok(),
+            "rendered default config must validate:\n{rendered}"
+        );
+        assert!(
+            validate_config_str("this is = = not valid toml").is_err(),
+            "garbage must be rejected"
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

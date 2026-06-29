@@ -332,6 +332,16 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
+        action: Action::EditConfig,
+        name: "edit-config",
+        description: "Edit config.toml in an editor",
+        // Web-only: opens the Monaco config.toml editor (GET/PUT
+        // /api/v1/config/raw). The TUI edits config through `dux config` and the
+        // configure-* commands, so it does not list this. First user of
+        // PaletteSurface::Web.
+        surface: PaletteSurface::Web,
+    },
+    PaletteCommand {
         action: Action::NewTerminal,
         name: "new-terminal",
         description: "Spawn a new companion terminal for the selected agent",
@@ -508,6 +518,7 @@ mod tests {
         let expected = [
             "add-project",
             "configure-global-env",
+            "edit-config",
             "edit-macros",
             "kill-running",
             "reload-config",
