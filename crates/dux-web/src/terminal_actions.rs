@@ -94,7 +94,7 @@ async fn delete_terminal(
         .engine
         .apply_wire_scoped(
             WireCommand::DeleteTerminal { terminal_id: tid },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {

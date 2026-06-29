@@ -161,7 +161,10 @@ async fn create_session(
     // `Ok` error-toned status → 409 (an agent is already being created).
     let outcome = match state
         .engine
-        .apply_wire_scoped(body.into_wire(), scope_from_headers(&headers))
+        .apply_wire_scoped(
+            body.into_wire(),
+            scope_from_headers(&headers, &state.connections),
+        )
         .await
     {
         Ok(outcome) => {
@@ -271,7 +274,7 @@ async fn delete_session(
                 session_id: id,
                 delete_worktree: q.delete_worktree,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -317,7 +320,7 @@ async fn patch_session(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp;
     }
-    let scope = scope_from_headers(&headers);
+    let scope = scope_from_headers(&headers, &state.connections);
 
     // Validate a provider change UP FRONT, before dispatching any sub-command, so a
     // bad provider can never partially apply after the rename/auto-reopen already
@@ -431,7 +434,7 @@ async fn reconnect_session(
                 session_id: id,
                 force,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -463,7 +466,7 @@ async fn rerun_startup_command(
         .engine
         .apply_wire_scoped(
             WireCommand::RerunStartupCommand { session_id: id },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -492,7 +495,7 @@ async fn reorder_sessions(
                 project_id: body.project_id,
                 session_ids: body.session_ids,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {

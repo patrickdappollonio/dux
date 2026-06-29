@@ -239,7 +239,7 @@ async fn push(
                 WireCommand::Push {
                     session_id: op.session_id,
                 },
-                scope_from_headers(&headers),
+                scope_from_headers(&headers, &state.connections),
             )
             .await,
     )
@@ -257,7 +257,7 @@ async fn pull(
                 WireCommand::Pull {
                     session_id: op.session_id,
                 },
-                scope_from_headers(&headers),
+                scope_from_headers(&headers, &state.connections),
             )
             .await,
     )
