@@ -232,6 +232,10 @@ export interface EventsServerMessage {
   id?: string
   /** Monotonic per-session revision (`session.changes`). */
   rev?: number
+  /** The claiming connection's id on a `pty.owner` handover. A client viewing
+   *  that PTY compares it against its own PTY-socket connection id to decide
+   *  ownership definitively (own id = owner, foreign id = read-only placeholder). */
+  owner?: string
   /** Status correlation key (`status`/`status_cleared`); null/absent = the
    *  anonymous slot. */
   key?: string | null

@@ -791,6 +791,16 @@ struct PtySizeOwners {
     next_conn_id: std::sync::atomic::AtomicU64,
 }
 
+/// Outcome of [`PtySizeOwners::may_write`]: whether the connection may forward its
+/// stdin to the PTY (`allowed`), and whether the check itself NEWLY claimed an
+/// unowned PTY (`claimed_new`) so the caller emits exactly one `pty.owner` handover
+/// for that uncontested first write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WriteClaim {
+    allowed: bool,
+    claimed_new: bool,
+}
+
 impl PtySizeOwners {
     /// Allocate a process-unique id for a freshly attached PTY socket, used to
     /// compare against the recorded owner.
@@ -815,14 +825,58 @@ impl PtySizeOwners {
     }
 
     /// Whether `conn_id` is the current owner of `pty_id`. Unlike [`claim`] this
-    /// never mutates: an unowned PTY (no client has sent a size yet) returns false,
-    /// so a non-owner's stdin is dropped until it claims ownership. The PTY socket
-    /// handler gates BOTH stdin and resize on ownership, so only the active device's
-    /// input reaches the child.
+    /// never mutates: an unowned PTY (no client has sent a size yet) returns false.
+    /// A read-only ownership probe used by tests to assert the post-conditions of
+    /// [`claim`], [`may_write`], and [`release`]; the live handler gates stdin
+    /// through [`may_write`] (atomic) and resize through [`claim`], so production
+    /// never needs a separate non-mutating check.
     ///
     /// [`claim`]: PtySizeOwners::claim
+    /// [`may_write`]: PtySizeOwners::may_write
+    /// [`release`]: PtySizeOwners::release
+    #[cfg(test)]
     fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners.lock().unwrap().get(pty_id) == Some(&conn_id)
+    }
+
+    /// Decide whether `conn_id` may write stdin to `pty_id`, resolving the gate
+    /// ATOMICALLY under the owners lock so no concurrent [`claim`] can slip between
+    /// the decision and the write (the TOCTOU window a separate `is_owner`-then-write
+    /// left open: a just-demoted connection's keystroke could still reach the PTY).
+    /// Semantics:
+    ///   - no current owner -> `conn_id` becomes the owner (an uncontested first
+    ///     writer claims, mirroring how a size frame auto-claims an unowned PTY),
+    ///     reported via `claimed_new` so the caller emits exactly one `pty.owner`
+    ///     handover. This restores input for a solo/out-of-band client whose stdin
+    ///     arrives before any size frame (previously silently dropped).
+    ///   - owner == conn_id -> allowed, no handover.
+    ///   - a different owner -> denied; the non-owner's stdin is dropped so a
+    ///     read-only secondary viewer can never disrupt the active device's typing.
+    ///
+    /// Unlike a size frame's [`claim`] (most-recent-wins, which DOES take over an
+    /// existing owner), writing never steals control from another owner: typing must
+    /// not silently wrest the prompt away from the active device.
+    ///
+    /// [`claim`]: PtySizeOwners::claim
+    fn may_write(&self, pty_id: &str, conn_id: u64) -> WriteClaim {
+        let mut owners = self.owners.lock().unwrap();
+        match owners.get(pty_id) {
+            Some(&owner) if owner == conn_id => WriteClaim {
+                allowed: true,
+                claimed_new: false,
+            },
+            Some(_) => WriteClaim {
+                allowed: false,
+                claimed_new: false,
+            },
+            None => {
+                owners.insert(pty_id.to_string(), conn_id);
+                WriteClaim {
+                    allowed: true,
+                    claimed_new: true,
+                }
+            }
+        }
     }
 
     /// Release ownership of `pty_id` if `conn_id` still holds it (called when the
@@ -1058,6 +1112,24 @@ async fn handle_pty_socket(
     // can attach as a silent read-only observer without stealing the foregrounded
     // device's control. Ownership is released on disconnect below.
     let conn_id = pty_size_owners.next_conn_id();
+    // Hand the client this PTY socket's connection id as the first frame (a Text
+    // frame, distinct from the Binary PTY-byte frames), mirroring how `/ws/events`
+    // opens with a `connected` frame. The client records it and compares it against
+    // the `owner` field of every `pty.owner` event: an equal id means this client
+    // is the (new) owner, a different id means another device took over. This
+    // definitive comparison replaces the old timing/echo-counting heuristic and
+    // fixes the two-device simultaneous-claim race. A fresh id is allocated per
+    // socket open, so a reconnect re-issues one.
+    let _ = send_event(
+        &sink,
+        &WireEvent {
+            event: "connected".to_string(),
+            id: Some(conn_id.to_string()),
+            rev: None,
+            owner: None,
+        },
+    )
+    .await;
     // Replay the buffered scrollback/repaint before streaming live bytes.
     send_binary(&sink, repaint).await;
     let pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
@@ -1104,24 +1176,38 @@ async fn handle_pty_socket(
             },
         };
         match msg {
-            // Binary frame = raw PTY stdin for THIS socket's PTY. Forwarded ONLY
-            // when this connection currently owns the PTY (it claimed by sending a
-            // size). A non-owner's stdin is dropped so a read-only secondary viewer
-            // can never disrupt the active device's typing.
+            // Binary frame = raw PTY stdin for THIS socket's PTY. The write gate is
+            // resolved ATOMICALLY by `may_write` (holding the owners lock across the
+            // decision) so no concurrent claim can slip between the check and the
+            // write. A non-owner's stdin is dropped (with a diagnostic log) so a
+            // read-only secondary viewer can never disrupt the active device's
+            // typing; an UNOWNED PTY's first writer is allowed AND becomes the owner,
+            // emitting one `pty.owner` so other clients update (the uncontested
+            // out-of-band case that arrives before any size frame).
             Message::Binary(bytes) => {
-                if pty_size_owners.is_owner(target.pty_id(), conn_id) {
-                    engine.write_pty(target.pty_id().to_string(), bytes.to_vec());
+                let pty_id = target.pty_id();
+                let claim = pty_size_owners.may_write(pty_id, conn_id);
+                if claim.allowed {
+                    if claim.claimed_new {
+                        bus.emit(pty_owner_event(pty_id, conn_id));
+                    }
+                    engine.write_pty(pty_id.to_string(), bytes.to_vec());
+                } else {
+                    dux_core::logger::debug(&format!(
+                        "PTY stdin from non-owner conn {conn_id} dropped for pty {pty_id} \
+                         (another connection currently owns input)"
+                    ));
                 }
             }
             // Text frame = a resize control message. Sending a size IS the claim:
             // it makes this connection the owner (most-recent claim wins, taking
             // over a prior owner), then applies the resize. On a real handover we
-            // broadcast a `pty.owner` signal so other clients viewing this PTY flip
-            // to the read-only take-over placeholder.
+            // broadcast a `pty.owner` signal (carrying this connection's id) so other
+            // clients viewing this PTY flip to the read-only take-over placeholder.
             Message::Text(text) => {
                 if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
                     if pty_size_owners.claim(target.pty_id(), conn_id) {
-                        bus.emit(pty_owner_event(target.pty_id()));
+                        bus.emit(pty_owner_event(target.pty_id(), conn_id));
                     }
                     engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
                 }
@@ -1139,16 +1225,22 @@ async fn handle_pty_socket(
 }
 
 /// A `pty.owner` signal: the connection that owns a PTY's sizing+input changed (a
-/// new device took over by sending its size). `id` is the pty id (the session id
-/// for an agent PTY, the terminal id for a companion). It carries no `rev` — it is
-/// a plain "the owner is now someone else" nudge. Delivered on the coarse
+/// new device took over by sending its size, or an uncontested first writer
+/// claimed an unowned PTY). `id` is the pty id (the session id for an agent PTY,
+/// the terminal id for a companion); `owner` is the claiming connection's id (the
+/// `PtySizeOwners` conn id). It carries no `rev`. Delivered on the coarse
 /// `sessions` topic (every client holds it), so any other client currently viewing
-/// that PTY flips to the read-only take-over placeholder.
-fn pty_owner_event(pty_id: &str) -> Event {
+/// that PTY compares `owner` against its own PTY-socket connection id: an equal id
+/// means this client is the owner; a different id flips it to the read-only
+/// take-over placeholder. The explicit id replaces the old timing/echo-counting
+/// heuristic, fixing the race where two devices claiming at once could both end up
+/// showing the placeholder while the server held a real owner.
+fn pty_owner_event(pty_id: &str, owner_conn_id: u64) -> Event {
     Event::Resource {
         event: "pty.owner".to_string(),
         id: Some(pty_id.to_string()),
         rev: None,
+        owner: Some(owner_conn_id.to_string()),
     }
 }
 
@@ -1160,6 +1252,7 @@ fn config_changed_event() -> Event {
         event: "config.changed".to_string(),
         id: None,
         rev: None,
+        owner: None,
     }
 }
 
@@ -1194,6 +1287,7 @@ fn projects_changed_event() -> Event {
         event: "projects.changed".to_string(),
         id: None,
         rev: None,
+        owner: None,
     }
 }
 
@@ -1206,6 +1300,7 @@ fn sessions_changed_event() -> Event {
         event: "sessions.changed".to_string(),
         id: None,
         rev: None,
+        owner: None,
     }
 }
 
@@ -1267,6 +1362,10 @@ struct WireEvent {
     id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rev: Option<u64>,
+    /// The claiming connection's id on a `pty.owner` handover (see
+    /// [`pty_owner_event`]). Omitted from the wire for every other event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 /// Outbound `/ws/events` status event: the one event carrying an inline payload
@@ -1413,6 +1512,7 @@ async fn handle_events_socket(
             event: "connected".to_string(),
             id: Some(connection_id.clone()),
             rev: None,
+            owner: None,
         },
     )
     .await;
@@ -1481,7 +1581,12 @@ async fn handle_events_socket(
                 continue;
             }
             ev = bus_rx.recv() => match ev {
-                Ok(Event::Resource { event, id, rev }) => {
+                Ok(Event::Resource {
+                    event,
+                    id,
+                    rev,
+                    owner,
+                }) => {
                     // Forward a resource event only if this connection holds the
                     // topic it is delivered on. `session.changes` rides the fine
                     // per-session `session:<id>:changes` topic; `config.changed`
@@ -1503,7 +1608,12 @@ async fn handle_events_socket(
                         _ => false,
                     };
                     if deliver {
-                        let frame = WireEvent { event, id, rev };
+                        let frame = WireEvent {
+                            event,
+                            id,
+                            rev,
+                            owner,
+                        };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
                         }
@@ -1523,6 +1633,7 @@ async fn handle_events_socket(
                                 event: "session.changes".to_string(),
                                 id: Some(sid.to_string()),
                                 rev: changes.peek_rev(sid),
+                                owner: None,
                             };
                             if send_event(&sink, &frame).await.is_err() {
                                 sink_dead = true;
@@ -1543,6 +1654,7 @@ async fn handle_events_socket(
                             event: "config.changed".to_string(),
                             id: None,
                             rev: None,
+                            owner: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1556,6 +1668,7 @@ async fn handle_events_socket(
                             event: "projects.changed".to_string(),
                             id: None,
                             rev: None,
+                            owner: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1566,6 +1679,7 @@ async fn handle_events_socket(
                             event: "sessions.changed".to_string(),
                             id: None,
                             rev: None,
+                            owner: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1661,6 +1775,7 @@ async fn handle_events_socket(
                                     event: "session.changes".to_string(),
                                     id: Some(sid.to_string()),
                                     rev: changes.peek_rev(sid),
+                                    owner: None,
                                 };
                                 if send_event(&sink, &catchup).await.is_err() {
                                     sink_dead = true;
@@ -3018,11 +3133,11 @@ mod tests {
         assert!(owners.claim(pty, conn_b), "A -> B (takeover) is a change");
     }
 
-    /// Owner-only input: with two connections attached to the same PTY, only the
-    /// current owner's stdin is forwarded; a non-owner's stdin is dropped. This is
-    /// exactly the gate the PTY socket handler applies (`is_owner`) before
-    /// `engine.write_pty`, so a read-only secondary viewer can never disrupt the
-    /// active device's typing.
+    /// Owner-only input, exercising the ACTUAL gate the handler applies
+    /// (`may_write`, not `is_owner`): with two connections attached to the same PTY,
+    /// only the current owner's stdin is forwarded; a non-owner's stdin is dropped.
+    /// A read-only secondary viewer can never disrupt the active device's typing,
+    /// and a non-owner's denied write never silently claims ownership.
     #[test]
     fn non_owner_stdin_is_dropped() {
         let owners = PtySizeOwners::default();
@@ -3035,14 +3150,79 @@ mod tests {
         owners.claim(pty, conn_a);
         owners.claim(pty, conn_b);
 
-        // The handler forwards a stdin frame only when `is_owner` holds.
+        // The handler forwards a stdin frame only when `may_write` allows it.
+        assert_eq!(
+            owners.may_write(pty, conn_b),
+            WriteClaim {
+                allowed: true,
+                claimed_new: false,
+            },
+            "the owner B's stdin is forwarded without re-claiming"
+        );
+        assert_eq!(
+            owners.may_write(pty, conn_a),
+            WriteClaim {
+                allowed: false,
+                claimed_new: false,
+            },
+            "the non-owner A's stdin is dropped and does not claim ownership"
+        );
+        // The denied write left ownership untouched: B still owns the PTY.
         assert!(
             owners.is_owner(pty, conn_b),
-            "the owner B's stdin is forwarded"
+            "a denied non-owner write must not change the owner"
+        );
+    }
+
+    /// `may_write` resolves the stdin gate atomically and shares `claim`'s
+    /// unowned-PTY semantics: the owner is allowed (no re-claim), a non-owner is
+    /// denied, and an UNOWNED PTY's first writer is allowed AND becomes the owner so
+    /// a solo/out-of-band client whose stdin arrives before any size frame is no
+    /// longer silently dropped.
+    #[test]
+    fn may_write_allows_owner_denies_non_owner_and_claims_unowned() {
+        let owners = PtySizeOwners::default();
+        let pty = "session-42";
+        let conn_a = owners.next_conn_id();
+        let conn_b = owners.next_conn_id();
+
+        // Unowned PTY: the first writer is allowed and NEWLY claims ownership.
+        assert_eq!(
+            owners.may_write(pty, conn_a),
+            WriteClaim {
+                allowed: true,
+                claimed_new: true,
+            },
+            "an unowned PTY's first writer is allowed and claims ownership"
         );
         assert!(
-            !owners.is_owner(pty, conn_a),
-            "the non-owner A's stdin is dropped"
+            owners.is_owner(pty, conn_a),
+            "the first writer became the owner"
+        );
+
+        // The same owner writing again is allowed without re-claiming (so the
+        // caller does not re-emit a `pty.owner` for steady-state typing).
+        assert_eq!(
+            owners.may_write(pty, conn_a),
+            WriteClaim {
+                allowed: true,
+                claimed_new: false,
+            },
+            "the owner writes again without re-claiming"
+        );
+
+        // A different connection is denied and does not steal ownership by typing.
+        assert_eq!(
+            owners.may_write(pty, conn_b),
+            WriteClaim {
+                allowed: false,
+                claimed_new: false,
+            },
+            "a non-owner's write is denied"
+        );
+        assert!(
+            owners.is_owner(pty, conn_a),
+            "a denied write never wrests ownership from the active owner"
         );
     }
 
@@ -3106,6 +3286,7 @@ mod tests {
                 event: "sessions.changed".to_string(),
                 id: None,
                 rev: None,
+                owner: None,
             }
         );
 
@@ -3121,6 +3302,7 @@ mod tests {
                 event: "projects.changed".to_string(),
                 id: None,
                 rev: None,
+                owner: None,
             }
         );
     }
@@ -3368,6 +3550,7 @@ mod tests {
             event: "connected".to_string(),
             id: Some("abc-123".into()),
             rev: None,
+            owner: None,
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
@@ -3566,6 +3749,7 @@ mod tests {
             event: "session.changes".to_string(),
             id: Some("s1".to_string()),
             rev: changes.peek_rev("s1"),
+            owner: None,
         };
         assert_eq!(
             serde_json::to_string(&catchup).unwrap(),
@@ -3610,6 +3794,7 @@ mod tests {
             event: "session.changes".to_string(),
             id: Some("s1".to_string()),
             rev: changes.peek_rev("s1"), // None
+            owner: None,
         };
         assert_eq!(
             serde_json::to_string(&catchup).unwrap(),
