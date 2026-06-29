@@ -58,7 +58,14 @@ impl App {
         let leading_branch =
             leading_branch_for_project(&path, (!branch.is_empty()).then_some(branch.as_str()));
 
-        if let Some(kind) = git::branch_warning_kind(&path, &branch) {
+        // A detached HEAD (empty branch string) is not "on a non-default
+        // branch" -- there is no branch to compare. Skip the warning so the
+        // user does not see a misleading Heuristic dialog when adding a
+        // detached-HEAD repo.
+        if let Some(kind) = (!branch.is_empty())
+            .then(|| git::branch_warning_kind(&path, &branch))
+            .flatten()
+        {
             // Default the checkbox to on for the confident path so hitting
             // Enter resolves the warning in the way users typically want —
             // "switch to main, then add". The heuristic path ignores this
@@ -2927,7 +2934,7 @@ impl App {
 
     /// Palette action: tear down the TUI and serve the web UI in the same
     /// process. LOCAL MODE only — loopback plus (when enabled) the machine's
-    /// Tailscale address; the flip never reads `listen_addrs`.
+    /// Tailscale address; the flip never reads the configurable [server] host.
     ///
     /// The pre-flight (Tailscale detection via `tailscale ip`, then an actual
     /// `TcpListener::bind` of each address) runs on a WORKER thread because the
@@ -3112,7 +3119,6 @@ mod tests {
             pty_activity: std::collections::HashMap::new(),
             pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
-            pending_auth_users: None,
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
@@ -3202,7 +3208,6 @@ mod tests {
             pending_server_flip: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: std::collections::HashMap::new(),
-            pending_auth_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
             pending_delete_ops: std::collections::HashMap::new(),
@@ -3303,7 +3308,6 @@ mod tests {
             pty_activity: std::collections::HashMap::new(),
             pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
-            pending_auth_users: None,
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),

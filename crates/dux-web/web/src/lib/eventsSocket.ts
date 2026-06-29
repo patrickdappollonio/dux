@@ -87,8 +87,8 @@ export class EventsSocket {
 
   private open(): void {
     // A socket may already be live here: a double connect() (double-click
-    // Reconnect, or `recheckAuthAfterFailure` firing connect() mid-reconnect)
-    // would otherwise overwrite `this.ws` and leave an orphan whose later
+    // Reconnect firing connect() mid-reconnect) would otherwise overwrite
+    // `this.ws` and leave an orphan whose later
     // `onclose` nulls the SHARED `this.ws` field — permanently killing outbound
     // subscribe/unsubscribe (stale changes pane, no error). Detach the orphan's
     // handlers and close it BEFORE assigning the new socket so it can never run

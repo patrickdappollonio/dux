@@ -11,10 +11,9 @@ import { partitionProjects } from "./projects"
 // shape, error mapping) lives in `spineApi.test.ts`; here we drive the store's
 // integration via a controllable fetch double.
 //
-// The store fires a boot `/api/me` probe and a `GET /api/v1/spine` at import
-// (after auth resolves). We steer the probe to auth-off and serve the spine body
-// from `spineBody`, which the fetch double reads at call time so a test can
-// mutate it before a refetch.
+// The store fires a `GET /api/v1/spine` at import. We serve the spine body from
+// `spineBody`, which the fetch double reads at call time so a test can mutate it
+// before a refetch.
 
 function makeSpine(overrides: Partial<Spine> = {}): Spine {
   return {
@@ -66,11 +65,11 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // /api/me, /api/v1/bootstrap, and anything else: auth off / empty body.
+  // /api/v1/bootstrap and anything else: empty body.
   return {
     ok: true,
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
@@ -111,7 +110,6 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().spine).not.toBeNull()
   })
   return mod
@@ -237,11 +235,11 @@ describe("spine slice", () => {
   })
 
   it("retries a failed first spine load on a reconnect onOpen", async () => {
-    // The very first load (driven by bootAuth) fails, so the slice stays null.
+    // The very first load (driven by boot()) fails, so the slice stays null.
     spineShouldFail = true
     const mod = await import("./store")
     await vi.waitFor(() => {
-      expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+      expect(mod.getSnapshot().booted).toBe(true)
     })
     await vi.waitFor(() => {
       expect(spineFetches).toBeGreaterThanOrEqual(1)
@@ -249,7 +247,7 @@ describe("spine slice", () => {
     expect(mod.getSnapshot().spine).toBeNull()
 
     // The initial connect's open consumes the skip flag and does NOT refetch
-    // (bootAuth already drove the first load — even though it failed).
+    // (boot() already drove the first load -- even though it failed).
     const afterInitialOpen = spineFetches
     mod.eventsSocket.onOpen()
     expect(spineFetches).toBe(afterInitialOpen)

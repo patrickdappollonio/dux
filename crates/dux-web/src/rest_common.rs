@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use dux_core::statusline::StatusScope;
 
 use crate::engine_actor::EngineHandle;
@@ -51,28 +52,108 @@ pub const CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// later REST-migration refinement.
 pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Derive the [`StatusScope`] for a REST action from the optional
-/// `X-Connection-Id` header: present and non-empty → scope the operation's status
-/// toasts to that connection (matching the WS command path); absent → broadcast to
-/// all clients (`All`). The header is OPTIONAL.
+/// The class of a live WebSocket connection tracked in the [`ConnectionRegistry`].
+/// Used by the liveness reaper (every class is pingable) and by `scope_from_headers`
+/// to require that a scoped `x-connection-id` is a live Events-class connection
+/// before routing a REST status toast to it; PTY-class ids are never disclosed to
+/// clients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConnClass {
+    /// A `/ws/events` change+status socket.
+    Events,
+    /// A `/ws/sessions/:id/pty` agent-provider PTY socket.
+    AgentPty,
+    /// A `/ws/sessions/:id/terminals/:tid/pty` companion-terminal PTY socket.
+    TerminalPty,
+}
+
+/// Thread-safe map of live connection id → its [`ConnClass`]. Every upgraded
+/// WebSocket registers its server-minted id on connect and deregisters on
+/// disconnect, so the map is the authoritative set of LIVE connection ids.
 ///
-/// The absent → `All` fallback covers two windows where the client has no id to
-/// stamp: (1) before the `/ws` `Connected` frame has delivered the first id on a
-/// fresh load, and (2) the reconnect window after a socket drop, where the client
-/// has cleared the now-dead id (see the web `connection.ts`/`socket.onConn`).
-/// Broadcasting the status to every client in those windows is the safe default for
-/// this single-tenant, trusted-access tool: the initiating client still sees its
-/// toast (it shares the one workspace), and there is no per-user scoping to leak
-/// across. The alternative — stamping a stale id — would route the status to a
-/// connection that no longer exists, so nobody would see it.
-pub fn scope_from_headers(headers: &HeaderMap) -> StatusScope {
+/// [`scope_from_headers`] validates an inbound `X-Connection-Id` against it: an id
+/// not present (or not of class [`ConnClass::Events`]) falls back to broadcast, so a
+/// forged, stale, or PTY-class id cannot silence a toast by routing it to a
+/// non-events connection.
+///
+/// A plain `Mutex<HashMap<..>>`: every operation takes the lock, does an O(1) map
+/// op, and releases it WITHOUT awaiting, so the guard never crosses an `.await`.
+#[derive(Default)]
+pub struct ConnectionRegistry {
+    entries: Mutex<HashMap<String, ConnClass>>,
+}
+
+impl ConnectionRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a live connection id with its class (called on socket upgrade).
+    pub fn insert(&self, id: String, class: ConnClass) {
+        self.entries.lock().unwrap().insert(id, class);
+    }
+
+    /// Deregister a connection id (called on socket disconnect), freeing its slot.
+    pub fn remove(&self, id: &str) {
+        self.entries.lock().unwrap().remove(id);
+    }
+
+    /// Whether `id` is a currently-live connection.
+    #[cfg(test)]
+    pub fn contains(&self, id: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(id)
+    }
+
+    /// The [`ConnClass`] of a currently-live connection, or `None` if absent.
+    /// Used by [`scope_from_headers`] to require that a scoped header carries
+    /// a live EVENTS-class id rather than any registered id.
+    pub fn class_of(&self, id: &str) -> Option<ConnClass> {
+        self.entries.lock().unwrap().get(id).copied()
+    }
+}
+
+/// Derive the [`StatusScope`] for a REST action from the optional
+/// `X-Connection-Id` header: present, non-empty, AND still a live connection in
+/// `registry` → scope the operation's status toasts to that connection (matching
+/// the WS command path); otherwise broadcast to all clients (`All`). The header is
+/// OPTIONAL.
+///
+/// Validating the id against the live-connection registry is the notification-tag
+/// guard: an absent, blank, forged, or stale id falls back to `All` rather than
+/// being trusted blindly. Routing a status to a connection that does not exist would
+/// silence the toast for everyone (nobody is listening on that scope), so the safe
+/// fallback is to broadcast. The connection id is an unguessable server UUID, so
+/// this is defense in depth for the single-tenant, trusted-access model, not a
+/// per-user boundary.
+///
+/// The absent/unknown → `All` fallback also covers two legitimate windows where the
+/// client has no live id to stamp: (1) before the `/ws` `Connected` frame has
+/// delivered the first id on a fresh load, and (2) the reconnect window after a
+/// socket drop, where the client has cleared the now-dead id (see the web
+/// `connection.ts`/`socket.onConn`). Broadcasting in those windows is the safe
+/// default for this single-tenant tool: the initiating client still sees its toast
+/// (it shares the one workspace), and there is no per-user scoping to leak across.
+pub fn scope_from_headers(headers: &HeaderMap, registry: &ConnectionRegistry) -> StatusScope {
     headers
         .get(CONNECTION_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|id| !id.is_empty())
+        // Bound length (chars, not bytes) before any registry lookup.
+        .filter(|id| id.chars().count() <= MAX_ID_LEN)
+        // Only EVENTS-class connections are ever disclosed to clients; a PTY-class
+        // id in the header must not scope-and-silence toasts.
+        .filter(|id| registry.class_of(id) == Some(ConnClass::Events))
         .map(|id| StatusScope::Connection(id.to_string()))
         .unwrap_or(StatusScope::All)
+}
+
+/// 404 response for an unknown or over-length session id. Shared across the REST
+/// route modules (`git_routes`, `file_routes`) so the body text and status code
+/// stay in one place. The over-length guard calls this BEFORE the engine lookup
+/// so an outsized `:id` never reaches the actor.
+pub fn unknown_session() -> Response {
+    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 /// Whether `provider` is in the engine's configured provider list (the same source
@@ -225,17 +306,123 @@ impl IdempotencyCache {
 mod tests {
     use super::*;
 
+    fn header_map_with(name: &'static str, value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(name, value.parse().unwrap());
+        h
+    }
+
     #[test]
     fn scope_from_headers_maps_connection_id() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("conn-7".into(), ConnClass::Events);
         let mut h = HeaderMap::new();
-        assert_eq!(scope_from_headers(&h), StatusScope::All);
+        assert_eq!(scope_from_headers(&h, &reg), StatusScope::All);
         h.insert(CONNECTION_ID_HEADER, "  ".parse().unwrap());
-        assert_eq!(scope_from_headers(&h), StatusScope::All, "blank → All");
+        assert_eq!(
+            scope_from_headers(&h, &reg),
+            StatusScope::All,
+            "blank → All"
+        );
         h.insert(CONNECTION_ID_HEADER, "conn-7".parse().unwrap());
         assert_eq!(
-            scope_from_headers(&h),
+            scope_from_headers(&h, &reg),
             StatusScope::Connection("conn-7".to_string())
         );
+    }
+
+    #[test]
+    fn unknown_connection_id_falls_back_to_all_scope() {
+        let reg = ConnectionRegistry::default();
+        let headers = header_map_with(CONNECTION_ID_HEADER, "does-not-exist");
+        assert!(matches!(
+            scope_from_headers(&headers, &reg),
+            StatusScope::All
+        ));
+    }
+
+    #[test]
+    fn live_connection_id_scopes_to_that_connection() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("conn-1".into(), ConnClass::Events);
+        let headers = header_map_with(CONNECTION_ID_HEADER, "conn-1");
+        assert!(
+            matches!(scope_from_headers(&headers, &reg), StatusScope::Connection(id) if id == "conn-1")
+        );
+    }
+
+    /// An Events-class id in the header resolves to a Connection scope.
+    #[test]
+    fn events_class_id_scopes_to_connection() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("ev-1".into(), ConnClass::Events);
+        let headers = header_map_with(CONNECTION_ID_HEADER, "ev-1");
+        assert!(
+            matches!(scope_from_headers(&headers, &reg), StatusScope::Connection(id) if id == "ev-1"),
+            "events-class id must produce a Connection scope"
+        );
+    }
+
+    /// A PTY-class id (AgentPty or TerminalPty) must fall back to All — PTY
+    /// connection ids are never disclosed to clients and must not scope toasts.
+    #[test]
+    fn pty_class_id_falls_back_to_all_scope() {
+        let reg = ConnectionRegistry::default();
+        reg.insert("pty-1".into(), ConnClass::AgentPty);
+        reg.insert("pty-2".into(), ConnClass::TerminalPty);
+
+        let h1 = header_map_with(CONNECTION_ID_HEADER, "pty-1");
+        assert_eq!(
+            scope_from_headers(&h1, &reg),
+            StatusScope::All,
+            "AgentPty id must fall back to All"
+        );
+        let h2 = header_map_with(CONNECTION_ID_HEADER, "pty-2");
+        assert_eq!(
+            scope_from_headers(&h2, &reg),
+            StatusScope::All,
+            "TerminalPty id must fall back to All"
+        );
+    }
+
+    /// An id longer than MAX_ID_LEN characters must fall back to All without a
+    /// registry lookup.
+    #[test]
+    fn over_long_id_falls_back_to_all_scope() {
+        let reg = ConnectionRegistry::default();
+        let long_id = "x".repeat(MAX_ID_LEN + 1);
+        // Even if registered, the length guard rejects it first.
+        reg.insert(long_id.clone(), ConnClass::Events);
+        let headers = header_map_with(CONNECTION_ID_HEADER, &long_id);
+        assert_eq!(
+            scope_from_headers(&headers, &reg),
+            StatusScope::All,
+            "an id exceeding MAX_ID_LEN must fall back to All"
+        );
+    }
+
+    #[test]
+    fn registry_insert_remove_contains() {
+        let reg = ConnectionRegistry::default();
+        assert!(!reg.contains("a"));
+        assert_eq!(reg.class_of("a"), None);
+
+        reg.insert("a".into(), ConnClass::Events);
+        reg.insert("b".into(), ConnClass::AgentPty);
+        reg.insert("c".into(), ConnClass::AgentPty);
+        assert!(reg.contains("a"));
+        assert!(reg.contains("b"));
+        assert_eq!(reg.class_of("a"), Some(ConnClass::Events));
+        assert_eq!(reg.class_of("b"), Some(ConnClass::AgentPty));
+        assert_eq!(reg.class_of("z"), None);
+
+        reg.remove("a");
+        assert!(!reg.contains("a"));
+        assert_eq!(reg.class_of("a"), None);
+        // Removing a never-registered id is a harmless no-op.
+        reg.remove("missing");
+        assert!(reg.contains("b"));
+        assert!(reg.contains("c"));
     }
 
     #[test]

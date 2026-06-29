@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use dux_core::config::DuxPaths;
 
-use crate::rest_common::id_within_bound;
+use crate::rest_common::{id_within_bound, unknown_session};
 use crate::server::AppState;
 
 /// The gated startup-command-log read routes.
@@ -190,10 +190,6 @@ fn read_named_log(
     }
 }
 
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +198,7 @@ mod tests {
     use std::path::Path;
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     fn paths_for(root: &Path) -> DuxPaths {
         DuxPaths {
@@ -324,29 +320,5 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         // Drain the body so the response is fully consumed.
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn startup_log_reads_are_gated() {
-        for uri in [
-            "/api/v1/sessions/s1/startup-logs",
-            "/api/v1/sessions/s1/startup-logs/content?name=x.log",
-        ] {
-            let (_tmp, app) = router_with_auth();
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must be gated"
-            );
-        }
     }
 }

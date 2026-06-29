@@ -8,9 +8,9 @@ import type { ChangedFileView } from "./types"
 // the reconnect re-subscribe + refetch. The events socket's own wire behaviour
 // lives in eventsSocket.test.ts; here we spy its methods / drive its callbacks.
 //
-// The store fires a boot `/api/me` probe and builds two sockets at import. We
-// steer the probe to auth-off and route `/changes` GETs to manually-resolvable
-// deferred promises so a test controls fetch timing precisely.
+// The store connects the events socket and builds two sockets at import. We
+// route `/changes` GETs to manually-resolvable deferred promises so a test
+// controls fetch timing precisely.
 
 interface Deferred {
   resolve: (value: unknown) => void
@@ -52,13 +52,6 @@ function changesResponse(
 
 const fetchMock = vi.fn(async (url: string) => {
   const u = String(url)
-  if (u.includes("/api/me")) {
-    return {
-      status: 200,
-      json: async () => ({ auth: "disabled" }),
-      headers: { get: () => null },
-    } as unknown as Response
-  }
   if (u.includes("/changes")) {
     callOrder.push("fetch")
     const m = u.match(/sessions\/([^/]+)\/changes/)
@@ -104,7 +97,7 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    expect(mod.getSnapshot().booted).toBe(true)
   })
   return mod
 }

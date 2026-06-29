@@ -1,6 +1,5 @@
 import type * as React from "react"
 import { Fragment, Suspense } from "react"
-import { LogOut } from "lucide-react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AgentEnvDialog } from "@/components/AgentEnvDialog"
@@ -10,7 +9,6 @@ import { AppSidebar } from "@/components/Sidebar"
 import { StartupLogsDialog } from "@/components/StartupLogsDialog"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
-import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { CommandPalette } from "@/components/CommandPalette"
 import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
@@ -30,9 +28,7 @@ import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { StatusBar } from "@/components/StatusBar"
-import { LoginScreen } from "@/components/LoginScreen"
 import { Welcome } from "@/components/Welcome"
-import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { Button } from "@/components/ui/button"
 import {
   ResizableHandle,
@@ -47,11 +43,8 @@ import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { paletteShortcutKeys } from "@/lib/platform"
-import { UNREACHABLE_MESSAGE } from "@/lib/auth"
 import {
   changesPaneVisible,
-  logout,
-  retryBoot,
   setPaletteOpen,
   useDux,
 } from "@/lib/store"
@@ -59,7 +52,7 @@ import { terminalTitle } from "@/lib/terminals"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
 function InsetHeader() {
-  const { spine, selectedSessionId, selectedTarget, auth } = useDux()
+  const { spine, selectedSessionId, selectedTarget } = useDux()
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
     ? spine?.projects.find((p) => p.id === session.project_id)
@@ -136,23 +129,6 @@ function InsetHeader() {
           ))}
           <span className="ms-2">Commands…</span>
         </Button>
-        {auth.phase === "authed" ? (
-          <div className="flex items-center gap-1.5">
-            <span className="max-w-32 truncate text-sm text-muted-foreground">
-              {auth.username}
-            </span>
-            <SimpleTooltip content="Log out">
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Log out"
-                onClick={() => void logout()}
-              >
-                <LogOut />
-              </Button>
-            </SimpleTooltip>
-          </div>
-        ) : null}
       </div>
     </header>
   )
@@ -362,62 +338,11 @@ function MobileApp() {
   )
 }
 
-// While the boot `/api/me` round-trip is in flight, the app shell must NOT mount
-// — both because we don't yet know whether to show the login screen, and because
-// the WS connect (issued the moment we learn auth is off / we're authed) must
-// precede the terminal's first subscribe. A minimal centered spinner covers the
-// brief gap.
-function BootSpinner() {
-  return (
-    <div className="flex min-h-svh items-center justify-center bg-background">
-      <BrailleSpinner className="text-primary" />
-    </div>
-  )
-}
-
-// Shown when the boot `/api/me` probe network-fails (server down/restarting).
-// The store is already auto-retrying with capped backoff; this is the honest
-// "we can't reach the server" state — NOT a login screen, which would imply auth
-// is the problem (it may be an auth-OFF deployment mid-restart). The duck mark
-// keeps it on-brand; the spinner signals the retry is live; "Retry now" lets an
-// impatient user skip the current backoff window. A successful retry leaves this
-// state on its own (the phase flips to disabled/authed/anonymous).
-function UnreachableScreen() {
-  return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-4 bg-background p-4 text-center">
-      <img src="/dux-logo.png" alt="dux" className="size-12 rounded-lg" />
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <BrailleSpinner className="text-primary" />
-        <span className="text-sm">{UNREACHABLE_MESSAGE}</span>
-      </div>
-      <Button variant="outline" size="sm" onClick={() => retryBoot()}>
-        Retry now
-      </Button>
-    </div>
-  )
-}
-
 function App() {
-  const { auth } = useDux()
   const isMobile = useIsMobile()
-
-  // Top-level auth branch, BEFORE the shell. "checking" → spinner; "unreachable"
-  // → the retrying reconnect screen; "anonymous" → the login screen ONLY (no
-  // sidebar, no WS-dependent UI); "disabled"/"authed" → today's app exactly.
-  if (auth.phase === "checking") {
-    return <BootSpinner />
-  }
-  if (auth.phase === "unreachable") {
-    return <UnreachableScreen />
-  }
-  if (auth.phase === "anonymous") {
-    return <LoginScreen />
-  }
-
   if (isMobile) {
     return <MobileApp />
   }
-
   return <DesktopShell />
 }
 

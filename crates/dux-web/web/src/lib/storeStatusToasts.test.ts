@@ -13,10 +13,9 @@ vi.mock("sonner", () => {
   return { toast }
 })
 
-// Mirror the store test harness (see storeCommitMessage.test.ts): the module
-// reads location/localStorage, registers listeners, and fires a boot probe on
-// import. Stub the minimum and steer the probe to auth-off so the store settles
-// before each test.
+// Mirror the store test harness: the module reads location/localStorage,
+// registers listeners, and boots at import. Stub the minimum so the store
+// settles before each test.
 
 // The info-toast auto-clear window is config-driven (`status_clear_seconds` in
 // the bootstrap document). Tests flip this before loading the store with a
@@ -50,7 +49,7 @@ const fetchMock = vi.fn(async (url: string) => {
   return {
     status: 200,
     ok: true,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "{}",
     headers: { get: () => null },
   } as unknown as Response
@@ -90,7 +89,7 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    expect(mod.getSnapshot().booted).toBe(true)
   })
   return mod
 }
@@ -100,7 +99,7 @@ async function loadStore() {
 async function loadStoreWithBootstrap() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+    expect(mod.getSnapshot().booted).toBe(true)
     expect(mod.getSnapshot().bootstrap).not.toBeNull()
   })
   return mod

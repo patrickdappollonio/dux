@@ -31,7 +31,7 @@ use dux_core::wire::{WireCommand, WireCommandOutcome};
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{
     CREATE_AWAIT_TIMEOUT, FROM_PR_CREATE_AWAIT_TIMEOUT, await_new_session, await_session_for_op,
-    id_within_bound, idempotency_key, provider_is_configured, scope_from_headers,
+    id_within_bound, idempotency_key, provider_is_configured, scope_from_headers, unknown_session,
 };
 use crate::server::AppState;
 
@@ -161,7 +161,10 @@ async fn create_session(
     // `Ok` error-toned status → 409 (an agent is already being created).
     let outcome = match state
         .engine
-        .apply_wire_scoped(body.into_wire(), scope_from_headers(&headers))
+        .apply_wire_scoped(
+            body.into_wire(),
+            scope_from_headers(&headers, &state.connections),
+        )
         .await
     {
         Ok(outcome) => {
@@ -271,7 +274,7 @@ async fn delete_session(
                 session_id: id,
                 delete_worktree: q.delete_worktree,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -317,7 +320,7 @@ async fn patch_session(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp;
     }
-    let scope = scope_from_headers(&headers);
+    let scope = scope_from_headers(&headers, &state.connections);
 
     // Validate a provider change UP FRONT, before dispatching any sub-command, so a
     // bad provider can never partially apply after the rename/auto-reopen already
@@ -431,7 +434,7 @@ async fn reconnect_session(
                 session_id: id,
                 force,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -463,7 +466,7 @@ async fn rerun_startup_command(
         .engine
         .apply_wire_scoped(
             WireCommand::RerunStartupCommand { session_id: id },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -492,7 +495,7 @@ async fn reorder_sessions(
                 project_id: body.project_id,
                 session_ids: body.session_ids,
             },
-            scope_from_headers(&headers),
+            scope_from_headers(&headers, &state.connections),
         )
         .await
     {
@@ -502,10 +505,6 @@ async fn reorder_sessions(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn unknown_session() -> Response {
-    (StatusCode::NOT_FOUND, "unknown session").into_response()
-}
 
 fn engine_unavailable() -> Response {
     (
@@ -531,7 +530,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     #[tokio::test]
     async fn rerun_startup_command_404_for_unknown_session() {
@@ -548,21 +547,5 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn rerun_startup_command_is_gated() {
-        let (_tmp, app) = router_with_auth();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/sessions/s1/rerun-startup-command")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

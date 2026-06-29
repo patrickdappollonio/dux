@@ -46,11 +46,11 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // /api/me + bootstrap + anything else.
+  // bootstrap + anything else.
   return {
     ok: true,
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "{}",
     headers: { get: () => null },
   } as unknown as Response
@@ -107,7 +107,6 @@ async function loadStore(
   spineBody = makeSpine(sessions)
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().spine).not.toBeNull()
   })
   return mod

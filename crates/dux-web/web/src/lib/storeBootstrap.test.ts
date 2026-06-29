@@ -7,8 +7,7 @@ import type { Bootstrap } from "./bootstrapApi"
 // (GET shape, error mapping) lives in `bootstrapApi.test.ts`; here we drive the
 // store's integration via a controllable fetch double.
 //
-// The store fires a boot `/api/me` probe and a `GET /api/v1/bootstrap` at import
-// (after auth resolves). We steer the probe to auth-off and serve the bootstrap
+// The store fires a `GET /api/v1/bootstrap` at import. We serve the bootstrap
 // body from `bootstrapBody`, which the fetch double reads at call time so a test
 // can mutate it before a refetch.
 
@@ -49,10 +48,10 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // /api/me (and anything else): auth off.
+  // Anything else: return empty 200.
   return {
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
@@ -93,7 +92,6 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().bootstrap).not.toBeNull()
   })
   return mod
@@ -144,11 +142,11 @@ describe("bootstrap slice", () => {
   })
 
   it("retries a failed first bootstrap load on a reconnect onOpen", async () => {
-    // The very first load (driven by bootAuth) fails, so the slice stays null.
+    // The very first load (driven by boot()) fails, so the slice stays null.
     bootstrapShouldFail = true
     const mod = await import("./store")
     await vi.waitFor(() => {
-      expect(mod.getSnapshot().auth.phase).not.toBe("checking")
+      expect(mod.getSnapshot().booted).toBe(true)
     })
     await vi.waitFor(() => {
       expect(bootstrapFetches).toBeGreaterThanOrEqual(1)
@@ -156,7 +154,7 @@ describe("bootstrap slice", () => {
     expect(mod.getSnapshot().bootstrap).toBeNull()
 
     // The initial connect's open consumes the skip flag and does NOT refetch
-    // (bootAuth already drove the first load — even though it failed).
+    // (boot() already drove the first load -- even though it failed).
     const afterInitialOpen = bootstrapFetches
     mod.eventsSocket.onOpen()
     expect(bootstrapFetches).toBe(afterInitialOpen)

@@ -2,12 +2,19 @@ import { useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { Maximize2, Minimize2 } from "lucide-react"
+import { Maximize2, Minimize2, MonitorSmartphone } from "lucide-react"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
@@ -21,6 +28,11 @@ import {
   setActivePtySocket,
   terminalPtyUrl,
 } from "@/lib/ptySocket"
+import {
+  isForeground,
+  isOwnerAfterHandover,
+  onPtyOwner,
+} from "@/lib/ptyOwnership"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
@@ -115,8 +127,15 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   const scrollbackRef = useRef(
     bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
   )
-  scrollbackRef.current =
-    bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+  // Keep the ref current as the bootstrap document arrives or changes, without
+  // writing it during render (React forbids ref writes in render) and without
+  // making it a dependency of the terminal mount effect (which would recreate
+  // the terminal). The terminal reads this ref lazily on (re)connect, so an
+  // after-commit update lands in time for the first attach.
+  useEffect(() => {
+    scrollbackRef.current =
+      bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
+  }, [bootstrap?.agent_scrollback_lines])
   const session =
     kind === "agent"
       ? spine?.sessions.find((s) => s.id === id)
@@ -150,6 +169,32 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Cleared on the next (re)open. Input typed while disconnected is dropped by the
   // socket's readyState guard; this overlay is the signal that it would be.
   const [reconnecting, setReconnecting] = useState(false)
+
+  // Per-PTY ownership. A PTY is shared across every connected device, but only
+  // the owner drives its size and may type into it; the others render a read-only
+  // take-over placeholder (so two people can't fight over one prompt). This view
+  // claims ownership on attach ONLY if the tab is foregrounded (a backgrounded
+  // tab attaches as a silent observer). The server broadcasts a `pty.owner` signal
+  // carrying the claimer's connection id on every handover; we compare it against
+  // OUR PTY-socket connection id (`myConnIdRef`) to decide definitively whether the
+  // handover is our own claim (stay owner) or another device taking over (demote to
+  // placeholder). `isOwnerRef` mirrors the state so the stable mount-effect closures
+  // (onData, the resize senders) read it live rather than capturing a stale value.
+  const [isOwner, setIsOwner] = useState(isForeground)
+  // Mirror of `isOwner` for the stable mount-effect closures (onData, the resize
+  // senders) to read synchronously. Kept in sync only at the mutation points
+  // (a take-over and the handover handler), never written during render.
+  const isOwnerRef = useRef(isOwner)
+  // This view's PTY-socket connection id, delivered as the socket's first
+  // `connected` frame (and re-issued on every reconnect). Compared against each
+  // `pty.owner` event's claimer id to decide ownership. Null until that frame lands.
+  const myConnIdRef = useRef<string | null>(null)
+  // A one-shot "claim as soon as our connection id is known" flag. `takeOver`
+  // sets it when it fires before the `connected` frame has assigned our id; the
+  // next `onConnected` consumes it and performs the deferred resize/claim. Without
+  // it, an optimistic claim sent while our id is null carries no recognisable
+  // owner and would be immediately revoked by its own `pty.owner` echo.
+  const pendingClaimRef = useRef(false)
 
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
@@ -242,6 +287,20 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     )
     ptyRef.current = pty
     setActivePtySocket(pty)
+    // Record this socket's connection id (the socket's first `connected` frame, and
+    // again on every reconnect since the server allocates a fresh id per open) so
+    // the `pty.owner` handler can compare a handover's claimer id against ours.
+    pty.onConnected = (connId) => {
+      myConnIdRef.current = connId
+      // A take-over requested before our id was known deferred its claim; now that
+      // we know our id, perform the resize/claim so the server's resulting
+      // `pty.owner` carries an id we recognise as ours.
+      if (pendingClaimRef.current) {
+        pendingClaimRef.current = false
+        const term = termRef.current
+        if (term) pty.sendResize(term.rows, term.cols)
+      }
+    }
 
     // Forward keystrokes to the PTY as binary. On mobile, sticky modifiers from
     // the accessory bar transform a single typed char (Ctrl-chord, Alt/Meta
@@ -251,6 +310,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // current latch rather than a stale capture.
     const encoder = new TextEncoder()
     const dataSub = term.onData((s) => {
+      // Read-only when we are not the owner: a secondary viewer's keystrokes are
+      // dropped client-side (and the server drops them too) so it can never
+      // disrupt the active device's typing. The take-over button reclaims input.
+      if (!isOwnerRef.current) return
       const mods = modsRef.current
       const out =
         mods.ctrl || mods.alt ? applyModifiers(s, mods) : s
@@ -264,7 +327,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // click into the pane. This effect re-runs (and the pane remounts) on every
     // agent OR companion-terminal selection (keyed by [kind, id]), so both cases
     // are covered. Runs after the click that selected the row, so it wins focus.
-    term.focus()
+    // Skip when we attached as a read-only observer (non-owner): there is nothing
+    // to type into, and the take-over placeholder owns the surface instead.
+    if (isOwnerRef.current) term.focus()
 
     // Touch gestures over the terminal, mapped to the natural mobile model:
     //   - a one-finger DRAG scrolls the scrollback,
@@ -368,11 +433,22 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     let lastCols = 0
     let fitFrame = 0
     let sendTimer: ReturnType<typeof setTimeout> | undefined
+    // A resize frame IS a claim of ownership server-side, so we only ever send one
+    // while we are the owner: a read-only observer (and a backgrounded tab) drives
+    // nothing, which is what keeps two viewers from thrashing the PTY's size and a
+    // secondary view from stealing control. A steady-state resize by the current
+    // owner does NOT change the owner (no `pty.owner` echo), so it deliberately
+    // does not arm one here — only the ownership-ACQUIRING claim below (and
+    // take-over) notes a claim.
+    const sendOwnedResize = (rows: number, cols: number) => {
+      if (!isOwnerRef.current) return
+      pty.sendResize(rows, cols)
+    }
     const sendSize = () => {
       if (term.rows !== lastRows || term.cols !== lastCols) {
         lastRows = term.rows
         lastCols = term.cols
-        pty.sendResize(term.rows, term.cols)
+        sendOwnedResize(term.rows, term.cols)
       }
     }
     // Local fit so the canvas matches this viewport right away, and seed
@@ -405,6 +481,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       fit.fit()
       lastRows = term.rows
       lastCols = term.cols
+      // Attaching while foregrounded claims ownership by sending our size. The
+      // server broadcasts a `pty.owner` carrying our connection id; the handover
+      // handler recognises it as ours by id, so no echo bookkeeping is needed here.
+      // A backgrounded observer is not the owner, so the sends below no-op.
       // Force the agent to FULLY redraw at our size now that the first paint has
       // landed. A same-size resize is a kernel no-op (no SIGWINCH), so when the
       // PTY already matches this viewport the agent never repaints and the
@@ -414,9 +494,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       // winsize change, so the kernel raises SIGWINCH and the agent redraws its
       // true UI, ending at the correct size. This automates the manual
       // divider-nudge that reliably fixed it.
-      pty.sendResize(term.rows, Math.max(1, term.cols - 1))
+      sendOwnedResize(term.rows, Math.max(1, term.cols - 1))
       jiggleTimer = setTimeout(() => {
-        pty.sendResize(term.rows, term.cols)
+        sendOwnedResize(term.rows, term.cols)
       }, 60)
     }
     // On a RECONNECT the server replays the FULL scrollback as the first binary
@@ -445,6 +525,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // reconnect (any open after the first) also arms the buffer reset above so the
     // replayed scrollback replaces, rather than stacks on, the stale buffer.
     pty.onOpen = () => {
+      // The server allocates a FRESH connection id per open, so the previous id is
+      // stale the instant the socket reopens. Clear it now (not only on the next
+      // `connected` frame): on reconnect a `pty.owner` over the separate
+      // `/ws/events` socket can arrive before this socket's new `connected` frame,
+      // and a stale id would make `isOwnerAfterHandover` misjudge ownership. With
+      // it null, a pre-`connected` handover safely reads as non-owner and resolves
+      // once the new `connected` frame lands (epoch dedup keeps the latest claim).
+      myConnIdRef.current = null
       initialResizeDone = false
       setReconnecting(false)
       if (firstOpen) {
@@ -507,7 +595,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
           fit.fit()
           lastRows = term.rows
           lastCols = term.cols
-          pty.sendResize(term.rows, term.cols)
+          sendOwnedResize(term.rows, term.cols)
         })
       }, 150)
     }
@@ -541,6 +629,26 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       term.dispose()
     }
   }, [kind, id, sessionId])
+
+  // React to ownership handovers. The server broadcasts a `pty.owner` carrying the
+  // claimer's connection id; the store fans it out by pty id plus that owner id. For
+  // OUR pty we compare the owner id against our own PTY-socket connection id: an
+  // equal id confirms our own claim (stay the owner), a different id means another
+  // device took over (demote to the read-only placeholder). This definitive
+  // comparison replaces the old timing heuristic, so two devices claiming at once
+  // both converge on the same final owner instead of both falling to the placeholder.
+  // Keyed by `id` (the pty id: session id for an agent, terminal id for a companion)
+  // so a focus switch re-subscribes for the new target.
+  useEffect(() => {
+    return onPtyOwner((ptyId, ownerId) => {
+      if (ptyId !== id) return
+      const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
+      // Flip the ref synchronously so an in-flight keystroke is gated by the new
+      // state at once, then re-render into the owner view or take-over placeholder.
+      isOwnerRef.current = mine
+      setIsOwner(mine)
+    })
+  }, [id])
 
   // Track fullscreen state for this pane and release the keyboard lock the
   // moment fullscreen ends, however it ends (button, held Esc, tab switch).
@@ -587,6 +695,33 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     termRef.current?.focus()
   }
 
+  // Reclaim ownership from another device. Sending our current size IS the claim
+  // server-side (most-recent claim wins), so the PTY snaps back to this viewport
+  // and our input is forwarded again. Flip the ref synchronously (so the resize
+  // passes the owner gate before the state re-render lands), then refocus. The
+  // server's resulting `pty.owner` carries our connection id, so the handover
+  // handler recognises it as ours by id and keeps us the owner.
+  function takeOver() {
+    isOwnerRef.current = true
+    setIsOwner(true)
+    const term = termRef.current
+    const pty = ptyRef.current
+    if (term && pty) {
+      // Only claim now if our connection id is known: the server stamps the
+      // resulting `pty.owner` with our id, and we must be able to recognise it as
+      // ours or the handover echo would immediately revoke this optimistic claim.
+      // If the `connected` frame has not landed yet (myConnIdRef null), defer the
+      // claim to the next `onConnected` via a one-shot flag instead of sending a
+      // claim whose owner we cannot match.
+      if (myConnIdRef.current !== null) {
+        pty.sendResize(term.rows, term.cols)
+      } else {
+        pendingClaimRef.current = true
+      }
+    }
+    term?.focus()
+  }
+
   // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
   // chars, so they bypass `applyModifiers` (which only transforms single-char
   // input). We still honor a latched Alt by prefixing ESC, and we clear any
@@ -594,6 +729,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // it's simply consumed. Sends go through the same socket path as typed input.
   const encoder = new TextEncoder()
   function sendSeq(seq: string) {
+    // Read-only when not the owner: the accessory-bar keys (Esc/Tab/arrows) are
+    // input too, so a secondary viewer's taps are dropped just like typed input.
+    if (!isOwnerRef.current) return
     const mods = modsRef.current
     const out = mods.alt ? ESC + seq : seq
     if (mods.ctrl || mods.alt) {
@@ -751,6 +889,32 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
                   : "Launching terminal…"}
             </span>
           </div>
+        </div>
+      ) : null}
+      {/* Read-only secondary view. When another device has taken over this PTY we
+          replace the editable terminal with a take-over placeholder (the xterm
+          stays mounted underneath, still receiving output, so reclaiming is
+          instant — but it is covered and its input is gated off). A solid
+          bg-background overlay so it reads as "instead of" the terminal rather
+          than a banner over it. */}
+      {!isOwner ? (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-4">
+          <Card className="w-full max-w-sm text-center">
+            <CardHeader className="items-center gap-3">
+              <MonitorSmartphone className="size-8 text-muted-foreground" />
+              <CardTitle>This session is active on another device.</CardTitle>
+              <CardDescription>
+                Only one device can type at a time. Take over to drive this{" "}
+                {kind === "agent" ? "agent" : "terminal"} from here.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button onClick={takeOver} className="w-full max-md:min-h-11">
+                <MonitorSmartphone />
+                Take over
+              </Button>
+            </CardContent>
+          </Card>
         </div>
       ) : null}
     </div>
