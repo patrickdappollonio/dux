@@ -661,6 +661,18 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Usize(c.server.max_websocket_connections as usize),
         },
+        ConfigEntry::Field {
+            key: "title",
+            comment: Some(CommentSource::Static(
+                "# Display name for THIS dux instance in the web UI. It is shown as\n\
+                 # the browser tab title and as the brand wordmark at the top of the\n\
+                 # projects pane (the version stays on the line below). Give each\n\
+                 # instance a distinct value — for example \"dux #1\" or \"dux (prod)\"\n\
+                 # — so several dux tabs/servers are easy to tell apart. An empty or\n\
+                 # whitespace-only value falls back to \"dux\".",
+            )),
+            value_fn: |c| FieldValue::Str(c.server.title.clone()),
+        },
         ConfigEntry::Blank,
         ConfigEntry::ServerAcme,
         ConfigEntry::Auth,
@@ -1290,6 +1302,7 @@ mod tests {
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("max_websocket_connections = 128"));
+        assert!(rendered.contains("title = \"dux\""));
         assert!(rendered.contains("[server.acme]"));
         assert!(rendered.contains("enabled = false"));
         assert!(rendered.contains("domains = []"));
