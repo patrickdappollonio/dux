@@ -53,6 +53,7 @@ const fetchMock = vi.fn(async (url: string) => {
   return {
     status: 200,
     json: async () => ({ auth: "disabled" }),
+    text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
 })
