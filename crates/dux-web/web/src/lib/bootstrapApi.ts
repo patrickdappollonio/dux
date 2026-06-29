@@ -14,7 +14,9 @@ import type { MacroView, PaletteCommandView } from "./types"
 
 // The bootstrap document. Field names/types mirror the server's JSON (snake_case)
 // and the values the legacy ViewModel carried, so consumers move over without a
-// shape change. Every field is required: the server always projects all of them.
+// shape change. Newer fields may be absent when talking to an older server (a `?`
+// marks the ones typed optional, e.g. `title`); consumers fall back to the
+// per-field documented default rather than assuming every field is present.
 export interface Bootstrap {
   /** Configured agent providers (the new-agent / change-provider pickers). */
   available_providers: string[]
@@ -45,6 +47,11 @@ export interface Bootstrap {
    * warning/error). The web computes its info-toast duration from this; older
    * servers omit it, so consumers fall back to 6. */
   status_clear_seconds: number
+  /** The operator-chosen display name for this dux instance (`config.server
+   * .title`). Shown as the browser tab title and the projects-pane wordmark.
+   * Optional: older servers omit it, so consumers resolve a missing/blank value
+   * to "dux" via `resolveInstanceTitle`. */
+  title?: string
 }
 
 // A failed bootstrap fetch. `status` is the HTTP status (0 for a network/
