@@ -2926,7 +2926,7 @@ impl App {
 
     /// Palette action: tear down the TUI and serve the web UI in the same
     /// process. LOCAL MODE only — loopback plus (when enabled) the machine's
-    /// Tailscale address; the flip never reads `listen_addrs`.
+    /// Tailscale address; the flip never reads the configurable [server] host.
     ///
     /// The pre-flight (Tailscale detection via `tailscale ip`, then an actual
     /// `TcpListener::bind` of each address) runs on a WORKER thread because the
@@ -3111,7 +3111,6 @@ mod tests {
             pty_activity: std::collections::HashMap::new(),
             pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
-            pending_auth_users: None,
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),
@@ -3201,7 +3200,6 @@ mod tests {
             pending_server_flip: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: std::collections::HashMap::new(),
-            pending_auth_ops: std::collections::HashMap::new(),
             pending_worktree_ops: std::collections::HashMap::new(),
             pending_pr_lookup_ops: std::collections::HashMap::new(),
             pending_delete_ops: std::collections::HashMap::new(),
@@ -3302,7 +3300,6 @@ mod tests {
             pty_activity: std::collections::HashMap::new(),
             pty_input: std::collections::HashMap::new(),
             last_foreground_refresh: None,
-            pending_auth_users: None,
             pending_web_checkout_ops: std::collections::HashMap::new(),
             pending_web_add_project_ops: std::collections::HashMap::new(),
             pending_web_pr_lookup_ops: std::collections::HashMap::new(),

@@ -202,7 +202,7 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     /// Initialize a git repo on `main` with one commit so `current_branch`
     /// resolves and there is no `origin/HEAD` (the heuristic-warning path).
@@ -309,29 +309,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn project_reads_are_gated() {
-        for uri in [
-            "/api/v1/projects/inspect?path=/tmp",
-            "/api/v1/projects/p1/worktrees",
-        ] {
-            let (_tmp, app) = router_with_auth();
-            let resp = app
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(axum::body::Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                resp.status(),
-                StatusCode::UNAUTHORIZED,
-                "{uri} must be gated"
-            );
-        }
     }
 }

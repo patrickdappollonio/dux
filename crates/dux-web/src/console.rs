@@ -46,7 +46,10 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 
-/// The tone of a console line — drives both the glyph and the color.
+/// The tone of a console line — drives both the glyph and the color. `Ok`/`Error`
+/// are part of the vocabulary the renderers support; not every tone has a live
+/// emit site today.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tone {
     Info,
@@ -393,7 +396,7 @@ impl Console {
     // ── Event renderers (the public emit surface) ──────────────────────────
 
     /// The post-bind startup banner. Multi-line: a header, one row per bound
-    /// listener, the login row, and any ⚠ degradation rows.
+    /// listener, and any ⚠ degradation rows.
     pub fn banner(&self, banner: &Banner) {
         if !self.is_active() {
             return;
@@ -415,39 +418,6 @@ impl Console {
             ring.connection_closed();
         }
         self.emit(Tone::Info, &format!("client disconnected from {ip}"));
-    }
-
-    /// A successful login. The username IS logged here (success is not an
-    /// enumeration leak — the operator wants to know who got in).
-    pub fn login_ok(&self, username: &str, ip: IpAddr) {
-        self.emit(Tone::Ok, &format!("login ok for \"{username}\" from {ip}"));
-    }
-
-    /// A failed login. NEVER logs the attempted username (enumeration/log
-    /// hygiene per the auth slices) — IP only.
-    pub fn login_failed(&self, ip: IpAddr) {
-        self.emit(Tone::Warn, &format!("login failed from {ip}"));
-    }
-
-    /// A rate-limited login attempt. IP only (same hygiene as a failure).
-    pub fn login_rate_limited(&self, ip: IpAddr) {
-        self.emit(
-            Tone::Warn,
-            &format!("login rate-limited from {ip} (too many failed attempts)"),
-        );
-    }
-
-    /// A logout. The username IS logged (the session was already authenticated).
-    pub fn logout(&self, username: &str) {
-        self.emit(Tone::Info, &format!("logout for \"{username}\""));
-    }
-
-    /// A config reload landed. `refused`/`rebind_changed` drive the tone so a
-    /// refusal or a restart-needed reload reads as a warning, a clean reload as
-    /// info.
-    pub fn reload(&self, message: &str, warn: bool) {
-        let tone = if warn { Tone::Warn } else { Tone::Info };
-        self.emit(tone, message);
     }
 
     /// A best-effort listener bind that degraded (e.g. a busy Tailscale leg).
@@ -581,26 +551,6 @@ pub struct ListenerRow {
     pub url: String,
 }
 
-/// The login-state row.
-#[derive(Debug, Clone)]
-pub enum LoginRow {
-    /// The gate is on with `count` configured user(s).
-    Enabled { count: usize },
-    /// The gate is OFF via `--disable-auth` — a loud red warning.
-    Disabled,
-    /// No login is required because there are zero valid users (the gate is OFF
-    /// per `auth_enabled`, but this is NOT `--disable-auth`). The tone tracks how
-    /// reachable the server is:
-    /// - `reachable: false` → loopback-only, a calm muted "local only" note.
-    /// - `reachable: true` → a non-loopback leg is bound, a ⚠ warning.
-    ///
-    /// `public` only refines the warning text: a required non-loopback leg (an
-    /// explicit `listen_addrs` public/LAN entry) gets the stronger wording, while
-    /// a best-effort (Tailscale local-mode) leg gets the Tailscale-specific one.
-    /// Ignored when `reachable` is false.
-    NoLoginRequired { reachable: bool, public: bool },
-}
-
 /// Everything the post-bind banner needs. Built by the serve path from the
 /// addresses that ACTUALLY bound, so it shows truth (no pre-bind hedging).
 #[derive(Debug, Clone)]
@@ -613,8 +563,6 @@ pub struct Banner {
     pub mode: String,
     /// One row per bound listener.
     pub listeners: Vec<ListenerRow>,
-    /// The login-state row.
-    pub login: LoginRow,
     /// ⚠ rows for degraded/best-effort legs (e.g. a busy Tailscale address).
     pub warnings: Vec<String>,
 }
@@ -658,55 +606,6 @@ fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
         let line = format!("  {arrow} {label}: {url}");
         out.push(line);
     }
-
-    // Login row.
-    let login_line = match &banner.login {
-        LoginRow::Enabled { count } => {
-            let text = format!("login enabled — {count} user(s)");
-            if color {
-                format!("  {GREEN}{}{RESET} {text}", Tone::Ok.glyph())
-            } else {
-                format!("  ok {text}")
-            }
-        }
-        LoginRow::Disabled => {
-            let text = "login DISABLED (--disable-auth) — anyone who reaches this server \
-                        controls your agents";
-            if color {
-                format!("  {RED}{}{RESET} {text}", Tone::Error.glyph())
-            } else {
-                format!("  error {text}")
-            }
-        }
-        LoginRow::NoLoginRequired { reachable, public } => {
-            if !reachable {
-                // Loopback-only: calm, muted. The gate is off but nothing off-host
-                // can reach it, so this is the expected local-dev shape.
-                let text = "No login required (local only) — add a login user to require sign-in";
-                if color {
-                    format!("  {DIM}{} {text}{RESET}", Tone::Info.glyph())
-                } else {
-                    format!("  info {text}")
-                }
-            } else {
-                // A non-loopback leg is bound: warn. Public/LAN (required) gets the
-                // stronger wording; a best-effort Tailscale leg gets its own.
-                let text = if *public {
-                    "No login required — this server is reachable on a public/LAN address with NO \
-                     login. Add a login user or front it with an auth proxy."
-                } else {
-                    "No login required — anyone on your Tailscale network can connect. Add a login \
-                     user to require sign-in."
-                };
-                if color {
-                    format!("  {YELLOW}{}{RESET} {text}", Tone::Warn.glyph())
-                } else {
-                    format!("  warn {text}")
-                }
-            }
-        }
-    };
-    out.push(login_line);
 
     // ⚠ degradation rows.
     for warning in &banner.warnings {
@@ -983,7 +882,6 @@ mod tests {
                 label: "Local".to_string(),
                 url: "http://127.0.0.1:8080".to_string(),
             }],
-            login: LoginRow::Enabled { count: 1 },
             warnings: vec![],
         }
     }
@@ -999,7 +897,6 @@ mod tests {
         assert!(joined.contains("dux v0.1.0"));
         assert!(joined.contains("plain HTTP"));
         assert!(joined.contains("Local: http://127.0.0.1:8080"));
-        assert!(joined.contains("login enabled — 1 user(s)"));
     }
 
     #[test]
@@ -1011,84 +908,6 @@ mod tests {
             "color banner carries ANSI: {joined}"
         );
         assert!(joined.contains("0.1.0"));
-    }
-
-    #[test]
-    fn banner_disabled_auth_is_a_red_warning() {
-        let mut b = sample_banner();
-        b.login = LoginRow::Disabled;
-        let plain = render_banner(false, &b).join("\n");
-        assert!(
-            plain.contains("login DISABLED"),
-            "must warn loudly: {plain}"
-        );
-        assert!(plain.contains("--disable-auth"));
-        let color = render_banner(true, &b).join("\n");
-        assert!(
-            color.contains(RED),
-            "disabled-auth row must be red in color mode"
-        );
-    }
-
-    #[test]
-    fn banner_no_login_loopback_is_muted_local_only() {
-        let mut b = sample_banner();
-        b.login = LoginRow::NoLoginRequired {
-            reachable: false,
-            public: false,
-        };
-        let plain = render_banner(false, &b).join("\n");
-        assert!(
-            plain.contains("No login required (local only)"),
-            "loopback-only must say local only: {plain}"
-        );
-        // Never the old lie about an enabled gate or the loud disabled warning.
-        assert!(!plain.contains("login enabled"));
-        assert!(!plain.contains("DISABLED"));
-        let color = render_banner(true, &b).join("\n");
-        assert!(
-            color.contains(DIM) && !color.contains(YELLOW) && !color.contains(RED),
-            "local-only row is muted (DIM), not a warning: {color}"
-        );
-    }
-
-    #[test]
-    fn banner_no_login_tailscale_is_yellow_warning() {
-        let mut b = sample_banner();
-        b.login = LoginRow::NoLoginRequired {
-            reachable: true,
-            public: false,
-        };
-        let plain = render_banner(false, &b).join("\n");
-        assert!(
-            plain.contains("Tailscale network"),
-            "tailscale wording: {plain}"
-        );
-        assert!(plain.starts_with("dux") || plain.contains("warn"));
-        let color = render_banner(true, &b).join("\n");
-        assert!(
-            color.contains(YELLOW),
-            "reachable no-login row is a yellow warning: {color}"
-        );
-    }
-
-    #[test]
-    fn banner_no_login_public_is_stronger_yellow_warning() {
-        let mut b = sample_banner();
-        b.login = LoginRow::NoLoginRequired {
-            reachable: true,
-            public: true,
-        };
-        let plain = render_banner(false, &b).join("\n");
-        assert!(
-            plain.contains("public/LAN address") && plain.contains("auth proxy"),
-            "public wording must name the public/LAN reach and the proxy mitigation: {plain}"
-        );
-        let color = render_banner(true, &b).join("\n");
-        assert!(
-            color.contains(YELLOW),
-            "public no-login row is a yellow warning: {color}"
-        );
     }
 
     #[test]
@@ -1114,7 +933,7 @@ mod tests {
         // Every emit is a no-op — there is no observable output, and these calls
         // must not panic.
         console.client_connected(ip("10.0.0.1"));
-        console.login_failed(ip("10.0.0.1"));
+        console.client_disconnected(ip("10.0.0.1"));
         console.access("GET", "/", 200, 1);
         console.banner(&sample_banner());
     }
@@ -1126,8 +945,7 @@ mod tests {
         let ring = ActivityRing::new();
         let console = Console::capture(ring.clone());
         console.client_connected(ip("10.0.0.1"));
-        console.login_ok("alice", ip("10.0.0.2"));
-        console.login_failed(ip("10.0.0.3"));
+        console.client_disconnected(ip("10.0.0.1"));
 
         let snap = ring.snapshot(dux_core::activity::ACTIVITY_CAP);
         let tones: Vec<ActivityTone> = snap.events.iter().map(|e| e.tone).collect();
@@ -1135,8 +953,7 @@ mod tests {
             tones,
             vec![
                 ActivityTone::Info, // client connected
-                ActivityTone::Ok,   // login ok
-                ActivityTone::Warn, // login failed
+                ActivityTone::Info, // client disconnected
             ]
         );
         assert!(
@@ -1144,7 +961,11 @@ mod tests {
                 .message
                 .contains("client connected from 10.0.0.1")
         );
-        assert!(snap.events[1].message.contains("login ok for \"alice\""));
+        assert!(
+            snap.events[1]
+                .message
+                .contains("client disconnected from 10.0.0.1")
+        );
         // The capture stores the structured message -- no ANSI escapes.
         assert!(!snap.events[0].message.contains('\u{1b}'));
     }
@@ -1203,7 +1024,6 @@ mod tests {
         let ring = ActivityRing::new();
         let console = Console::noop();
         console.client_connected(ip("10.0.0.1"));
-        console.login_ok("alice", ip("10.0.0.2"));
         assert!(!console.is_active());
         let snap = ring.snapshot(dux_core::activity::ACTIVITY_CAP);
         assert!(snap.events.is_empty(), "a noop console captures nothing");
@@ -1215,26 +1035,9 @@ mod tests {
         let (console, sink) = Console::test_capture(false);
         console.client_connected(ip("10.0.0.1"));
         console.client_disconnected(ip("10.0.0.1"));
-        console.login_ok("alice", ip("10.0.0.2"));
-        console.login_failed(ip("10.0.0.3"));
-        console.login_rate_limited(ip("10.0.0.4"));
-        console.logout("alice");
         let out = sink.contents();
         assert!(out.contains("client connected from 10.0.0.1"));
         assert!(out.contains("client disconnected from 10.0.0.1"));
-        assert!(out.contains("login ok for \"alice\" from 10.0.0.2"));
-        assert!(out.contains("login failed from 10.0.0.3"));
-        // The failure line names the IP but NEVER a username.
-        let failed_line = out
-            .lines()
-            .find(|l| l.contains("login failed"))
-            .expect("a failure line");
-        assert!(
-            !failed_line.contains("alice"),
-            "failure must not log a username: {failed_line}"
-        );
-        assert!(out.contains("login rate-limited from 10.0.0.4"));
-        assert!(out.contains("logout for \"alice\""));
     }
 
     #[test]
@@ -1255,7 +1058,6 @@ mod tests {
         let out = sink.contents();
         assert!(out.contains("dux v0.1.0"));
         assert!(out.contains("Local: http://127.0.0.1:8080"));
-        assert!(out.contains("login enabled — 1 user(s)"));
     }
 
     #[test]

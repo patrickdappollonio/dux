@@ -531,7 +531,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    use crate::test_support::{router_no_auth, router_with_auth};
+    use crate::test_support::router_no_auth;
 
     #[tokio::test]
     async fn rerun_startup_command_404_for_unknown_session() {
@@ -548,21 +548,5 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn rerun_startup_command_is_gated() {
-        let (_tmp, app) = router_with_auth();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/sessions/s1/rerun-startup-command")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

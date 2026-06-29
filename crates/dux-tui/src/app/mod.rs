@@ -199,18 +199,6 @@ pub struct App {
     /// only supplies which branch fired and any error string.
     pub(crate) pending_persist_ops:
         HashMap<String, dux_core::engine::HandlerStatusOp<PersistFinalOutcome>>,
-    /// In-flight web-UI login-user add ops whose final is decided in the
-    /// completion handler. The add dispatch mints a
-    /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
-    /// pending busy, and stashes it here keyed by that id. The matching
-    /// [`dux_core::engine::EventReaction::AuthUsersOutcome`] carries the id back;
-    /// the handler pops the op and resolves it against the engine-computed
-    /// [`dux_core::engine::AuthUserFinalOutcome`]. Because the engine defers the
-    /// outcome across a config-reload barrier, the op may stay stashed here until
-    /// the later `ConfigReloadReady` replay emits its final — so this map is the
-    /// op's home for the full deferral window, not just one tick.
-    pub(crate) pending_auth_ops:
-        HashMap<String, dux_core::engine::HandlerStatusOp<dux_core::engine::AuthUserFinalOutcome>>,
     /// In-flight worktree-picker load ops whose final is decided in the
     /// completion handler. The picker dispatch mints a
     /// [`dux_core::engine::HandlerStatusOp`] (its own opaque id), shows its
@@ -956,26 +944,6 @@ pub(crate) enum PromptState {
         input: TextInput,
         rename_branch: bool,
     },
-    /// Step 1 of `server-add-user`: type the username. Enter advances to the
-    /// masked password step; Esc cancels.
-    ServerAddUserName {
-        input: TextInput,
-    },
-    /// Step 2 of `server-add-user`: type the (masked) password for `username`.
-    /// `is_update` records whether this username already exists so the success
-    /// message can say "password updated" rather than "added". Enter hashes the
-    /// password off-thread and persists; Esc cancels.
-    ServerAddUserPassword {
-        username: String,
-        input: TextInput,
-        is_update: bool,
-    },
-    /// `server-remove-user`: a picker over the configured usernames. Enter
-    /// removes every entry for the highlighted username; Esc cancels.
-    ServerRemoveUser {
-        usernames: Vec<String>,
-        selected: usize,
-    },
     PullRequestInput {
         project: Project,
         input: TextInput,
@@ -1517,7 +1485,6 @@ pub(crate) fn build_left_items(
     items
 }
 
-mod auth_users;
 mod components;
 mod input;
 mod render;
@@ -1645,7 +1612,6 @@ impl App {
             pty_activity: HashMap::new(),
             pty_input: HashMap::new(),
             last_foreground_refresh: None,
-            pending_auth_users: None,
             pending_web_checkout_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
             pending_web_pr_lookup_ops: HashMap::new(),
@@ -1772,7 +1738,6 @@ impl App {
             pending_server_flip: None,
             server_flip_preflight_pending: false,
             pending_persist_ops: HashMap::new(),
-            pending_auth_ops: HashMap::new(),
             pending_worktree_ops: HashMap::new(),
             pending_pr_lookup_ops: HashMap::new(),
             pending_delete_ops: HashMap::new(),
@@ -2372,14 +2337,6 @@ impl App {
             "reload-config" => self.reload_config_from_disk(),
             "start-web-server" => {
                 self.start_web_server();
-                Ok(())
-            }
-            "server-add-user" => {
-                self.open_server_add_user();
-                Ok(())
-            }
-            "server-remove-user" => {
-                self.open_server_remove_user();
                 Ok(())
             }
             "toggle-project-auto-reopen-agents" => self.toggle_project_auto_reopen_agents(),
@@ -3352,7 +3309,8 @@ pub(crate) fn sync_config_projects_with_store(
 /// there is no rebind race when the web server adopts them.
 ///
 /// The flip is structurally local-only: this function takes `port` +
-/// `tailscale_ip`, never `listen_addrs`, so it can never open a public listener.
+/// `tailscale_ip`, never a configurable bind host, so it can never open a public
+/// listener.
 /// Tailscale detection (`tailscale ip`) is a subprocess call, so the CALLER runs
 /// it on a worker thread and hands the result here — this function does no
 /// blocking work beyond the (fast, local) `TcpListener::bind`.
@@ -3620,12 +3578,13 @@ mod tests {
     }
 
     #[test]
-    fn preflight_is_local_only_and_never_reads_listen_addrs() {
+    fn preflight_is_local_only_and_never_reads_bind_host() {
         // STRUCTURAL: the flip pre-flight takes a port + optional Tailscale IP,
-        // never listen_addrs, so it can only ever bind loopback (and Tailscale).
-        // Even with a public listen_addrs configured, the flip path is unaffected
-        // because it does not consult that field at all — this test documents the
-        // local-only guarantee by exercising the only inputs the flip can take.
+        // never the configurable [server] host, so it can only ever bind loopback
+        // (and Tailscale). Even with a public host configured, the flip path is
+        // unaffected because it does not consult that field at all — this test
+        // documents the local-only guarantee by exercising the only inputs the
+        // flip can take.
         let (listeners, _urls, _warnings) =
             preflight_server_listeners(0, None).expect("loopback-only pre-flight succeeds");
         assert!(

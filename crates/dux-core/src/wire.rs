@@ -497,15 +497,6 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
             .label
             .as_ref()
             .map(|l| WireStatus::new("info", format!("Closed terminal \"{l}\"."))),
-        // The web never initiates a login-user add (TUI/config-only by design),
-        // so `status_op_id` is `None` here; build the final status directly,
-        // keyed if the id is ever present so it replaces a matching busy.
-        EventReaction::AuthUsersOutcome {
-            outcome,
-            status_op_id,
-        } => Some(WireStatus::from_update(
-            &outcome.clone().into_status(status_op_id.clone()),
-        )),
         _ => None,
     }
 }
@@ -519,14 +510,6 @@ pub fn wire_statuses_from_reaction(reaction: &EventReaction) -> Vec<WireStatus> 
     match reaction {
         EventReaction::Status(update) => vec![WireStatus::from_update(update)],
         EventReaction::Multi(items) => items.iter().flat_map(wire_statuses_from_reaction).collect(),
-        // See `wire_status_from_reaction`: the web never drives an auth-user add,
-        // but a deferred replay could surface one — translate it for completeness.
-        EventReaction::AuthUsersOutcome {
-            outcome,
-            status_op_id,
-        } => vec![WireStatus::from_update(
-            &outcome.clone().into_status(status_op_id.clone()),
-        )],
         // Create-kind launch finals (success / startup-error / persist-fail /
         // launch-fail) are resolved ENGINE-SIDE against the shared
         // `Engine::pending_create_ops` op and ride alongside the launch View as a

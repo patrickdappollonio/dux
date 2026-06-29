@@ -110,8 +110,6 @@ pub enum Action {
     ChangeTheme,
     ReloadConfig,
     StartWebServer,
-    ServerAddUser,
-    ServerRemoveUser,
 }
 
 impl Action {
@@ -209,8 +207,6 @@ impl Action {
             Action::ChangeTheme => "change_theme",
             Action::ReloadConfig => "reload_config",
             Action::StartWebServer => "start_web_server",
-            Action::ServerAddUser => "server_add_user",
-            Action::ServerRemoveUser => "server_remove_user",
         }
     }
 
@@ -344,10 +340,6 @@ impl Action {
             Action::StartWebServer => {
                 "Tear down the TUI and serve the dux web UI over the same agents."
             }
-            Action::ServerAddUser => {
-                "Add or update a web UI login user (prompts for a username and password)."
-            }
-            Action::ServerRemoveUser => "Remove a web UI login user.",
         }
     }
 
@@ -443,9 +435,7 @@ impl Action {
             | Action::ChangeProjectDefaultProvider
             | Action::ChangeTheme
             | Action::ReloadConfig
-            | Action::StartWebServer
-            | Action::ServerAddUser
-            | Action::ServerRemoveUser => None,
+            | Action::StartWebServer => None,
         }
     }
 }

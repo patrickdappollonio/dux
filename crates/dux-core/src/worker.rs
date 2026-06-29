@@ -374,27 +374,6 @@ pub enum WorkerEvent {
         /// `None` for callers that don't drive a handler-resolved status (web).
         status_op_id: Option<String>,
     },
-    /// A web UI `[auth]` user add/update/remove was hashed (for adds) and
-    /// persisted to config.toml on a background thread. On success the worker
-    /// carries the updated user list so the engine can refresh its in-memory
-    /// config; `message` is the verbose, already-formatted status line to show.
-    /// On failure `result` is the formatted error and the config is left
-    /// untouched. `warn` requests a warning-tone status on success (set when a
-    /// removal leaves zero users, which disables the login gate).
-    AuthUsersPersisted {
-        users: Vec<String>,
-        message: String,
-        warn: bool,
-        result: Result<(), String>,
-        /// Correlation id for the TUI `HandlerStatusOp` minted at the add
-        /// dispatch site, whose final is resolved in the completion handler
-        /// (the post-worker config write is fallible and the warn tone is known
-        /// only here). Rides back to the immediate handler AND, when an arrival
-        /// is deferred by an open reload barrier, into the stash so the later
-        /// `ConfigReloadReady` replay resolves the right op. `None` for callers
-        /// that don't drive a handler-resolved status.
-        status_op_id: Option<String>,
-    },
     StartupCommandLogsLoaded {
         scope_label: String,
         result: Result<crate::startup::StartupCommandLatestLog, String>,

@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 notify.workspace = true
 anyhow.workspace = true
-bcrypt.workspace = true
 chrono.workspace = true
 compact_str = "0.9"
 content_inspector.workspace = true

@@ -20,9 +20,9 @@ use anyhow::{Context, Result};
 use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
-/// holds bcrypt password hashes under `[auth]` and may hold tokens under `[env]`,
-/// so it must not be group/world readable. Unix-only — the project targets macOS
-/// and Linux (CLAUDE.md), so no `cfg(windows)` branch is needed.
+/// may hold secrets such as tokens under `[env]`, so it must not be group/world
+/// readable. Unix-only — the project targets macOS and Linux (CLAUDE.md), so no
+/// `cfg(windows)` branch is needed.
 const CONFIG_FILE_MODE: u32 = 0o600;
 
 /// Whether an atomic write fsyncs the file before the rename. Eager (critical)
@@ -276,9 +276,10 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_str(doc, "editor", "default", &config.editor.default);
 
     // --- [server] ---
-    // `bind` is DEPRECATED: it is migrated away on load and is never re-emitted
-    // here, so a patch/recover/plain write produces the new port/listen_addrs
-    // shape only.
+    // The deprecated `bind` field is migrated away on load and is never
+    // re-emitted here, so a patch/recover/plain write produces the new
+    // host/port shape only.
+    patch_table_str(doc, "server", "host", &config.server.host);
     patch_table_u16(doc, "server", "port", config.server.port);
     patch_table_bool(
         doc,
@@ -286,19 +287,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "tailscale_enabled",
         config.server.tailscale_enabled,
     );
-    patch_table_string_array(doc, "server", "listen_addrs", &config.server.listen_addrs);
-    patch_table_bool(
-        doc,
-        "server",
-        "insecure_allow_remote",
-        config.server.insecure_allow_remote,
-    );
-    patch_table_bool(
-        doc,
-        "server",
-        "dangerously_listen_http",
-        config.server.dangerously_listen_http,
-    );
+    patch_table_string_array(doc, "server", "allowed_hosts", &config.server.allowed_hosts);
     patch_table_str(doc, "server", "color", &config.server.color);
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
     patch_table_usize(
@@ -307,9 +296,6 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "max_websocket_connections",
         config.server.max_websocket_connections as usize,
     );
-
-    // --- [auth] ---
-    patch_table_string_array(doc, "auth", "users", &config.auth.users);
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -780,11 +766,10 @@ unknown_key = \"untouched\"
         let config_path = dir.path().join("config.toml");
 
         let mut config = Config::default();
+        config.server.host = "0.0.0.0".to_string();
         config.server.port = 9000;
         config.server.tailscale_enabled = false;
-        config.server.listen_addrs = vec!["0.0.0.0:9000".to_string()];
-        config.server.insecure_allow_remote = true;
-        config.server.dangerously_listen_http = true;
+        config.server.allowed_hosts = vec!["box.tailnet.ts.net".to_string()];
         config.server.color = "never".to_string();
         config.server.access_log = false;
         config.server.max_websocket_connections = 42;
@@ -793,13 +778,12 @@ unknown_key = \"untouched\"
 
         let saved = fs::read_to_string(&config_path).expect("read back");
         let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.server.host, "0.0.0.0");
         assert_eq!(parsed.server.port, 9000);
         assert!(!parsed.server.tailscale_enabled);
-        assert_eq!(parsed.server.listen_addrs, vec!["0.0.0.0:9000".to_string()]);
-        assert!(parsed.server.insecure_allow_remote);
-        assert!(
-            parsed.server.dangerously_listen_http,
-            "dangerously_listen_http must round-trip through a plain write"
+        assert_eq!(
+            parsed.server.allowed_hosts,
+            vec!["box.tailnet.ts.net".to_string()]
         );
         assert_eq!(parsed.server.color, "never");
         assert!(!parsed.server.access_log);
@@ -812,63 +796,27 @@ unknown_key = \"untouched\"
     }
 
     #[test]
-    fn write_config_plain_round_trips_auth_users() {
-        // LESSON from the [server] slice: a managed section that forgets its
-        // apply_patches entry silently wipes user settings on the recover path.
-        // Guard the [auth] users against that regression: non-default users must
-        // survive a from-scratch plain write.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-
-        let mut config = Config::default();
-        config.auth.users = vec![
-            "alice:$2y$12$abcdefghijklmnopqrstuv".to_string(),
-            "bob:$2y$12$wxyz0123456789abcdefgh".to_string(),
-        ];
-
-        write_config_plain(&config_path, &config).expect("write_config_plain");
-
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        let parsed: Config = toml::from_str(&saved).expect("reparse");
+    fn write_config_plain_round_trips_host_and_allowed_hosts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("c.toml");
+        let mut cfg = Config::default();
+        cfg.server.host = "0.0.0.0".into();
+        cfg.server.port = 9000;
+        cfg.server.allowed_hosts = vec!["box.tailnet.ts.net".into()];
+        write_config_plain(&path, &cfg).unwrap();
+        let parsed: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.server.host, "0.0.0.0");
+        assert_eq!(parsed.server.port, 9000);
         assert_eq!(
-            parsed.auth.users,
-            vec![
-                "alice:$2y$12$abcdefghijklmnopqrstuv".to_string(),
-                "bob:$2y$12$wxyz0123456789abcdefgh".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn patch_preserves_existing_auth_users() {
-        // Patching an existing file must keep configured [auth] users intact.
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let config_path = dir.path().join("config.toml");
-        fs::write(
-            &config_path,
-            "[auth]\nusers = [\"alice:$2y$12$existinghashvalue000000\"]\n",
-        )
-        .expect("write initial");
-
-        let mut config = Config::default();
-        // Mirror what a real load would do: the in-memory config carries the
-        // same users back into the patch.
-        config.auth.users = vec!["alice:$2y$12$existinghashvalue000000".to_string()];
-
-        patch_config_file(&config_path, &config).expect("patch");
-
-        let saved = fs::read_to_string(&config_path).expect("read back");
-        let parsed: Config = toml::from_str(&saved).expect("reparse");
-        assert_eq!(
-            parsed.auth.users,
-            vec!["alice:$2y$12$existinghashvalue000000".to_string()]
+            parsed.server.allowed_hosts,
+            vec!["box.tailnet.ts.net".to_string()]
         );
     }
 
     #[test]
     #[cfg(unix)]
     fn write_config_plain_sets_owner_only_perms() {
-        // config.toml carries bcrypt hashes ([auth]) and possibly tokens ([env]),
+        // config.toml may carry secrets (tokens under [env]),
         // so every write must restrict it to 0600 (owner read/write only).
         let dir = tempfile::TempDir::new().expect("tempdir");
         let config_path = dir.path().join("config.toml");

@@ -14,7 +14,6 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
-bcrypt = "0.19"
 chrono = { version = "0.4.41", features = ["serde"] }
 rustix = { version = "1.1", features = ["termios", "process", "event", "stdio", "fs", "time"] }
 dux-core = { path = "crates/dux-core" }
@@ -32,7 +31,6 @@ libc = "0.2"
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
-tower-sessions = "0.15"
 
 [profile.release]
 opt-level = "z"   # Optimize for size.

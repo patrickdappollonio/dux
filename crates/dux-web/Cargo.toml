@@ -15,10 +15,6 @@ futures-util.workspace = true
 uuid.workspace = true
 # Wall-clock `HH:MM:SS` timestamps for the vite-style server console (console.rs).
 chrono.workspace = true
-tower-sessions.workspace = true
-# The tower-sessions `SessionStore`/`ExpiredDeletion` traits are `#[async_trait]`,
-# so the sweepable in-memory store that implements them needs the same macro.
-async-trait = "0.1"
 rust-embed = { version = "8", features = ["mime-guess", "debug-embed"] }
 # Decompress embedded assets on the fly for the rare client that doesn't accept
 # gzip (build.rs stores them gzipped to shrink the binary). Already in the lock.
