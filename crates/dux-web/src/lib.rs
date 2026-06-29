@@ -401,8 +401,8 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
             let shutdown = shutdown.clone();
             let task_shutdown = shutdown.subscribe();
             tasks.spawn(async move {
-                // Serve with connect-info so the login handler can read the peer
-                // IP for the per-IP attempt backoff. `tap_io` disables Nagle on
+                // Serve with connect-info so the access-log middleware can include
+                // the peer IP in each log line. `tap_io` disables Nagle on
                 // each accepted socket: terminal traffic is many tiny packets
                 // (keystrokes, per-char echo/redraws), and Nagle batches them into
                 // laggy clumps that make remote typing stutter and flicker.

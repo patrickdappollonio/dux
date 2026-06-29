@@ -18,7 +18,8 @@
 //! given the single-tenant trusted-access model); it is gated to local-access
 //! clients in the UI and is a harmless no-op when spawned on a headless server.
 //!
-//! All routes are auth-gated and run the file I/O OFF the async reactor
+//! All routes are served like every other API route, with the host-allowlist
+//! and same-origin guard applied app-wide, and run the file I/O OFF the async reactor
 //! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
 //! `session.changes` event reaches subscribed clients on `/ws/events`.
 
@@ -180,7 +181,8 @@ async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) ->
 /// then `read_nofollow` re-opens it with `O_NOFOLLOW` to close the TOCTOU
 /// window between the canonicalize and the read. The write path is unaffected.
 /// Content-Type is guessed from the extension; SVGs served to `<img>` never
-/// run scripts. Auth-gated like every `/api/file/*` route.
+/// run scripts. Served like every other `/api/file/*` route, with the
+/// host-allowlist and same-origin guard applied app-wide.
 ///
 /// Containment is enforced in two stages:
 ///

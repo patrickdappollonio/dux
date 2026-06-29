@@ -294,10 +294,10 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 /// the flip/disabled paths emit nothing.
 ///
 /// The path is printed WITHOUT its query string. Query parameters can carry
-/// sensitive values — `GET /api/file/raw?session_id=…&path=…` puts the session
-/// cookie id and an absolute filesystem path in the query — and this log is the
-/// `dux server` stdout an operator may forward to a file or aggregator, so the
-/// query is dropped to avoid leaking secrets.
+/// sensitive values — `GET /api/file/raw?path=…` puts an absolute filesystem
+/// path in the query — and this log is the `dux server` stdout an operator may
+/// forward to a file or aggregator, so the query is dropped to avoid leaking
+/// secrets.
 async fn log_request(
     console: &Console,
     access_log: bool,
