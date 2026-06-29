@@ -572,17 +572,29 @@ impl Engine {
     /// and any extra calls within the interval are cheap no-ops. Both the TUI
     /// run loop and the web engine actor call this once per tick; they never run
     /// at the same time.
-    pub fn refresh_terminal_foregrounds(&mut self) {
+    ///
+    /// Returns `true` only when this call actually probed AND a terminal's
+    /// `foreground_cmd` changed (the spine's `foreground_cmd` therefore moved).
+    /// A throttled no-op, or a probe that found every foreground unchanged,
+    /// returns `false`. The web engine actor uses this to bump its spine-change
+    /// version only on a real change; the TUI ignores the result.
+    pub fn refresh_terminal_foregrounds(&mut self) -> bool {
         let now = Instant::now();
         if let Some(last) = self.last_foreground_refresh
             && now.duration_since(last) < FOREGROUND_REFRESH_INTERVAL
         {
-            return;
+            return false;
         }
         self.last_foreground_refresh = Some(now);
+        let mut changed = false;
         for terminal in self.companion_terminals.values_mut() {
-            terminal.foreground_cmd = terminal.client.foreground_process_name();
+            let next = terminal.client.foreground_process_name();
+            if next != terminal.foreground_cmd {
+                terminal.foreground_cmd = next;
+                changed = true;
+            }
         }
+        changed
     }
 
     /// Record that the user just forwarded interactive keystrokes to the given
