@@ -193,10 +193,10 @@ async fn boot_with_repo() -> (SocketAddr, tempfile::TempDir) {
     (addr, tmp)
 }
 
-/// HTTP `GET`/`POST /api/v1/file/diff` returns both raw sides of a changed file and
-/// rejects a path that escapes the worktree — the HTTP-layer coverage that replaced
-/// the deleted WS `get_diff` test (route wiring, session resolution, the boundary,
-/// and JSON shape).
+/// HTTP `POST /api/v1/sessions/:id/files/diff` returns both raw sides of a changed
+/// file and rejects a path that escapes the worktree — the HTTP-layer coverage that
+/// replaced the deleted WS `get_diff` test (route wiring, session resolution, the
+/// boundary, and JSON shape).
 #[tokio::test]
 async fn http_file_diff_returns_sides_and_rejects_traversal() {
     let (addr, _tmp) = boot_with_repo().await;
@@ -204,8 +204,8 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
 
     // The seeded repo has f.txt = "line2" at HEAD, "CHANGED" in the working copy.
     let resp = client
-        .post(format!("http://{addr}/api/v1/file/diff"))
-        .json(&serde_json::json!({ "session_id": "s1", "path": "f.txt" }))
+        .post(format!("http://{addr}/api/v1/sessions/s1/files/diff"))
+        .json(&serde_json::json!({ "path": "f.txt" }))
         .send()
         .await
         .unwrap();
@@ -232,17 +232,17 @@ async fn http_file_diff_returns_sides_and_rejects_traversal() {
 
     // A path escaping the worktree is rejected at the boundary → 400.
     let resp = client
-        .post(format!("http://{addr}/api/v1/file/diff"))
-        .json(&serde_json::json!({ "session_id": "s1", "path": "../escape" }))
+        .post(format!("http://{addr}/api/v1/sessions/s1/files/diff"))
+        .json(&serde_json::json!({ "path": "../escape" }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 400, "path traversal must be rejected");
 }
 
-/// HTTP `GET /api/v1/file/raw` (the markdown-preview image proxy) serves a worktree
-/// file's bytes with a guessed content type, and rejects a path that escapes the
-/// worktree.
+/// HTTP `GET /api/v1/sessions/:id/files/raw` (the markdown-preview image proxy)
+/// serves a worktree file's bytes with a guessed content type, and rejects a path
+/// that escapes the worktree.
 #[tokio::test]
 async fn http_file_raw_serves_bytes_and_rejects_traversal() {
     let (addr, _tmp) = boot_with_repo().await;
@@ -250,7 +250,7 @@ async fn http_file_raw_serves_bytes_and_rejects_traversal() {
 
     let resp = client
         .get(format!(
-            "http://{addr}/api/v1/file/raw?session_id=s1&path=f.txt"
+            "http://{addr}/api/v1/sessions/s1/files/raw?path=f.txt"
         ))
         .send()
         .await
@@ -282,7 +282,7 @@ async fn http_file_raw_serves_bytes_and_rejects_traversal() {
 
     let resp = client
         .get(format!(
-            "http://{addr}/api/v1/file/raw?session_id=s1&path=../escape"
+            "http://{addr}/api/v1/sessions/s1/files/raw?path=../escape"
         ))
         .send()
         .await
@@ -864,53 +864,57 @@ async fn terminal_rest_create_and_delete() {
     );
 }
 
-/// The `/api/v1` git and file routes reach their handlers over real HTTP (a stage
-/// against an unknown session 404s), and the retired unversioned `/api/git/*` /
-/// `/api/file/*` paths no longer reach the handler (they fall through to the SPA
+/// The session-nested git and file routes reach their handlers over real HTTP (a
+/// stage against an unknown session 404s), and the old body-keyed `/api/v1/git/*` /
+/// `/api/v1/file/*` paths no longer reach the handler (they fall through to the SPA
 /// fallback, which never returns the handler's 404).
 #[tokio::test]
-async fn rest_v1_git_and_file_routes_resolve() {
+async fn rest_nested_git_and_file_routes_resolve() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
 
-    let v1_git = client
+    let git = client
+        .post(format!("http://{addr}/api/v1/sessions/nope/git/stage"))
+        .json(&serde_json::json!({"path":"a.txt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(git.status().as_u16(), 404, "/api/v1/sessions/:id/git/stage");
+
+    let file = client
+        .post(format!("http://{addr}/api/v1/sessions/nope/files/read"))
+        .json(&serde_json::json!({"path":"a.txt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        file.status().as_u16(),
+        404,
+        "/api/v1/sessions/:id/files/read"
+    );
+
+    // The retired body-keyed paths no longer reach the handler (no 404 from it).
+    let old_git = client
         .post(format!("http://{addr}/api/v1/git/stage"))
         .json(&serde_json::json!({"session_id":"nope","path":"a.txt"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(v1_git.status().as_u16(), 404, "/api/v1/git/stage");
+    assert_ne!(
+        old_git.status().as_u16(),
+        404,
+        "the old body-keyed /api/v1/git/* path must be gone"
+    );
 
-    let v1_file = client
+    let old_file = client
         .post(format!("http://{addr}/api/v1/file/read"))
         .json(&serde_json::json!({"session_id":"nope","path":"a.txt"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(v1_file.status().as_u16(), 404, "/api/v1/file/read");
-
-    // The retired legacy aliases no longer reach the handler (no 404 from it).
-    let legacy_git = client
-        .post(format!("http://{addr}/api/git/stage"))
-        .json(&serde_json::json!({"session_id":"nope","path":"a.txt"}))
-        .send()
-        .await
-        .unwrap();
     assert_ne!(
-        legacy_git.status().as_u16(),
+        old_file.status().as_u16(),
         404,
-        "the legacy /api/git/* alias must be gone"
-    );
-
-    let legacy_file = client
-        .post(format!("http://{addr}/api/file/read"))
-        .json(&serde_json::json!({"session_id":"nope","path":"a.txt"}))
-        .send()
-        .await
-        .unwrap();
-    assert_ne!(
-        legacy_file.status().as_u16(),
-        404,
-        "the legacy /api/file/* alias must be gone"
+        "the old body-keyed /api/v1/file/* path must be gone"
     );
 }

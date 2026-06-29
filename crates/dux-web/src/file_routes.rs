@@ -24,7 +24,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Path as ApiPath, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -32,6 +32,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::git_routes::resolve_worktree;
+use crate::rest_common::id_within_bound;
 use crate::server::AppState;
 
 /// Largest raw asset the markdown-preview proxy will serve. Bigger than the
@@ -40,26 +41,18 @@ use crate::server::AppState;
 const MAX_RAW_BYTES: u64 = 25 * 1024 * 1024;
 
 #[derive(Deserialize)]
-struct SessionOp {
-    session_id: String,
-}
-
-#[derive(Deserialize)]
 struct ReadOp {
-    session_id: String,
     path: String,
 }
 
 #[derive(Deserialize)]
 struct WriteOp {
-    session_id: String,
     path: String,
     content: String,
 }
 
 #[derive(Deserialize)]
 struct OpenInEditorOp {
-    session_id: String,
     path: String,
     /// Which editor to open, as a dux-core editor config key/alias (e.g.
     /// "vscode", "zed"). When absent, the configured/preferred editor is used —
@@ -69,10 +62,10 @@ struct OpenInEditorOp {
 }
 
 /// Query for the raw-asset proxy. A GET so it can back an `<img src>`; the
-/// session resolves the worktree, `path` is worktree-relative.
+/// session resolves the worktree (from the `:id` path segment), `path` is
+/// worktree-relative.
 #[derive(Deserialize)]
 struct RawQuery {
-    session_id: String,
     path: String,
 }
 
@@ -94,11 +87,12 @@ struct OpenedEditor {
 }
 
 /// The gated editor file routes, merged into the authenticated sub-router. These
-/// are body/query-keyed (`session_id` in the body/query) and live under the
-/// versioned `/api/v1/file/*` prefix. The unversioned `/api/file/*` aliases were
-/// removed at cutover (Phase 6).
+/// are path-keyed: the session id is the `:id` path segment under
+/// `/api/v1/sessions/:id/files/*`, validated by `id_within_bound` and resolved to
+/// a worktree at the top of each handler (mirroring the other resource-nested REST
+/// routes). The `raw` proxy is a GET with a worktree-relative `?path=` query.
 pub fn routes() -> Router<AppState> {
-    let prefix = "/api/v1/file";
+    let prefix = "/api/v1/sessions/{id}/files";
     Router::new()
         .route(&format!("{prefix}/list"), post(list_files))
         .route(&format!("{prefix}/read"), post(read_file))
@@ -108,8 +102,17 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/open-in-editor"), post(open_in_editor))
 }
 
-async fn list_files(State(state): State<AppState>, Json(op): Json<SessionOp>) -> Response {
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+/// 404 for an unknown/over-long session id. Mirrors `session_actions` /
+/// `terminal_actions` so an oversized `:id` never reaches the engine lookup.
+fn unknown_session() -> Response {
+    (StatusCode::NOT_FOUND, "unknown session").into_response()
+}
+
+async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -128,8 +131,15 @@ async fn list_files(State(state): State<AppState>, Json(op): Json<SessionOp>) ->
     }
 }
 
-async fn read_file(State(state): State<AppState>, Json(op): Json<ReadOp>) -> Response {
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+async fn read_file(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<ReadOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -151,8 +161,15 @@ async fn read_file(State(state): State<AppState>, Json(op): Json<ReadOp>) -> Res
 /// Return the two raw sides (HEAD vs working copy) of a changed file so the web
 /// editor can render a Monaco diff. Same worktree-relative path security as
 /// `read`; binary content is reported via the `binary` flag with empty sides.
-async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) -> Response {
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+async fn diff_contents(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<ReadOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -180,7 +197,7 @@ async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) ->
 /// then `read_nofollow` re-opens it with `O_NOFOLLOW` to close the TOCTOU
 /// window between the canonicalize and the read. The write path is unaffected.
 /// Content-Type is guessed from the extension; SVGs served to `<img>` never
-/// run scripts. Auth-gated like every `/api/file/*` route.
+/// run scripts. Auth-gated like every `/api/v1/sessions/:id/files/*` route.
 ///
 /// Containment is enforced in two stages:
 ///
@@ -196,8 +213,15 @@ async fn diff_contents(State(state): State<AppState>, Json(op): Json<ReadOp>) ->
 /// Note: `read_file` intentionally ALLOWS outside-resolving symlinks (marking
 /// them `read_only: true`) so the editor can display them. We do NOT change
 /// that behaviour here; this restriction is image-proxy–only.
-async fn read_raw(State(state): State<AppState>, Query(q): Query<RawQuery>) -> Response {
-    let worktree = match resolve_worktree(&state, q.session_id).await {
+async fn read_raw(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Query(q): Query<RawQuery>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -310,9 +334,16 @@ fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
-async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> Response {
-    let session_id = op.session_id.clone();
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+async fn write_file(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<WriteOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -356,8 +387,15 @@ async fn write_file(State(state): State<AppState>, Json(op): Json<WriteOp>) -> R
 /// fails and we return the error. Containment is enforced by
 /// `resolve_worktree_path` exactly like read/write, so no path outside the
 /// worktree can be targeted.
-async fn open_in_editor(State(state): State<AppState>, Json(op): Json<OpenInEditorOp>) -> Response {
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+async fn open_in_editor(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<OpenInEditorOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };

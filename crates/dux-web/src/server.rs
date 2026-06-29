@@ -496,12 +496,14 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 /// the flip/disabled paths emit nothing.
 ///
 /// The path is printed WITHOUT its query string. Query parameters can carry
-/// sensitive values — `GET /api/file/raw?session_id=…&path=…` puts the session
-/// cookie id and an absolute filesystem path in the query — and this log is the
+/// sensitive values — `GET /api/v1/sessions/<id>/files/raw?path=…` puts a
+/// worktree-relative filesystem path in the query — and this log is the
 /// `dux server` stdout an operator may forward to a file or aggregator, so the
-/// query is dropped to avoid leaking secrets. The ACME challenge token rides the
-/// PATH (`/.well-known/acme-challenge/{token}`), not the query, so challenge
-/// fetches are still visible.
+/// query is dropped to avoid leaking secrets. The session id is now an opaque
+/// `:id` path segment (not a query parameter) and so still appears in the logged
+/// path. The ACME challenge token rides the PATH
+/// (`/.well-known/acme-challenge/{token}`), not the query, so challenge fetches
+/// are still visible.
 async fn log_request(
     console: &Console,
     access_log: bool,
@@ -517,9 +519,10 @@ async fn log_request(
     }
     let method = request.method().as_str().to_string();
     // Log the PATH ONLY — never the query string. Query params can carry secrets
-    // (e.g. /api/file/raw?session_id=…&path=…), and this log is stdout an operator
-    // may persist; the ACME challenge token is in the path, so dropping the query
-    // loses nothing useful.
+    // (e.g. /api/v1/sessions/<id>/files/raw?path=…), and this log is stdout an
+    // operator may persist; the ACME challenge token is in the path, so dropping
+    // the query loses nothing useful. The session id is an opaque path segment now,
+    // so it still appears in the logged path.
     let path = request.uri().path().to_string();
     let started = std::time::Instant::now();
     let response = next.run(request).await;
@@ -2336,11 +2339,9 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/git/stage")
+                    .uri("/api/v1/sessions/s1/git/stage")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"session_id":"s1","path":"a.txt"}"#,
-                    ))
+                    .body(axum::body::Body::from(r#"{"path":"a.txt"}"#))
                     .unwrap(),
             )
             .await
@@ -2352,7 +2353,7 @@ mod tests {
     /// With auth off the gate passes; an unknown session resolves to 404 (the
     /// handler is wired and resolves the worktree before doing any git work).
     #[tokio::test]
-    async fn git_route_unknown_session_is_404() {
+    async fn nested_git_unknown_session_is_404() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
         let auth = auth::shared_auth(&[], false);
@@ -2362,17 +2363,67 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/git/stage")
+                    .uri("/api/v1/sessions/does-not-exist/git/stage")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"session_id":"does-not-exist","path":"a.txt"}"#,
-                    ))
+                    .body(axum::body::Body::from(r#"{"path":"a.txt"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A nested git route with a KNOWN seeded session id resolves the worktree
+    /// from `:id` and gets past routing: the path-validation step rejects it as a
+    /// non-changed file (400), proving `:id` was extracted rather than 404-ing on
+    /// an unknown session. (The seeded worktree is not a real git repo, so the
+    /// changed-file membership check fails — a non-routing outcome, which is the
+    /// point.)
+    #[tokio::test]
+    async fn nested_git_stage_resolves_known_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let status = oneshot_status(
+            &app,
+            "POST",
+            "/api/v1/sessions/s1/git/stage",
+            Some(r#"{"path":"a.txt"}"#),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a known session id must resolve past routing (not a 404)"
+        );
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the seeded worktree is not a git repo, so the changed-file guard rejects it as 400"
+        );
+    }
+
+    /// An oversized `:id` (longer than `MAX_ID_LEN`) is rejected with 404 by the
+    /// `id_within_bound` guard before any engine lookup runs.
+    #[tokio::test]
+    async fn nested_git_oversized_id_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let huge = "x".repeat(crate::rest_common::MAX_ID_LEN + 1);
+        let status = oneshot_status(
+            &app,
+            "POST",
+            &format!("/api/v1/sessions/{huge}/git/stage"),
+            Some(r#"{"path":"a.txt"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     /// The editor file routes live in the same gated group: unauthenticated read
@@ -2389,11 +2440,9 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/file/read")
+                    .uri("/api/v1/sessions/s1/files/read")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"session_id":"s1","path":"a.txt"}"#,
-                    ))
+                    .body(axum::body::Body::from(r#"{"path":"a.txt"}"#))
                     .unwrap(),
             )
             .await
@@ -2405,7 +2454,7 @@ mod tests {
     /// With auth off the gate passes; an unknown session resolves to 404 (the
     /// write handler resolves the worktree before touching the filesystem).
     #[tokio::test]
-    async fn file_route_unknown_session_is_404() {
+    async fn nested_file_unknown_session_is_404() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
         let auth = auth::shared_auth(&[], false);
@@ -2415,17 +2464,64 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/v1/file/write")
+                    .uri("/api/v1/sessions/does-not-exist/files/write")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"session_id":"does-not-exist","path":"a.txt","content":"x"}"#,
-                    ))
+                    .body(axum::body::Body::from(r#"{"path":"a.txt","content":"x"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A nested file route with a KNOWN seeded session id resolves the worktree
+    /// from `:id` and gets past routing: reading a non-existent file in the seeded
+    /// worktree is a 400 (a non-routing outcome), proving `:id` was extracted.
+    #[tokio::test]
+    async fn nested_file_read_resolves_known_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let status = oneshot_status(
+            &app,
+            "POST",
+            "/api/v1/sessions/s1/files/read",
+            Some(r#"{"path":"does-not-exist.txt"}"#),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a known session id must resolve past routing (not a 404)"
+        );
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "reading a missing file in the resolved worktree is a 400 client condition"
+        );
+    }
+
+    /// An oversized `:id` (longer than `MAX_ID_LEN`) is rejected with 404 by the
+    /// `id_within_bound` guard before any engine lookup runs.
+    #[tokio::test]
+    async fn nested_file_oversized_id_is_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let auth = auth::shared_auth(&[], false);
+        let app = build_app(handle, auth, Router::new(), RouterParams::plain_http()).0;
+
+        let huge = "x".repeat(crate::rest_common::MAX_ID_LEN + 1);
+        let status = oneshot_status(
+            &app,
+            "POST",
+            &format!("/api/v1/sessions/{huge}/files/read"),
+            Some(r#"{"path":"a.txt"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     /// Boot a headless engine handle whose store holds one project (`p1`) and one
@@ -2611,16 +2707,16 @@ mod tests {
             ),
             ("POST", "/api/v1/projects/p1/pull", None),
             ("POST", "/api/v1/projects/p1/checkout-default", None),
-            // The /api/v1 git/file aliases are gated too.
+            // The nested session git/file routes are gated too.
             (
                 "POST",
-                "/api/v1/git/stage",
-                Some(r#"{"session_id":"s1","path":"a"}"#),
+                "/api/v1/sessions/s1/git/stage",
+                Some(r#"{"path":"a"}"#),
             ),
             (
                 "POST",
-                "/api/v1/file/read",
-                Some(r#"{"session_id":"s1","path":"a"}"#),
+                "/api/v1/sessions/s1/files/read",
+                Some(r#"{"path":"a"}"#),
             ),
             // The Phase-5 companion-terminal verbs are gated too.
             ("POST", "/api/v1/sessions/s1/terminals", None),
@@ -2667,15 +2763,10 @@ mod tests {
         // Contrast: a surviving git route still reaches its handler (an unknown
         // session resolves there), so it does NOT match the fallback status —
         // proving the equality above is route removal, not a blanket fallthrough
-        // of everything under /api/v1/git.
+        // of everything under /api/v1/git. The git mutations now live under the
+        // session-nested path.
         assert_ne!(
-            oneshot_status(
-                &app,
-                "POST",
-                "/api/v1/git/push",
-                Some(r#"{"session_id":"nope"}"#)
-            )
-            .await,
+            oneshot_status(&app, "POST", "/api/v1/sessions/nope/git/push", Some("{}")).await,
             fallback,
             "the surviving push route must still reach the git handler"
         );
@@ -2779,13 +2870,13 @@ mod tests {
         );
     }
 
-    /// The `/api/v1` git/file routes reach their handlers: an unknown session
-    /// resolves to 404 (auth off so the gate passes). The legacy unversioned
-    /// `/api/git/*` and `/api/file/*` paths were removed at cutover, so they no
-    /// longer reach the git/file handler (they fall through to the SPA fallback,
-    /// which never returns the handler's 404).
+    /// The session-nested git/file routes reach their handlers: an unknown session
+    /// resolves to 404 (auth off so the gate passes). The old body-keyed
+    /// `/api/v1/git/*` and `/api/v1/file/*` paths were re-pathed under the session,
+    /// so they no longer reach the git/file handler (they fall through to the SPA
+    /// fallback, which never returns the handler's 404).
     #[tokio::test]
-    async fn v1_git_and_file_routes_reach_handlers() {
+    async fn nested_git_and_file_routes_reach_handlers() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = test_engine_handle(tmp.path());
         let auth = auth::shared_auth(&[], false);
@@ -2795,14 +2886,37 @@ mod tests {
             oneshot_status(
                 &app,
                 "POST",
+                "/api/v1/sessions/nope/git/stage",
+                Some(r#"{"path":"a.txt"}"#)
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "the nested git route must reach the git handler and 404 the unknown session"
+        );
+        assert_eq!(
+            oneshot_status(
+                &app,
+                "POST",
+                "/api/v1/sessions/nope/files/read",
+                Some(r#"{"path":"a.txt"}"#)
+            )
+            .await,
+            StatusCode::NOT_FOUND,
+            "the nested file route must reach the file handler and 404 the unknown session"
+        );
+        // The retired body-keyed paths no longer reach the handler (no 404 from it).
+        assert_ne!(
+            oneshot_status(
+                &app,
+                "POST",
                 "/api/v1/git/stage",
                 Some(r#"{"session_id":"nope","path":"a.txt"}"#)
             )
             .await,
             StatusCode::NOT_FOUND,
-            "the v1 git route must reach the git handler and 404 the unknown session"
+            "the old body-keyed /api/v1/git/* path must be gone"
         );
-        assert_eq!(
+        assert_ne!(
             oneshot_status(
                 &app,
                 "POST",
@@ -2811,19 +2925,7 @@ mod tests {
             )
             .await,
             StatusCode::NOT_FOUND,
-            "the v1 file route must reach the file handler and 404 the unknown session"
-        );
-        // The retired legacy paths no longer reach the handler (no 404 from it).
-        assert_ne!(
-            oneshot_status(
-                &app,
-                "POST",
-                "/api/git/stage",
-                Some(r#"{"session_id":"nope","path":"a.txt"}"#)
-            )
-            .await,
-            StatusCode::NOT_FOUND,
-            "the legacy /api/git/* alias must be gone"
+            "the old body-keyed /api/v1/file/* path must be gone"
         );
     }
 

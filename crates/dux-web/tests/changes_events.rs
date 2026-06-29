@@ -294,9 +294,8 @@ async fn new_client_snapshot_excludes_other_connections_status() {
 
     // A pulls s1 (no remote → a Busy then an error, both scoped to A) via REST.
     let resp = client
-        .post(format!("http://{addr}/api/v1/git/pull"))
+        .post(format!("http://{addr}/api/v1/sessions/s1/git/pull"))
         .header("x-connection-id", &a_id)
-        .json(&serde_json::json!({"session_id": "s1"}))
         .send()
         .await
         .unwrap();
@@ -656,9 +655,8 @@ async fn status_toast_is_scoped_to_origin_connection() {
 
     // A issues a pull via REST: the worker posts a Busy "Pulling…" status scoped to A.
     let resp = client
-        .post(format!("http://{addr}/api/v1/git/pull"))
+        .post(format!("http://{addr}/api/v1/sessions/s1/git/pull"))
         .header("x-connection-id", &a_id)
-        .json(&serde_json::json!({"session_id": "s1"}))
         .send()
         .await
         .unwrap();

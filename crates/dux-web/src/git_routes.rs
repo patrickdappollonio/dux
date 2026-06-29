@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path as ApiPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -30,34 +30,28 @@ use axum::{
 use dux_core::wire::WireCommand;
 use serde::Deserialize;
 
-use crate::rest_common::scope_from_headers;
+use crate::rest_common::{id_within_bound, scope_from_headers};
 use crate::server::AppState;
 
 #[derive(Deserialize)]
 struct FileOp {
-    session_id: String,
     path: String,
 }
 
 #[derive(Deserialize)]
 struct CommitOp {
-    session_id: String,
     message: String,
 }
 
-#[derive(Deserialize)]
-struct SessionOp {
-    session_id: String,
-}
-
 /// The gated git-mutation routes, merged into the authenticated sub-router. These
-/// are body-keyed (`session_id` in the POST body) and live under the versioned
-/// `/api/v1/git/*` prefix. The unversioned `/api/git/*` aliases were removed at
-/// cutover (Phase 6). Project-scoped git actions (refresh the source checkout and
+/// are path-keyed: the session id is the `:id` path segment under
+/// `/api/v1/sessions/:id/git/*`, validated by `id_within_bound` and then resolved
+/// to a worktree at the top of each handler (mirroring the other resource-nested
+/// REST routes). Project-scoped git actions (refresh the source checkout and
 /// switch it to the default branch) live in [`crate::project_actions`] under the
 /// path-keyed `/api/v1/projects/:id/{pull,checkout-default}` routes.
 pub fn routes() -> Router<AppState> {
-    let prefix = "/api/v1/git";
+    let prefix = "/api/v1/sessions/{id}/git";
     Router::new()
         .route(&format!("{prefix}/stage"), post(stage))
         .route(&format!("{prefix}/unstage"), post(unstage))
@@ -65,6 +59,12 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/commit"), post(commit))
         .route(&format!("{prefix}/push"), post(push))
         .route(&format!("{prefix}/pull"), post(pull))
+}
+
+/// 404 for an unknown/over-long session id. Mirrors `session_actions` /
+/// `terminal_actions` so an oversized `:id` never reaches the engine lookup.
+fn unknown_session() -> Response {
+    (StatusCode::NOT_FOUND, "unknown session").into_response()
 }
 
 pub(crate) async fn resolve_worktree(
@@ -119,23 +119,44 @@ where
 
 // ── File-path ops (stage / unstage / discard) ────────────────────────────────
 
-async fn stage(State(state): State<AppState>, Json(op): Json<FileOp>) -> Response {
-    file_op(state, op.session_id, op.path, |wt, p| {
+async fn stage(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<FileOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    file_op(state, id, op.path, |wt, p| {
         dux_core::git::stage_file(&wt, &p)
     })
     .await
 }
 
-async fn unstage(State(state): State<AppState>, Json(op): Json<FileOp>) -> Response {
-    file_op(state, op.session_id, op.path, |wt, p| {
+async fn unstage(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<FileOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    file_op(state, id, op.path, |wt, p| {
         dux_core::git::unstage_file(&wt, &p)
     })
     .await
 }
 
-async fn discard(State(state): State<AppState>, Json(op): Json<FileOp>) -> Response {
-    let session_id = op.session_id.clone();
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+async fn discard(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<FileOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -199,12 +220,19 @@ where
 
 // ── Session-scoped ops (commit / push / pull) ────────────────────────────────
 
-async fn commit(State(state): State<AppState>, Json(op): Json<CommitOp>) -> Response {
+async fn commit(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<CommitOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
     if op.message.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "commit message is empty").into_response();
     }
-    let session_id = op.session_id.clone();
-    let worktree = match resolve_worktree(&state, op.session_id).await {
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
     };
@@ -229,16 +257,17 @@ async fn commit(State(state): State<AppState>, Json(op): Json<CommitOp>) -> Resp
 
 async fn push(
     State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
     headers: HeaderMap,
-    Json(op): Json<SessionOp>,
 ) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
     apply_wire_response(
         state
             .engine
             .apply_wire_scoped(
-                WireCommand::Push {
-                    session_id: op.session_id,
-                },
+                WireCommand::Push { session_id: id },
                 scope_from_headers(&headers, &state.connections),
             )
             .await,
@@ -247,16 +276,17 @@ async fn push(
 
 async fn pull(
     State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
     headers: HeaderMap,
-    Json(op): Json<SessionOp>,
 ) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
     apply_wire_response(
         state
             .engine
             .apply_wire_scoped(
-                WireCommand::Pull {
-                    session_id: op.session_id,
-                },
+                WireCommand::Pull { session_id: id },
                 scope_from_headers(&headers, &state.connections),
             )
             .await,
