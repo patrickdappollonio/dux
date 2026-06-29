@@ -3,8 +3,8 @@ import type { Bootstrap } from "./bootstrapApi"
 
 // Store-level coverage for the agent startup-command-log viewer actions
 // (openStartupLogs / selectStartupLog) and the rerun action. Mirrors the store
-// test harness in `storeChangesPane.test.ts`: stub the boot probe + bootstrap so
-// the store settles, then drive the REST endpoints through `fetchMock`.
+// test harness in `storeChangesPane.test.ts`: stub bootstrap so the store
+// settles, then drive the REST endpoints through `fetchMock`.
 
 function makeBootstrap(): Bootstrap {
   return {
@@ -85,7 +85,6 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().bootstrap).not.toBeNull()
   })
   return mod

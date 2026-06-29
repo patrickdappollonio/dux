@@ -3,9 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Spine } from "./spineApi"
 
 // `store` reads `location`/`localStorage`, registers a `popstate` listener, and
-// at module load fires a boot `/api/me` fetch + constructs an `EventsSocket`. Stub
-// the minimum so the import succeeds; steer the boot probe to auth-off so the
-// store settles cleanly.
+// at module load constructs an `EventsSocket` and fetches bootstrap + spine. Stub
+// the minimum so the import succeeds.
 //
 // The create-focus logic moved off the broadcast ViewModel onto the spine apply
 // path (`GET /api/v1/spine`, refetched on `projects.changed`/`sessions.changed`).
@@ -33,11 +32,11 @@ const fetchMock = vi.fn(async (url: string) => {
       headers: { get: () => null },
     } as unknown as Response
   }
-  // /api/me, /api/v1/bootstrap, and anything else: auth off / empty body.
+  // /api/v1/bootstrap and anything else: empty body.
   return {
     ok: true,
     status: 200,
-    json: async () => ({ auth: "disabled" }),
+    json: async () => ({}),
     text: async () => "",
     headers: { get: () => null },
   } as unknown as Response
@@ -76,7 +75,6 @@ afterEach(() => {
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
-    expect(mod.getSnapshot().auth.phase).not.toBe("checking")
     expect(mod.getSnapshot().spine).not.toBeNull()
   })
   return mod
