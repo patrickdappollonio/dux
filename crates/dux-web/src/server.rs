@@ -332,12 +332,11 @@ async fn log_request(
 // DNS-rebinding defense: the same-origin check below trusts the request's own
 // `Host` header, so on its own it does not stop a rebinding attacker who points a
 // controlled hostname at this server's IP (the browser then sends a matching
-// Origin/Host pair). When a host allowlist is configured (see
-// `host_guard::host_allowlist_layer`), that middleware runs AHEAD of the whole app
-// and pins the accepted `Host` values to the configured domains, closing that gap
-// (a mismatched Host gets 421 before reaching here). The plain HTTP path has no
-// allowlist by design (loopback/proxy mode, where the proxy owns Host hygiene), so
-// this same-origin check remains the WS-specific defense there.
+// Origin/Host pair). The host allowlist (see `host_guard::host_allowlist_layer`)
+// runs AHEAD of the whole app on every serve path and pins the accepted `Host`
+// values to loopback, the addresses dux actually bound, and any configured
+// `allowed_hosts`, returning 403 for a mismatched Host and closing that gap. This
+// same-origin check remains the WS-specific defense layered on top.
 fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // No Origin: a non-browser client. Allowed (documented tradeoff).
