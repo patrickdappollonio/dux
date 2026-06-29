@@ -357,6 +357,7 @@ where
         .merge(crate::session_actions::routes())
         .merge(crate::project_actions::routes())
         .merge(crate::project_reads::routes())
+        .merge(crate::startup_logs::routes())
         .merge(crate::terminal_actions::routes())
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())

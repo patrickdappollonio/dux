@@ -120,6 +120,45 @@ describe("sessionsApi", () => {
     expect(c.body).toEqual({ project_id: "p1", session_ids: ["s2", "s1"] })
   })
 
+  it("rerunStartupCommand POSTs /rerun-startup-command", async () => {
+    const fetchMock = stubOkFetch(200)
+    await sessionsApi.rerunStartupCommand("s 1")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/sessions/s%201/rerun-startup-command")
+    expect(c.method).toBe("POST")
+  })
+
+  it("startupLogs GETs /startup-logs and parses the listing", async () => {
+    const fetchMock = stubOkFetch(200, {
+      entries: [{ name: "a.log", modified_at: null }],
+      selected: { name: "a.log", content: "hi" },
+    })
+    const res = await sessionsApi.startupLogs("s1")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/sessions/s1/startup-logs")
+    expect(c.method).toBe("GET")
+    expect(res.entries[0].name).toBe("a.log")
+    expect(res.selected?.content).toBe("hi")
+  })
+
+  it("startupLogContent GETs /content with the encoded name", async () => {
+    const fetchMock = stubOkFetch(200, { name: "a b.log", content: "x" })
+    await sessionsApi.startupLogContent("s1", "a b.log")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe(
+      "/api/v1/sessions/s1/startup-logs/content?name=a%20b.log",
+    )
+    expect(c.method).toBe("GET")
+  })
+
+  it("startupLogContent omits the name query when none is given (newest)", async () => {
+    const fetchMock = stubOkFetch(200, { name: "a.log", content: "x" })
+    await sessionsApi.startupLogContent("s1")
+    expect(lastCall(fetchMock).url).toBe(
+      "/api/v1/sessions/s1/startup-logs/content",
+    )
+  })
+
   it("throws a typed SessionsApiError carrying status + message on non-2xx", async () => {
     stubOkFetch(409, null)
     vi.stubGlobal(

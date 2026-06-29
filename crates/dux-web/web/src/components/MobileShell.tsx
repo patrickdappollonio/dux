@@ -22,13 +22,17 @@ import {
   GitPullRequest,
   LogOut,
   Pencil,
+  Play,
   Plug,
   Plus,
   RefreshCw,
   RotateCcw,
+  ScrollText,
   Search,
+  SquareChevronRight,
   SquareTerminal,
   Trash2,
+  Variable,
   X,
 } from "lucide-react"
 import type { CSSProperties } from "react"
@@ -73,14 +77,18 @@ import {
   logout,
   mobileNavigate,
   openAddProject,
+  openAgentEnv,
+  openAgentStartupCommand,
   openChangeProvider,
   openDelete,
   openDeleteTerminal,
   openForkAgent,
   openRename,
+  openStartupLogs,
   reconnectSession,
   reorderProjects,
   reorderSessions,
+  rerunStartupCommand,
   selectSession,
   selectTerminal,
   setPaletteOpen,
@@ -134,6 +142,25 @@ function SessionActions({ session }: { session: SessionView }) {
       <DropdownMenuItem onClick={() => createTerminal(session.id)}>
         <SquareTerminal />
         New terminal
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      {/* Startup command + env (project-scoped; see the desktop Sidebar note) and
+          the per-agent runtime ops, kept in sync with the desktop menu. */}
+      <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
+        <SquareChevronRight />
+        Configure startup command…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
+        <Variable />
+        Configure environment variables…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
+        <Play />
+        Rerun startup command
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
+        <ScrollText />
+        Startup command logs…
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem

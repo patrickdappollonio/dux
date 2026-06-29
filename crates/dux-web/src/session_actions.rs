@@ -12,6 +12,8 @@
 //! - `PATCH  /api/v1/sessions/:id`                 — rename / change provider /
 //!   toggle auto-reopen (optional body fields).
 //! - `POST   /api/v1/sessions/:id/reconnect`       — relaunch (`{force}`).
+//! - `POST   /api/v1/sessions/:id/rerun-startup-command` — re-run the agent's
+//!   project startup command in its worktree (keyed Busy → final toast).
 //! - `POST   /api/v1/sessions/reorder`             — persist order (literal
 //!   segment, registered so it does not collide with `:id`).
 
@@ -47,6 +49,10 @@ pub fn routes() -> Router<AppState> {
             patch(patch_session).delete(delete_session),
         )
         .route("/api/v1/sessions/{id}/reconnect", post(reconnect_session))
+        .route(
+            "/api/v1/sessions/{id}/rerun-startup-command",
+            post(rerun_startup_command),
+        )
 }
 
 // ── Create ───────────────────────────────────────────────────────────────────
@@ -434,6 +440,38 @@ async fn reconnect_session(
     }
 }
 
+// ── Rerun startup command ────────────────────────────────────────────────────
+
+/// Re-run the agent's project startup command in that agent's worktree (the web
+/// counterpart to the TUI's `rerun-startup-command-on-agent` palette command).
+/// The engine resolves the session + project, requires a non-empty project
+/// startup command, and runs it off-thread; the keyed Busy → final status pair
+/// rides the `/ws/events` toast stream back to the initiating client. A missing
+/// session/project or absent startup command is the engine's `Err` → 400.
+async fn rerun_startup_command(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
+        return resp;
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::RerunStartupCommand { session_id: id },
+            scope_from_headers(&headers),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 // ── Reorder ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -485,4 +523,46 @@ fn outcome_is_error(outcome: &WireCommandOutcome) -> bool {
         .as_ref()
         .map(|s| s.tone == "error")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use crate::test_support::{router_no_auth, router_with_auth};
+
+    #[tokio::test]
+    async fn rerun_startup_command_404_for_unknown_session() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions/ghost/rerun-startup-command")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rerun_startup_command_is_gated() {
+        let (_tmp, app) = router_with_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions/s1/rerun-startup-command")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }

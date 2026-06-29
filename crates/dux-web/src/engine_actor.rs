@@ -132,6 +132,14 @@ pub enum EngineRequest {
             )>,
         >,
     ),
+    /// Resolve a session's startup-command-log context: `(dux paths, project_id)`
+    /// for the session, so a GET handler can list/read its startup-command logs
+    /// off-thread. `None` when the session id is unknown. Instant clone off engine
+    /// state, mirroring [`EngineRequest::ProjectWorktreeInputs`].
+    SessionStartupLogContext(
+        String,
+        oneshot::Sender<Option<(dux_core::config::DuxPaths, String)>>,
+    ),
     /// Gracefully wind down every running PTY (SIGTERM the children so CLIs can
     /// save state for a later resume), then stop the engine thread. Replies once
     /// the wind-down completes so the server can finish exiting.
@@ -769,6 +777,26 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::ProjectWorktreeInputs(project_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// Resolve a session's startup-command-log context: the dux paths and the
+    /// session's owning project id. Instant lookup — the log directory listing /
+    /// file read runs off-thread in the caller (the `project_worktree_inputs`
+    /// precedent). `None` when the session id is unknown.
+    pub async fn session_startup_log_context(
+        &self,
+        session_id: String,
+    ) -> Option<(dux_core::config::DuxPaths, String)> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::SessionStartupLogContext(session_id, tx))
             .await
             .is_err()
         {
@@ -1431,6 +1459,14 @@ fn handle_request(engine: &mut Engine, req: EngineRequest, status_tx: &mut Statu
                 .cloned()
                 .map(|project| (project, engine.paths.clone(), engine.sessions.clone()));
             let _ = reply.send(inputs);
+        }
+        EngineRequest::SessionStartupLogContext(session_id, reply) => {
+            let context = engine
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .map(|session| (engine.paths.clone(), session.project_id.clone()));
+            let _ = reply.send(context);
         }
     }
 }

@@ -3,8 +3,11 @@ import { Fragment, Suspense } from "react"
 import { LogOut } from "lucide-react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
+import { AgentEnvDialog } from "@/components/AgentEnvDialog"
+import { AgentStartupCommandDialog } from "@/components/AgentStartupCommandDialog"
 import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
 import { AppSidebar } from "@/components/Sidebar"
+import { StartupLogsDialog } from "@/components/StartupLogsDialog"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -235,6 +238,9 @@ function GlobalOverlays() {
       <MacrosDialog />
       <ProjectInfoDialog />
       <ProjectSettingsDialog />
+      <AgentStartupCommandDialog />
+      <AgentEnvDialog />
+      <StartupLogsDialog />
       <AddProjectDialog />
       <AttachWorktreeDialog />
       <RemoveProjectDialog />

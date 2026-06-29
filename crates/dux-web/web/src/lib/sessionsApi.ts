@@ -14,7 +14,11 @@
 // to report these failures no longer fires for them).
 
 import { getConnectionId } from "./connection"
-import type { SessionView } from "./types"
+import type {
+  SessionView,
+  StartupLogContent,
+  StartupLogsList,
+} from "./types"
 
 // A failed sessions REST call. `status` is the HTTP status (0 for a network/
 // transport failure with no response); `message` is the parsed server detail.
@@ -107,4 +111,27 @@ export const sessionsApi = {
       project_id: projectId,
       session_ids: sessionIds,
     }),
+  // Re-run the agent's project startup command in its worktree. The server runs
+  // it off-thread and routes the busy/success/error toasts back over `/ws`, so
+  // this resolves as soon as the run is accepted (a non-2xx still throws).
+  rerunStartupCommand: (id: string) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/rerun-startup-command`,
+    ),
+  // List the agent's startup-command log files (newest first) with the newest
+  // file's contents pre-loaded for immediate display.
+  startupLogs: (id: string) =>
+    request<StartupLogsList>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/startup-logs`,
+    ),
+  // Read one startup-command log file by name (empty name returns the newest).
+  startupLogContent: (id: string, name?: string) =>
+    request<StartupLogContent>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/startup-logs/content${
+        name ? `?name=${encodeURIComponent(name)}` : ""
+      }`,
+    ),
 }
