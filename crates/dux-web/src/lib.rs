@@ -212,6 +212,7 @@ fn plain_http_banner(
     version: &str,
     bound: &[(SocketAddr, bool)],
     bind_warnings: &[String],
+    security_note: Option<String>,
 ) -> Banner {
     let listeners = bound
         .iter()
@@ -234,6 +235,7 @@ fn plain_http_banner(
         mode: "plain HTTP".to_string(),
         warnings: bind_warnings.to_vec(),
         listeners,
+        security_note,
     }
 }
 
@@ -242,10 +244,6 @@ fn plain_http_banner(
 /// public/LAN entries and false for best-effort Tailscale local-mode legs).
 /// Worst-wins: any required non-loopback leg makes it `Public`; otherwise any
 /// best-effort non-loopback leg makes it `Tailscale`; otherwise `LoopbackOnly`.
-///
-/// Retained for the post-bind safety note a later task surfaces from the bound
-/// reachability; not yet wired into the banner.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reachability {
     /// Every bound leg is genuine loopback — nothing off-host can reach it.
@@ -258,7 +256,6 @@ enum Reachability {
     Public,
 }
 
-#[allow(dead_code)]
 fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
     let mut result = Reachability::LoopbackOnly;
     for (addr, required) in bound {
@@ -271,6 +268,36 @@ fn reachability(bound: &[(SocketAddr, bool)]) -> Reachability {
         result = Reachability::Tailscale;
     }
     result
+}
+
+/// Operator-facing safety note based on the bound addresses' reachability.
+/// Returns None when the server is loopback-only (nothing to warn about).
+/// Uses highest-severity-wins: a required non-loopback primary yields the LAN
+/// warning regardless of whether a Tailscale leg is also bound.
+pub fn safety_note(addrs: &[PlanAddr]) -> Option<String> {
+    let pairs: Vec<(SocketAddr, bool)> =
+        addrs.iter().map(|a| (a.addr(), a.is_required())).collect();
+    match reachability(&pairs) {
+        Reachability::LoopbackOnly => None,
+        Reachability::Tailscale => Some(
+            "Reachable by other devices on your tailnet (no login). \
+             Disable with tailscale_enabled = false under [server]."
+                .to_string(),
+        ),
+        Reachability::Public => {
+            let has_tailscale = pairs
+                .iter()
+                .any(|(addr, required)| !addr.ip().is_loopback() && !required);
+            let mut msg = "Reachable on your network with NO login. \
+                Anyone who can reach this address controls your agents and worktrees. \
+                Put it behind Tailscale or a trusted reverse proxy."
+                .to_string();
+            if has_tailscale {
+                msg.push_str(" (The Tailscale address is bound too.)");
+            }
+            Some(msg)
+        }
+    }
 }
 
 fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Result<()> {
@@ -298,7 +325,23 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
         // bound listeners into (addr, required) pairs for the pure banner builder.
         let banner_legs: Vec<(SocketAddr, bool)> =
             bound.iter().map(|b| (b.addr, b.required)).collect();
-        console.banner(&plain_http_banner(&version, &banner_legs, &bind_warnings));
+        let bound_plan_addrs: Vec<PlanAddr> = bound
+            .iter()
+            .map(|b| {
+                if b.required {
+                    PlanAddr::required(b.addr)
+                } else {
+                    PlanAddr::best_effort(b.addr)
+                }
+            })
+            .collect();
+        let note = safety_note(&bound_plan_addrs);
+        console.banner(&plain_http_banner(
+            &version,
+            &banner_legs,
+            &bind_warnings,
+            note,
+        ));
 
         // Spawn the engine on its own std thread (it runs the synchronous engine
         // loop, not a tokio task).
@@ -877,7 +920,7 @@ async fn next_terminate_signal(
 #[cfg(test)]
 mod tests {
     use super::{
-        Reachability, ServeShutdown, bind_plan_addrs, plain_http_banner, reachability,
+        Reachability, ServeShutdown, bind_plan_addrs, plain_http_banner, reachability, safety_note,
         tailscale_bind_warning, wait_for_shutdown,
     };
     use dux_core::config::PlanAddr;
@@ -1021,6 +1064,59 @@ mod tests {
         assert_eq!(reachability(&[]), Reachability::LoopbackOnly);
     }
 
+    // ── safety_note ───────────────────────────────────────────────────────────
+
+    fn plan_addr(s: &str, required: bool) -> PlanAddr {
+        if required {
+            PlanAddr::required(s.parse().unwrap())
+        } else {
+            PlanAddr::best_effort(s.parse().unwrap())
+        }
+    }
+
+    #[test]
+    fn safety_note_loopback_only_is_none() {
+        let addrs = vec![plan_addr("127.0.0.1:8080", true)];
+        assert_eq!(safety_note(&addrs), None);
+    }
+
+    #[test]
+    fn safety_note_loopback_plus_tailscale_mentions_tailnet() {
+        let addrs = vec![
+            plan_addr("127.0.0.1:8080", true),
+            plan_addr("100.64.0.5:8080", false),
+        ];
+        let note = safety_note(&addrs).expect("must have a note for tailscale leg");
+        assert!(note.contains("tailnet"), "must mention tailnet: {note}");
+        assert!(
+            !note.contains("NO login"),
+            "tailscale note must NOT say NO login: {note}"
+        );
+    }
+
+    #[test]
+    fn safety_note_wildcard_primary_mentions_no_login() {
+        let addrs = vec![plan_addr("0.0.0.0:8080", true)];
+        let note = safety_note(&addrs).expect("must warn for 0.0.0.0");
+        assert!(note.contains("NO login"), "must contain 'NO login': {note}");
+    }
+
+    #[test]
+    fn safety_note_lan_primary_with_tailscale_leg_mentions_both() {
+        // Overlap case: non-loopback required primary AND a Tailscale best-effort leg.
+        // LAN warning wins (severity), and appends the Tailscale parenthetical.
+        let addrs = vec![
+            plan_addr("192.168.1.5:8080", true),
+            plan_addr("100.64.0.5:8080", false),
+        ];
+        let note = safety_note(&addrs).expect("must warn for LAN primary");
+        assert!(note.contains("NO login"), "must contain 'NO login': {note}");
+        assert!(
+            note.contains("Tailscale address is bound too"),
+            "must note the tailscale leg: {note}"
+        );
+    }
+
     #[test]
     fn plain_http_banner_labels_loopback_tailscale_and_public_legs() {
         let legs = vec![
@@ -1028,7 +1124,7 @@ mod tests {
             (addr("100.64.0.5:8080"), false), // best-effort → Tailscale
             (addr("203.0.113.7:8080"), true), // required non-loopback → Listen
         ];
-        let banner = plain_http_banner("0.1.0", &legs, &[]);
+        let banner = plain_http_banner("0.1.0", &legs, &[], None);
         assert_eq!(banner.mode, "plain HTTP");
         assert_eq!(banner.listeners.len(), 3);
         assert_eq!(banner.listeners[0].label, "Local (loopback)");
@@ -1040,8 +1136,8 @@ mod tests {
     #[test]
     fn plain_http_banner_carries_degradation_warnings() {
         let legs = vec![(addr("127.0.0.1:8080"), true)];
-        let warnings = vec!["Tailscale: 100.64.0.1:8080 busy — serving without it".to_string()];
-        let banner = plain_http_banner("0.1.0", &legs, &warnings);
+        let warnings = vec!["Tailscale: 100.64.0.1:8080 busy -- serving without it".to_string()];
+        let banner = plain_http_banner("0.1.0", &legs, &warnings, None);
         assert_eq!(banner.warnings, warnings);
     }
 

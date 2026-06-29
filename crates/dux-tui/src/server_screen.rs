@@ -88,7 +88,8 @@ pub struct ServerStatusScreen {
     /// Every bound URL (loopback plus the Tailscale address in LOCAL MODE, or all
     /// the FULL WEB MODE listeners). All are shown so the user can pick one.
     urls: Vec<String>,
-    loopback: bool,
+    /// Operator-facing safety note, or None when the server is loopback-only.
+    safety_note: Option<String>,
     started: Instant,
     /// Uptime second most recently drawn, so [`tick`] redraws only when the
     /// visible value actually changes (wall-clock, not per engine-loop tick).
@@ -107,7 +108,7 @@ impl ServerStatusScreen {
     /// status screen cannot be set up.
     pub fn new(
         urls: &[String],
-        loopback: bool,
+        safety_note: Option<String>,
         theme_name: &str,
         paths: &DuxPaths,
         activity: ActivityRing,
@@ -132,7 +133,7 @@ impl ServerStatusScreen {
             terminal,
             theme,
             urls: urls.to_vec(),
-            loopback,
+            safety_note,
             started,
             // Force the first `tick` redraw by seeding an impossible "last
             // drawn" value; the initial frame is drawn explicitly below.
@@ -200,7 +201,7 @@ impl ServerStatusScreen {
     /// generation without snapshotting twice.
     fn draw(&mut self, uptime_secs: u64, snapshot: &ActivitySnapshot) -> Result<()> {
         let theme = &self.theme;
-        let header = header_lines(&self.urls, self.loopback, uptime_secs);
+        let header = header_lines(&self.urls, self.safety_note.as_deref(), uptime_secs);
         let footer = footer_hint_lines();
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -404,9 +405,9 @@ fn format_uptime(secs: u64) -> String {
 /// `(text, Role)` segments. The exit hints live in [`footer_hint_lines`]; the
 /// activity log in [`activity_lines`].
 ///
-/// dux has no login gate, so a NON-LOOPBACK bind shows the loud no-auth security
-/// warning; a loopback bind shows nothing (it is unreachable off the machine).
-fn header_lines(urls: &[String], loopback: bool, uptime_secs: u64) -> Vec<ScreenLine> {
+/// When `safety_note` is Some, the server is reachable beyond loopback and the
+/// note is shown as a loud warning row. None means loopback-only (no note needed).
+fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) -> Vec<ScreenLine> {
     let mut lines: Vec<ScreenLine> = Vec::new();
 
     for logo_line in ASCII_LOGO {
@@ -424,14 +425,9 @@ fn header_lines(urls: &[String], loopback: bool, uptime_secs: u64) -> Vec<Screen
         Role::Muted,
     )]);
 
-    if !loopback {
+    if let Some(note) = safety_note {
         lines.push(vec![(String::new(), Role::Spacer)]);
-        lines.push(vec![(
-            "Listening beyond this machine with NO authentication. \
-             Anyone on the network can control your agents."
-                .to_string(),
-            Role::Warning,
-        )]);
+        lines.push(vec![(note.to_string(), Role::Warning)]);
     }
 
     lines
@@ -686,7 +682,7 @@ mod tests {
 
     #[test]
     fn content_includes_url_and_heading_and_uptime() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 42);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 42);
         let text = plain_text(&lines);
         assert!(text.contains("dux server running"));
         assert!(text.contains("http://127.0.0.1:8080"));
@@ -701,7 +697,7 @@ mod tests {
             "http://127.0.0.1:8080".to_string(),
             "http://100.101.102.103:8080".to_string(),
         ];
-        let lines = header_lines(&urls, true, 0);
+        let lines = header_lines(&urls, None, 0);
         let text = plain_text(&lines);
         assert!(text.contains("http://127.0.0.1:8080"));
         assert!(text.contains("http://100.101.102.103:8080"));
@@ -717,11 +713,9 @@ mod tests {
     }
 
     #[test]
-    fn loopback_auth_off_omits_the_warning() {
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 0);
-        let text = plain_text(&lines);
-        assert!(!text.contains("NO authentication"));
-        // No line should carry the Warning role.
+    fn loopback_only_omits_the_warning() {
+        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
+        // No line should carry the Warning role when there is no safety note.
         assert!(
             !lines
                 .iter()
@@ -731,8 +725,10 @@ mod tests {
     }
 
     #[test]
-    fn non_loopback_auth_off_includes_the_loud_warning() {
-        let lines = header_lines(&one("http://0.0.0.0:8080"), false, 0);
+    fn non_loopback_shows_the_safety_note_as_warning() {
+        let note = "Listening beyond this machine with NO authentication. \
+                    Anyone on the network can control your agents.";
+        let lines = header_lines(&one("http://0.0.0.0:8080"), Some(note), 0);
         let text = plain_text(&lines);
         assert!(text.contains("NO authentication"));
         assert!(text.contains("control your agents"));
@@ -766,7 +762,7 @@ mod tests {
     #[test]
     fn header_lines_have_no_exit_hints() {
         // The exit hints moved to the footer — the header must not carry them.
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
         let text = plain_text(&lines);
         assert!(!text.contains("return to dux"));
         assert!(!text.contains("quit dux entirely"));
@@ -852,7 +848,7 @@ mod tests {
     fn content_includes_the_wordmark() {
         // The first lines are the shared ASCII wordmark; assert one of its
         // distinctive rows is present so a future logo-export break is caught.
-        let lines = header_lines(&one("http://127.0.0.1:8080"), true, 0);
+        let lines = header_lines(&one("http://127.0.0.1:8080"), None, 0);
         assert!(lines.len() >= ASCII_LOGO.len());
         assert_eq!(lines[0][0].1, Role::Logo);
         assert_eq!(lines[0][0].0, ASCII_LOGO[0]);

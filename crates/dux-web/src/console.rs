@@ -565,6 +565,9 @@ pub struct Banner {
     pub listeners: Vec<ListenerRow>,
     /// ⚠ rows for degraded/best-effort legs (e.g. a busy Tailscale address).
     pub warnings: Vec<String>,
+    /// Security note shown when the server is reachable beyond loopback. None
+    /// when the server is loopback-only (no note needed).
+    pub security_note: Option<String>,
 }
 
 /// Render the banner to its lines. Pure so both color modes are unit-tested.
@@ -613,6 +616,16 @@ fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
             format!("  {YELLOW}{}{RESET} {warning}", Tone::Warn.glyph())
         } else {
             format!("  warn {warning}")
+        };
+        out.push(line);
+    }
+
+    // Security note: shown when the server is reachable beyond loopback.
+    if let Some(note) = &banner.security_note {
+        let line = if color {
+            format!("  {YELLOW}{}{RESET} {note}", Tone::Warn.glyph())
+        } else {
+            format!("  warn {note}")
         };
         out.push(line);
     }
@@ -883,6 +896,7 @@ mod tests {
                 url: "http://127.0.0.1:8080".to_string(),
             }],
             warnings: vec![],
+            security_note: None,
         }
     }
 
