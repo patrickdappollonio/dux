@@ -61,11 +61,7 @@ fn run_tui_with_flip() -> Result<()> {
                         })
                         .unwrap_or(false)
                 }) {
-                    Some(
-                        "Reachable by other devices on your tailnet (no login). \
-                         Disable with tailscale_enabled = false under [server]."
-                            .to_string(),
-                    )
+                    Some(dux_web::SAFETY_NOTE_TAILNET.to_string())
                 } else {
                     None
                 };
