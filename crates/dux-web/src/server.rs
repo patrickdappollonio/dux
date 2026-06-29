@@ -46,7 +46,7 @@ use crate::changes::ChangesService;
 use crate::console::Console;
 use crate::engine_actor::{EngineHandle, SpineChange};
 use crate::event_bus::{self, Event, EventBus};
-use crate::tls::SweepableMemoryStore;
+use crate::host_guard::SweepableMemoryStore;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -133,17 +133,12 @@ pub fn router_with_auth(engine: EngineHandle, auth: SharedAuth) -> Router {
 /// the per-socket `Vec` scan under a brief read lock is negligible overhead.
 const WS_RECHECK_PERIOD: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// Knobs that differ between the plain-HTTP serve paths and the TLS (ACME) path.
+/// Knobs for the serve paths.
 #[derive(Clone)]
 pub struct RouterParams {
     /// `/ws` user-existence recheck cadence (injectable so the revocation e2e can
     /// drive a short window).
     pub ws_recheck_period: std::time::Duration,
-    /// Whether the session cookie carries the `Secure` attribute. TRUE only when
-    /// dux itself terminates TLS (the ACME path); FALSE for plain HTTP, where a
-    /// Secure cookie would never be sent over the loopback/proxy deployment and
-    /// would lock everyone out. (Deferral 1.)
-    pub secure_cookie: bool,
     /// The console handler events (and the access middleware) emit through.
     /// Defaults to [`Console::noop`] so the flip and tests stay silent; the CLI
     /// serve paths replace it with a real stdout console via [`with_console`].
@@ -158,36 +153,21 @@ pub struct RouterParams {
 }
 
 impl RouterParams {
-    /// Plain-HTTP defaults: production recheck cadence, NO Secure cookie, a no-op
-    /// console, no access log. Used by the loopback/Tailscale/proxy serve paths
-    /// and every test harness; the CLI paths layer a real console on with
-    /// [`with_console`].
+    /// Plain-HTTP defaults: production recheck cadence, a no-op console, no
+    /// access log. Used by the loopback/Tailscale/proxy serve paths and every
+    /// test harness; the CLI paths layer a real console on with [`with_console`].
     pub fn plain_http() -> Self {
         Self {
             ws_recheck_period: WS_RECHECK_PERIOD,
-            secure_cookie: false,
             console: Console::noop(),
             access_log: false,
             max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
         }
     }
 
-    /// TLS (ACME) defaults: production recheck cadence, Secure cookie ON because
-    /// dux terminates HTTPS so the browser will always send it back. No-op
-    /// console + no access log by default (the CLI path layers them on).
-    pub fn tls() -> Self {
-        Self {
-            ws_recheck_period: WS_RECHECK_PERIOD,
-            secure_cookie: true,
-            console: Console::noop(),
-            access_log: false,
-            max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
-        }
-    }
-
-    /// Attach a real console + the access-log toggle. The CLI serve paths
-    /// (`run_plain_http`/`run_acme`) call this so handler events and the access
-    /// middleware reach stdout; the flip leaves the no-op console in place.
+    /// Attach a real console + the access-log toggle. The CLI serve paths call
+    /// this so handler events and the access middleware reach stdout; the flip
+    /// leaves the no-op console in place.
     pub fn with_console(mut self, console: Console, access_log: bool) -> Self {
         self.console = console;
         self.access_log = access_log;
@@ -218,7 +198,6 @@ pub fn build_router_with_recheck(
         extra_gated,
         RouterParams {
             ws_recheck_period,
-            secure_cookie: false,
             console: Console::noop(),
             access_log: false,
             max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
@@ -327,11 +306,7 @@ where
         .with_name(auth::SESSION_COOKIE_NAME)
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
-        // Secure attribute is set ONLY when dux terminates TLS (the ACME path).
-        // On plain HTTP a Secure cookie would never be sent back over the
-        // loopback/proxy deployment, locking everyone out — so it stays off
-        // there. (Deferral 1; the flag is decided by the caller via RouterParams.)
-        .with_secure(params.secure_cookie)
+        .with_secure(false)
         .with_expiry(Expiry::OnInactivity(CookieDuration::days(
             auth::SESSION_INACTIVITY_DAYS,
         )));
@@ -379,13 +354,9 @@ where
         // so the flip and disabled-console paths pay nothing. Stamped via
         // `from_fn_with_state` so it reads the console/toggle off `AppState`.
         //
-        // CAVEAT on the TLS (:443) path: `run_acme` wraps the host-allowlist and
-        // HSTS layers OUTSIDE this app (see `tls::host_allowlist_layer`), so a
-        // foreign-Host probe is 421'd by the allowlist BEFORE it reaches this
-        // middleware — those 421s are deliberately NOT access-logged on :443, which
-        // keeps a rebinding-probe flood out of the log. (The `:80`
-        // challenge/redirect router DOES log its 421s: there the access log is the
-        // true outermost layer — see `tls::build_http_challenge_router`.)
+        // When a host allowlist is active (see `host_guard::host_allowlist_layer`),
+        // a foreign-Host probe is 421'd BEFORE it reaches this middleware, so those
+        // probes are not access-logged.
         .layer(middleware::from_fn_with_state(state.clone(), access_log))
         .with_state(state)
 }
@@ -393,8 +364,7 @@ where
 /// Per-request access-log middleware for the main app: print
 /// `method path status latencyms` to the console after the inner stack produces a
 /// response. Reads the console + toggle off [`AppState`] and delegates to the
-/// shared [`log_request`] core (the SAME core the `:80` challenge/redirect router
-/// uses via [`access_log_layer`], so both surfaces log identically).
+/// shared [`log_request`] core.
 async fn access_log(State(state): State<AppState>, request: Request, next: Next) -> Response {
     log_request(&state.console, state.access_log, request, next).await
 }
@@ -408,9 +378,7 @@ async fn access_log(State(state): State<AppState>, request: Request, next: Next)
 /// sensitive values — `GET /api/file/raw?session_id=…&path=…` puts the session
 /// cookie id and an absolute filesystem path in the query — and this log is the
 /// `dux server` stdout an operator may forward to a file or aggregator, so the
-/// query is dropped to avoid leaking secrets. The ACME challenge token rides the
-/// PATH (`/.well-known/acme-challenge/{token}`), not the query, so challenge
-/// fetches are still visible.
+/// query is dropped to avoid leaking secrets.
 async fn log_request(
     console: &Console,
     access_log: bool,
@@ -427,42 +395,13 @@ async fn log_request(
     let method = request.method().as_str().to_string();
     // Log the PATH ONLY — never the query string. Query params can carry secrets
     // (e.g. /api/file/raw?session_id=…&path=…), and this log is stdout an operator
-    // may persist; the ACME challenge token is in the path, so dropping the query
-    // loses nothing useful.
+    // may persist, so dropping the query avoids leaking them.
     let path = request.uri().path().to_string();
     let started = std::time::Instant::now();
     let response = next.run(request).await;
     let latency_ms = started.elapsed().as_millis();
     console.access(&method, &path, response.status().as_u16(), latency_ms);
     response
-}
-
-/// The console + access-log toggle carried as middleware state for routers that
-/// have no [`AppState`] — namely the `:80` ACME challenge/redirect router (see
-/// [`access_log_layer`]). Cheap to clone (the `Console` is `Arc`-backed).
-#[derive(Clone)]
-struct AccessLogState {
-    console: Console,
-    access_log: bool,
-}
-
-/// Wrap a router with the shared access-log middleware, carrying the console +
-/// toggle explicitly (no [`AppState`] required). Used to give the `:80`
-/// challenge/redirect router the SAME access log as the main app, so a challenge
-/// fetch, a 308 redirect, a 421 foreign-Host rejection, or a 400 all log one line
-/// like any other request. Gated identically (`access_log && console.is_active()`),
-/// so the flip and disabled-console paths emit nothing.
-pub fn access_log_layer(router: Router, console: Console, access_log: bool) -> Router {
-    let state = AccessLogState {
-        console,
-        access_log,
-    };
-    router.layer(middleware::from_fn_with_state(
-        state,
-        |State(state): State<AccessLogState>, request: Request, next: Next| async move {
-            log_request(&state.console, state.access_log, request, next).await
-        },
-    ))
 }
 
 /// Gate middleware for the protected sub-router. When auth is enabled, a valid
@@ -506,13 +445,13 @@ async fn gate(
 // DNS-rebinding defense: the same-origin check below trusts the request's own
 // `Host` header, so on its own it does not stop a rebinding attacker who points a
 // controlled hostname at this server's IP (the browser then sends a matching
-// Origin/Host pair). When dux terminates TLS (the ACME path), the
-// `crate::tls::host_allowlist_layer` middleware runs AHEAD of the gate on the
-// whole HTTPS app and pins the accepted `Host` values to the configured domains,
+// Origin/Host pair). When a host allowlist is configured (see
+// `host_guard::host_allowlist_layer`), that middleware runs AHEAD of the gate on
+// the whole app and pins the accepted `Host` values to the configured domains,
 // closing that gap (a mismatched Host gets 421 before reaching here). The plain
-// HTTP path has no allowlist by design — loopback/proxy mode, where the proxy
-// owns Host hygiene — so this same-origin check remains the WS-specific defense
-// there. (Deferral 2.)
+// HTTP path has no allowlist by design (loopback/proxy mode, where the proxy owns
+// Host hygiene), so this same-origin check remains the WS-specific defense there.
+// (Deferral 2.)
 fn same_origin_allowed(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         // No Origin: a non-browser client. Allowed (documented tradeoff).

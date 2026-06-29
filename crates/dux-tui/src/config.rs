@@ -340,8 +340,6 @@ enum ConfigEntry {
     Terminal,
     /// Renders the `[startup_command_terminal]` section.
     StartupCommandTerminal,
-    /// Renders the `[server.acme]` built-in TLS / Let's Encrypt subsection.
-    ServerAcme,
     /// Renders the `[auth]` section with the web UI login users.
     Auth,
     /// Renders the `[keys]` section with all keybindings.
@@ -588,7 +586,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  #   listen_addrs = [\"0.0.0.0:8080\"]             # every interface\n\
                  # A non-loopback (public) entry is gated: it needs either [auth] users\n\
                  # or insecure_allow_remote, AND `dux server --dangerously-listen-http`\n\
-                 # (plain HTTP is unencrypted). Prefer built-in TLS via [server.acme].",
+                 # (plain HTTP is unencrypted). Prefer using a TLS-terminating proxy in front of dux.",
             )),
             value_fn: |c| FieldValue::StrList(c.server.listen_addrs.clone()),
         },
@@ -610,14 +608,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Acknowledge serving UNENCRYPTED plain HTTP on a non-loopback (public)\n\
                  # listen_addrs entry. This is the config-file equivalent of the\n\
                  # `dux server --dangerously-listen-http` flag: either one satisfies the\n\
-                 # gate, so a config-only rollback off [server.acme] can re-open a public\n\
-                 # plain-HTTP bind without editing the service's command line. It only\n\
-                 # covers the ENCRYPTION requirement, though: a public bind still needs\n\
-                 # auth ([auth] users or insecure_allow_remote), so this alone will not\n\
+                 # gate, so a config-only change can re-open a public plain-HTTP bind\n\
+                 # without editing the service's command line. It only covers the\n\
+                 # ENCRYPTION requirement, though: a public bind still needs auth\n\
+                 # ([auth] users or insecure_allow_remote), so this alone will not\n\
                  # unblock startup. Traffic (including the login password) is sent in the\n\
-                 # clear, so prefer built-in TLS via [server.acme]; set this true only\n\
-                 # when an upstream proxy terminates TLS or you accept the risk on a\n\
-                 # trusted network.",
+                 # clear; set this true only when an upstream proxy terminates TLS or\n\
+                 # you accept the risk on a trusted network.",
             )),
             value_fn: |c| FieldValue::Bool(c.server.dangerously_listen_http),
         },
@@ -662,7 +659,6 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.server.max_websocket_connections as usize),
         },
         ConfigEntry::Blank,
-        ConfigEntry::ServerAcme,
         ConfigEntry::Auth,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -724,7 +720,6 @@ fn render_config(config: &Config, bindings: &crate::keybindings::RuntimeBindings
             ConfigEntry::StartupCommandTerminal => {
                 render_startup_command_terminal_config(&mut out, &config.startup_command_terminal);
             }
-            ConfigEntry::ServerAcme => render_server_acme_config(&mut out, &config.server.acme),
             ConfigEntry::Auth => render_auth_config(&mut out, &config.auth, bindings),
             ConfigEntry::Keys => render_keys_config(&mut out, &config.keys, bindings),
             ConfigEntry::Macros => render_macros_config(&mut out, &config.macros, bindings),
@@ -1028,69 +1023,6 @@ fn render_auth_config(
     out.push_str(&format!("users = {}\n\n", render_string_list(&auth.users)));
 }
 
-fn render_server_acme_config(out: &mut String, acme: &AcmeSettings) {
-    out.push_str("[server.acme]\n");
-    out.push_str(
-        "# Built-in TLS via Let's Encrypt (ACME HTTP-01). When enabled, `dux server`\n\
-         # obtains and renews real certificates itself and serves HTTPS — no reverse\n\
-         # proxy required. This uses the HTTP-01 challenge, which means BOTH must hold:\n\
-         #   1. Each domain below has a public DNS A/AAAA record pointing at this host.\n\
-         #   2. Inbound http_port (default 80) is reachable from the internet so\n\
-         #      Let's Encrypt can fetch the challenge token.\n\
-         # The :80 listener answers the ACME challenge and otherwise redirects to HTTPS;\n\
-         # :443 serves the TLS web UI. Both ports are configurable below.\n\
-         #\n\
-         # Behind your own reverse proxy instead? Leave enabled = false, let the proxy\n\
-         # terminate TLS, and point the proxy at a loopback or private [server]\n\
-         # listen_addrs entry (or use LOCAL MODE).\n\
-         #\n\
-         # NOTE: ACME settings are read once when the server starts. Changing them and\n\
-         # running reload-config does NOT rebind the listeners — dux applies the rest\n\
-         # of the reload and posts a warning telling you to restart the server.\n",
-    );
-    out.push_str(
-        "# Turn the built-in ACME server on. Leave false to serve plain HTTP (loopback\n\
-         # dev, or TLS terminated by an upstream proxy).\n",
-    );
-    out.push_str(&format!("enabled = {}\n", acme.enabled));
-    out.push_str(
-        "# Domains to request certificates for. Each one needs a public DNS record\n\
-         # resolving to this host. Example: domains = [\"dux.example.com\"].\n",
-    );
-    out.push_str(&format!(
-        "domains = {}\n",
-        render_string_list(&acme.domains)
-    ));
-    out.push_str("# Contact email Let's Encrypt uses for expiry/renewal notices (recommended).\n");
-    out.push_str(&format!(
-        "email = \"{}\"\n",
-        escape_toml_string(&acme.email)
-    ));
-    out.push_str(
-        "# Port for the HTTP-01 challenge and the HTTPS redirect. Let's Encrypt always\n\
-         # connects to port 80 for HTTP-01, so keep this 80 unless a proxy forwards it.\n",
-    );
-    out.push_str(&format!("http_port = {}\n", acme.http_port));
-    out.push_str("# Port the TLS web UI listens on (443 is the browser default).\n");
-    out.push_str(&format!("https_port = {}\n", acme.https_port));
-    out.push_str(
-        "# Use the Let's Encrypt PRODUCTION directory (true) or the STAGING directory\n\
-         # (false). Production has strict rate limits and issues browser-trusted certs;\n\
-         # staging issues untrusted certs but lets you test the flow freely. Test with\n\
-         # production = false first, then flip to true once the challenge succeeds.\n",
-    );
-    out.push_str(&format!("production = {}\n", acme.production));
-    out.push_str(
-        "# Directory holding the ACME account key and issued certificates. These are\n\
-         # PRIVATE KEYS — keep the directory readable only by the dux user. Leave empty\n\
-         # to use <config-dir>/acme. Env vars and a leading ~ are expanded.\n",
-    );
-    out.push_str(&format!(
-        "cache_dir = \"{}\"\n\n",
-        escape_toml_string(acme.cache_dir.as_deref().unwrap_or(""))
-    ));
-}
-
 fn render_terminal_config(out: &mut String, terminal: &TerminalConfig) {
     out.push_str("[terminal]\n");
     out.push_str(
@@ -1290,12 +1222,6 @@ mod tests {
         assert!(rendered.contains("color = \"auto\""));
         assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("max_websocket_connections = 128"));
-        assert!(rendered.contains("[server.acme]"));
-        assert!(rendered.contains("enabled = false"));
-        assert!(rendered.contains("domains = []"));
-        assert!(rendered.contains("http_port = 80"));
-        assert!(rendered.contains("https_port = 443"));
-        assert!(rendered.contains("production = true"));
         assert!(rendered.contains("[auth]"));
         assert!(rendered.contains("users = []"));
         assert!(rendered.contains("server-add-user"));
@@ -1315,80 +1241,6 @@ mod tests {
         assert!(
             !rendered.contains("commit_prompt"),
             "the removed AI-commit prompt key must no longer be rendered"
-        );
-    }
-
-    #[test]
-    fn server_acme_section_documents_key_concepts() {
-        // The config file IS the documentation: the [server.acme] comments must
-        // explain HTTP-01 reachability, the staging/production toggle + rate
-        // limits, the behind-a-proxy path, the private-key cache, and that ACME
-        // changes need a server restart.
-        let rendered = render_default_config();
-        // HTTP-01: DNS record + inbound :80 reachable from the internet.
-        assert!(rendered.contains("HTTP-01"), "must name the challenge type");
-        assert!(
-            rendered.contains("DNS A/AAAA record"),
-            "must explain the DNS requirement"
-        );
-        assert!(
-            rendered.contains("reachable from the internet"),
-            "must explain the inbound :80 reachability requirement"
-        );
-        // Staging vs production + Let's Encrypt rate limits.
-        assert!(
-            rendered.contains("STAGING") && rendered.contains("PRODUCTION"),
-            "must explain the staging/production toggle"
-        );
-        assert!(
-            rendered.contains("rate limits"),
-            "must warn about Let's Encrypt rate limits"
-        );
-        // Behind-my-own-proxy path: enabled = false + private/loopback bind.
-        assert!(
-            rendered.contains("reverse proxy") && rendered.contains("enabled = false"),
-            "must describe the proxy path with enabled = false"
-        );
-        // Cache dir default + it holds PRIVATE KEYS.
-        assert!(
-            rendered.contains("<config-dir>/acme"),
-            "must document the default cache dir"
-        );
-        assert!(
-            rendered.contains("PRIVATE KEYS"),
-            "must warn the cache dir holds private keys"
-        );
-        // ACME changes need a RESTART (reload-config does not rebind).
-        assert!(
-            rendered.contains("restart the server"),
-            "must explain that ACME changes need a restart"
-        );
-    }
-
-    #[test]
-    fn rendered_config_with_acme_round_trips() {
-        // The rendered template (including a populated [server.acme]) must
-        // re-parse into an equivalent config — proving the section ordering is
-        // valid TOML (subtable after the bare [server] keys).
-        let mut config = Config::default();
-        config.server.acme.enabled = true;
-        config.server.acme.domains = vec!["dux.example.com".to_string()];
-        config.server.acme.email = "ops@example.com".to_string();
-        config.server.acme.production = false;
-        config.server.acme.cache_dir = Some("/var/lib/dux/acme".to_string());
-
-        let rendered = render_config_default(&config);
-        let parsed: Config = toml::from_str(&rendered).expect("rendered config must re-parse");
-        assert!(parsed.server.acme.enabled);
-        assert_eq!(
-            parsed.server.acme.domains,
-            vec!["dux.example.com".to_string()]
-        );
-        assert_eq!(parsed.server.acme.email, "ops@example.com");
-        assert!(!parsed.server.acme.production);
-        assert_eq!(
-            parsed.server.acme.cache_dir.as_deref(),
-            Some("/var/lib/dux/acme")
         );
     }
 
