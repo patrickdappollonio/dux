@@ -111,9 +111,13 @@ function FileRow({ file, action, sessionId, onOpenDiff }: FileRowProps) {
 
       {/* File path — monospace (it's a path/code identifier). Long paths
           ellipsize at the START (direction:rtl) so the filename at the end stays
-          visible; text-left keeps short paths normally left-aligned. */}
+          visible; text-left keeps short paths normally left-aligned. The path
+          itself is wrapped in a <bdi> LTR isolate so a leading bidi-neutral
+          character in a dotfile path (e.g. ".github/...") isn't reordered by the
+          rtl container to the visual end — without it the leading "." renders
+          stuck onto the end of the filename. */}
       <span className="min-w-0 flex-1 truncate text-left font-mono text-sm text-foreground [direction:rtl]">
-        {file.path}
+        <bdi dir="ltr">{file.path}</bdi>
       </span>
 
       {/* Additions / deletions (text-only, skip for binary). Added lines green,
