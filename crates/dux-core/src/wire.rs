@@ -382,6 +382,27 @@ pub enum WireCommand {
     },
 }
 
+impl WireCommand {
+    /// True for the commands that mutate config-static state surfaced in the
+    /// bootstrap document — the macro set, the workspace-wide env map, and the
+    /// Changes-pane visibility flag. These eager-save to `config.toml` and adopt
+    /// the change into the running config in place (no disk reload), so the web
+    /// layer must fire a `config.changed` event after one succeeds for connected
+    /// clients to refetch `/api/v1/bootstrap`. Without it the change persists but
+    /// the UI keeps showing — and reseeds dialogs from — a stale snapshot (e.g. a
+    /// just-saved macro appears to vanish). `ReloadConfig` is intentionally NOT
+    /// listed: it re-reads the whole file and already signals through the engine
+    /// actor's reload path.
+    pub fn mutates_config_static(&self) -> bool {
+        matches!(
+            self,
+            WireCommand::UpdateMacros { .. }
+                | WireCommand::PersistGlobalEnv { .. }
+                | WireCommand::SetChangesPaneVisible { .. }
+        )
+    }
+}
+
 /// A single macro in a [`WireCommand::UpdateMacros`] payload. `surface` is the
 /// canonical lowercase string ("agent" | "terminal" | "both"), matching the
 /// `MacroSurface` serde casing and the ViewModel's `MacroView::surface`.
@@ -5899,6 +5920,25 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn mutates_config_static_flags_only_bootstrap_config_writes() {
+        // The eager-save config mutations that have no disk-reload to drive a
+        // `config.changed` signal — the web actor fires it for these.
+        assert!(WireCommand::UpdateMacros { entries: vec![] }.mutates_config_static());
+        assert!(
+            WireCommand::PersistGlobalEnv {
+                env: std::collections::BTreeMap::new(),
+            }
+            .mutates_config_static()
+        );
+        assert!(WireCommand::SetChangesPaneVisible { visible: true }.mutates_config_static());
+        // ReloadConfig re-reads the whole file and already signals through the
+        // reload path; it must NOT double-fire here.
+        assert!(!WireCommand::ReloadConfig {}.mutates_config_static());
+        // A non-config command never signals a bootstrap refetch.
+        assert!(!WireCommand::WatchChangedFiles { session_id: None }.mutates_config_static());
     }
 
     #[test]
