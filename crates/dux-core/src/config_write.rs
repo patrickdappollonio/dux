@@ -303,8 +303,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     patch_table_bool(doc, "server", "access_log", config.server.access_log);
     // The single WebSocket cap was split into three per-class caps; drop the
     // obsolete key from any existing config block on every save so saves stop
-    // carrying it (mirrors the oneshot strip in `patch_providers`).
-    remove_table_key(doc, "server", "max_websocket_connections");
+    // carrying it (mirrors the oneshot strip in `patch_providers`). Warn when
+    // the key is actually present so a TUI user (who never calls load_config on
+    // the server path) still sees the migration notice in dux.log and on stderr.
+    if remove_table_key_item(doc, "server", "max_websocket_connections").is_some() {
+        let msg = "[server] max_websocket_connections has been removed and is being ignored. \
+            It was split into max_websocket_events_connections, \
+            max_websocket_agent_connections, and max_websocket_terminal_connections. \
+            Set those per-class caps instead; a value of 0 still means disable \
+            (refuse all new connections of that class until restart).";
+        crate::logger::warn(msg);
+        eprintln!("dux config migration warning: {msg}");
+    }
     patch_table_usize(
         doc,
         "server",
@@ -1089,5 +1099,49 @@ unknown_key = \"untouched\"
         assert_eq!(parsed.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "project-1");
+    }
+
+    #[test]
+    fn apply_patches_strips_removed_max_websocket_connections_key() {
+        // Build a DocumentMut that still carries the obsolete key.
+        let raw = "[server]\nmax_websocket_connections = 16\nport = 7878\n";
+        assert!(
+            crate::config::raw_has_removed_max_websocket_connections(raw),
+            "precondition: raw must contain the removed key"
+        );
+        let mut doc: DocumentMut = raw.parse().expect("parse toml");
+        let config = Config::default();
+        apply_patches(&mut doc, &config);
+        // The key must be stripped after apply_patches.
+        let stripped = doc.to_string();
+        assert!(
+            !crate::config::raw_has_removed_max_websocket_connections(&stripped),
+            "apply_patches must remove max_websocket_connections; got: {stripped}"
+        );
+        // Other server settings survive.
+        assert!(
+            stripped.contains("port"),
+            "apply_patches must not wipe unrelated server keys; got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn apply_patches_does_not_warn_when_key_is_absent() {
+        // A config that never had max_websocket_connections must not trip the
+        // detection predicate after patching.
+        let raw = "[server]\nport = 7878\n";
+        assert!(
+            !crate::config::raw_has_removed_max_websocket_connections(raw),
+            "precondition: raw must not contain the removed key"
+        );
+        let mut doc: DocumentMut = raw.parse().expect("parse toml");
+        let config = Config::default();
+        // Must not panic and must leave the key absent.
+        apply_patches(&mut doc, &config);
+        let stripped = doc.to_string();
+        assert!(
+            !crate::config::raw_has_removed_max_websocket_connections(&stripped),
+            "key must remain absent; got: {stripped}"
+        );
     }
 }
