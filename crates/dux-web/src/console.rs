@@ -1,6 +1,6 @@
 //! The `dux server` terminal console: vite-style, colored, well-formatted
 //! output that shows the server's life as it runs (bind banner, client
-//! connect/disconnect, auth events, config reload, and a
+//! connect/disconnect, config reload, and a
 //! per-request access log).
 //!
 //! ## Scope

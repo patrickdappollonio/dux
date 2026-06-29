@@ -232,7 +232,7 @@ fn server_rebind_settings_changed(
 /// The engine returns `ApplyReloadedConfig` bare in the common case, but folds it
 /// into a `Multi` (alongside the deferred saves' status reactions) when
 /// config-mutating commands were deferred during the reload. The actor must
-/// handle BOTH so the auth-gate rebuild and server-restart warning always fire.
+/// handle BOTH so the config-reload and server-restart warning always fire.
 /// Returns `None` for any reaction that is not (and does not wrap) an
 /// `ApplyReloadedConfig`.
 fn take_apply_reloaded_config(reaction: EventReaction) -> Option<Box<dux_core::config::Config>> {
@@ -928,7 +928,7 @@ pub(crate) fn run_engine_loop(
                 // anything that only takes effect at startup (listeners are
                 // bound once; reload-config never rebinds). Comparing here — the
                 // arm already holds both the running config (pre-swap) and the
-                // incoming one — keeps the detection next to the auth reload hook.
+                // incoming one — keeps the detection next to the config-reload handler.
                 let server_settings_changed =
                     server_rebind_settings_changed(&engine.config.server, &config.server);
                 match engine.apply_reloaded_config(*config) {
