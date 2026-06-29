@@ -212,11 +212,11 @@ pub struct ServerConfig {
     pub title: String,
     /// WEB-ONLY favicon for this dux instance, so several dux tabs are easy to
     /// tell apart. Empty (default) keeps the bundled dux logo. Otherwise one of:
-    /// a COLOUR — a hex value like "#863bff" or a name (violet, blue, sky, cyan,
-    /// teal, green, lime, amber, orange, red, pink, rose, slate, gray, white,
-    /// black) — which renders the dux logo OUTLINE in that colour; or a custom
-    /// favicon URL beginning with "http://", "https://", or "/". Unrecognized
-    /// values fall back to the bundled logo.
+    /// a COLOUR (a hex value like "#863bff", or a name: violet, purple, blue,
+    /// sky, cyan, teal, green, lime, amber, orange, red, pink, rose, slate, gray,
+    /// white, black), which renders the dux logo OUTLINE in that colour; or a
+    /// custom favicon URL beginning with "http://", "https://", or "/".
+    /// Unrecognized values fall back to the bundled logo.
     pub favicon: String,
     pub acme: AcmeSettings,
 }

@@ -65,12 +65,23 @@ export function resolveFavicon(
   const named = FAVICON_COLORS[value.toLowerCase()]
   if (named) return { kind: "outline", color: named }
 
-  // Custom URL: only http(s) or an absolute path, and never protocol-relative
-  // (`//host`), so the config can't point the favicon at a `javascript:`/`data:`
-  // URL or silently load from another origin.
+  // Explicit absolute http(s) URL: allowed (the operator may host the favicon
+  // elsewhere, e.g. a CDN). `javascript:`/`data:`/`vbscript:` etc. never match.
   if (/^https?:\/\//i.test(value)) return { kind: "url", href: value }
-  if (value.startsWith("/") && !value.startsWith("//")) {
-    return { kind: "url", href: value }
+
+  // Same-origin absolute path. Validate through the URL parser against a sentinel
+  // origin and require the result to STAY same-origin, so a value the browser
+  // would normalize to another host — `//host`, or `/\host` (backslashes become
+  // slashes) — is rejected instead of silently loading cross-origin.
+  if (value.startsWith("/")) {
+    try {
+      const sentinel = "https://dux.invalid"
+      if (new URL(value, `${sentinel}/`).origin === sentinel) {
+        return { kind: "url", href: value }
+      }
+    } catch {
+      // Not a parseable same-origin path → fall through to default.
+    }
   }
 
   return { kind: "default" }
@@ -82,9 +93,14 @@ export function resolveFavicon(
  * callers should not pass untrusted input here.
  */
 export function outlineFaviconDataUri(color: string): string {
+  // Defense in depth: only a validated hex is ever interpolated into the SVG.
+  // `resolveFavicon` never produces a non-hex colour, but a future/mistaken
+  // caller falls back to the brand colour rather than letting an unsanitized
+  // string break out of the `stroke` attribute.
+  const stroke = HEX_RE.test(color) ? color : FAVICON_COLORS.violet
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${DUX_LOGO_VIEWBOX}">` +
-    `<path d="${DUX_LOGO_PATH}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>` +
+    `<path d="${DUX_LOGO_PATH}" fill="none" stroke="${stroke}" stroke-width="2.5" stroke-linejoin="round"/>` +
     `</svg>`
   return `data:image/svg+xml,${encodeURIComponent(svg)}`
 }

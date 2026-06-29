@@ -95,11 +95,24 @@ describe("store applies the configured favicon", () => {
   it("renders a recoloured dux-logo outline for a colour", async () => {
     bootstrapBody = makeBootstrap({ favicon: "violet" })
     await loadStore()
-    expect(iconHref()?.startsWith("data:image/svg+xml,")).toBe(true)
+    const href = iconHref() ?? ""
+    expect(href.startsWith("data:image/svg+xml,")).toBe(true)
+    // Verify the colour survives the whole store→applyFavicon path, not just the
+    // data-URI format.
+    const decoded = decodeURIComponent(href.replace("data:image/svg+xml,", ""))
+    expect(decoded).toContain('stroke="#863bff"')
   })
 
   it("keeps the bundled favicon when none is configured", async () => {
     bootstrapBody = makeBootstrap({ favicon: "" })
+    await loadStore()
+    expect(iconHref()).toBe("/favicon.svg")
+  })
+
+  it("reads the favicon field, not the title", async () => {
+    // favicon empty keeps the bundled logo even though the title on its own would
+    // resolve to a colour. Guards against applyFavicon being wired to b.title.
+    bootstrapBody = makeBootstrap({ favicon: "", title: "violet" })
     await loadStore()
     expect(iconHref()).toBe("/favicon.svg")
   })
