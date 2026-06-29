@@ -734,11 +734,13 @@ impl Engine {
                             PullTarget::Project { leading_branch, .. } => {
                                 let leading_branch = match leading_branch.clone() {
                                     Some(branch) => Ok(branch),
-                                    None => crate::git::current_branch(&repo_path).map(|branch| {
-                                        crate::project_browser::leading_branch_for_project(
-                                            &repo_path, &branch,
-                                        )
-                                    }),
+                                    None => {
+                                        crate::git::current_branch_opt(&repo_path).map(|opt_branch| {
+                                            crate::project_browser::leading_branch_for_project(
+                                                &repo_path, opt_branch.as_deref(),
+                                            )
+                                        })
+                                    }
                                 };
                                 leading_branch
                                     .and_then(|branch| {

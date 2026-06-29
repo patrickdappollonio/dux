@@ -55,7 +55,7 @@ impl App {
         };
         logger::info(&format!("attempting to add project {}", path.display()));
         let branch = git::current_branch(&path)?;
-        let leading_branch = leading_branch_for_project(&path, &branch);
+        let leading_branch = leading_branch_for_project(&path, Some(branch.as_str()));
 
         if let Some(kind) = git::branch_warning_kind(&path, &branch) {
             // Default the checkbox to on for the confident path so hitting
