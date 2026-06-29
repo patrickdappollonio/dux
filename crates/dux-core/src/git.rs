@@ -254,7 +254,14 @@ pub fn parse_worktree_list_porcelain_z(bytes: &[u8]) -> Result<Vec<GitWorktree>>
 }
 
 pub fn pull_current_branch(repo_path: &Path) -> Result<()> {
-    let branch = current_branch(repo_path)?;
+    let branch = match current_branch_opt(repo_path)? {
+        Some(b) => b,
+        None => {
+            return Err(anyhow!(
+                "HEAD is detached; check out a branch before pulling"
+            ));
+        }
+    };
     pull_origin_branch(repo_path, &branch)
 }
 
@@ -1001,7 +1008,14 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
 
 pub fn push(worktree_path: &Path) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
-    let branch = current_branch(worktree_path)?;
+    let branch = match current_branch_opt(worktree_path)? {
+        Some(b) => b,
+        None => {
+            return Err(anyhow!(
+                "HEAD is detached; check out a branch before pushing"
+            ));
+        }
+    };
     let output = Command::new("git")
         .args(["-C", wt.as_ref(), "push", "-u", "origin", &branch])
         .output()?;
@@ -2543,5 +2557,47 @@ mod tests {
 
         fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
         assert!(has_tracked_changes(repo.path()).unwrap());
+    }
+
+    #[test]
+    fn pull_current_branch_on_detached_head_returns_clear_error() {
+        let repo = init_test_repo();
+        // A second commit is required so HEAD~1 exists for the detach.
+        fs::write(repo.path().join("detach.txt"), "x\n").unwrap();
+        run_git(repo.path(), &["add", "detach.txt"]);
+        run_git(repo.path(), &["commit", "-m", "second commit"]);
+        run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
+
+        let err = pull_current_branch(repo.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("detached"),
+            "expected 'detached' in error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("symbolic-ref"),
+            "expected no 'symbolic-ref' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn push_on_detached_head_returns_clear_error() {
+        let repo = init_test_repo();
+        // A second commit is required so HEAD~1 exists for the detach.
+        fs::write(repo.path().join("detach.txt"), "x\n").unwrap();
+        run_git(repo.path(), &["add", "detach.txt"]);
+        run_git(repo.path(), &["commit", "-m", "second commit"]);
+        run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
+
+        let err = push(repo.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("detached"),
+            "expected 'detached' in error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("symbolic-ref"),
+            "expected no 'symbolic-ref' in error, got: {msg}"
+        );
     }
 }
