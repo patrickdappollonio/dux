@@ -53,8 +53,10 @@ pub const CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(20);
 pub const FROM_PR_CREATE_AWAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The class of a live WebSocket connection tracked in the [`ConnectionRegistry`].
-/// Used by the liveness reaper (every class is pingable) and exposed via
-/// [`ConnectionRegistry::count`] for a later task's per-class connection caps.
+/// Used by the liveness reaper (every class is pingable) and by `scope_from_headers`
+/// to require that a scoped `x-connection-id` is a live Events-class connection
+/// before routing a REST status toast to it; PTY-class ids are never disclosed to
+/// clients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ConnClass {
     /// A `/ws/events` change+status socket.
@@ -97,6 +99,7 @@ impl ConnectionRegistry {
     }
 
     /// Whether `id` is a currently-live connection.
+    #[cfg(test)]
     pub fn contains(&self, id: &str) -> bool {
         self.entries.lock().unwrap().contains_key(id)
     }

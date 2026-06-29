@@ -359,12 +359,37 @@ mod tests {
             ))
             .await
             .unwrap();
-        // The session does not exist so we get 404, not 400 -- meaning the
-        // length gate was passed and the handler reached the worktree lookup.
-        assert_ne!(
+        // The at-cap message passes the length gate; the session does not exist,
+        // so the handler returns 404 from the worktree lookup rather than 400.
+        assert_eq!(
             resp.status(),
-            StatusCode::BAD_REQUEST,
-            "length gate must not fire at cap"
+            StatusCode::NOT_FOUND,
+            "at-cap message must pass the length gate and reach the session lookup (404)"
+        );
+    }
+
+    /// A commit message of exactly MAX_COMMIT_MSG_LEN MULTI-BYTE characters must
+    /// not be rejected with 400. Proves the cap uses `.chars().count()` rather than
+    /// `.len()` (a 2-byte char like 'e with acute' has byte length > char count).
+    #[tokio::test]
+    async fn commit_accepts_multibyte_message_at_exactly_the_length_cap() {
+        let (_tmp, app) = router_no_auth();
+        // 'é' is 2 UTF-8 bytes; MAX_COMMIT_MSG_LEN copies = MAX_COMMIT_MSG_LEN
+        // chars but 2*MAX_COMMIT_MSG_LEN bytes. A byte-based cap would reject this.
+        let ok_msg = "é".repeat(MAX_COMMIT_MSG_LEN);
+        let body = format!(r#"{{"message":"{ok_msg}"}}"#);
+        let resp = app
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/sessions/abc123/git/commit",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "multi-byte at-cap message must pass the length gate (cap is chars, not bytes)"
         );
     }
 }

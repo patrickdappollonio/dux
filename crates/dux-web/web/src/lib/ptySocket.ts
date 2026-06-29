@@ -5,7 +5,9 @@
 // server routes that PTY's bytes here with no per-message addressing.
 //
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
-//   - On (re)open the server sends ONE Binary frame replaying the buffered
+//   - On (re)open the server sends a Text `connected` frame FIRST carrying this
+//     socket's connection id: `{"event":"connected","id":"<connId>"}`.
+//   - Then the server sends ONE Binary frame replaying the buffered
 //     scrollback/repaint; feed it straight to xterm like any other byte chunk.
 //   - server→client Binary = raw PTY bytes (write to xterm).
 //   - client→server Binary = PTY stdin (xterm `onData`).
