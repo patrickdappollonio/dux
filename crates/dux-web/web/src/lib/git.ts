@@ -37,20 +37,25 @@ async function postGit(
   }
 }
 
+// The session id is the `:id` path segment (encoded) — no longer a body field.
+const gitUrl = (sessionId: string, action: string) =>
+  `/api/v1/sessions/${encodeURIComponent(sessionId)}/git/${action}`
+
 export const git = {
   stage: (sessionId: string, path: string) =>
-    postGit("/api/v1/git/stage", { session_id: sessionId, path }),
+    postGit(gitUrl(sessionId, "stage"), { path }),
   unstage: (sessionId: string, path: string) =>
-    postGit("/api/v1/git/unstage", { session_id: sessionId, path }),
+    postGit(gitUrl(sessionId, "unstage"), { path }),
   // `untracked` is intentionally NOT sent: the server re-derives the
   // delete-vs-restore distinction from live git status (never trusting the
   // client about a destructive outcome).
   discard: (sessionId: string, path: string) =>
-    postGit("/api/v1/git/discard", { session_id: sessionId, path }),
+    postGit(gitUrl(sessionId, "discard"), { path }),
   commit: (sessionId: string, message: string) =>
-    postGit("/api/v1/git/commit", { session_id: sessionId, message }),
+    postGit(gitUrl(sessionId, "commit"), { message }),
+  // push/pull are bodiless; the session is in the path.
   push: (sessionId: string) =>
-    postGit("/api/v1/git/push", { session_id: sessionId }, { scopeToConnection: true }),
+    postGit(gitUrl(sessionId, "push"), {}, { scopeToConnection: true }),
   pull: (sessionId: string) =>
-    postGit("/api/v1/git/pull", { session_id: sessionId }, { scopeToConnection: true }),
+    postGit(gitUrl(sessionId, "pull"), {}, { scopeToConnection: true }),
 }

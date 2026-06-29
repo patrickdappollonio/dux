@@ -59,35 +59,35 @@ async function postFileNoContent(
   }
 }
 
+// The session id is the `:id` path segment (encoded) — no longer a body field.
+const fileUrl = (sessionId: string, action: string) =>
+  `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/${action}`
+
 export const fileApi = {
   // The worktree's browsable files for the editor tree: tracked, untracked, and
   // loose gitignored files (fully-ignored dirs like node_modules are collapsed
   // out server-side). Editing is NOT limited to this set — any path inside the
   // worktree can be read/written/created (the server enforces containment).
   list: (sessionId: string) =>
-    postFile<{ files: string[]; truncated?: boolean }>("/api/v1/file/list", {
-      session_id: sessionId,
-    }),
+    postFile<{ files: string[]; truncated?: boolean }>(
+      fileUrl(sessionId, "list"),
+      {},
+    ),
   read: (sessionId: string, path: string) =>
-    postFile<WorktreeFile>("/api/v1/file/read", { session_id: sessionId, path }),
+    postFile<WorktreeFile>(fileUrl(sessionId, "read"), { path }),
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
   // diff view. The server resolves both sides and the binary flag.
   diff: (sessionId: string, path: string) =>
-    postFile<FileDiffContents>("/api/v1/file/diff", { session_id: sessionId, path }),
+    postFile<FileDiffContents>(fileUrl(sessionId, "diff"), { path }),
   write: (sessionId: string, path: string, content: string) =>
-    postFileNoContent("/api/v1/file/write", {
-      session_id: sessionId,
-      path,
-      content,
-    }),
+    postFileNoContent(fileUrl(sessionId, "write"), { path, content }),
   // Open the file in a locally-installed GUI editor (server-side spawn) and
   // resolve with the chosen editor's label for a toast. `editor` is the dux-core
   // editor config key (e.g. "vscode") the user picked; the server launches that
   // one and errors if it isn't installed. Only useful when the server is the
   // user's own machine — the UI gates this to local-access URLs.
   openInEditor: (sessionId: string, path: string, editor: string) =>
-    postFile<{ editor: string }>("/api/v1/file/open-in-editor", {
-      session_id: sessionId,
+    postFile<{ editor: string }>(fileUrl(sessionId, "open-in-editor"), {
       path,
       editor,
     }).then((r) => r.editor),
