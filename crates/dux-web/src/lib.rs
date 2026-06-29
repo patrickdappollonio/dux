@@ -278,8 +278,10 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
     // Build the vite-style CLI console (color from [server] color) + the access-log
     // toggle before the engine moves into the actor thread.
     let (console, access_log) = build_console(&engine.config);
-    // Capture the connection cap before the engine moves into the actor thread.
+    // Capture the connection cap and allowed hosts before the engine moves into
+    // the actor thread. Both are read-only config values the router builder needs.
     let max_ws_connections = engine.config.server.max_websocket_connections;
+    let engine_allowed_hosts = engine.config.server.allowed_hosts.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -305,15 +307,25 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
         // The shared shutdown primitive: a SIGINT/SIGTERM or a first-listener
         // failure flips its watch and every serve task awaits it.
         let shutdown = ServeShutdown::new();
+        // Collect the IPs the server actually bound to (for the host allowlist).
+        // Uses the bound addresses captured above, BEFORE the listeners move into
+        // the serve tasks. Together with `server.allowed_hosts` from config this
+        // drives the DNS-rebinding guard; loopback is always allowed regardless.
+        let bound_ips: Vec<std::net::IpAddr> = bound.iter().map(|b| b.addr.ip()).collect();
+
         // Build ONE app, clone the router across listeners (it is a cheap
         // `Arc`-backed service). The console + access-log toggle ride into the
         // router so the WS handlers and the access middleware emit to the terminal.
+        // The host allowlist is threaded in via `with_host_allowlist` so
+        // `build_app` can wrap the whole router with the guard as its outermost
+        // layer (outside the access log, so rejected probes are not logged).
         let app = server::build_app(
             handle.clone(),
             axum::Router::new(),
             RouterParams::plain_http()
                 .with_console(console.clone(), access_log)
-                .with_max_websocket_connections(max_ws_connections),
+                .with_max_websocket_connections(max_ws_connections)
+                .with_host_allowlist(bound_ips, engine_allowed_hosts.clone()),
         );
 
         // Translate a SIGINT/SIGTERM into a watch trip so every listener winds
@@ -552,6 +564,17 @@ pub fn serve_with_engine(
         .enable_all()
         .build()?;
 
+    // Collect the flip's bound IPs (for the host allowlist) and the operator's
+    // configured hosts. Read them HERE -- from the std TcpListeners -- before the
+    // conversion loop below moves `listeners` into the tokio listener set.
+    let flip_bound_ips: Vec<std::net::IpAddr> = listeners
+        .iter()
+        .filter_map(|l| l.local_addr().ok())
+        .map(|a| a.ip())
+        .collect();
+    let flip_allowed_hosts = engine.config.server.allowed_hosts.clone();
+    let flip_max_ws = engine.config.server.max_websocket_connections;
+
     // The std listeners travel through the flip (the TUI bound them BEFORE tearing
     // down, so there is no rebind race); tokio needs them non-blocking. Adoption
     // failures here are rare (the bind already succeeded in the preflight), but log
@@ -602,7 +625,7 @@ pub fn serve_with_engine(
 
     // Build ONE app, shared across listeners (the router is a cheap `Arc`-backed
     // service). `build_app` constructs the `ChangesService`, which spawns its
-    // supervised poller via `tokio::spawn` — that needs an entered runtime, and
+    // supervised poller via `tokio::spawn` -- that needs an entered runtime, and
     // the flip is not yet inside `block_on` here, so enter the runtime for the
     // build.
     let app = {
@@ -615,7 +638,8 @@ pub fn serve_with_engine(
                 // in the panel, and access() never reaches emit() to be captured
                 // anyway) while the WS handlers feed lifecycle events into the ring.
                 .with_console(console.clone(), false)
-                .with_max_websocket_connections(engine.config.server.max_websocket_connections),
+                .with_max_websocket_connections(flip_max_ws)
+                .with_host_allowlist(flip_bound_ips, flip_allowed_hosts),
         )
     };
 
