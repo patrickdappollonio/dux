@@ -1,6 +1,6 @@
 //! The `dux server` terminal console: vite-style, colored, well-formatted
 //! output that shows the server's life as it runs (bind banner, client
-//! connect/disconnect, auth events, ACME lifecycle, config reload, and a
+//! connect/disconnect, auth events, config reload, and a
 //! per-request access log).
 //!
 //! ## Scope
@@ -579,8 +579,6 @@ pub struct ListenerRow {
     pub label: String,
     /// The full URL a user opens.
     pub url: String,
-    /// An optional trailing note (e.g. the ACME redirect note).
-    pub note: Option<String>,
 }
 
 /// The login-state row.
@@ -611,8 +609,7 @@ pub struct Banner {
     /// `development` otherwise) — the same string the TUI footer and web sidebar
     /// show, via `dux_core::display_version`. Rendered verbatim.
     pub version: String,
-    /// The mode line (e.g. `plain HTTP`, `TLS via Let's Encrypt`,
-    /// `TLS via Let's Encrypt [STAGING]`).
+    /// The mode line (e.g. `plain HTTP`).
     pub mode: String,
     /// One row per bound listener.
     pub listeners: Vec<ListenerRow>,
@@ -658,15 +655,7 @@ fn render_banner(color: bool, banner: &Banner) -> Vec<String> {
         } else {
             row.url.clone()
         };
-        let mut line = format!("  {arrow} {label}: {url}");
-        if let Some(note) = &row.note {
-            let note_text = if color {
-                format!("{DIM}{note}{RESET}")
-            } else {
-                note.clone()
-            };
-            line.push_str(&format!(" {note_text}"));
-        }
+        let line = format!("  {arrow} {label}: {url}");
         out.push(line);
     }
 
@@ -993,7 +982,6 @@ mod tests {
             listeners: vec![ListenerRow {
                 label: "Local".to_string(),
                 url: "http://127.0.0.1:8080".to_string(),
-                note: None,
             }],
             login: LoginRow::Enabled { count: 1 },
             warnings: vec![],
@@ -1101,26 +1089,6 @@ mod tests {
             color.contains(YELLOW),
             "public no-login row is a yellow warning: {color}"
         );
-    }
-
-    #[test]
-    fn banner_acme_staging_mode_and_redirect_note() {
-        let b = Banner {
-            version: "v0.1.0".to_string(),
-            mode: "TLS via Let's Encrypt [STAGING]".to_string(),
-            listeners: vec![ListenerRow {
-                label: "dux.example.com".to_string(),
-                url: "https://dux.example.com/".to_string(),
-                note: Some("(plain HTTP on :80 redirects here)".to_string()),
-            }],
-            login: LoginRow::Enabled { count: 2 },
-            warnings: vec![],
-        };
-        let plain = render_banner(false, &b).join("\n");
-        assert!(plain.contains("[STAGING]"));
-        assert!(plain.contains("https://dux.example.com/"));
-        assert!(plain.contains("redirects here"));
-        assert!(plain.contains("login enabled — 2 user(s)"));
     }
 
     #[test]
