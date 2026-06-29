@@ -702,27 +702,30 @@ impl PtySizeOwners {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Make `conn_id` the current sizing owner of `pty_id`. Called on every new
-    /// attach, so the most recently attached connection wins.
-    fn claim(&self, pty_id: &str, conn_id: u64) {
+    /// Make `conn_id` the current sizing+input owner of `pty_id`. A client claims
+    /// ownership by sending a size frame, so the most recently claiming connection
+    /// wins, taking over from any prior owner. Attaching alone no longer claims:
+    /// a backgrounded tab that attaches as a silent observer (sends no size) never
+    /// steals ownership from the foregrounded device. Returns whether the owner
+    /// CHANGED, so the caller broadcasts a `pty.owner` signal only on a real
+    /// handover (a same-owner re-claim is silent).
+    fn claim(&self, pty_id: &str, conn_id: u64) -> bool {
         self.owners
             .lock()
             .unwrap()
-            .insert(pty_id.to_string(), conn_id);
+            .insert(pty_id.to_string(), conn_id)
+            != Some(conn_id)
     }
 
-    /// Whether `conn_id` may apply a resize to `pty_id`: true if it is the current
-    /// owner, or if no owner is recorded (the previous owner dropped) — in which
-    /// case `conn_id` claims it so the next live resize takes over.
-    fn may_resize(&self, pty_id: &str, conn_id: u64) -> bool {
-        let mut owners = self.owners.lock().unwrap();
-        match owners.get(pty_id) {
-            Some(&owner) => owner == conn_id,
-            None => {
-                owners.insert(pty_id.to_string(), conn_id);
-                true
-            }
-        }
+    /// Whether `conn_id` is the current owner of `pty_id`. Unlike [`claim`] this
+    /// never mutates: an unowned PTY (no client has sent a size yet) returns false,
+    /// so a non-owner's stdin is dropped until it claims ownership. The PTY socket
+    /// handler gates BOTH stdin and resize on ownership, so only the active device's
+    /// input reaches the child.
+    ///
+    /// [`claim`]: PtySizeOwners::claim
+    fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
+        self.owners.lock().unwrap().get(pty_id) == Some(&conn_id)
     }
 
     /// Release ownership of `pty_id` if `conn_id` still holds it (called when the
@@ -779,6 +782,7 @@ async fn ws_session_pty_upgrade(
     let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let bus = Arc::clone(&state.event_bus);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -793,6 +797,7 @@ async fn ws_session_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                bus,
             )
         })
         .into_response()
@@ -846,6 +851,7 @@ async fn ws_terminal_pty_upgrade(
     let recheck_period = state.ws_recheck_period;
     let console = state.console.clone();
     let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let bus = Arc::clone(&state.event_bus);
     let peer_ip = peer.ip();
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
@@ -860,6 +866,7 @@ async fn ws_terminal_pty_upgrade(
                 peer_ip,
                 permit,
                 pty_size_owners,
+                bus,
             )
         })
         .into_response()
@@ -887,6 +894,7 @@ async fn handle_pty_socket(
     // slot when this returns). Never read.
     _permit: tokio::sync::OwnedSemaphorePermit,
     pty_size_owners: Arc<PtySizeOwners>,
+    bus: Arc<EventBus>,
 ) {
     console.client_connected(peer_ip);
     let (sink, mut stream) = socket.split();
@@ -918,11 +926,12 @@ async fn handle_pty_socket(
             return;
         }
     };
-    // This connection now owns sizing for its PTY: the most recently attached socket
-    // wins, so a second viewer opening takes over and the first viewer's later
-    // resizes are ignored until it reattaches. Released on disconnect below.
+    // Allocate this connection's id, but do NOT claim ownership yet: attaching is
+    // not the same as taking over. A connection claims sizing+input ownership only
+    // when it sends a size frame (see the resize arm below), so a backgrounded tab
+    // can attach as a silent read-only observer without stealing the foregrounded
+    // device's control. Ownership is released on disconnect below.
     let conn_id = pty_size_owners.next_conn_id();
-    pty_size_owners.claim(target.pty_id(), conn_id);
     // Replay the buffered scrollback/repaint before streaming live bytes.
     send_binary(&sink, repaint).await;
     let pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
@@ -957,18 +966,25 @@ async fn handle_pty_socket(
             },
         };
         match msg {
-            // Binary frame = raw PTY stdin for THIS socket's PTY.
+            // Binary frame = raw PTY stdin for THIS socket's PTY. Forwarded ONLY
+            // when this connection currently owns the PTY (it claimed by sending a
+            // size). A non-owner's stdin is dropped so a read-only secondary viewer
+            // can never disrupt the active device's typing.
             Message::Binary(bytes) => {
-                engine.write_pty(target.pty_id().to_string(), bytes.to_vec());
+                if pty_size_owners.is_owner(target.pty_id(), conn_id) {
+                    engine.write_pty(target.pty_id().to_string(), bytes.to_vec());
+                }
             }
-            // Text frame = a resize control message. Applied to the engine PTY ONLY
-            // when this connection currently owns sizing (the most recently attached
-            // viewer). A non-owner's resize is dropped, breaking the last-writer-wins
-            // feedback loop between two viewers of the same PTY.
+            // Text frame = a resize control message. Sending a size IS the claim:
+            // it makes this connection the owner (most-recent claim wins, taking
+            // over a prior owner), then applies the resize. On a real handover we
+            // broadcast a `pty.owner` signal so other clients viewing this PTY flip
+            // to the read-only take-over placeholder.
             Message::Text(text) => {
-                if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str())
-                    && pty_size_owners.may_resize(target.pty_id(), conn_id)
-                {
+                if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
+                    if pty_size_owners.claim(target.pty_id(), conn_id) {
+                        bus.emit(pty_owner_event(target.pty_id()));
+                    }
                     engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
                 }
             }
@@ -982,6 +998,20 @@ async fn handle_pty_socket(
     pty_forwarder.abort();
     pty_size_owners.release(target.pty_id(), conn_id);
     console.client_disconnected(peer_ip);
+}
+
+/// A `pty.owner` signal: the connection that owns a PTY's sizing+input changed (a
+/// new device took over by sending its size). `id` is the pty id (the session id
+/// for an agent PTY, the terminal id for a companion). It carries no `rev` — it is
+/// a plain "the owner is now someone else" nudge. Delivered on the coarse
+/// `sessions` topic (every client holds it), so any other client currently viewing
+/// that PTY flips to the read-only take-over placeholder.
+fn pty_owner_event(pty_id: &str) -> Event {
+    Event::Resource {
+        event: "pty.owner".to_string(),
+        id: Some(pty_id.to_string()),
+        rev: None,
+    }
 }
 
 /// The single `config.changed` signal emitted whenever the engine reloads config.
@@ -1305,6 +1335,10 @@ async fn handle_events_socket(
                         // id/rev — a plain refetch of `/api/v1/spine`).
                         ("projects.changed", _) => interest.subscribed.contains("projects"),
                         ("sessions.changed", _) => interest.subscribed.contains("sessions"),
+                        // A PTY ownership handover rides the coarse `sessions` topic
+                        // (held by every client). Coarse delivery is fine: only the
+                        // client(s) actually viewing that pty id react to it.
+                        ("pty.owner", _) => interest.subscribed.contains("sessions"),
                         _ => false,
                     };
                     if deliver {
@@ -2630,47 +2664,117 @@ mod tests {
         );
     }
 
-    /// Two viewers of one PTY: the most recently attached connection owns sizing.
-    /// The later attacher's resize applies; the earlier one's is ignored. After the
-    /// owner drops, the surviving connection's next resize claims ownership.
+    /// Two viewers of one PTY: the most recently CLAIMING connection owns it (a
+    /// claim happens when a client sends a size). The later claimer owns; the
+    /// earlier one does not. After the owner drops, the surviving connection
+    /// reclaims on its next size.
     #[test]
-    fn pty_size_owner_is_most_recent_attach_and_releases_on_drop() {
+    fn pty_size_owner_is_most_recent_claim_and_releases_on_drop() {
         let owners = PtySizeOwners::default();
         let pty = "session-1";
 
-        // First viewer attaches and owns sizing.
+        // First viewer claims (sends a size) and owns the PTY. The first claim of
+        // an unowned PTY is a change.
         let conn_a = owners.next_conn_id();
-        owners.claim(pty, conn_a);
         assert!(
-            owners.may_resize(pty, conn_a),
-            "the sole attached connection owns sizing"
+            owners.claim(pty, conn_a),
+            "claiming an unowned PTY changes the owner"
+        );
+        assert!(
+            owners.is_owner(pty, conn_a),
+            "the sole claimant owns the PTY"
         );
 
-        // Second viewer attaches: it becomes the owner (most-recent-attach wins).
+        // Second viewer claims: it takes over (most-recent claim wins).
         let conn_b = owners.next_conn_id();
-        owners.claim(pty, conn_b);
+        assert!(owners.claim(pty, conn_b), "a takeover changes the owner");
         assert!(
-            owners.may_resize(pty, conn_b),
-            "the later attacher's resize applies"
+            owners.is_owner(pty, conn_b),
+            "the later claimant owns the PTY"
         );
         assert!(
-            !owners.may_resize(pty, conn_a),
-            "the earlier attacher's resize is ignored while it is not the owner"
+            !owners.is_owner(pty, conn_a),
+            "the earlier claimant no longer owns the PTY"
         );
 
         // The owner (B) disconnects and releases ownership.
         owners.release(pty, conn_b);
-        // Now A's next resize claims the unowned PTY and applies.
         assert!(
-            owners.may_resize(pty, conn_a),
-            "after the owner drops, the surviving connection claims sizing on its next resize"
+            !owners.is_owner(pty, conn_b),
+            "a released owner no longer owns it"
         );
-        // B's stale id no longer owns it.
-        assert!(!owners.may_resize(pty, conn_b));
+        // Now A's next claim takes the unowned PTY.
+        assert!(
+            owners.claim(pty, conn_a),
+            "claiming after a release changes the owner"
+        );
+        assert!(owners.is_owner(pty, conn_a));
+    }
+
+    /// `claim` reports whether the owner CHANGED so the handler emits `pty.owner`
+    /// only on a real handover: a fresh claim and a takeover are changes; a
+    /// same-owner re-claim (an owner re-asserting its size) is not.
+    #[test]
+    fn pty_size_claim_reports_owner_change() {
+        let owners = PtySizeOwners::default();
+        let pty = "session-7";
+        let conn_a = owners.next_conn_id();
+        let conn_b = owners.next_conn_id();
+
+        assert!(owners.claim(pty, conn_a), "None -> A is a change");
+        assert!(
+            !owners.claim(pty, conn_a),
+            "A -> A (re-claim) is not a change"
+        );
+        assert!(owners.claim(pty, conn_b), "A -> B (takeover) is a change");
+    }
+
+    /// Owner-only input: with two connections attached to the same PTY, only the
+    /// current owner's stdin is forwarded; a non-owner's stdin is dropped. This is
+    /// exactly the gate the PTY socket handler applies (`is_owner`) before
+    /// `engine.write_pty`, so a read-only secondary viewer can never disrupt the
+    /// active device's typing.
+    #[test]
+    fn non_owner_stdin_is_dropped() {
+        let owners = PtySizeOwners::default();
+        let pty = "session-1";
+
+        let conn_a = owners.next_conn_id();
+        let conn_b = owners.next_conn_id();
+        // Both attach. A claims first (sends a size), then B claims (the most recent
+        // foreground device) and takes over.
+        owners.claim(pty, conn_a);
+        owners.claim(pty, conn_b);
+
+        // The handler forwards a stdin frame only when `is_owner` holds.
+        assert!(
+            owners.is_owner(pty, conn_b),
+            "the owner B's stdin is forwarded"
+        );
+        assert!(
+            !owners.is_owner(pty, conn_a),
+            "the non-owner A's stdin is dropped"
+        );
+    }
+
+    /// An attached-but-never-claimed connection (a backgrounded observer that sent
+    /// no size) owns nothing, so its stdin is dropped: attaching alone does not
+    /// grant input. An unowned PTY (nobody has sent a size) answers `is_owner`
+    /// false for every connection.
+    #[test]
+    fn attach_without_claim_is_a_read_only_observer() {
+        let owners = PtySizeOwners::default();
+        let pty = "session-9";
+        let observer = owners.next_conn_id();
+        // The observer attached (got a conn id) but never sent a size.
+        assert!(
+            !owners.is_owner(pty, observer),
+            "an unclaimed PTY grants no one input"
+        );
     }
 
     /// `release` is a no-op when another connection has already claimed the PTY, so
-    /// a late-arriving disconnect from a former owner never steals sizing from the
+    /// a late-arriving disconnect from a former owner never steals ownership from the
     /// current one.
     #[test]
     fn pty_size_owner_release_does_not_clobber_a_newer_owner() {
@@ -2685,7 +2789,7 @@ mod tests {
         // A disconnects after B took over: releasing A must not drop B's ownership.
         owners.release(pty, conn_a);
         assert!(
-            owners.may_resize(pty, conn_b),
+            owners.is_owner(pty, conn_b),
             "B remains the owner after A's stale release"
         );
     }

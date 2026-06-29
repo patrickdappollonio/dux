@@ -654,6 +654,12 @@ async fn nested_agent_pty_socket_streams_bytes() {
         .await
         .expect("connect agent pty socket");
 
+    // Claim sizing+input ownership first: a non-owner's stdin is dropped (the
+    // per-PTY active-owner model), and a fresh socket owns nothing until it sends
+    // a size, exactly as the real client does on a foreground attach.
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
     ws.send(Message::Binary(b"dux-nested-agent-marker\n".to_vec()))
         .await
         .unwrap();
@@ -735,6 +741,11 @@ async fn nested_terminal_pty_socket_enforces_session_ownership() {
     ))
     .await
     .expect("connect terminal pty on the owning session");
+    // Claim ownership first so this connection's stdin is forwarded (non-owner
+    // stdin is dropped under the per-PTY active-owner model).
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
     ws.send(Message::Binary(b"dux-owned-terminal-marker\n".to_vec()))
         .await
         .unwrap();
