@@ -14,7 +14,7 @@
 //! same-host origins. Non-browser clients (no `Origin`) are allowed — documented
 //! tradeoff: a CLI/test client is trusted to not be a hijacked browser tab.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
@@ -101,17 +101,28 @@ pub struct RouterParams {
     /// Defaults to [`dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS`]; the
     /// serve paths override it from config via [`with_max_websocket_connections`].
     pub max_websocket_connections: u32,
+    /// The IPs the server actually bound to. When non-empty, `build_app` wraps
+    /// the router with the Host allowlist (DNS-rebinding defense). An empty vec
+    /// disables the guard; used by tests that do not exercise the host guard.
+    pub bound_ips: Vec<IpAddr>,
+    /// Operator-configured hostnames from `[server] allowed_hosts`. Normalized
+    /// (lowercased, port-stripped) inside the allowlist; raw strings here. Only
+    /// meaningful when the host guard is active (see [`bound_ips`]).
+    pub configured_hosts: Vec<String>,
 }
 
 impl RouterParams {
-    /// Plain-HTTP defaults: a no-op console, no access log. Used by the
-    /// loopback/Tailscale/proxy serve paths and every test harness; the CLI paths
-    /// layer a real console on with [`with_console`].
+    /// Plain-HTTP defaults: a no-op console, no access log, host guard off.
+    /// Used by the loopback/Tailscale/proxy serve paths and every test harness;
+    /// the CLI paths layer a real console and the allowlist on with
+    /// [`with_console`] and [`with_host_allowlist`].
     pub fn plain_http() -> Self {
         Self {
             console: Console::noop(),
             access_log: false,
             max_websocket_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            bound_ips: Vec::new(),
+            configured_hosts: Vec::new(),
         }
     }
 
@@ -131,19 +142,48 @@ impl RouterParams {
         self.max_websocket_connections = max;
         self
     }
+
+    /// Activate the Host allowlist (DNS-rebinding defense). `bound_ips` is the
+    /// set of IPs the server actually bound to (derived from the bound listeners
+    /// in `lib.rs`); `configured` is the raw `[server] allowed_hosts` list. When
+    /// this is set, `build_app` wraps the whole router with the host allowlist
+    /// middleware, which runs OUTSIDE the access-log layer so foreign-Host probes
+    /// are not access-logged.
+    pub fn with_host_allowlist(mut self, bound_ips: Vec<IpAddr>, configured: Vec<String>) -> Self {
+        self.bound_ips = bound_ips;
+        self.configured_hosts = configured;
+        self
+    }
 }
 
 /// Build the dux web router. dux is trusted-local: there is no login gate, so
 /// every route is served plainly. `extra_gated` is merged into the router as-is
 /// (a test seam for an injected probe route); production callers pass an empty
 /// router.
+///
+/// ## Middleware stack (outermost to innermost)
+///
+/// 1. **Host allowlist** (DNS-rebinding defense): when `params.bound_ips` is
+///    non-empty, the outermost layer rejects any request whose `Host` header is
+///    not in the allowlist with `403`. Foreign-Host probes are rejected before
+///    the access log runs, so they are never logged.
+/// 2. **Access log**: logs every request (method, path, status, latency) when
+///    the console is active and `access_log` is on. Sees the final status
+///    produced by every inner layer, including the REST mutation check's 403.
+/// 3. **REST mutation origin check**: rejects cross-origin POST/PATCH/PUT/DELETE
+///    requests (cross-site request forgery defense). A missing `Origin` (curl,
+///    CLI clients) is allowed; a present but unparseable `Origin` (including the
+///    literal `"null"` from sandboxed iframes) is treated as a mismatch and
+///    rejected. Shares the `same_origin_allowed` helper with the WS upgrade
+///    handlers so REST and WS use one authority-comparison implementation.
+/// 4. **Handlers**: the actual route logic.
 pub fn build_app(
     engine: EngineHandle,
     extra_gated: Router<AppState>,
     params: RouterParams,
 ) -> Router {
     // A zero cap is a valid-but-drastic setting ("refuse all new connections").
-    // Warn loudly at startup so an accidental 0 isn't a silent web-UI lock-out —
+    // Warn loudly at startup so an accidental 0 isn't a silent web-UI lock-out --
     // every upgrade would 503 with no other clue (explicit failure over silence).
     if params.max_websocket_connections == 0 {
         dux_core::logger::warn(
@@ -153,7 +193,7 @@ pub fn build_app(
     }
     // The event bus and changed-files service are web-layer concerns built here.
     // `ChangesService::new` spawns its supervised poller, so this must run inside a
-    // tokio runtime context — the CLI serve paths build inside `block_on`, and the
+    // tokio runtime context -- the CLI serve paths build inside `block_on`, and the
     // flip wraps its `build_app` in `runtime.enter()` (see `serve_with_engine`).
     let event_bus = Arc::new(EventBus::new());
     let changes = ChangesService::new(engine.clone(), Arc::clone(&event_bus));
@@ -187,7 +227,7 @@ pub fn build_app(
 
     // Every route is served plainly (trusted-local: no login gate). `extra_gated`
     // is merged as-is so a test can inject a probe route.
-    Router::new()
+    let router = Router::new()
         .route("/ws/events", get(ws_events_upgrade))
         // Nested per-PTY byte-stream sockets. One socket per attached PTY: the
         // agent session's main provider PTY and a companion terminal's PTY. Each
@@ -212,17 +252,32 @@ pub fn build_app(
         .merge(extra_gated)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(crate::web_assets::static_handler)
-        // The access log is the OUTERMOST layer OF THIS app, so it sees the final
-        // status every layer it wraps produced. It is gated inside on
-        // `access_log && console.is_active`, so the flip and disabled-console paths
-        // pay nothing. Stamped via `from_fn_with_state` so it reads the
-        // console/toggle off `AppState`.
+        // REST mutation same-origin check (cross-site request forgery defense).
+        // Rejects POST/PATCH/PUT/DELETE when an `Origin` header is present but
+        // its `host:port` authority does not match the `Host` header. A missing
+        // `Origin` (curl, CLI clients) is allowed. Shares `same_origin_allowed`
+        // with the WS upgrade handlers for one authority-comparison path.
+        // Sits INSIDE the access-log layer so 403s are access-logged.
+        .layer(middleware::from_fn(rest_mutation_origin_check))
+        // The access log is the OUTERMOST layer OF THIS inner app, so it sees the
+        // final status every layer it wraps produced (including the mutation 403).
+        // It is gated inside on `access_log && console.is_active`, so the flip
+        // and disabled-console paths pay nothing. Stamped via
+        // `from_fn_with_state` so it reads the console/toggle off `AppState`.
         //
-        // When a host allowlist is active (see `host_guard::host_allowlist_layer`),
-        // a foreign-Host probe is 421'd BEFORE it reaches this middleware, so those
-        // probes are not access-logged.
+        // The host allowlist (see below) is applied OUTSIDE this layer, so
+        // foreign-Host probes are rejected before reaching the access log.
         .layer(middleware::from_fn_with_state(state.clone(), access_log))
-        .with_state(state)
+        .with_state(state);
+
+    // Host allowlist (DNS-rebinding defense): outermost layer so it runs before
+    // the access log. Active when bound_ips is non-empty; tests that do not
+    // exercise the host guard leave bound_ips empty, keeping the guard off.
+    if !params.bound_ips.is_empty() || !params.configured_hosts.is_empty() {
+        crate::host_guard::host_allowlist_layer(router, params.bound_ips, params.configured_hosts)
+    } else {
+        router
+    }
 }
 
 /// Per-request access-log middleware for the main app: print
@@ -301,10 +356,15 @@ fn same_origin_allowed(headers: &HeaderMap) -> bool {
 /// (`scheme://host[:port]`), so it can be compared against the `Host` header.
 ///
 /// NOTE: the scheme is intentionally dropped, so the comparison in
-/// [`same_origin_allowed`] is authority-only — it does NOT distinguish an
+/// [`same_origin_allowed`] is authority-only -- it does NOT distinguish an
 /// `http://` Origin from an `https://` one for the same host. A cross-protocol
 /// upgrade is not blocked here; browsers reject it via mixed-content policy, and
 /// on the TLS path the host allowlist is the complementary layer.
+///
+/// Returns `None` for the literal `"null"` (sent by sandboxed iframes / `data:`
+/// documents) and for any value without a `"://"` scheme separator, so callers
+/// can treat an unparseable Origin as a cross-origin mismatch rather than
+/// falling through to the no-Origin allow path.
 fn origin_host(origin: &str) -> Option<String> {
     let after_scheme = origin.split_once("://").map(|(_, rest)| rest)?;
     // Strip any path/query that shouldn't appear in an Origin but be defensive.
@@ -317,6 +377,33 @@ fn origin_host(origin: &str) -> Option<String> {
     } else {
         Some(authority.to_string())
     }
+}
+
+/// Middleware: reject cross-origin REST mutations (cross-site request forgery
+/// defense). Applies to POST, PATCH, PUT, and DELETE only; GET/HEAD/OPTIONS
+/// pass through unconditionally.
+///
+/// - `Origin` absent (curl, CLI clients, server-to-server): allowed. Non-browser
+///   clients do not send `Origin`, and the tradeoff is documented.
+/// - `Origin` present and authority matches `Host` (same-origin browser): allowed.
+/// - `Origin: null` (sandboxed iframe / `data:` document): `origin_host` returns
+///   `None` (no `"://"` separator), which `same_origin_allowed` treats as a
+///   mismatch -- rejected with 403. Do NOT fall through to the no-Origin allow
+///   path when the value is present but unparseable.
+/// - `Origin` present and authority does not match `Host`: rejected with 403.
+///
+/// Shares `same_origin_allowed` with the WS upgrade handlers so one authority-
+/// comparison path serves both.
+async fn rest_mutation_origin_check(request: Request, next: Next) -> Response {
+    use axum::http::Method;
+    let is_mutation = matches!(
+        *request.method(),
+        Method::POST | Method::PATCH | Method::PUT | Method::DELETE
+    );
+    if is_mutation && !same_origin_allowed(request.headers()) {
+        return (StatusCode::FORBIDDEN, "cross-origin request rejected").into_response();
+    }
+    next.run(request).await
 }
 
 type SharedSink = Arc<tokio::sync::Mutex<futures_util::stream::SplitSink<WebSocket, Message>>>;
@@ -2328,5 +2415,217 @@ mod tests {
             .expect("a config reload must emit config.changed")
             .expect("bus recv");
         assert_eq!(ev, config_changed_event());
+    }
+
+    // ── Host guard serve-level tests ───────────────────────────────────────
+
+    /// When the host guard is active (bound_ips set), an unknown Host is rejected
+    /// with 403 before reaching any handler; `localhost` passes through.
+    #[tokio::test]
+    async fn host_guard_rejects_unknown_host_and_allows_localhost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http()
+                .with_host_allowlist(vec!["127.0.0.1".parse().unwrap()], vec![]),
+        );
+
+        // An unknown hostname gets 403 (DNS-rebinding defense).
+        let bad = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/healthz")
+                    .header("Host", "evil.example.com")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            bad.status(),
+            StatusCode::FORBIDDEN,
+            "unknown Host must be rejected"
+        );
+
+        // `localhost` is always allowed (rule 1).
+        let good = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/healthz")
+                    .header("Host", "localhost")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(good.status(), StatusCode::OK, "localhost must be allowed");
+    }
+
+    // ── REST same-origin serve-level tests ────────────────────────────────
+
+    /// A cross-origin POST to a mutation route is rejected with 403 (cross-site
+    /// request forgery defense). The Origin authority does not match Host.
+    #[tokio::test]
+    async fn cross_origin_post_mutation_is_403() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/git/stage")
+                    .header("Host", "localhost")
+                    .header("Origin", "http://evil.example.com")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"s1","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "cross-origin POST must be rejected"
+        );
+    }
+
+    /// A POST with `Origin: null` (sandboxed iframe / data: document) is always
+    /// rejected with 403, regardless of bind address. `null` has no parseable
+    /// authority, so `same_origin_allowed` treats it as a mismatch -- it must
+    /// NOT fall through to the no-Origin allow path.
+    #[tokio::test]
+    async fn post_with_null_origin_is_403() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        // No host guard needed -- the Origin check fires independently.
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/git/stage")
+                    .header("Host", "localhost")
+                    .header("Origin", "null")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"s1","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Origin: null must be treated as cross-origin and rejected"
+        );
+    }
+
+    /// A POST with NO `Origin` header reaches the handler (non-browser client).
+    /// `same_origin_allowed` allows missing-Origin explicitly -- a curl/CLI
+    /// client is trusted to not be a hijacked browser tab.
+    #[tokio::test]
+    async fn post_with_no_origin_reaches_handler() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = test_engine_handle(tmp.path());
+        let app = build_app(handle, Router::new(), RouterParams::plain_http());
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/git/stage")
+                    .header("Host", "localhost")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"does-not-exist","path":"a.txt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Reaches the git handler -- unknown session -> 404, NOT 403.
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a POST without Origin must reach the handler"
+        );
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "the git handler returns 404 for an unknown session"
+        );
+    }
+
+    // ── WebSocket cross-origin serve-level tests ───────────────────────────
+    //
+    // The WS upgrade handlers use `WebSocketUpgrade` as a function argument,
+    // which requires a real `hyper::upgrade::OnUpgrade` extension that axum
+    // inserts only for genuine TCP connections. `oneshot` in tower does not
+    // set this extension, so `WebSocketUpgrade` extraction fails (426) before
+    // the handler body -- and therefore before the origin check -- can run.
+    // These tests must use a real bound server via `boot_plain_test_server`.
+
+    /// A cross-origin WS upgrade to ALL THREE WS endpoints is rejected with 403
+    /// (cross-site WebSocket hijacking defense). Each handler checks
+    /// `same_origin_allowed` before the upgrade completes: a mismatched `Origin`
+    /// never gets to subscribe to PTY output or events. The origin check fires
+    /// before any session/terminal lookup, so seeding data is unnecessary.
+    ///
+    /// Uses raw TCP so the WS upgrade request can carry an arbitrary `Origin`
+    /// header without client-side WS-library pre-flight validation interfering
+    /// (tungstenite's `IntoClientRequest` rejects unrecognized fields; reqwest
+    /// strips hop-by-hop headers). A raw write exercises the same server code path
+    /// as a real browser WS upgrade: the server sees an HTTP/1.1 GET with WS
+    /// headers and runs the handler before any upgrade handshake.
+    #[tokio::test]
+    async fn cross_origin_ws_upgrades_rejected_on_all_three_endpoints() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A real bound server so the `WebSocketUpgrade` extractor can find the
+        // hyper upgrade extension (which `oneshot` does not provide).
+        let (_tmp, addr) = crate::test_support::boot_plain_test_server().await;
+
+        let paths = [
+            "/ws/events",
+            "/ws/sessions/s1/pty",
+            "/ws/sessions/s1/terminals/t1/pty",
+        ];
+
+        for path in &paths {
+            // Send a raw HTTP/1.1 WS upgrade request with a cross-origin Origin.
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "GET {path} HTTP/1.1\r\n\
+                 Host: {addr}\r\n\
+                 Origin: http://evil.example.com\r\n\
+                 Upgrade: websocket\r\n\
+                 Connection: Upgrade\r\n\
+                 Sec-WebSocket-Version: 13\r\n\
+                 Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                 \r\n"
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+
+            // Read the HTTP response (status line is first).
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).await.unwrap();
+            let response = String::from_utf8_lossy(&buf[..n]);
+            // Status line is "HTTP/1.1 403 Forbidden\r\n..." or similar.
+            assert!(
+                response.starts_with("HTTP/1.1 403"),
+                "{path} must reject cross-origin WS upgrade with 403; got: {response}"
+            );
+        }
     }
 }
