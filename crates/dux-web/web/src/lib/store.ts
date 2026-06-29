@@ -29,6 +29,7 @@ import {
   type SessionChangesResponse,
 } from "./changesApi"
 import { type Bootstrap, fetchBootstrap } from "./bootstrapApi"
+import { applyFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
 import type {
@@ -677,6 +678,10 @@ function applyBootstrap(b: Bootstrap): void {
   if (typeof document !== "undefined") {
     document.title = resolveInstanceTitle(b.title)
   }
+  // Swap the favicon to the configured one (bundled logo, a recoloured dux-logo
+  // outline, or a custom URL). Self-guards on the DOM, so it is a no-op under the
+  // store's Node test environment. Runs on first load and every config.changed.
+  applyFavicon(b.favicon)
 }
 
 // Monotonic sequence for spine loads. Two rapid `sessions.changed`/

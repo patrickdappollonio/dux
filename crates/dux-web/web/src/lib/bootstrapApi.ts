@@ -52,6 +52,11 @@ export interface Bootstrap {
    * Optional: older servers omit it, so consumers resolve a missing/blank value
    * to "dux" via `resolveInstanceTitle`. */
   title?: string
+  /** The operator-chosen favicon for this dux instance (`config.server.favicon`).
+   * Empty/missing keeps the bundled logo; a colour selects the dux-logo outline
+   * in that colour; an http(s)/absolute-path URL is a custom favicon. Resolved
+   * and applied by `applyFavicon`. Optional: older servers omit it. */
+  favicon?: string
 }
 
 // A failed bootstrap fetch. `status` is the HTTP status (0 for a network/
