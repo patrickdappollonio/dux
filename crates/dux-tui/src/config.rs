@@ -679,9 +679,9 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Favicon for THIS dux instance, so several dux tabs are easy to tell\n\
                  # apart. Empty (the default) keeps the bundled dux logo. Otherwise:\n\
                  #   - a COLOUR renders the dux logo OUTLINE in that colour. Use a hex\n\
-                 #     value like \"#863bff\" or a name: violet, blue, sky, cyan, teal,\n\
-                 #     green, lime, amber, orange, red, pink, rose, slate, gray, white,\n\
-                 #     black.\n\
+                 #     value like \"#863bff\" or a name: violet, purple, blue, sky,\n\
+                 #     cyan, teal, green, lime, amber, orange, red, pink, rose, slate,\n\
+                 #     gray, white, black.\n\
                  #   - a custom favicon URL beginning with \"http://\", \"https://\", or\n\
                  #     \"/\" is used as-is.\n\
                  # An unrecognized value falls back to the bundled logo.",
@@ -1318,7 +1318,9 @@ mod tests {
         assert!(rendered.contains("access_log = true"));
         assert!(rendered.contains("max_websocket_connections = 128"));
         assert!(rendered.contains("title = \"dux\""));
-        assert!(rendered.contains("favicon = \"\""));
+        // Assert the active key (not a commented-out line) so a regression that
+        // emits favicon only as a comment is caught.
+        assert!(rendered.lines().any(|l| l.trim() == "favicon = \"\""));
         assert!(rendered.contains("[server.acme]"));
         assert!(rendered.contains("enabled = false"));
         assert!(rendered.contains("domains = []"));

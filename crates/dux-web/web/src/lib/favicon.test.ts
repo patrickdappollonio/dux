@@ -43,6 +43,9 @@ describe("resolveFavicon", () => {
     expect(resolveFavicon("data:image/svg+xml,<svg/>")).toEqual({ kind: "default" })
     // protocol-relative URL must not be treated as a custom favicon source
     expect(resolveFavicon("//evil.test/x.png")).toEqual({ kind: "default" })
+    // backslash variants browsers normalize to a cross-origin host are rejected
+    expect(resolveFavicon("/\\evil.test/x.png")).toEqual({ kind: "default" })
+    expect(resolveFavicon("/\\\\evil.test")).toEqual({ kind: "default" })
     expect(resolveFavicon("notacolor")).toEqual({ kind: "default" })
     expect(resolveFavicon("#xyz")).toEqual({ kind: "default" })
     // an SVG-attribute breakout attempt is not a known colour → rejected
@@ -78,5 +81,18 @@ describe("outlineFaviconDataUri", () => {
     expect(decoded).toContain('fill="none"')
     // the start of the extracted dux-logo path
     expect(decoded).toContain("M25.946")
+  })
+
+  it("clamps a non-hex colour to a safe value (defense in depth)", () => {
+    // resolveFavicon never yields this, but a mistaken direct caller must not be
+    // able to inject an attribute breakout into the generated SVG.
+    const decoded = decodeURIComponent(
+      outlineFaviconDataUri('#fff" onload="alert(1)').replace(
+        "data:image/svg+xml,",
+        "",
+      ),
+    )
+    expect(decoded).not.toContain("onload")
+    expect(decoded).toContain('stroke="#863bff"')
   })
 })
