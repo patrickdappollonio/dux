@@ -69,17 +69,16 @@ export function ConfirmDeleteTerminalDialog() {
         <DialogHeader>
           <DialogTitle>Close {title}?</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-destructive">
-          {foreground ? (
-            <>
-              <span className="font-mono">{foreground}</span> is running in this
-              terminal and will be killed.
-            </>
-          ) : (
-            "The running process will be killed."
-          )}
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
+        {/* Only warn about killing a process when an actual app is running in
+            the foreground. The bare shell (no foreground command) is not worth
+            warning about, so an idle terminal confirms with just the title. */}
+        {foreground ? (
+          <p className="text-sm text-destructive">
+            <span className="font-mono">{foreground}</span> is running in this
+            terminal and will be killed.
+          </p>
+        ) : null}
+        {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
           {/* Cancel is the default focus, matching the TUI (Cancel highlighted).

@@ -4677,6 +4677,7 @@ impl App {
             }
             PromptState::ConfirmDeleteTerminal {
                 terminal_label,
+                foreground_cmd,
                 confirm_selected,
                 ..
             } => {
@@ -4696,7 +4697,7 @@ impl App {
                     ])
                     .areas(inner);
 
-                let lines = vec![
+                let mut lines = vec![
                     Line::from(""),
                     Line::from(vec![
                         Span::raw(" Are you sure you want to delete "),
@@ -4706,12 +4707,17 @@ impl App {
                         ),
                         Span::raw("?"),
                     ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
+                ];
+                // Only warn about killing a process when an app is actually
+                // running in the foreground. Closing an idle terminal merely
+                // ends the bare shell, which is not worth a warning.
+                if foreground_cmd.is_some() {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
                         " The running process will be killed.",
                         Style::default().fg(self.theme.warning_fg),
-                    )),
-                ];
+                    )));
+                }
                 Paragraph::new(lines)
                     .wrap(Wrap { trim: false })
                     .render(body_area, frame.buffer_mut());
@@ -7863,6 +7869,48 @@ mod tests {
     fn format_bytes_gib_range() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024 * 3), "3.0 GiB");
+    }
+
+    #[test]
+    fn delete_terminal_overlay_warns_only_when_an_app_is_running() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn overlay_text(foreground_cmd: Option<String>) -> String {
+            let mut app = test_app(default_bindings());
+            app.prompt = PromptState::ConfirmDeleteTerminal {
+                terminal_id: "term-1".to_string(),
+                terminal_label: "Terminal 1".to_string(),
+                confirm_selected: false,
+                foreground_cmd,
+            };
+            let backend = TestBackend::new(100, 40);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let buffer = terminal.backend().buffer();
+            buffer.content.iter().map(|cell| cell.symbol()).collect()
+        }
+
+        // An app is in the foreground: the kill warning is shown.
+        let running = overlay_text(Some("vim".to_string()));
+        assert!(
+            running.contains("will be killed"),
+            "running-app overlay should warn about the kill: {running:?}"
+        );
+
+        // Only the bare shell is running: closing it is not killing an app, so
+        // the overlay still confirms the delete but shows no kill warning.
+        let idle = overlay_text(None);
+        assert!(
+            idle.contains("want to delete"),
+            "idle overlay should still confirm the delete: {idle:?}"
+        );
+        assert!(
+            !idle.contains("will be killed"),
+            "idle overlay should not warn about killing a process: {idle:?}"
+        );
     }
 
     #[test]

@@ -1147,6 +1147,7 @@ impl App {
         self.prompt = PromptState::ConfirmDeleteTerminal {
             terminal_id: (*terminal_id).clone(),
             terminal_label: terminal.label.clone(),
+            foreground_cmd: terminal.foreground_cmd.clone(),
             confirm_selected: false, // Cancel is default
         };
         Ok(())
