@@ -13325,6 +13325,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteTerminal {
             terminal_id: terminal_id.clone(),
             terminal_label: "test".to_string(),
+            foreground_cmd: None,
             confirm_selected: true,
         };
 
@@ -13349,6 +13350,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmDeleteTerminal {
             terminal_id,
             terminal_label: "test".to_string(),
+            foreground_cmd: None,
             confirm_selected: false,
         };
 

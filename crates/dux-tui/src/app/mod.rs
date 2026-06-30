@@ -927,6 +927,11 @@ pub(crate) enum PromptState {
     ConfirmDeleteTerminal {
         terminal_id: String,
         terminal_label: String,
+        /// The foreground app running in the terminal, captured when the prompt
+        /// opens, or `None` when only the shell is running. The "process will be
+        /// killed" warning is shown only when an app is present, since closing
+        /// an idle terminal merely ends the shell.
+        foreground_cmd: Option<String>,
         confirm_selected: bool, // false = Cancel (default), true = Delete
     },
     ConfirmQuit {
