@@ -24,6 +24,7 @@ import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MacrosDialog } from "@/components/MacrosDialog"
 import { MobileShell } from "@/components/MobileShell"
+import { OfflineOverlay } from "@/components/OfflineOverlay"
 import { PrBanner } from "@/components/PrBanner"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
@@ -231,6 +232,9 @@ function GlobalOverlays() {
       <RemoveProjectDialog />
       <CheckoutDefaultBranchDialog />
       <Toaster />
+      {/* The app-wide offline modal. Portals to the body and sits above every
+          other surface, so DOM order here is irrelevant — keep it last. */}
+      <OfflineOverlay />
     </>
   )
 }
