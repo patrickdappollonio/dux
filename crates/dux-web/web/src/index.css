@@ -51,64 +51,45 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
-    /* A gentle bob for the agent icon while it streams output ("working").
-       Symmetric around the rest position (up AND down by the same amount) so it
-       doesn't open a one-sided gap below the icon; ease-in-out so a busy sidebar
-       isn't jarring. */
-    --animate-agent-working: agent-working 0.5s ease-in-out infinite;
 }
 
-@keyframes agent-working {
-    0%, 100% { transform: translateY(0); }
-    25% { transform: translateY(-10%); }
-    75% { transform: translateY(10%); }
-}
-
-/* Positioning shell for the working-agent beam (AgentBeam.tsx). Lays the sweep
-   over the full row as a click-through overlay (pointer-events: none, so clicks
-   reach the row and its ⋯ menu beneath), clipped to the row's rounded corners.
-   Shown while an agent works, next to the bouncing Bot icon. */
-.agent-beam {
-    position: absolute;
-    inset: 0;
-    border-radius: 6px;
-    pointer-events: none;
-    overflow: hidden;
-}
-
-/* The light itself: a white, slightly tilted (skewed) bar with soft gradient
-   edges that travels left→right across the row, like a beam sweeping over it.
-   `transform`-only animation so it stays on the compositor; the gradient gives
-   the soft falloff and the skew the tilt. Width is a fraction of the row so the
-   percentage-based translate (relative to the bar's own width) carries it fully
-   off both edges regardless of row width. */
-.agent-beam-bar {
-    position: absolute;
-    top: -30%;
-    height: 160%;
-    width: 35%;
-    left: 0;
+/* The working-agent name shimmer. While an agent streams output its name becomes
+   a clipped gradient — a cool light sweeping across the text — drawn with dux's
+   brand accents (cyan + cornflower blue, mirrored from the dux_dark TUI theme;
+   see --dux-shimmer-* below). This is the single "working" motion cue per row.
+   `background-clip: text` paints the gradient through the glyphs; the keyframe
+   slides the gradient so the bright band travels left→right. */
+.agent-name-shimmer {
     background: linear-gradient(
         90deg,
-        transparent,
-        rgba(255, 255, 255, 0.75) 50%,
-        transparent
+        var(--dux-shimmer-base),
+        var(--dux-shimmer-accent),
+        var(--dux-shimmer-bright),
+        var(--dux-shimmer-accent),
+        var(--dux-shimmer-base)
     );
-    will-change: transform;
-    animation: agent-beam-sweep 1.4s linear infinite;
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    animation: agent-name-shimmer 2s linear infinite;
 }
 
-@keyframes agent-beam-sweep {
-    from { transform: translateX(-140%) skewX(-18deg); }
-    to   { transform: translateX(340%) skewX(-18deg); }
+@keyframes agent-name-shimmer {
+    from { background-position: 200% center; }
+    to   { background-position: -200% center; }
 }
 
-/* Honor reduced-motion: drop the travelling light entirely. The "working" state
-   is still conveyed by the status badge and the (motion-safe-gated) Bot bob. */
+/* Honor reduced-motion: stop the sweep and settle on a steady brand tint rather
+   than freezing the gradient mid-pass. The status badge ("active — working")
+   still spells out the state in text. */
 @media (prefers-reduced-motion: reduce) {
-    .agent-beam-bar {
+    .agent-name-shimmer {
         animation: none;
-        opacity: 0;
+        background: none;
+        -webkit-text-fill-color: var(--dux-shimmer-bright);
+        color: var(--dux-shimmer-bright);
     }
 }
 
@@ -145,6 +126,13 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
+    /* dux brand accents for the working-agent name shimmer, mirrored from the
+       dux_dark TUI theme: `base` a cool light grey (readable resting text),
+       `accent` the cornflower project blue (#6495ed), `bright` the signature
+       cyan (#00ffff). Constant across light/dark since the app is dark-only. */
+    --dux-shimmer-base: #cdd6e0;
+    --dux-shimmer-accent: #6495ed;
+    --dux-shimmer-bright: #00ffff;
 }
 
 .dark {
@@ -179,6 +167,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+    /* dux brand accents for the working-agent name shimmer (see :root above). */
+    --dux-shimmer-base: #cdd6e0;
+    --dux-shimmer-accent: #6495ed;
+    --dux-shimmer-bright: #00ffff;
 }
 
 /* Slim the xterm scrollbar so it doesn't dominate the terminal column. xterm 6
