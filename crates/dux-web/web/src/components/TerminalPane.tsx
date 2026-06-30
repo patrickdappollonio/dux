@@ -118,7 +118,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     setAlt(next.alt)
   }
 
-  const { spine, bootstrap } = useDux()
+  const { spine, bootstrap, offline } = useDux()
   // Size xterm's scrollback to the configured `agent_scrollback_lines` (now from
   // the bootstrap document) so the reconnect repaint's replayed history isn't
   // trimmed by xterm's 1000-line default. Read via a ref (not an effect dep) so
@@ -876,13 +876,20 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
           first output latches `everReady`) OR whenever the socket has dropped and
           is reconnecting — the latter re-arms even after `everReady`, so a
           mid-session disconnect is visible instead of a silently frozen terminal.
-          Reconnect text wins when both apply. */}
-      {!everReady || reconnecting ? (
+          Reconnect text wins when both apply.
+
+          But when the WHOLE app is offline (the events socket is down, so every
+          PTY dropped too), the app-wide `OfflineOverlay` already owns that signal
+          — and it deliberately leaves the grayscaled UI visible behind it, where a
+          per-pane "Reconnecting…" spinner would show through and double up. So
+          suppress the reconnect variant while globally offline; the initial
+          startup spinner (`!everReady`) is unrelated and still shows. */}
+      {!everReady || (reconnecting && !offline) ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <BrailleSpinner className="text-primary" />
             <span className="text-sm text-muted-foreground">
-              {reconnecting
+              {reconnecting && !offline
                 ? "Reconnecting…"
                 : kind === "agent"
                   ? `Starting ${providerName ?? "agent"}…`

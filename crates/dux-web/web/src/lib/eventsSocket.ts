@@ -10,13 +10,15 @@ const RECONNECT_MIN_MS = 500
 const RECONNECT_MAX_MS = 5000
 
 // How many consecutive reconnect attempts before the socket gives up and signals
-// `failed` (the bottom-left "Connection failed" indicator + Reconnect button).
-// Since Phase 6 this is the ONLY JSON socket, so it owns the connection-state UX
-// the retired `DuxSocket` used to: a normal blip auto-recovers within a few
-// backoff-spaced attempts; exhausting them surfaces a deliberate Reconnect
-// affordance (and, when authed, triggers the auth recheck — an expired session
-// 401s the gated upgrade so the loop can never open).
-const MAX_RECONNECT_ATTEMPTS = 4
+// `failed` (the bottom-left "Connection failed" indicator + Reconnect button, and
+// the app-wide offline modal's "gave up" state). Since Phase 6 this is the ONLY
+// JSON socket, so it owns the connection-state UX the retired `DuxSocket` used to:
+// a normal blip auto-recovers within a few backoff-spaced attempts; exhausting
+// them surfaces a deliberate Reconnect affordance (and, when authed, triggers the
+// auth recheck — an expired session 401s the gated upgrade so the loop can never
+// open). Kept deliberately small (a handful of tries) so a genuinely-down server
+// hands control back to the user quickly rather than spinning indefinitely.
+const MAX_RECONNECT_ATTEMPTS = 3
 
 // The server silently rejects an interest frame carrying more than this many
 // topics (its `MAX_EVENT_TOPICS_PER_FRAME`). The reconnect resend, which sends

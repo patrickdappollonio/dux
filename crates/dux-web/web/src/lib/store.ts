@@ -133,6 +133,14 @@ export interface DuxState {
   // this as a settled signal instead of the old auth.phase guard.
   booted: boolean
   conn: ConnState
+  // Sticky "the app-wide events socket is not connected" flag that drives the
+  // full-screen offline modal (`OfflineOverlay`). Distinct from `conn` because a
+  // reconnect attempt re-enters `conn === "connecting"` between drops, and gating
+  // the modal on the raw state would flicker it off on every retry. So this latches
+  // true on the first drop (`closed`/`failed`) and clears ONLY when we are `open`
+  // again; an intermediate `connecting` leaves it untouched. False during the very
+  // first boot connect (no prior connection to have lost).
+  offline: boolean
   selectedTarget: SelectedTarget | null
   // Derived from `selectedTarget`: the owning session id. Session-scoped UI
   // (breadcrumb, changed files, statusbar) reads this so it keeps working
@@ -369,6 +377,7 @@ let state: DuxState = {
   bootstrap: null,
   booted: false,
   conn: "connecting",
+  offline: false,
   selectedTarget: null,
   selectedSessionId: null,
   terminalEpoch: 0,
@@ -878,7 +887,18 @@ eventsSocket.onConn = (conn) => {
   // pick up the new agent from the sidebar.
   const patch =
     conn === "closed" || conn === "failed" ? clearPendingClientIntent() : {}
-  setState({ conn, ...patch })
+  // Latch the sticky offline flag that drives the full-screen `OfflineOverlay`.
+  // `open` is the only state that clears it; `closed`/`failed` set it; an
+  // intermediate `connecting` (a reconnect attempt between drops, OR the very
+  // first boot connect) leaves the prior value so the modal neither flickers off
+  // mid-retry nor flashes on at boot before we have ever connected.
+  const offline =
+    conn === "open"
+      ? false
+      : conn === "closed" || conn === "failed"
+        ? true
+        : state.offline
+  setState({ conn, offline, ...patch })
   // Clear the per-connection id on a drop. It belongs to the now-dead socket; a
   // REST action fired during the reconnect window must NOT stamp it as
   // `X-Connection-Id`, or the server would scope that action's status toasts to a
