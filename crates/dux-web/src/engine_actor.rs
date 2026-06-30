@@ -112,6 +112,13 @@ pub enum EngineRequest {
     /// "cursor"/"vscode"/"zed"). Instant clone; the detect + launch I/O for the
     /// "open in editor" action runs off-thread in the server handler.
     EditorDefault(oneshot::Sender<String>),
+    /// Resolve the directory the add-project picker should open at from the LIVE
+    /// config (`defaults.start_directory`, with the shared fallback chain). Read
+    /// through the engine so it reflects the currently-applied config — a reload
+    /// that swaps `engine.config` changes the answer; a not-yet-reloaded raw save
+    /// does not. Instant clone of a resolved path; the filesystem listing runs
+    /// off-thread in the browse handler.
+    BrowseStartDir(oneshot::Sender<String>),
     /// Ask the engine to recompute the changed-files lists for a worktree (after
     /// an HTTP git mutation ran the git op off-thread). Fire-and-forget: the
     /// engine spawns its off-thread refresh worker, whose result flows back
@@ -717,6 +724,22 @@ impl EngineHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// The directory the add-project picker should open at, resolved from the
+    /// live config. `None` if the engine is gone — the browse handler then falls
+    /// back to `$HOME` on its own.
+    pub async fn browse_start_dir(&self) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::BrowseStartDir(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
     /// Fire-and-forget: ask the engine to recompute changed-files for `worktree`
     /// (after an HTTP git mutation). The refreshed lists are served by the REST
     /// changed-files read; nothing to await here.
@@ -894,6 +917,10 @@ pub(crate) fn run_engine_loop(
     // SPINE_CHECK_TICK_INTERVAL) so it is evaluated ~every 250ms rather than every
     // tick.
     let mut tick_count: u64 = 0;
+    // True between a raw `config.toml` "Save" (disk written, not yet adopted) and
+    // the next reconcile (an explicit reload, or the reconcile a config-static
+    // mutation performs). Drives the clobber-safe reconcile in `handle_request`.
+    let mut config_disk_ahead = false;
     loop {
         // Caller-driven exit (the flip's status screen asked to stop). Checked
         // before any work so an exit takes effect on the next tick. PTYs are
@@ -1006,6 +1033,9 @@ pub(crate) fn run_engine_loop(
                     server_rebind_settings_changed(&engine.config.server, &config.server);
                 match engine.apply_reloaded_config(*config) {
                     Ok(()) => {
+                        // Memory now matches disk: any pending raw "Save" has been
+                        // adopted, so disk is no longer ahead.
+                        config_disk_ahead = false;
                         // Signal the web layer that config-static state changed so
                         // it emits a `config.changed` event and clients refetch
                         // `/api/v1/bootstrap`. Fire-and-forget: an `Err` only means
@@ -1164,7 +1194,13 @@ pub(crate) fn run_engine_loop(
                         req,
                         EngineRequest::ApplyWire(..) | EngineRequest::CreateTerminal(..)
                     );
-                    handle_request(&mut engine, req, &mut thread_status_tx, &config_reload_tx);
+                    handle_request(
+                        &mut engine,
+                        req,
+                        &mut thread_status_tx,
+                        &config_reload_tx,
+                        &mut config_disk_ahead,
+                    );
                     if mutates {
                         mutation_version = mutation_version.wrapping_add(1);
                     }
@@ -1438,6 +1474,12 @@ fn handle_request(
     req: EngineRequest,
     status_tx: &mut StatusEmitter,
     config_reload_tx: &broadcast::Sender<()>,
+    // `true` when a raw `config.toml` write (Monaco "Save") has landed on disk but
+    // has NOT been adopted into `engine.config` yet — i.e. disk is ahead of memory.
+    // Set by the WriteRawConfig path; cleared whenever memory is reconciled with
+    // disk (an explicit reload, or the reconcile below before a config-static
+    // mutation). Loop-local because only the web surface writes raw config.
+    config_disk_ahead: &mut bool,
 ) {
     match req {
         EngineRequest::ApplyWire(cmd, reply, origin) => {
@@ -1448,6 +1490,20 @@ fn handle_request(
             // below once the command succeeds. Capture this BEFORE `cmd` is moved
             // into `apply_wire`.
             let mutates_config = cmd.mutates_config_static();
+            // Reconcile before a config-static mutation if a raw "Save" left disk
+            // ahead of memory. These mutations persist via a WHOLESALE toml_edit
+            // patch (`apply_patches` rewrites every key from `engine.config`), so
+            // applying one against the stale in-memory config would clobber the
+            // user's just-saved raw edits. Re-read disk and adopt it first so the
+            // patch carries the saved edits forward; the `config.changed` emitted
+            // after a successful mutation then reflects the combined state. The
+            // raw-save flushed pending writes before writing, so nothing in memory
+            // is lost by reloading here.
+            if mutates_config && *config_disk_ahead {
+                let reloaded = dux_core::config::load_config(&engine.paths);
+                let _ = engine.apply_reloaded_config(reloaded);
+                *config_disk_ahead = false;
+            }
             // Tag every status this command mints with the originating
             // connection. The engine reads `current_origin` at each mint site
             // (the synchronous outcome, deferred busies/finals, worker busies);
@@ -1561,6 +1617,12 @@ fn handle_request(
         EngineRequest::EditorDefault(reply) => {
             let _ = reply.send(engine.config.editor.default.clone());
         }
+        EngineRequest::BrowseStartDir(reply) => {
+            let dir = dux_core::project_browser::resolve_start_dir(&engine.config)
+                .to_string_lossy()
+                .to_string();
+            let _ = reply.send(dir);
+        }
         EngineRequest::RefreshChangedFiles(worktree) => {
             // Spawn the off-thread refresh unconditionally. If this worktree is
             // not the currently-watched one, the resulting `ChangedFilesReady`
@@ -1605,21 +1667,32 @@ fn handle_request(
             let _ = reply.send(write_raw_config_on_engine(
                 engine,
                 &content,
-                config_reload_tx,
+                config_disk_ahead,
             ));
         }
     }
 }
 
-/// Validate, persist, and adopt a raw `config.toml` edit from the web Monaco
-/// editor, all on the engine thread. Runs as a free function (not an inline
-/// closure) so the `?` short-circuits read cleanly. On success the running
-/// config matches disk before this returns and a `config.changed` signal has
-/// fired; on any failure nothing is written.
+/// Validate and persist a raw `config.toml` edit from the web Monaco editor, on
+/// the engine thread. Runs as a free function (not an inline closure) so the `?`
+/// short-circuits read cleanly.
+///
+/// "Save" PERSISTS but does NOT apply: the new file is written verbatim and left
+/// on disk, but `engine.config` is intentionally NOT reloaded and no
+/// `config.changed` is emitted, so the running app keeps its current settings
+/// until the user explicitly runs "Reload config". This is deliberate — some
+/// settings (the `[server]` perimeter, the port) only take effect at restart, so
+/// silently adopting an edit on save would be surprising and, for those, a no-op
+/// that hides the need to restart. Reload is the single apply point.
+///
+/// Because memory is now behind disk, `*config_disk_ahead` is set so the next
+/// config-static mutation reconciles first and cannot clobber the saved edits
+/// (see the `ApplyWire` handler). On any failure nothing is written and the flag
+/// is left untouched.
 fn write_raw_config_on_engine(
     engine: &mut Engine,
     content: &str,
-    config_reload_tx: &broadcast::Sender<()>,
+    config_disk_ahead: &mut bool,
 ) -> Result<(), String> {
     let parsed = dux_core::config::validate_config_str(content)
         .map_err(|e| format!("config.toml is not valid: {e}"))?;
@@ -1646,15 +1719,11 @@ fn write_raw_config_on_engine(
     // Don't leak the absolute config-dir path to the client: return the
     // underlying OS error without the path-annotated context.
     .map_err(|e| format!("Could not write config.toml: {}", e.root_cause()))?;
-    // Adopt the new config in place so engine.config matches disk BEFORE we
-    // return — this closes the window where a concurrent toggle's save would
-    // serialize the stale in-memory config back over the just-written file.
-    // Reload from disk (reapplies provider defaults, matching ReloadConfig),
-    // then signal clients to refetch the bootstrap; no separate reload
-    // round-trip is needed.
-    let reloaded = dux_core::config::load_config(&engine.paths);
-    let _ = engine.apply_reloaded_config(reloaded);
-    let _ = config_reload_tx.send(());
+    // Persist-only: the file is on disk, but the running config is left as-is so
+    // nothing applies until an explicit reload. Mark disk as ahead of memory so a
+    // later config-static mutation reconciles before its wholesale patch (which
+    // would otherwise serialize the stale in-memory config over these edits).
+    *config_disk_ahead = true;
     Ok(())
 }
 
@@ -2370,6 +2439,134 @@ mod tests {
         assert!(
             saw_sessions,
             "pruning the exited terminal must emit SpineChange::Sessions"
+        );
+    }
+
+    // ── Bug 1: "Save" persists but does not apply ────────────────────────────
+
+    /// Write a config.toml that sets only `defaults.start_directory`, leaving
+    /// everything else at defaults so a later raw write that also defaults the
+    /// `[server]` section is accepted (the raw-save guard rejects host changes).
+    fn write_start_dir_config(paths: &DuxPaths, dir: &std::path::Path) {
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[defaults]\nstart_directory = \"{}\"\n",
+                dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Poll `browse_start_dir` until it equals `want` or the deadline passes.
+    /// Reload adoption happens asynchronously (a barrier + worker), so the flip is
+    /// observed by polling rather than assumed immediate.
+    async fn await_start_dir(handle: &EngineHandle, want: &str) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if handle.browse_start_dir().await.as_deref() == Some(want) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_save_persists_to_disk_but_does_not_apply_until_reload() {
+        let (_tmp, paths) = temp_paths();
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        write_start_dir_config(&paths, dir_a.path());
+
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        // Baseline: the live config resolves to dir A.
+        assert_eq!(
+            handle.browse_start_dir().await.as_deref(),
+            Some(dir_a.path().to_string_lossy().as_ref())
+        );
+
+        // Save a new config pointing at dir B.
+        let new_body = format!(
+            "[defaults]\nstart_directory = \"{}\"\n",
+            dir_b.path().to_string_lossy()
+        );
+        handle
+            .write_raw_config(new_body.clone())
+            .await
+            .expect("write");
+
+        // PERSISTED: the file on disk now carries dir B.
+        let on_disk = handle.read_raw_config().await.expect("read");
+        assert!(
+            on_disk.contains(dir_b.path().to_string_lossy().as_ref()),
+            "disk must hold the saved edit"
+        );
+
+        // NOT APPLIED: the running config still resolves to dir A — saving did not
+        // adopt. Give any erroneous async adopt a moment to (not) happen.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            handle.browse_start_dir().await.as_deref(),
+            Some(dir_a.path().to_string_lossy().as_ref()),
+            "save must not apply the config"
+        );
+
+        // Explicit reload is the single apply point: now it flips to dir B.
+        handle
+            .apply_wire(WireCommand::ReloadConfig {})
+            .await
+            .expect("reload");
+        assert!(
+            await_start_dir(&handle, dir_b.path().to_string_lossy().as_ref()).await,
+            "reload must apply the saved config"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_static_mutation_after_a_raw_save_does_not_clobber_it() {
+        let (_tmp, paths) = temp_paths();
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        write_start_dir_config(&paths, dir_a.path());
+
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        // Save dir B (persist-only; memory still on dir A).
+        let new_body = format!(
+            "[defaults]\nstart_directory = \"{}\"\n",
+            dir_b.path().to_string_lossy()
+        );
+        handle.write_raw_config(new_body).await.expect("write");
+
+        // Now toggle a config-static setting. Its wholesale toml_edit patch would
+        // serialize the (stale) in-memory config over the file — reverting the
+        // saved dir B back to dir A — UNLESS the handler reconciles with disk first.
+        handle
+            .apply_wire(WireCommand::SetChangesPaneVisible { visible: false })
+            .await
+            .expect("toggle");
+
+        // The saved edit survived on disk: the toggle reconciled instead of clobbering.
+        let on_disk = handle.read_raw_config().await.expect("read");
+        assert!(
+            on_disk.contains(dir_b.path().to_string_lossy().as_ref()),
+            "the config-static mutation must not clobber the saved start_directory"
+        );
+        assert!(
+            !on_disk.contains(dir_a.path().to_string_lossy().as_ref()),
+            "the stale dir A must not have been written back"
+        );
+
+        // And the reconcile adopted dir B, so the live config now resolves to it.
+        assert!(
+            await_start_dir(&handle, dir_b.path().to_string_lossy().as_ref()).await,
+            "reconcile must adopt the saved config"
         );
     }
 }

@@ -61,6 +61,28 @@ pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
     entries
 }
 
+/// Resolve the directory the add-project browser should open at, from config.
+///
+/// Prefers `[defaults] start_directory` when it is set AND currently a directory
+/// (a stale/typo'd path falls through rather than dead-ending the picker on a
+/// non-existent dir), then `$HOME`, then the process working directory, then `.`.
+/// Shared by the TUI picker and the web `/api/v1/browse` fallback so both honor
+/// the same configured value and the same fallback chain. Reads `config` live, so
+/// a reload that swaps `engine.config` is reflected on the next call.
+pub fn resolve_start_dir(config: &Config) -> PathBuf {
+    config
+        .defaults
+        .start_directory
+        .as_ref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        })
+}
+
 pub(crate) fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -294,7 +316,27 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::config::Config;
     use crate::model::{ProviderKind, SessionStatus};
+
+    #[test]
+    fn resolve_start_dir_prefers_an_existing_configured_directory() {
+        let dir = tempdir().expect("start tempdir");
+        let mut config = Config::default();
+        config.defaults.start_directory = Some(dir.path().to_string_lossy().to_string());
+        assert_eq!(resolve_start_dir(&config), dir.path());
+    }
+
+    #[test]
+    fn resolve_start_dir_falls_back_when_configured_path_is_missing() {
+        let missing = tempdir().expect("missing tempdir");
+        let missing_path = missing.path().join("does-not-exist");
+        let mut config = Config::default();
+        config.defaults.start_directory = Some(missing_path.to_string_lossy().to_string());
+        // A non-existent configured path must not be returned; it falls through to
+        // the home/cwd chain. We only assert it did NOT echo the missing path back.
+        assert_ne!(resolve_start_dir(&config), missing_path);
+    }
 
     fn run_git(cwd: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")

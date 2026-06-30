@@ -202,9 +202,9 @@ async fn read_raw_config(State(state): State<AppState>) -> Response {
 
 /// `PUT /api/v1/config/raw`. Validate (`toml::from_str::<Config>`) and write the
 /// raw `config.toml` text verbatim. `200 OK` on success; `400` with the parse/IO
-/// error otherwise. The engine adopts the change when the frontend follows with
-/// `POST /api/v1/config/reload`, which re-reads the file and emits
-/// `config.changed`.
+/// error otherwise. This PERSISTS only — the engine does NOT adopt the change and
+/// emits no `config.changed`; the running config is untouched until the user
+/// explicitly runs `POST /api/v1/config/reload`. Reload is the single apply point.
 async fn write_raw_config(
     State(state): State<AppState>,
     Json(body): Json<WriteRawConfigBody>,
@@ -357,7 +357,7 @@ mod tests {
         assert!(!content.is_empty(), "content must not be empty");
 
         // Write it back unchanged: valid TOML with an unchanged [server] section,
-        // so the happy path returns 200 (exercises the Ok arm + adoption).
+        // so the happy path returns 200 (exercises the Ok arm of the persist).
         let body = serde_json::json!({ "content": content }).to_string();
         let put = app
             .oneshot(json_req("PUT", "/api/v1/config/raw", &body))
