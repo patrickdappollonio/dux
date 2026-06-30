@@ -1,20 +1,18 @@
 import { useEffect, useState } from "react"
-import { BorderBeam } from "border-beam"
 
-// A glowing light that travels along the bottom edge of a working agent's row to
-// signal activity, alongside the bouncing Bot icon. The glow is drawn by the
-// border-beam library's `line` preset (rotate family: a bottom-edge traveling
-// beam); `colorVariant="mono"` + `theme="dark"` match the app's neutral,
-// dark-only palette. `.agent-beam` (index.css) lays it over the row as a
-// click-through overlay; BorderBeam fills that overlay (children is required, so
-// we pass `null`, and set `borderRadius` explicitly to skip child auto-detect).
+// A white, slightly tilted light bar that sweeps left→right across a working
+// agent's row to signal activity, alongside the bouncing Bot icon. The sweep is
+// a pure-CSS keyframe animation (`.agent-beam` / `.agent-beam-bar` in index.css,
+// keyframes `agent-beam-sweep`) — no external dependency. It's laid over the row
+// as a click-through overlay (`pointer-events: none`) clipped to the row's
+// rounded corners. The overlay is mounted on the full-width row wrapper (not the
+// inner label button), so the beam travels across the trailing ⋯ menu too.
 //
-// When the agent STOPS working we don't yank the glow instantly: `active`
-// follows `working`, so the library plays its fade-out and calls `onDeactivate`
-// when it finishes — that's when we unmount, for a clean finish. A fallback
-// timer unmounts shortly after regardless, in case `onDeactivate` never fires.
-// Note: the rotate family (unlike the pulse types) ships no prefers-reduced-
-// motion block, so the travel does not auto-disable under reduced motion.
+// When the agent STOPS working we don't yank the beam mid-pass: we keep it
+// mounted until the current sweep finishes (the next `animationiteration` after
+// `working` goes false), then unmount for a clean exit. A fallback timer
+// unmounts shortly after regardless, in case that event never fires (the
+// animation is disabled under reduced motion, the row unmounted, etc.).
 // Rendered unconditionally by the row; returns null when idle.
 export function AgentBeam({ working }: { working: boolean }) {
   const [show, setShow] = useState(working)
@@ -25,27 +23,23 @@ export function AgentBeam({ working }: { working: boolean }) {
 
   useEffect(() => {
     if (working) return
-    // Work stopped: fallback-unmount shortly after, in case the fade-out (and so
-    // onDeactivate) never fires.
-    const timer = setTimeout(() => setShow(false), 1700)
+    // Work stopped: fallback-unmount shortly after, in case the
+    // animationiteration handler never fires.
+    const timer = setTimeout(() => setShow(false), 1600)
     return () => clearTimeout(timer)
   }, [working])
 
   if (!show) return null
   return (
     <div className="agent-beam" aria-hidden>
-      <BorderBeam
-        size="line"
-        colorVariant="mono"
-        theme="dark"
-        borderRadius={6}
-        strength={1}
-        active={working}
-        onDeactivate={() => setShow(false)}
-        style={{ width: "100%", height: "100%" }}
-      >
-        {null}
-      </BorderBeam>
+      {/* The travelling bar. We let the current sweep complete before
+          unmounting so the light exits cleanly rather than blinking out. */}
+      <span
+        className="agent-beam-bar"
+        onAnimationIteration={() => {
+          if (!working) setShow(false)
+        }}
+      />
     </div>
   )
 }

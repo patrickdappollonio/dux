@@ -64,17 +64,52 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* Positioning shell for the working-agent beam. The glow itself is drawn by the
-   border-beam library's `line` preset (a bottom-edge traveling beam) in
-   AgentBeam; this just lays it over the row as a click-through overlay
-   (pointer-events: none, so clicks reach the row beneath), clipped to the row's
-   rounded corners. Shown while an agent works, next to the bouncing Bot icon. */
+/* Positioning shell for the working-agent beam (AgentBeam.tsx). Lays the sweep
+   over the full row as a click-through overlay (pointer-events: none, so clicks
+   reach the row and its ⋯ menu beneath), clipped to the row's rounded corners.
+   Shown while an agent works, next to the bouncing Bot icon. */
 .agent-beam {
     position: absolute;
     inset: 0;
     border-radius: 6px;
     pointer-events: none;
     overflow: hidden;
+}
+
+/* The light itself: a white, slightly tilted (skewed) bar with soft gradient
+   edges that travels left→right across the row, like a beam sweeping over it.
+   `transform`-only animation so it stays on the compositor; the gradient gives
+   the soft falloff and the skew the tilt. Width is a fraction of the row so the
+   percentage-based translate (relative to the bar's own width) carries it fully
+   off both edges regardless of row width. */
+.agent-beam-bar {
+    position: absolute;
+    top: -30%;
+    height: 160%;
+    width: 35%;
+    left: 0;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.75) 50%,
+        transparent
+    );
+    will-change: transform;
+    animation: agent-beam-sweep 1.4s linear infinite;
+}
+
+@keyframes agent-beam-sweep {
+    from { transform: translateX(-140%) skewX(-18deg); }
+    to   { transform: translateX(340%) skewX(-18deg); }
+}
+
+/* Honor reduced-motion: drop the travelling light entirely. The "working" state
+   is still conveyed by the status badge and the (motion-safe-gated) Bot bob. */
+@media (prefers-reduced-motion: reduce) {
+    .agent-beam-bar {
+        animation: none;
+        opacity: 0;
+    }
 }
 
 :root {
