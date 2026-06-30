@@ -5,21 +5,7 @@ use dux_core::engine::{Command, EventReaction, FinishDeleteSessionOutcome, Workt
 
 impl App {
     pub(crate) fn open_project_browser(&mut self) -> Result<()> {
-        let start_dir = self
-            .engine
-            .config
-            .defaults
-            .start_directory
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    })
-            });
+        let start_dir = dux_core::project_browser::resolve_start_dir(&self.engine.config);
         self.prompt = PromptState::BrowseProjects {
             current_dir: start_dir.clone(),
             entries: Vec::new(),
