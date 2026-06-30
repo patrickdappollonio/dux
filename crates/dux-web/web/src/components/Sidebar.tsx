@@ -37,6 +37,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import type * as React from "react"
+import { useEffect, useRef } from "react"
 import { copyToClipboard } from "@/lib/clipboard"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
@@ -81,7 +82,6 @@ import {
   SidebarMenuSub,
   SidebarMenuSubButton,
   SidebarMenuSubItem,
-  SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
@@ -245,22 +245,23 @@ function SessionSubItem({
           // pane, where the row (not the inner label button) carries the
           // background. The button below keeps its own background transparent,
           // so this wrapper is the single highlight surface for the whole row.
-          "flex items-center rounded-md pr-1 transition-colors group/agent-row",
+          "relative flex items-center rounded-md pr-1 transition-colors group/agent-row",
           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
           agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground"
         )}
       >
+        {/* A white, slightly tilted light sweeps left→right across the WHOLE row
+            (including the trailing ⋯) while the agent works, and finishes its
+            current pass when work stops. It lives on the row wrapper — the
+            positioning context that spans the full width — as a click-through
+            overlay, so the ⋯ stays clickable. Self-manages mount/unmount. */}
+        <AgentBeam working={session.working} />
         <SidebarMenuSubButton
           {...attributes}
           {...listeners}
           isActive={agentSelected}
           className={cn(
             "flex-1 touch-manipulation",
-            // Positioning context for the beam overlay. Always relative: the beam
-            // self-manages its lifetime (it lingers a moment past `working` to
-            // finish its sweep), so the row can't gate the positioning context on
-            // `working` without clipping that final pass.
-            "relative",
             // The wrapper (group/agent-row) owns the highlight now, so keep this
             // button transparent — otherwise it paints a second box that stops
             // short of the trailing ⋯.
@@ -268,9 +269,6 @@ function SessionSubItem({
           )}
           onClick={() => selectSession(session.id)}
         >
-          {/* A light sweeps left→right across the row while the agent works (and
-              finishes its current pass when work stops). Self-manages mount. */}
-          <AgentBeam working={session.working} />
           {/* All agents use the same Bot icon — provider is shown as text. While
               the agent is streaming output it gently bounces (motion-safe) so the
               "working" state is unmistakable at a glance. The transition lets the
@@ -652,17 +650,37 @@ function ProjectItem({
   )
 }
 
-// Drag handle pinned to the sidebar's right edge. shadcn's `collapsible="icon"`
-// only collapses; this lets the user resize the expanded width by dragging,
-// clamped to [14rem, 28rem] and persisted on release. Hidden while collapsed.
+// Edge affordance pinned to the sidebar's right edge. shadcn's `collapsible="icon"`
+// only collapses; when expanded this lets the user resize the width by dragging,
+// clamped to [14rem, 28rem] and persisted on release. When collapsed it becomes a
+// click-to-expand strip (the only edge affordance, replacing the old SidebarRail)
+// — it deliberately only expands, never collapses, so a stray click near the
+// splitter can no longer shrink the panel. Desktop only: on mobile the sheet owns
+// its own open/close, so the strip is suppressed there.
 const MIN_SIDEBAR_PX = 14 * 16
 const MAX_SIDEBAR_PX = 28 * 16
 
 function SidebarResizeHandle() {
-  const { state } = useSidebar()
+  const { state, isMobile, setOpen } = useSidebar()
+  // A drag wires pointermove/up/cancel listeners onto `window`; if the handle
+  // unmounts mid-drag (e.g. the sidebar collapses while dragging) React drops the
+  // element but those listeners would linger. Tear them down on unmount.
+  const cleanupRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => cleanupRef.current?.(), [])
 
   if (state === "collapsed") {
-    return null
+    if (isMobile) {
+      return null
+    }
+    return (
+      <button
+        type="button"
+        data-sidebar="expand-handle"
+        aria-label="Expand sidebar"
+        onClick={() => setOpen(true)}
+        className="absolute inset-y-0 -right-1 z-30 w-1 cursor-e-resize hover:bg-sidebar-border"
+      />
+    )
   }
 
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
@@ -675,19 +693,31 @@ function SidebarResizeHandle() {
       setSidebarWidth(`${px / 16}rem`)
     }
 
+    // Shared teardown so an interrupted drag (pointercancel — a stolen touch or
+    // gesture) cleans up exactly like a normal release; otherwise the listeners
+    // would leak and keep mutating the width on later pointer moves.
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      window.removeEventListener("pointercancel", cleanup)
+      cleanupRef.current = null
+    }
+
     const onUp = (up: PointerEvent) => {
       const px = Math.min(Math.max(up.clientX, MIN_SIDEBAR_PX), MAX_SIDEBAR_PX)
       setSidebarWidth(`${px / 16}rem`, true)
-      window.removeEventListener("pointermove", onMove)
-      window.removeEventListener("pointerup", onUp)
+      cleanup()
     }
 
+    cleanupRef.current = cleanup
     window.addEventListener("pointermove", onMove)
     window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", cleanup)
   }
 
   return (
     <div
+      data-sidebar="resize-handle"
       onPointerDown={handlePointerDown}
       className="absolute inset-y-0 -right-1 z-30 w-1 cursor-col-resize hover:bg-sidebar-border"
     />
@@ -874,7 +904,6 @@ export function AppSidebar() {
           <SidebarTrigger />
         </div>
       </SidebarFooter>
-      <SidebarRail />
       <SidebarResizeHandle />
     </Sidebar>
   )
