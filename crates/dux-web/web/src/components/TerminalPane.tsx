@@ -34,6 +34,7 @@ import {
   onPtyOwner,
 } from "@/lib/ptyOwnership"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
+import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
@@ -264,6 +265,11 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       overviewRuler: { width: scrollbarWidth },
       theme: { background: resolvedBg },
     })
+    // This xterm is a VIEWER of a PTY that dux-core's alacritty_terminal already
+    // drives and answers device/color queries for. Stop it from also answering
+    // (and injecting duplicate replies back into the shared PTY via onData); see
+    // suppressViewerReports. Install before open so it is armed before any byte.
+    suppressViewerReports(term)
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
