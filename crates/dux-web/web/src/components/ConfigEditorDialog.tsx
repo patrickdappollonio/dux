@@ -1,3 +1,4 @@
+import { Info } from "lucide-react"
 import { useState } from "react"
 
 import CodeEditor from "@/components/CodeEditor"
@@ -46,6 +47,14 @@ function ConfigEditorForm({
           {error}
         </p>
       ) : null}
+      <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+        <Info className="mt-0.5 size-4 shrink-0" aria-hidden />
+        <span>
+          Saving writes <span className="font-mono">config.toml</span> to disk but
+          does not apply it. Run <span className="font-medium">Reload config</span>{" "}
+          from the command palette (Ctrl-K) to apply your changes.
+        </span>
+      </div>
       <DialogFooter>
         <Button variant="outline" onClick={closeConfigEditor}>
           Cancel
@@ -57,7 +66,9 @@ function ConfigEditorForm({
 }
 
 // The Monaco config.toml editor (Ctrl+K "edit-config"). The server validates the
-// TOML before writing and the change is reloaded automatically on save.
+// TOML before writing; saving PERSISTS the file but does not apply it (the
+// running config is unchanged until the user runs "Reload config"). A callout in
+// the form states this.
 export function ConfigEditorDialog() {
   const {
     configEditorOpen,
@@ -77,8 +88,9 @@ export function ConfigEditorDialog() {
         <DialogHeader>
           <DialogTitle>Edit config.toml</DialogTitle>
           <DialogDescription>
-            Edit the dux configuration. It is validated before saving and
-            reloaded automatically; invalid TOML is rejected with the reason.
+            Edit the dux configuration. It is validated before saving; invalid
+            TOML is rejected with the reason. Saving does not apply the change —
+            run “Reload config” afterwards.
           </DialogDescription>
         </DialogHeader>
         {configEditorLoading ? (

@@ -1554,9 +1554,9 @@ export function closeProjectInfo(): void {
 }
 
 // Browse a directory for the add-project picker over REST (replaces the retired
-// `/ws` `browse_dir` → `dir_entries` round-trip). A null path starts at $HOME.
-// The reply is ignored once the dialog has closed so a late response can't
-// repopulate a closed picker.
+// `/ws` `browse_dir` → `dir_entries` round-trip). A null path resolves the
+// server's configured default start directory. The reply is ignored once the
+// dialog has closed so a late response can't repopulate a closed picker.
 function runBrowse(path: string | null): void {
   browseApi
     .browse(path)
@@ -1579,7 +1579,9 @@ function runBrowse(path: string | null): void {
 
 export function openAddProject(): void {
   setState({ addProjectOpen: true, browseLoading: true, browseEntries: [] })
-  runBrowse(null) // start at $HOME
+  // A null path tells the server to open at the configured default
+  // (`defaults.start_directory`, resolved from the live config), not $HOME.
+  runBrowse(null)
 }
 
 export function closeAddProject(): void {
@@ -2296,11 +2298,12 @@ export function saveConfigEditor(content: string): void {
   configApi
     .writeRawConfig(content)
     .then(() => {
-      // The server validates, writes, adopts the new config in place, and emits
-      // `config.changed` as part of this one request — there is no separate
-      // reload to wait on, so the toast states only what actually happened.
+      // Save PERSISTS but does not APPLY: the server writes config.toml and leaves
+      // the running config untouched (no adopt, no `config.changed`) until the user
+      // explicitly runs "Reload config". The toast states exactly that so the lack
+      // of a visible change isn't mistaken for a no-op.
       closeConfigEditor()
-      toast.success("Saved config.toml.")
+      toast.success("Saved config.toml. Run “Reload config” to apply it.")
     })
     .catch((e) => {
       setState({

@@ -4,9 +4,10 @@
 //! `agent_name`); they are now plain authenticated GETs.
 //!
 //! - `GET /api/v1/browse?path=` — directory listing for the add-project picker.
-//!   An absent (or empty) `path` falls back to `$HOME`, exactly as the old
-//!   `BrowseDir` handler did. The reply echoes the resolved `path` plus the
-//!   child `entries`.
+//!   An absent (or empty) `path` resolves the configured `defaults.start_directory`
+//!   (shared fallback chain) from the live engine config, so the picker honors the
+//!   setting and reflects an explicit reload; if the engine is gone it falls back
+//!   to `$HOME`. The reply echoes the resolved `path` plus the child `entries`.
 //! - `GET /api/v1/agent-name` — a freshly generated two-word pet name for the
 //!   new-agent dialog's randomized-name preview (reuses `git::docker_style_name`).
 //!
@@ -59,13 +60,19 @@ struct BrowseReply {
     entries: Vec<DirEntryView>,
 }
 
-async fn browse(State(_state): State<AppState>, Query(query): Query<BrowseQuery>) -> Response {
-    // An absent OR empty path falls back to $HOME (then `/` if even that is
-    // unset), exactly as the old `BrowseDir` handler did.
-    let dir = query
-        .path
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>) -> Response {
+    // An explicit `path` always wins. An absent OR empty path means "open at the
+    // configured default": resolve `defaults.start_directory` (with the shared
+    // fallback chain) from the LIVE engine config, so the picker honors the
+    // setting and reflects an explicit reload. If the engine is gone, fall back to
+    // `$HOME` (then `/`), exactly as the old `BrowseDir` handler did.
+    let dir = match query.path.filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => match state.engine.browse_start_dir().await {
+            Some(dir) => dir,
+            None => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
+        },
+    };
 
     if dir.chars().count() > MAX_PATH_LEN {
         return (StatusCode::BAD_REQUEST, "path is too long").into_response();
@@ -163,6 +170,59 @@ mod tests {
             .collect();
         assert!(labels.contains(&"alpha/"));
         assert!(labels.contains(&"beta/"));
+    }
+
+    /// With `path` omitted, the picker must open at the configured
+    /// `defaults.start_directory` (resolved through the live engine), not `$HOME`.
+    /// This is the web side of the start-directory wiring (the TUI already honored
+    /// it). Boots a real engine from a config.toml that points start_directory at a
+    /// temp dir and asserts the no-path browse echoes that dir.
+    #[tokio::test]
+    async fn browse_without_a_path_opens_the_configured_start_directory() {
+        let cfg_root = tempfile::tempdir().unwrap();
+        let start = tempfile::tempdir().unwrap();
+        std::fs::create_dir(start.path().join("alpha")).unwrap();
+        let start_path = start.path().to_string_lossy().to_string();
+
+        // Minimal config: only set the one key under test; everything else defaults.
+        std::fs::write(
+            cfg_root.path().join("config.toml"),
+            format!("[defaults]\nstart_directory = \"{start_path}\"\n"),
+        )
+        .unwrap();
+
+        let paths = dux_core::config::DuxPaths {
+            root: cfg_root.path().to_path_buf(),
+            config_path: cfg_root.path().join("config.toml"),
+            sessions_db_path: cfg_root.path().join("sessions.sqlite3"),
+            worktrees_root: cfg_root.path().join("worktrees"),
+            lock_path: cfg_root.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/browse")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["path"], start_path);
+        let labels: Vec<&str> = value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["label"].as_str().unwrap())
+            .collect();
+        assert!(labels.contains(&"alpha/"));
     }
 
     #[tokio::test]
