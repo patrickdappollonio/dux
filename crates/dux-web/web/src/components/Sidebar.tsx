@@ -38,10 +38,10 @@ import {
 import { toast } from "sonner"
 import type * as React from "react"
 import { useEffect, useRef } from "react"
+import { agentRowVisual } from "@/lib/agentRow"
 import { copyToClipboard } from "@/lib/clipboard"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
-import { AgentBeam } from "@/components/AgentBeam"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
@@ -214,6 +214,8 @@ function SessionSubItem({
   const label = session.title || session.branch_name
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
+  // Running agents shimmer their name; non-running (detached/exited) recede.
+  const { shimmer, dimmed } = agentRowVisual(session.status, session.working)
 
   // The whole row is the drag handle. The enclosing PointerSensor's 6px
   // activation distance keeps a plain click a select, not a drag. `isDragging`
@@ -245,17 +247,11 @@ function SessionSubItem({
           // pane, where the row (not the inner label button) carries the
           // background. The button below keeps its own background transparent,
           // so this wrapper is the single highlight surface for the whole row.
-          "relative flex items-center rounded-md pr-1 transition-colors group/agent-row",
+          "flex items-center rounded-md pr-1 transition-colors group/agent-row",
           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
           agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground"
         )}
       >
-        {/* A white, slightly tilted light sweeps left→right across the WHOLE row
-            (including the trailing ⋯) while the agent works, and finishes its
-            current pass when work stops. It lives on the row wrapper — the
-            positioning context that spans the full width — as a click-through
-            overlay, so the ⋯ stays clickable. Self-manages mount/unmount. */}
-        <AgentBeam working={session.working} />
         <SidebarMenuSubButton
           {...attributes}
           {...listeners}
@@ -265,22 +261,22 @@ function SessionSubItem({
             // The wrapper (group/agent-row) owns the highlight now, so keep this
             // button transparent — otherwise it paints a second box that stops
             // short of the trailing ⋯.
-            "hover:bg-transparent active:bg-transparent data-active:bg-transparent"
+            "hover:bg-transparent active:bg-transparent data-active:bg-transparent",
+            // Non-running agents recede: dim the whole row (name, icon, and the
+            // status indicator) so the running ones read first.
+            dimmed && "opacity-70"
           )}
           onClick={() => selectSession(session.id)}
         >
-          {/* All agents use the same Bot icon — provider is shown as text. While
-              the agent is streaming output it gently bounces (motion-safe) so the
-              "working" state is unmistakable at a glance. The transition lets the
-              icon settle back to rest when streaming stops mid-bounce instead of
-              snapping from wherever the keyframe left it. */}
-          <Bot
-            className={cn(
-              "motion-safe:transition-transform motion-safe:duration-300",
-              session.working && "motion-safe:animate-agent-working"
-            )}
-          />
-          <span className="truncate">{label}</span>
+          {/* All agents use the same Bot icon — provider is shown as text. The
+              "working" motion cue lives on the name shimmer (below), so the icon
+              stays calm — one animation per row. */}
+          <Bot />
+          {/* While the agent streams output its name shimmers with dux's brand
+              accents (see .agent-name-shimmer) — the single working cue. */}
+          <span className={cn("truncate", shimmer && "agent-name-shimmer")}>
+            {label}
+          </span>
           <span className="ml-auto flex shrink-0 items-center gap-1">
             {session.pr ? (
               // Icon-only PR link: just the state-tinted glyph, with the full

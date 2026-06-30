@@ -37,7 +37,6 @@ import {
 import type { CSSProperties } from "react"
 import { Suspense } from "react"
 
-import { AgentBeam } from "@/components/AgentBeam"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
@@ -63,6 +62,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { agentRowVisual } from "@/lib/agentRow"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
@@ -243,6 +243,8 @@ function SessionRow({
   const label = session.title || session.branch_name
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
+  // Running agents shimmer their name; non-running (detached/exited) recede.
+  const { shimmer, dimmed } = agentRowVisual(session.status, session.working)
 
   // Long-press (250ms) starts the drag so taps still select and vertical scroll
   // isn't hijacked — see the sensor config on the enclosing DndContext. The
@@ -265,24 +267,25 @@ function SessionRow({
           variant={agentSelected ? "secondary" : "ghost"}
           className={cn(
             "min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2",
-            // Positioning context for the beam overlay. Always relative: the beam
-            // lingers a moment past `working` to finish its sweep (see AgentBeam).
-            "relative"
+            // Non-running agents recede: dim the whole row (name, icon, and the
+            // status indicator) so the running ones read first.
+            dimmed && "opacity-70"
           )}
           onClick={() => selectAndOpen(session.id)}
         >
-          {/* A light sweeps left→right across the row while the agent works (and
-              finishes its current pass when work stops). Self-manages mount. */}
-          <AgentBeam working={session.working} />
-          {/* Gently bounces (motion-safe) while the agent streams output; the
-              transition settles it back to rest when streaming stops mid-bounce. */}
-          <Bot
+          {/* The "working" motion cue lives on the name shimmer (below), so the
+              icon stays calm — one animation per row. */}
+          <Bot />
+          {/* While the agent streams output its name shimmers with dux's brand
+              accents (see .agent-name-shimmer) — the single working cue. */}
+          <span
             className={cn(
-              "motion-safe:transition-transform motion-safe:duration-300",
-              session.working && "motion-safe:animate-agent-working"
+              "flex-1 truncate text-left",
+              shimmer && "agent-name-shimmer"
             )}
-          />
-          <span className="flex-1 truncate text-left">{label}</span>
+          >
+            {label}
+          </span>
           <span className="flex shrink-0 items-center gap-1">
             {session.pr ? (
               // Icon-only PR link (no tooltip on touch — the banner on the

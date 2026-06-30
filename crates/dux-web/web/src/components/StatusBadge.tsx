@@ -49,9 +49,10 @@ export function StatusBadge({
   // reveal the label in a tooltip on hover, so long agent names keep their room.
   iconOnly?: boolean
   // When the agent is actively streaming output, an active badge's label becomes
-  // "active — working". The MOTION cue for "working" lives on the agent icon (a
-  // gentle bounce in the sidebar/mobile rows), so the badge itself stays calm —
-  // one animation per row, not two. Honored only for active; ignored otherwise.
+  // "active — working". The MOTION cue for "working" lives on the agent name (a
+  // brand-colored shimmer in the sidebar/mobile rows), so the badge itself stays
+  // calm — one animation per row, not two. Honored only for active; otherwise
+  // ignored.
   working?: boolean
 }) {
   const s = STATUS[status]
