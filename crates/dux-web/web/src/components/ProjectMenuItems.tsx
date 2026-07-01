@@ -58,7 +58,7 @@ export function ProjectMenuItems({ id }: { id: string }) {
           )}
           <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
             <FolderGit2 />
-            Attach worktree…
+            New agent from existing worktree…
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => pullProject(id)}>
             <Download />
