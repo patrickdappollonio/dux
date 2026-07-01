@@ -1,9 +1,8 @@
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import { FolderGit2 } from "lucide-react"
 
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -28,6 +27,40 @@ import type { ProjectWorktreeEntryView } from "@/lib/types"
 function pathTail(path: string): string {
   const parts = path.split("/").filter(Boolean)
   return parts.length > 0 ? parts[parts.length - 1] : path
+}
+
+// The row body truncates both the name and the branch, so the hover tooltip
+// surfaces the full worktree path and branch name (plus any disabled reason for
+// attached rows) to keep the clipped values recoverable.
+function rowTooltip(entry: ProjectWorktreeEntryView): ReactNode {
+  return (
+    <span className="flex flex-col gap-0.5">
+      {entry.reason ? <span>{entry.reason}</span> : null}
+      <span>{entry.worktree_path}</span>
+      <span className="font-mono">{entry.branch_name}</span>
+    </span>
+  )
+}
+
+// The shared row body: the folder icon plus the worktree name stacked over its
+// branch. Rendered by both the adoptable (clickable button) and the
+// already-attached (disabled div) lists so the two never drift visually.
+function WorktreeRowBody({ entry }: { entry: ProjectWorktreeEntryView }) {
+  return (
+    <>
+      <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
+      {/* Stack the worktree name over its branch so neither competes for the
+         row's horizontal room; min-w-0 lets both truncate with an ellipsis
+         instead of overflowing the fixed-width dialog and forcing a horizontal
+         scrollbar. */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-sm">{pathTail(entry.worktree_path)}</span>
+        <span className="truncate font-mono text-xs text-muted-foreground">
+          {entry.branch_name}
+        </span>
+      </div>
+    </>
+  )
 }
 
 // Mounted only while the dialog is open so its local select/name state resets on
@@ -65,7 +98,7 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
   return (
     <DialogContent className="sm:max-w-xl" showCloseButton={false}>
       <DialogHeader>
-        <DialogTitle>Attach worktree in {projectName}</DialogTitle>
+        <DialogTitle>New agent from existing worktree in {projectName}</DialogTitle>
         <DialogDescription>
           Adopts an orphaned managed worktree (one dux created with no live
           agent) as a new agent, launching a fresh session on its existing
@@ -87,24 +120,22 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
             {adoptable.map((entry) => {
               const isSelected = selected === entry.worktree_path
               return (
-                <button
+                <SimpleTooltip
                   key={entry.worktree_path}
-                  type="button"
-                  onClick={() => handleSelect(entry)}
-                  // min-h-11 gives a ≥44px touch target on phones; desktop keeps
-                  // the compact density via md:.
-                  className={`flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
-                    isSelected ? "bg-accent" : ""
-                  }`}
+                  content={rowTooltip(entry)}
                 >
-                  <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate">
-                    {pathTail(entry.worktree_path)}
-                  </span>
-                  <Badge variant="secondary" className="shrink-0 font-mono">
-                    {entry.branch_name}
-                  </Badge>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSelect(entry)}
+                    // min-h-11 gives a ≥44px touch target on phones; desktop keeps
+                    // the compact density via md:.
+                    className={`flex min-h-11 w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-accent md:min-h-0 ${
+                      isSelected ? "bg-accent" : ""
+                    }`}
+                  >
+                    <WorktreeRowBody entry={entry} />
+                  </button>
+                </SimpleTooltip>
               )
             })}
             {attached.length > 0 ? (
@@ -115,16 +146,10 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
                 {attached.map((entry) => (
                   <SimpleTooltip
                     key={entry.worktree_path}
-                    content={entry.reason ?? undefined}
+                    content={rowTooltip(entry)}
                   >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2 px-3 py-2 text-left text-sm opacity-50 md:min-h-0">
-                      <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-                      <span className="flex-1 truncate">
-                        {pathTail(entry.worktree_path)}
-                      </span>
-                      <Badge variant="outline" className="shrink-0 font-mono">
-                        {entry.branch_name}
-                      </Badge>
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-50 md:min-h-0">
+                      <WorktreeRowBody entry={entry} />
                     </div>
                   </SimpleTooltip>
                 ))}
@@ -173,13 +198,18 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
           Cancel
         </Button>
         <Button disabled={disabled} onClick={handleAttach}>
-          Attach worktree
+          Create agent
         </Button>
       </DialogFooter>
     </DialogContent>
   )
 }
 
+// Powers the "New agent from existing worktree…" project-menu action; its
+// submit button reads "Create agent". The component and its store surface keep
+// the older "attach worktree" naming, so grep `attachWorktree` /
+// `openAttachWorktree` / `attachWorktreeTarget` (lib/store.ts) to find the
+// wiring behind those user-facing labels.
 export function AttachWorktreeDialog() {
   const { attachWorktreeTarget } = useDux()
 
