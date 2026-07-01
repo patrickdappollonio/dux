@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prep": "node scripts/copy-install.mjs && node scripts/fetch-contributors.mjs && node scripts/generate-webp.mjs",
+    "predev": "npm run prep",
     "dev": "astro dev",
+    "prestart": "npm run prep",
     "start": "astro dev",
-    "build": "node scripts/copy-install.mjs && node scripts/fetch-contributors.mjs && node scripts/generate-webp.mjs && astro build",
+    "build": "npm run prep && astro build",
     "preview": "astro preview",
     "astro": "astro",
     "contributors": "node scripts/fetch-contributors.mjs",
