@@ -1,6 +1,54 @@
 import { describe, expect, it } from "vitest"
 
-import { applyModifiers, arrowSeq, ctrlByte, ESC, TAB } from "./termkeys"
+import {
+  applyModifiers,
+  arrowSeq,
+  ctrlByte,
+  ESC,
+  LF,
+  softNewline,
+  softNewlineAction,
+  TAB,
+} from "./termkeys"
+
+// Default runtime context: the input owner with no latch armed.
+const OWNER = { isOwner: true, ctrlLatched: false, altLatched: false }
+
+// Builds the minimal shape `softNewline` reads, defaulting to a bare Enter
+// keydown (13, not composing) so each test only states the fields it cares about.
+function keyEvent(
+  over: Partial<{
+    type: string
+    key: string
+    ctrlKey: boolean
+    shiftKey: boolean
+    altKey: boolean
+    metaKey: boolean
+    isComposing: boolean
+    keyCode: number
+  }>,
+): {
+  type: string
+  key: string
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  isComposing: boolean
+  keyCode: number
+} {
+  return {
+    type: "keydown",
+    key: "Enter",
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    metaKey: false,
+    isComposing: false,
+    keyCode: 13,
+    ...over,
+  }
+}
 
 describe("constants", () => {
   it("ESC is the ASCII escape byte", () => {
@@ -11,6 +59,96 @@ describe("constants", () => {
   it("TAB is the horizontal-tab byte", () => {
     expect(TAB).toBe("\x09")
     expect(TAB.charCodeAt(0)).toBe(0x09)
+  })
+
+  it("LF is the line-feed (Ctrl-J) byte", () => {
+    expect(LF).toBe("\x0a")
+    expect(LF.charCodeAt(0)).toBe(0x0a)
+  })
+})
+
+describe("softNewline", () => {
+  it("maps bare Shift-Enter keydown to LF", () => {
+    expect(softNewline(keyEvent({ shiftKey: true }))).toBe(LF)
+  })
+
+  it("ignores a plain Enter (no Shift) so it submits as CR", () => {
+    expect(softNewline(keyEvent({ shiftKey: false }))).toBeNull()
+  })
+
+  it("ignores keyup so the newline is not emitted twice", () => {
+    expect(softNewline(keyEvent({ type: "keyup", shiftKey: true }))).toBeNull()
+  })
+
+  it("ignores Shift-Enter when another modifier is also held", () => {
+    expect(softNewline(keyEvent({ shiftKey: true, ctrlKey: true }))).toBeNull()
+    expect(softNewline(keyEvent({ shiftKey: true, altKey: true }))).toBeNull()
+    expect(softNewline(keyEvent({ shiftKey: true, metaKey: true }))).toBeNull()
+  })
+
+  it("ignores Shift held with a non-Enter key", () => {
+    expect(softNewline(keyEvent({ key: "a", shiftKey: true }))).toBeNull()
+    expect(softNewline(keyEvent({ key: "Tab", shiftKey: true }))).toBeNull()
+  })
+
+  it("ignores Shift-Enter while an IME composition is in flight", () => {
+    // A confirming keystroke mid-CJK-composition must finalize composition via
+    // xterm, not get rewritten to a stray LF. Both signals are honored.
+    expect(
+      softNewline(keyEvent({ shiftKey: true, isComposing: true })),
+    ).toBeNull()
+    expect(
+      softNewline(keyEvent({ shiftKey: true, keyCode: 229 })),
+    ).toBeNull()
+  })
+})
+
+describe("softNewlineAction", () => {
+  const shiftEnter = keyEvent({ shiftKey: true })
+
+  it("leaves a non-matching key entirely to xterm", () => {
+    const a = softNewlineAction(keyEvent({ shiftKey: false }), OWNER)
+    expect(a).toEqual({ handled: false, send: null, clearLatch: false })
+  })
+
+  it("an owner sends the LF for a bare Shift-Enter", () => {
+    const a = softNewlineAction(shiftEnter, OWNER)
+    expect(a).toEqual({ handled: true, send: LF, clearLatch: false })
+  })
+
+  it("a read-only viewer consumes the key but sends nothing", () => {
+    const a = softNewlineAction(shiftEnter, {
+      isOwner: false,
+      ctrlLatched: false,
+      altLatched: false,
+    })
+    expect(a).toEqual({ handled: true, send: null, clearLatch: false })
+  })
+
+  it("clears an armed Ctrl or Alt latch when the owner sends the newline", () => {
+    expect(
+      softNewlineAction(shiftEnter, { ...OWNER, ctrlLatched: true }),
+    ).toEqual({ handled: true, send: LF, clearLatch: true })
+    expect(
+      softNewlineAction(shiftEnter, { ...OWNER, altLatched: true }),
+    ).toEqual({ handled: true, send: LF, clearLatch: true })
+  })
+
+  it("does not clear a latch for a non-owner (nothing is consumed to send)", () => {
+    const a = softNewlineAction(shiftEnter, {
+      isOwner: false,
+      ctrlLatched: true,
+      altLatched: false,
+    })
+    expect(a.clearLatch).toBe(false)
+  })
+
+  it("never sends or clears mid-IME-composition", () => {
+    const a = softNewlineAction(
+      keyEvent({ shiftKey: true, isComposing: true }),
+      { ...OWNER, ctrlLatched: true },
+    )
+    expect(a).toEqual({ handled: false, send: null, clearLatch: false })
   })
 })
 

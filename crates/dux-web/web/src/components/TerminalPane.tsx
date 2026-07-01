@@ -18,7 +18,14 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
-import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
+import {
+  applyModifiers,
+  arrowSeq,
+  ESC,
+  LF,
+  softNewlineAction,
+  TAB,
+} from "@/lib/termkeys"
 import { selectSession, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import {
@@ -67,6 +74,20 @@ function lockKeyboard(): void {
 function unlockKeyboard(): void {
   const keyboard = (navigator as KeyboardLockNavigator).keyboard
   keyboard?.unlock?.()
+}
+
+// A soft newline (LF / Ctrl-J) written straight to the PTY, plus the view side
+// effects a typed key would get through xterm's data pipeline — which both the
+// physical Shift-Enter handler and the accessory bar's ⇧↵ key deliberately
+// bypass: snap to the live edge and drop any stale selection so the user sees
+// where the input landed. Latch clearing is left to each caller (they compute it
+// from different sources). Module-scoped and shared so the two entry points that
+// insert a soft newline can't drift apart.
+const LF_BYTES = new TextEncoder().encode(LF)
+function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
+  term?.scrollToBottom()
+  term?.clearSelection()
+  pty?.sendInput(LF_BYTES)
 }
 
 export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
@@ -323,6 +344,37 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       pty.sendInput(encoder.encode(out))
     })
 
+    // Shift-Enter inserts a "soft" newline (LF / Ctrl-J) instead of submitting.
+    // xterm collapses both Enter and Shift-Enter to a carriage return before
+    // `onData` can see them, so the two are indistinguishable at the data layer —
+    // we must intercept at the key-event layer instead. `softNewlineAction` owns
+    // the decision (chord match, IME guard, ownership gate, latch clear); this
+    // closure is the thin applicator that turns that decision into DOM/PTY effects.
+    term.attachCustomKeyEventHandler((e) => {
+      const action = softNewlineAction(e, {
+        isOwner: isOwnerRef.current,
+        ctrlLatched: modsRef.current.ctrl,
+        altLatched: modsRef.current.alt,
+      })
+      if (!action.handled) return true
+      // Cancel the key with the same semantics xterm applies to every key it
+      // handles: `preventDefault` stops the browser dropping a stray newline into
+      // the hidden textarea, `stopPropagation` stops the "handled" key bubbling to
+      // window-level shortcut listeners, and returning `false` tells xterm not to
+      // encode its own CR.
+      e.preventDefault()
+      e.stopPropagation()
+      // Owner-only write. Consume the latch here (the decision came from
+      // `softNewlineAction`), then `writeSoftNewline` replays the scroll/selection
+      // side effects our early return skipped — shared with the accessory bar's
+      // ⇧↵ key so the two entry points can't drift.
+      if (action.send !== null) {
+        if (action.clearLatch) setMods({ ctrl: false, alt: false })
+        writeSoftNewline(term, pty)
+      }
+      return false
+    })
+
     // Focus the terminal on selection so the user can type immediately — no extra
     // click into the pane. This effect re-runs (and the pane remounts) on every
     // agent OR companion-terminal selection (keyed by [kind, id]), so both cases
@@ -339,8 +391,8 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // xterm's text layer sits over its scrollable viewport, so a finger drag on
     // the output never reaches the native scroll (only the slim scrollbar does);
     // we bridge that by translating a vertical drag into xterm's own
-    // scrollLines() — the same scrollback the accessory-bar page buttons move
-    // through (they call scrollPages/scrollToTop/scrollToBottom). Touch-only
+    // scrollLines() — the same scrollback the accessory-bar PgUp/PgDn keys move
+    // through (they call scrollPages). Touch-only
     // listeners, so this also lights up a touchscreen laptop, not just the mobile
     // layout. Only the normal buffer has scrollback; alt-screen TUIs own the
     // screen (no history), so we leave their touches alone and let the arrow row
@@ -746,6 +798,21 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     sendSeq(arrowSeq(dir, app))
   }
 
+  // The accessory bar's ⇧↵ key — the touch equivalent of Shift-Enter, since a
+  // soft keyboard can't produce that chord. Owner-gated like every accessory
+  // send; consumes any armed Ctrl/Alt latch (a raw newline doesn't combine with
+  // them, so unlike `sendSeq` it never routes through `applyModifiers`) and keeps
+  // focus so the user keeps typing. Shares `writeSoftNewline` with the physical
+  // Shift-Enter handler so both land input identically.
+  function sendNewline() {
+    if (!isOwnerRef.current) return
+    if (modsRef.current.ctrl || modsRef.current.alt) {
+      setMods({ ctrl: false, alt: false })
+    }
+    writeSoftNewline(termRef.current, ptyRef.current)
+    termRef.current?.focus()
+  }
+
   function toggleCtrl() {
     setMods({ ctrl: !modsRef.current.ctrl, alt: modsRef.current.alt })
     termRef.current?.focus()
@@ -756,11 +823,11 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     termRef.current?.focus()
   }
 
-  // Scroll the xterm viewport from the accessory bar's second row. These drive
-  // xterm's own scrollback (the normal-buffer history that accumulates as the
-  // agent streams output), giving a reliable touch target the slim scrollbar
-  // can't. (Alt-screen TUIs keep no scrollback, so page/jump scrolling is a
-  // no-op there — the cursor-arrow row drives those instead.)
+  // Page-scroll the xterm viewport from the accessory bar's PgUp/PgDn keys. These
+  // drive xterm's own scrollback (the normal-buffer history that accumulates as
+  // the agent streams output), giving a reliable touch target the slim scrollbar
+  // can't. (Alt-screen TUIs keep no scrollback, so page scrolling is a no-op
+  // there — the cursor arrows alongside them drive movement instead.)
   //
   // Scrolling is a READ gesture, so it drops the hidden textarea's focus: that
   // slides the soft keyboard away to free the whole screen for reading back and,
@@ -768,17 +835,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // textarea stays the focused element after the user swipes the keyboard down,
   // so any later tap on a focus-retaining (preventDefault) button pops it right
   // back up; blurring here is what keeps it down. Tapping the terminal refocuses
-  // to resume typing. (The key row above instead KEEPS focus — that's input.)
+  // to resume typing. (The input keys — Esc/Tab/Ctrl/Alt/newline and the cursor
+  // arrows — instead KEEP focus; only PgUp/PgDn blur. It's an input vs
+  // page-scroll split, not a row split.)
   function onScroll(dir: ScrollDir) {
     const term = termRef.current
     if (!term) return
     switch (dir) {
-      case "top":
-        term.scrollToTop()
-        break
-      case "bottom":
-        term.scrollToBottom()
-        break
       case "pageUp":
         term.scrollPages(-1)
         break
@@ -989,6 +1052,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
         <AccessoryBar
           onEsc={() => sendSeq(ESC)}
           onTab={() => sendSeq(TAB)}
+          onNewline={sendNewline}
           onArrow={onArrow}
           onScroll={onScroll}
           ctrl={ctrl}

@@ -14,6 +14,19 @@ export const ESC = "\x1b"
 // The horizontal-tab byte.
 export const TAB = "\x09"
 
+// The line-feed byte (LF, 0x0A) — the byte Ctrl-J produces. dux maps Shift-Enter
+// to it so a "soft" newline can be inserted into an agent prompt without a
+// dedicated Ctrl-J reflex. Interactive CLIs (Claude, Codex, ...) treat a bare LF
+// as a literal newline and a carriage return (CR, 0x0D — what a plain Enter
+// sends) as submit, so the two must stay distinct.
+//
+// Note: a newline embedded in *macro* text uses a different encoding — Alt+Enter
+// (ESC + CR), see `macros.ts` `macroPayloadBytes`. That path replays a whole
+// prewritten prompt as one wholesale write, where Alt+Enter is the reliable
+// "newline, don't submit" signal; this path is a single live keystroke, where
+// Ctrl-J/LF is the natural chord. Different contexts, deliberately different bytes.
+export const LF = "\x0a"
+
 // Punctuation/whitespace that map to a control byte. Letters are handled
 // arithmetically (see `ctrlByte`); these are the standard caret-notation
 // mappings a terminal recognizes:
@@ -129,4 +142,103 @@ export function applyModifiers(
     out = ESC + out
   }
   return out
+}
+
+/**
+ * Decides whether a terminal keydown should be rewritten to a "soft" newline.
+ *
+ * Shift-Enter — with no other modifier held — returns `LF` (0x0A, the Ctrl-J
+ * byte). Every other event returns `null`, signalling the caller to let xterm
+ * encode the key normally (a plain Enter becomes CR, which the agent treats as
+ * submit).
+ *
+ * We deliberately match ONLY the bare Shift-Enter chord: if Ctrl, Alt/Meta is
+ * also held the user is asking for a different control sequence, so we leave
+ * those to xterm rather than swallowing them. Only `keydown` is matched —
+ * xterm's custom-key handler also fires for `keyup`/`keypress`, which must pass
+ * through untouched so we never emit the newline twice.
+ *
+ * An in-flight IME composition is left strictly alone: while composing CJK text
+ * the confirming/return keystroke arrives with `isComposing` true (and, on most
+ * browsers, `keyCode` 229). If we intercepted it we would inject a stray LF into
+ * the middle of the composition and pre-empt xterm's own composition handling,
+ * corrupting the text — the exact failure the app's IME accessibility guarantees
+ * exist to prevent. So we bail and let the keystroke finalize composition
+ * normally.
+ *
+ * Pure and DOM-free by design: it reads only the plain fields of a
+ * `KeyboardEvent`, so it is unit-testable without a real event (see
+ * `termkeys.test.ts`).
+ */
+export function softNewline(e: {
+  type: string
+  key: string
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  isComposing: boolean
+  keyCode: number
+}): string | null {
+  if (
+    e.type === "keydown" &&
+    e.key === "Enter" &&
+    e.shiftKey &&
+    !e.ctrlKey &&
+    !e.altKey &&
+    !e.metaKey &&
+    !e.isComposing &&
+    e.keyCode !== 229
+  ) {
+    return LF
+  }
+  return null
+}
+
+/** What a terminal key handler should do with a keystroke (see `softNewlineAction`). */
+export interface SoftNewlineAction {
+  /**
+   * The key is a soft-newline chord that the handler must consume: cancel it
+   * (`preventDefault`/`stopPropagation`) and tell xterm not to encode its own CR.
+   * When false, nothing else in this action applies and the key is left to xterm.
+   */
+  handled: boolean
+  /** Bytes to write to the PTY, or `null` when nothing should be sent (a read-only viewer). */
+  send: string | null
+  /** Whether consuming this keystroke should clear the one-shot Ctrl/Alt latch. */
+  clearLatch: boolean
+}
+
+/**
+ * Resolves a keydown into the full set of decisions a terminal key handler needs,
+ * combining the pure chord match (`softNewline`) with runtime context. Keeping the
+ * branching here — rather than inside the component's event closure — makes the
+ * ownership gate and the latch-clear rule unit-testable without mounting xterm.
+ *
+ * - Not a soft-newline chord → `{ handled: false, ... }`: the caller lets xterm handle the key.
+ * - A soft-newline chord → `handled: true`; `send` carries the LF only for the input
+ *   owner (a non-owner consumes the key visually but injects nothing); `clearLatch`
+ *   is set when the owner had an armed Ctrl/Alt latch, so it can't leak onto the
+ *   next keystroke.
+ */
+export function softNewlineAction(
+  e: {
+    type: string
+    key: string
+    ctrlKey: boolean
+    shiftKey: boolean
+    altKey: boolean
+    metaKey: boolean
+    isComposing: boolean
+    keyCode: number
+  },
+  ctx: { isOwner: boolean; ctrlLatched: boolean; altLatched: boolean },
+): SoftNewlineAction {
+  const nl = softNewline(e)
+  if (nl === null) return { handled: false, send: null, clearLatch: false }
+  return {
+    handled: true,
+    send: ctx.isOwner ? nl : null,
+    clearLatch: ctx.isOwner && (ctx.ctrlLatched || ctx.altLatched),
+  }
 }
