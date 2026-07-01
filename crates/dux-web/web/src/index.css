@@ -51,14 +51,36 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
+    /* A gentle bob for the agent icon while it streams output ("working").
+       Symmetric around the rest position (up AND down by the same amount) so it
+       doesn't open a one-sided gap below the icon; ease-in-out so a busy sidebar
+       isn't jarring. The row pairs it with `motion-safe:transition-transform` so
+       that when work stops the icon glides back to rest (translateY(0)) instead
+       of freezing at the top or bottom of the bob. */
+    --animate-agent-working: agent-working 0.5s ease-in-out infinite;
 }
 
-/* The working-agent name shimmer. While an agent streams output its name becomes
-   a clipped gradient — a cool light sweeping across the text — drawn with dux's
-   brand accents (cyan + cornflower blue, mirrored from the dux_dark TUI theme;
-   see --dux-shimmer-* below). This is the single "working" motion cue per row.
-   `background-clip: text` paints the gradient through the glyphs; the keyframe
-   slides the gradient so the bright band travels left→right. */
+@keyframes agent-working {
+    0%, 100% { transform: translateY(0); }
+    25% { transform: translateY(-10%); }
+    75% { transform: translateY(10%); }
+}
+
+/* The working-agent name shimmer, a greyscale "loading" sweep that dims the name
+   and runs a soft white highlight through it (see --dux-shimmer-* below). Neutral
+   so it sits quietly in the UI. One of two "working" cues on the row (the Bot icon
+   also bobs).
+
+   The machinery is ALWAYS on the name, only the STATE toggles (.agent-name-shimmer
+   --on), so the fill can cross-fade instead of snapping. Idle, the fill is
+   `currentColor`, so the name is normal solid text and the gradient sits hidden
+   behind the opaque fill; the sweep animation is present but paused. Working,
+   `--on` makes the fill transparent (revealing the moving gradient) and resumes
+   the sweep. When work stops the `transition` below eases the fill from transparent
+   back to the solid colour, so the name fades back to bright text instead of
+   snapping from the grey shimmer. `background-clip: text` paints the gradient
+   through the glyphs; the keyframe slides it so the highlight travels left to
+   right. */
 .agent-name-shimmer {
     background: linear-gradient(
         90deg,
@@ -71,9 +93,17 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     background-size: 200% auto;
     -webkit-background-clip: text;
     background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
-    animation: agent-name-shimmer 2s linear infinite;
+    -webkit-text-fill-color: currentColor;
+    animation: agent-name-shimmer 2s linear infinite paused;
+    transition: -webkit-text-fill-color 500ms ease-out;
+}
+
+.agent-name-shimmer--on {
+    /* Transparent WHITE, not the `transparent` keyword (which is transparent black
+       and would darken the cross-fade). Alpha 0 reveals the gradient; the fade
+       between this and the solid `currentColor` stays light the whole way. */
+    -webkit-text-fill-color: rgb(255 255 255 / 0);
+    animation-play-state: running;
 }
 
 @keyframes agent-name-shimmer {
@@ -81,15 +111,49 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     to   { background-position: -200% center; }
 }
 
-/* Honor reduced-motion: stop the sweep and settle on a steady brand tint rather
-   than freezing the gradient mid-pass. The status badge ("active — working")
-   still spells out the state in text. */
+/* Reduced motion: no sweep and no cross-fade. Working names stay solid; the
+   "active — working" badge carries the state when motion is disabled (the icon
+   bob is likewise motion-safe-gated). */
 @media (prefers-reduced-motion: reduce) {
     .agent-name-shimmer {
         animation: none;
-        background: none;
-        -webkit-text-fill-color: var(--dux-shimmer-bright);
-        color: var(--dux-shimmer-bright);
+        transition: none;
+    }
+    .agent-name-shimmer--on {
+        -webkit-text-fill-color: currentColor;
+    }
+}
+
+/* Status indicator icons (StatusBadge dots) rest slightly transparent so they
+   read as quiet metadata. `--on` (the active dot while the agent works) PULSES,
+   breathing its opacity between faint and fully opaque so it reads as a live
+   heartbeat. When work stops the class is removed and the opacity reverts to the
+   resting value; the `transition` on the base eases that change, so the dot
+   settles back to rest instead of freezing at the faint part of the pulse (the
+   same "settle, don't snap" idea as the icon bob). */
+.agent-status-dot {
+    opacity: 0.6;
+    transition: opacity 400ms ease-out;
+}
+
+.agent-status-dot--on {
+    animation: agent-status-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes agent-status-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+}
+
+/* Reduced motion: no pulse. Keep the active dot fully opaque (against the
+   transparent rest of the others) so "active" still reads, just without motion. */
+@media (prefers-reduced-motion: reduce) {
+    .agent-status-dot {
+        transition: none;
+    }
+    .agent-status-dot--on {
+        animation: none;
+        opacity: 1;
     }
 }
 
@@ -126,13 +190,14 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
-    /* dux brand accents for the working-agent name shimmer, mirrored from the
-       dux_dark TUI theme: `base` a cool light grey (readable resting text),
-       `accent` the cornflower project blue (#6495ed), `bright` the signature
-       cyan (#00ffff). Constant across light/dark since the app is dark-only. */
-    --dux-shimmer-base: #cdd6e0;
-    --dux-shimmer-accent: #6495ed;
-    --dux-shimmer-bright: #00ffff;
+    /* Greyscale shimmer for the working-agent name: the text dims to `base`
+       (muted grey) while `bright` (white) is the highlight that sweeps through,
+       `accent` the transition between them. Neutral to match the app's greyscale
+       palette. (For a "dark through" look instead, swap so `bright` is darker
+       than `base`.) Constant across light/dark since the app is dark-only. */
+    --dux-shimmer-base: oklch(0.62 0 0);
+    --dux-shimmer-accent: oklch(0.8 0 0);
+    --dux-shimmer-bright: oklch(1 0 0);
 }
 
 .dark {
@@ -167,10 +232,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
-    /* dux brand accents for the working-agent name shimmer (see :root above). */
-    --dux-shimmer-base: #cdd6e0;
-    --dux-shimmer-accent: #6495ed;
-    --dux-shimmer-bright: #00ffff;
+    /* Greyscale shimmer for the working-agent name (see :root above). */
+    --dux-shimmer-base: oklch(0.62 0 0);
+    --dux-shimmer-accent: oklch(0.8 0 0);
+    --dux-shimmer-bright: oklch(1 0 0);
 }
 
 /* Slim the xterm scrollbar so it doesn't dominate the terminal column. xterm 6

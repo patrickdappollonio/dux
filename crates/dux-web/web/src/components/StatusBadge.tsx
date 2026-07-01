@@ -8,6 +8,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import type { SessionStatus } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 // Meaningful status color + icon, mirroring the dux TUI (active=green/●,
 // detached=amber/◐, exited=muted/○). The color lives on the icon and label
@@ -49,17 +50,26 @@ export function StatusBadge({
   // reveal the label in a tooltip on hover, so long agent names keep their room.
   iconOnly?: boolean
   // When the agent is actively streaming output, an active badge's label becomes
-  // "active — working". The MOTION cue for "working" lives on the agent name (a
-  // brand-colored shimmer in the sidebar/mobile rows), so the badge itself stays
-  // calm — one animation per row, not two. Honored only for active; otherwise
-  // ignored.
+  // "active — working". The MOTION cues for "working" live on the agent row (the
+  // Bot icon bobs and the name shimmers in the sidebar/mobile rows), so the badge
+  // itself stays calm. Honored only for active; otherwise ignored.
   working?: boolean
 }) {
   const s = STATUS[status]
   const streaming = status === "active" && working
   const label = streaming ? `${s.label} — working` : s.label
 
-  const dot = <s.Icon className={`size-2.5 ${s.fill ? "fill-current" : ""}`} />
+  // Status icons rest slightly transparent (quiet metadata). Only the active dot
+  // "streams", so while the agent works it pulses its opacity (breathing between
+  // faint and opaque) and settles back to the resting opacity when work stops
+  // (see .agent-status-dot in index.css).
+  const dotClass = cn(
+    "size-2.5 agent-status-dot",
+    s.fill && "fill-current",
+    streaming && "agent-status-dot--on",
+  )
+
+  const dot = <s.Icon className={dotClass} />
 
   if (iconOnly) {
     return (
@@ -88,10 +98,7 @@ export function StatusBadge({
 
   return (
     <Badge className={s.className}>
-      <s.Icon
-        data-icon="inline-start"
-        className={`size-2.5 ${s.fill ? "fill-current" : ""}`}
-      />
+      <s.Icon data-icon="inline-start" className={dotClass} />
       {label}
     </Badge>
   )

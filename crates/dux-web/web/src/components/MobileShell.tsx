@@ -273,15 +273,23 @@ function SessionRow({
           )}
           onClick={() => selectAndOpen(session.id)}
         >
-          {/* The "working" motion cue lives on the name shimmer (below), so the
-              icon stays calm — one animation per row. */}
-          <Bot />
-          {/* While the agent streams output its name shimmers with dux's brand
-              accents (see .agent-name-shimmer) — the single working cue. */}
+          {/* While the agent streams output the icon bobs (motion-safe); the
+              transition settles it back to rest (translateY(0)) when streaming
+              stops mid-bounce instead of freezing at the top or bottom. */}
+          <Bot
+            className={cn(
+              "motion-safe:transition-transform motion-safe:duration-300",
+              shimmer && "motion-safe:animate-agent-working"
+            )}
+          />
+          {/* Its name also dims with a soft white highlight sweeping through (see
+              .agent-name-shimmer), a second working cue alongside the bob. The
+              base class is always applied so the fill cross-fades back to solid
+              text when work stops; `--on` toggles the active sweep. */}
           <span
             className={cn(
-              "flex-1 truncate text-left",
-              shimmer && "agent-name-shimmer"
+              "flex-1 truncate text-left agent-name-shimmer",
+              shimmer && "agent-name-shimmer--on"
             )}
           >
             {label}
