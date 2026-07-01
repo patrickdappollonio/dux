@@ -268,13 +268,27 @@ function SessionSubItem({
           )}
           onClick={() => selectSession(session.id)}
         >
-          {/* All agents use the same Bot icon — provider is shown as text. The
-              "working" motion cue lives on the name shimmer (below), so the icon
-              stays calm — one animation per row. */}
-          <Bot />
-          {/* While the agent streams output its name shimmers with dux's brand
-              accents (see .agent-name-shimmer) — the single working cue. */}
-          <span className={cn("truncate", shimmer && "agent-name-shimmer")}>
+          {/* All agents use the same Bot icon; the provider is shown as text.
+              While the agent streams output the icon bobs (motion-safe) so the
+              "working" state is unmistakable at a glance. The transition lets it
+              settle back to rest (translateY(0)) when streaming stops mid-bounce
+              instead of freezing at the top or bottom of the bob. */}
+          <Bot
+            className={cn(
+              "motion-safe:transition-transform motion-safe:duration-300",
+              shimmer && "motion-safe:animate-agent-working"
+            )}
+          />
+          {/* Its name also dims with a soft white highlight sweeping through (see
+              .agent-name-shimmer), a second working cue alongside the bob. The
+              base class is always applied so the fill cross-fades back to solid
+              text when work stops; `--on` toggles the active sweep. */}
+          <span
+            className={cn(
+              "truncate agent-name-shimmer",
+              shimmer && "agent-name-shimmer--on"
+            )}
+          >
             {label}
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1">

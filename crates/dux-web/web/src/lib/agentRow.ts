@@ -4,7 +4,8 @@ import type { SessionStatus } from "@/lib/types"
  *  mobile shell so the two surfaces never drift.
  *
  *  - `shimmer`: the agent is actively streaming output → its name gets the
- *    brand-colored shimmer (the single "working" motion cue per row).
+ *    shimmer. The same flag drives the Bot icon's bob, so the two "working"
+ *    motion cues stay in lockstep.
  *  - `dimmed`: the agent isn't running (detached/exited) → the whole row recedes
  *    (name, icon, and status indicator) so the running agents stand out. Mirrors
  *    the dux TUI, where active sessions render brighter than detached/exited.
