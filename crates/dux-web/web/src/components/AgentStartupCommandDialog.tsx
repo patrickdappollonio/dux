@@ -9,7 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import {
   closeAgentStartupCommand,
   updateProjectSettings,
@@ -51,17 +51,19 @@ function AgentStartupCommandForm({
           every agent in the project, not just this one. Leave empty to clear it.
         </DialogDescription>
       </DialogHeader>
-      <Input
+      <Textarea
         value={startup}
         onChange={(e) => setStartup(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          // Plain Enter inserts a newline (a startup command can be multi-line);
+          // Cmd/Ctrl-Enter saves, matching the common textarea submit convention.
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault()
             void handleSave()
           }
         }}
         placeholder="npm run dev"
-        className="font-mono"
+        className="min-h-16 font-mono"
         autoFocus
       />
       <DialogFooter>

@@ -9,7 +9,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
@@ -131,11 +130,11 @@ function ProjectSettingsForm({
 
         <div className="grid gap-2">
           <label className="text-sm font-medium">Startup command</label>
-          <Input
+          <Textarea
             value={startup}
             onChange={(e) => setStartup(e.target.value)}
             placeholder="npm run dev"
-            className="font-mono"
+            className="min-h-16 font-mono"
           />
         </div>
 
