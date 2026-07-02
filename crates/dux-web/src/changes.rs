@@ -232,6 +232,14 @@ impl ChangesService {
             let Some(svc) = weak.upgrade() else {
                 return;
             };
+            // Stop polling once a shutdown is underway. The engine thread is busy
+            // in its (up to `shutdown_timeout_seconds`) grace wait and is not
+            // servicing these round-trips, so a compute issued now would only block
+            // until PER_SESSION_TIMEOUT and log a spurious timeout error during an
+            // ordinary shutdown. A clean return stops the supervisor too.
+            if svc.engine.shutdown_flag().load(Ordering::SeqCst) {
+                return;
+            }
             let sessions = svc.bus.interested_sessions();
             if !sessions.is_empty() {
                 futures_util::stream::iter(sessions)
@@ -243,6 +251,17 @@ impl ChangesService {
                                 .await
                                 .is_err()
                             {
+                                // A shutdown that began mid-compute leaves the engine
+                                // unable to answer; the timeout is then expected, not
+                                // a real failure, so don't log it as an error or
+                                // record a Warning-escalating cached error.
+                                if svc.engine.shutdown_flag().load(Ordering::SeqCst) {
+                                    dux_core::logger::debug(&format!(
+                                        "changed-files compute for session {id_for_err} \
+                                         abandoned during shutdown; not recording an error"
+                                    ));
+                                    return;
+                                }
                                 // The per-session compute exceeded its budget (a
                                 // slow/locked repo). Don't swallow it: log, then
                                 // record a cached error so the keyed-Warning streak

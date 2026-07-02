@@ -1092,6 +1092,16 @@ pub(crate) fn run_engine_loop(
             mutation_version = mutation_version.wrapping_add(1);
         }
 
+        // Reap PTYs that an individual delete/close SIGTERMed and that have now
+        // exited or passed their grace deadline (force-killed + dropped) — the
+        // non-blocking background half of graceful close. For a reaped agent whose
+        // delete also removes its worktree, dispatch that removal now, only after
+        // the agent's process is actually gone (the existing
+        // `WorktreeRemoveCompleted` path then drives its status).
+        for removal in engine.reap_terminating_ptys() {
+            let _busy = engine.dispatch_deferred_worktree_removal(removal);
+        }
+
         // Reap agent/terminal PTYs whose child process exited so they stop
         // lingering in `providers`/`companion_terminals` and disappear from the
         // spine, broadcasting a status for each so web clients learn.
@@ -1175,10 +1185,28 @@ pub(crate) fn run_engine_loop(
                     // promptly (symmetry with the flip; harmless here since the
                     // engine drop will also disconnect their channels).
                     shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    // SIGTERM children, wait briefly for them to flush state,
-                    // then mark agent sessions Detached. Handled here (not in
-                    // `handle_request`) because it must stop the loop.
-                    engine.shutdown_ptys(Duration::from_millis(1500));
+                    // SIGTERM children, wait up to the configured web grace for
+                    // them to flush state, then mark agent sessions Detached.
+                    // Handled here (not in `handle_request`) because it must stop
+                    // the loop. `shutdown_ptys` logs the start/result to dux.log;
+                    // we also echo to the `dux server` console (stderr) so an
+                    // operator running it in the foreground sees the shutdown
+                    // progress, mirroring what the TUI prints on quit.
+                    let agents = engine.providers.len();
+                    let terminals = engine.companion_terminals.len();
+                    let grace = dux_core::config::shutdown_grace(
+                        engine.config.server.shutdown_timeout_seconds,
+                    );
+                    if agents + terminals > 0 {
+                        eprintln!(
+                            "{}",
+                            dux_core::engine::format_shutdown_start(agents, terminals, grace)
+                        );
+                    }
+                    let report = engine.shutdown_ptys(grace);
+                    if report.agents_total + report.terminals_total > 0 {
+                        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+                    }
                     let _ = reply.send(());
                     disconnected = true;
                     break;
@@ -1985,7 +2013,8 @@ mod tests {
             .expect("create companion terminal");
         let (handle, join) = spawn_engine_thread(engine);
 
-        // Shutdown should ack within a reasonable window (grace is 1.5s).
+        // Shutdown should ack quickly: cat exits on SIGTERM well inside the grace
+        // window, so the configured shutdown_timeout_seconds is never reached.
         tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown())
             .await
             .expect("shutdown acked");

@@ -61,12 +61,6 @@ pub(crate) use dux_core::worker::{
 #[cfg(test)]
 pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 
-/// How long the TUI waits for SIGTERMed agent/terminal PTYs to exit on quit
-/// before their `PtyClient::drop` hard-kills any stragglers with SIGKILL. Mirrors
-/// the web server's `QUIT_PTY_GRACE` so both surfaces give children the same
-/// window to save state for a later resume.
-const QUIT_PTY_GRACE: Duration = Duration::from_millis(1500);
-
 pub struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
@@ -1610,6 +1604,7 @@ impl App {
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             companion_terminals: HashMap::new(),
+            terminating_ptys: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             pr_statuses: HashMap::new(),
             branch_sync_sessions,
@@ -2015,18 +2010,37 @@ impl App {
         Ok(result)
     }
 
-    /// SIGTERM every running agent/terminal PTY and wait up to [`QUIT_PTY_GRACE`]
-    /// for them to exit, the TUI analogue of the server's shutdown path. Runs
-    /// after the terminal is restored, so the user is back at their shell while
-    /// the (typically sub-second) wind-down happens. Prints a short note only
-    /// when there is something to wait for, so an agent-less quit stays silent.
+    /// SIGTERM every running agent/terminal PTY and wait up to the configured
+    /// `shutdown_timeout_seconds` for them to exit, the TUI analogue of the
+    /// server's shutdown path. Runs after the terminal is restored, so the user
+    /// is back at their shell while the wind-down happens. Echoes the same start
+    /// and result lines `shutdown_ptys` logs to `dux.log`, but only when there is
+    /// something to wait for — an agent-less quit stays silent.
+    ///
+    /// A second SIGINT/SIGTERM during the wait cuts it short: the run loop (the
+    /// only thing that polled `shutdown_flag`) has already exited, so we clear the
+    /// flag and hand it to `shutdown_ptys_interruptible` as an abort. Without this
+    /// a child that ignores SIGTERM would trap the operator for the full grace
+    /// (now up to the configured timeout) with only `kill -9` as an out.
     fn shutdown_agents_gracefully(&mut self) {
-        let live = self.engine.providers.len() + self.engine.companion_terminals.len();
-        if live == 0 {
+        let agents = self.engine.providers.len();
+        let terminals = self.engine.companion_terminals.len();
+        if agents + terminals == 0 {
             return;
         }
-        eprintln!("Stopping {live} running session(s) gracefully, please wait...");
-        self.engine.shutdown_ptys(QUIT_PTY_GRACE);
+        let grace = dux_core::config::shutdown_grace(self.engine.config.shutdown_timeout_seconds);
+        eprintln!(
+            "{}",
+            dux_core::engine::format_shutdown_start(agents, terminals, grace)
+        );
+        // Consume the signal that may have triggered this quit, then watch for a
+        // fresh one during the wait.
+        self.shutdown_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let report = self
+            .engine
+            .shutdown_ptys_interruptible(grace, Some(&self.shutdown_flag));
+        eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
     }
 
     fn should_poll_raw_input(&self) -> bool {
@@ -4381,6 +4395,59 @@ leading_branch = "main"
             .find(|s| s.id == "session-1")
             .unwrap();
         assert_eq!(session.status, SessionStatus::Detached);
+    }
+
+    #[test]
+    fn shutdown_agents_gracefully_uses_the_top_level_timeout_not_server() {
+        // Regression guard for the config wiring: the TUI quit path must read the
+        // top-level `shutdown_timeout_seconds`, not `[server]` and not the 30s
+        // default. We set the top-level value to 1s and the server value to a much
+        // larger 20s, then time a quit with a SIGTERM-ignoring agent. If the call
+        // site read the wrong field, the wait would be ~20s (or the 30s default)
+        // instead of ~1s.
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.engine.config.shutdown_timeout_seconds = 1;
+        app.engine.config.server.shutdown_timeout_seconds = 20;
+
+        // `trap '' TERM` makes the shell ignore SIGTERM; `echo ready` marks the
+        // trap as installed; the busy loop keeps it alive until force-killed.
+        let client = crate::pty::PtyClient::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                "trap '' TERM; echo ready; while true; do :; done".to_string(),
+            ],
+            std::path::Path::new("/tmp"),
+            24,
+            80,
+            1000,
+        )
+        .expect("spawn sigterm-ignorer for test");
+        app.engine.providers.insert("session-1".to_string(), client);
+
+        // Wait until the trap is installed before quitting.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !app.engine.providers.get("session-1").unwrap().has_output() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ignorer never readied"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let start = std::time::Instant::now();
+        app.shutdown_agents_gracefully();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(900),
+            "the 1s top-level grace should have been waited out, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "a ~1s top-level grace was configured, but the wait took {elapsed:?} — \
+             the quit path likely read [server] (20s) or the 30s default instead"
+        );
     }
 
     /// Proves the mechanism behind the TUI↔server graceful-shutdown handoff and

@@ -157,6 +157,36 @@ pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
 /// [`ServerConfig::max_websocket_terminal_connections`].
 pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
 
+/// Default seconds to wait for SIGTERMed agents/terminals to exit before
+/// force-killing them on shutdown. Shared by the top-level
+/// [`Config::shutdown_timeout_seconds`] (TUI quit) and
+/// [`ServerConfig::shutdown_timeout_seconds`] (web/`dux server`).
+pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u16 = 30;
+
+/// Hard ceiling on a configured shutdown timeout. The field is seconds, but a
+/// `u16` reaches ~18 hours, so a fat-fingered millisecond value (e.g. `30000`)
+/// would otherwise block quit — and, on the web server, the single engine
+/// thread that services every client — for that whole time. Clamping keeps a
+/// misconfiguration from wedging shutdown while still allowing any sane grace.
+pub const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
+
+/// Convert a configured `shutdown_timeout_seconds` into the grace `Duration`
+/// every shutdown path uses, clamped to [`MAX_SHUTDOWN_TIMEOUT_SECONDS`]. Logs a
+/// warning when the configured value is above the ceiling so the operator learns
+/// their setting is being capped (and is nudged that the unit is seconds, not
+/// milliseconds). Centralized so the TUI quit, the web flip, and `dux server`
+/// all derive the grace identically.
+pub fn shutdown_grace(seconds: u16) -> std::time::Duration {
+    if seconds > MAX_SHUTDOWN_TIMEOUT_SECONDS {
+        crate::logger::warn(&format!(
+            "shutdown_timeout_seconds = {seconds} exceeds the maximum of \
+             {MAX_SHUTDOWN_TIMEOUT_SECONDS}s and is being clamped (the value is in \
+             SECONDS, not milliseconds)."
+        ));
+    }
+    std::time::Duration::from_secs(u64::from(seconds.min(MAX_SHUTDOWN_TIMEOUT_SECONDS)))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -227,6 +257,14 @@ pub struct ServerConfig {
     /// custom favicon URL beginning with "http://", "https://", or "/".
     /// Unrecognized values fall back to the bundled logo.
     pub favicon: String,
+    /// Seconds the web server (`dux server`, or the server flipped from the TUI)
+    /// waits for agents and companion terminals to exit after SIGTERM on
+    /// shutdown, before force-killing (SIGKILL) any stragglers. `0` skips the
+    /// wait and force-kills immediately; values above
+    /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`] are clamped. A second Ctrl-C/SIGTERM
+    /// during the wait forces an immediate exit. The TUI quit path uses the
+    /// top-level `shutdown_timeout_seconds` instead. Default 30.
+    pub shutdown_timeout_seconds: u16,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -390,6 +428,7 @@ impl Default for ServerConfig {
             max_websocket_terminal_connections: DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
             title: "dux".to_string(),
             favicon: String::new(),
+            shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
         }
     }
 }
@@ -803,6 +842,16 @@ fn is_valid_var_name(name: &str) -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Seconds the TUI waits for agents and companion terminals to exit after
+    /// SIGTERM when quitting, before force-killing (SIGKILL) any stragglers.
+    /// `0` skips the wait and force-kills immediately; values above
+    /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`] are clamped (the unit is seconds, not
+    /// milliseconds). A second Ctrl-C/SIGTERM during the wait cuts it short. A
+    /// top-level (not `[ui]`/`[server]`) key because it is a global lifecycle
+    /// knob. This governs the plain TUI quit; once the TUI is flipped into server
+    /// mode, that shutdown uses `[server].shutdown_timeout_seconds` instead (even
+    /// though you started in the TUI).
+    pub shutdown_timeout_seconds: u16,
     pub defaults: Defaults,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -847,6 +896,7 @@ impl Default for KeysConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
             defaults: Defaults::default(),
             env: BTreeMap::new(),
             providers: ProvidersConfig::default(),
@@ -1362,6 +1412,29 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn shutdown_grace_converts_and_clamps_to_the_ceiling() {
+        use std::time::Duration;
+        // 0 = immediate force; ordinary values pass through as seconds.
+        assert_eq!(shutdown_grace(0), Duration::ZERO);
+        assert_eq!(shutdown_grace(30), Duration::from_secs(30));
+        // At and below the ceiling, unchanged.
+        assert_eq!(
+            shutdown_grace(MAX_SHUTDOWN_TIMEOUT_SECONDS),
+            Duration::from_secs(u64::from(MAX_SHUTDOWN_TIMEOUT_SECONDS))
+        );
+        // A fat-fingered millisecond value (e.g. 30000) is clamped to the ceiling
+        // rather than blocking shutdown for hours.
+        assert_eq!(
+            shutdown_grace(30_000),
+            Duration::from_secs(u64::from(MAX_SHUTDOWN_TIMEOUT_SECONDS))
+        );
+        assert_eq!(
+            shutdown_grace(u16::MAX),
+            Duration::from_secs(u64::from(MAX_SHUTDOWN_TIMEOUT_SECONDS))
+        );
+    }
 
     #[test]
     fn validate_config_str_accepts_a_full_render_and_rejects_garbage() {

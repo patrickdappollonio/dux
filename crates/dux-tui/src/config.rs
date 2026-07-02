@@ -372,6 +372,19 @@ fn config_schema() -> Vec<ConfigEntry> {
             "# Every value is materialized here so the file doubles as documentation.",
         ),
         ConfigEntry::Blank,
+        ConfigEntry::Field {
+            key: "shutdown_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds the TUI waits for running agents and companion terminals to exit\n\
+                 # after SIGTERM when you quit, before force-killing (SIGKILL) any that ignore\n\
+                 # it. Set to 0 to skip the wait and force-kill immediately; values above 600\n\
+                 # are clamped (the unit is SECONDS, not milliseconds). Press Ctrl-C again\n\
+                 # during the wait to force an immediate exit.\n\
+                 # The web server has its own [server].shutdown_timeout_seconds.",
+            )),
+            value_fn: |c| FieldValue::U16(c.shutdown_timeout_seconds),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Section("defaults"),
         ConfigEntry::Field {
             key: "provider",
@@ -706,6 +719,18 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # An unrecognized value falls back to the bundled logo.",
             )),
             value_fn: |c| FieldValue::Str(c.server.favicon.clone()),
+        },
+        ConfigEntry::Field {
+            key: "shutdown_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds the web server (dux server, or a server flipped from the TUI)\n\
+                 # waits for agents and companion terminals to exit after SIGTERM on\n\
+                 # shutdown, before force-killing (SIGKILL) any stragglers. Set to 0 to\n\
+                 # skip the wait and force-kill immediately; values above 600 are clamped.\n\
+                 # A second Ctrl-C/SIGTERM during the wait forces an immediate exit.\n\
+                 # The TUI quit path uses the top-level shutdown_timeout_seconds instead.",
+            )),
+            value_fn: |c| FieldValue::U16(c.server.shutdown_timeout_seconds),
         },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
@@ -1481,6 +1506,48 @@ name = "test"
             rendered, re_rendered,
             "render → parse → render should be stable"
         );
+    }
+
+    #[test]
+    fn shutdown_timeout_keys_render_in_correct_sections() {
+        let rendered = render_default_config();
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        // The top-level key must render before the first table header, or TOML
+        // would bind it to a table.
+        let root_line = lines
+            .iter()
+            .position(|l| l.trim() == "shutdown_timeout_seconds = 30")
+            .expect("top-level shutdown_timeout_seconds line present");
+        let defaults_line = lines
+            .iter()
+            .position(|l| l.trim() == "[defaults]")
+            .expect("[defaults] header present");
+        assert!(
+            root_line < defaults_line,
+            "top-level shutdown_timeout_seconds must render before [defaults]:\n{rendered}"
+        );
+
+        // The server key must render under [server].
+        let server_line = lines
+            .iter()
+            .position(|l| l.trim() == "[server]")
+            .expect("[server] header present");
+        let server_key_line = lines
+            .iter()
+            .enumerate()
+            .skip(server_line + 1)
+            .position(|(_, l)| l.trim() == "shutdown_timeout_seconds = 30")
+            .map(|p| p + server_line + 1);
+        assert!(
+            server_key_line.is_some(),
+            "[server].shutdown_timeout_seconds must render under [server]:\n{rendered}"
+        );
+
+        // And both parse back to their defaults.
+        let parsed: Config = toml::from_str(&rendered).expect("rendered default parses");
+        assert_eq!(parsed.shutdown_timeout_seconds, 30);
+        assert_eq!(parsed.server.shutdown_timeout_seconds, 30);
     }
 
     #[test]

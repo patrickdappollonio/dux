@@ -934,6 +934,32 @@ impl PtyClient {
         }
     }
 
+    /// Hard-kill the child's whole process group (SIGKILL) — the forceful
+    /// counterpart to [`terminate`]. `shutdown_ptys` calls this for any child
+    /// that has not exited once the grace period elapses, so the "force-closing"
+    /// log line is truthful at the instant it prints rather than relying solely
+    /// on the SIGKILL in `Drop`. Signals the group (not just the lone PID) for
+    /// the same `setsid` reason `terminate` and `Drop` do. `Drop` remains the
+    /// backstop for any path that never calls this.
+    ///
+    /// A genuine failure (anything but `ESRCH`, which just means the group is
+    /// already gone) is logged at WARN: this is a deliberate, operator-visible
+    /// shutdown action, and a SIGKILL that did not land leaves a child running
+    /// while `shutdown_ptys` reports it force-closed, so it must leave a trace
+    /// (mirrors the `Drop` breadcrumb, louder because the context is explicit).
+    pub fn force_terminate(&self) {
+        if let Some(pid) = self.child_process_id()
+            && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+            && let Err(err) =
+                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+            && err != rustix::io::Errno::SRCH
+        {
+            logger::warn(&format!(
+                "PtyClient::force_terminate: kill_process_group failed: {err}"
+            ));
+        }
+    }
+
     /// Returns the name of the foreground process running in this PTY, or
     /// `None` if the shell itself is in the foreground (idle).
     ///

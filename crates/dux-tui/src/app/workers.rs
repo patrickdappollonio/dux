@@ -78,6 +78,14 @@ impl App {
             }
         }
         self.retry_hung_resume_sessions();
+        // Reap PTYs that an individual delete/close SIGTERMed and that have now
+        // exited or passed their grace deadline (force-killed + dropped) — the
+        // non-blocking background half of graceful close. For a reaped agent whose
+        // delete also removes its worktree, dispatch that removal now, only after
+        // the agent's process is actually gone.
+        for removal in self.engine.reap_terminating_ptys() {
+            let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
+        }
         // Detect PTY exits.
         let mut exited = Vec::new();
         for (session_id, provider) in &mut self.engine.providers {
@@ -704,12 +712,25 @@ impl App {
                     }
                     BeginDeleteSessionOutcome::NotFound => {}
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
-                        // Mint a keyed HandlerStatusOp, show its pending busy, and
-                        // stash it keyed by session id so the completion handler
-                        // resolves exactly this spinner.
-                        let op = self.build_delete_status_op(&session_id, busy_message);
-                        self.apply_reaction(EventReaction::Status(op.pending_status()));
-                        self.pending_delete_ops.insert(session_id.clone(), op);
+                        // The agent PTY + its terminals are already SIGTERMed and
+                        // held for a background reap. Vanish the session now
+                        // (update_status=false: the worktree busy op below is the
+                        // only status until the removal completes), then mint a
+                        // keyed HandlerStatusOp so the deferred worktree removal's
+                        // `WorktreeRemoveCompleted` resolves exactly this spinner.
+                        if let Err(e) = self.finish_delete_session(
+                            &session_id,
+                            WorktreeRemoval::Performed {
+                                branch_already_deleted: false,
+                            },
+                            false,
+                        ) {
+                            self.set_error(format!("Failed to delete agent: {e:#}"));
+                        } else {
+                            let op = self.build_delete_status_op(&session_id, busy_message);
+                            self.apply_reaction(EventReaction::Status(op.pending_status()));
+                            self.pending_delete_ops.insert(session_id.clone(), op);
+                        }
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {
                         if let Err(e) = self.finish_delete_session(&session_id, removal, true) {

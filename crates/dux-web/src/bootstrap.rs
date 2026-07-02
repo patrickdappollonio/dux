@@ -104,6 +104,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),
+        terminating_ptys: Vec::new(),
         gh_status: GhStatus::Unknown,
         pr_statuses: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),

@@ -474,10 +474,6 @@ pub enum ServerExit {
     QuitProcess,
 }
 
-/// Grace period given to agent/terminal children to flush state on a quit, the
-/// same window the dedicated-thread `Shutdown` path uses.
-const QUIT_PTY_GRACE: Duration = Duration::from_millis(1500);
-
 /// Upper bound on how long the flip waits for the axum server task to finish
 /// after graceful shutdown is triggered. A wedged client connection must not be
 /// able to hang the flip back to the TUI, so we cap the join and tear the
@@ -799,19 +795,41 @@ pub fn serve_with_engine(
         })
         .await;
     });
+    if matches!(exit, ServerExit::QuitProcess) {
+        // Quit teardown: SIGTERM the children so CLIs can save state for a later
+        // resume, mark agent sessions Detached. We own the engine here, so we
+        // call `shutdown_ptys` directly (the dedicated-thread path routes the
+        // equivalent through the `Shutdown` request). The grace window is the
+        // configured `[server].shutdown_timeout_seconds` (web mode, even though
+        // this was flipped from the TUI); `shutdown_ptys` logs to dux.log and we
+        // also echo to the server console.
+        //
+        // Crucially this runs BEFORE `runtime.shutdown_timeout` below: the wait
+        // can now last up to the configured grace, and `shutdown_signal`'s
+        // second-signal watcher is a task on this still-alive runtime, so a second
+        // Ctrl-C/SIGTERM during the wait force-exits (130) instead of trapping the
+        // operator behind a child that ignores SIGTERM. Tearing the runtime down
+        // first (as before) would kill that watcher and remove the escape hatch.
+        let agents = engine.providers.len();
+        let terminals = engine.companion_terminals.len();
+        if agents + terminals > 0 {
+            let grace =
+                dux_core::config::shutdown_grace(engine.config.server.shutdown_timeout_seconds);
+            eprintln!(
+                "{}",
+                dux_core::engine::format_shutdown_start(agents, terminals, grace)
+            );
+            let report = engine.shutdown_ptys(grace);
+            eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+        }
+    }
+
     // Tear the runtime down with a bounded timeout. An implicit `drop(runtime)`
     // would block forever on any parked `spawn_blocking` task (drop cannot abort
     // them); `shutdown_timeout` detaches stragglers instead, so the flip cannot
     // wedge even if a forwarder were somehow still blocked.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
-    if matches!(exit, ServerExit::QuitProcess) {
-        // Quit teardown: SIGTERM the children so CLIs can save state for a later
-        // resume, mark agent sessions Detached. We own the engine here, so we
-        // call `shutdown_ptys` directly (the dedicated-thread path routes the
-        // equivalent through the `Shutdown` request).
-        engine.shutdown_ptys(QUIT_PTY_GRACE);
-    }
     // ReturnToTui intentionally leaves PTYs untouched so the resumed TUI finds
     // the same live agents.
     //

@@ -25,7 +25,10 @@ pub use events::{
     ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
 };
 pub use in_flight::{InFlightKey, InFlightSet};
-pub use lifecycle::{PrunedPty, PrunedPtyKind};
+pub use lifecycle::{
+    DeferredWorktreeRemoval, PrunedPty, PrunedPtyKind, ShutdownReport, TerminatingPty,
+    format_shutdown_result, format_shutdown_start,
+};
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
     BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec, format_panic_payload,
@@ -100,6 +103,13 @@ pub struct Engine {
     /// the agent. Cleared whenever the PTY is torn down.
     pub running_provider_pins: HashMap<String, ProviderKind>,
     pub companion_terminals: HashMap<String, CompanionTerminal>,
+    /// Agent/terminal PTYs that have been SIGTERMed on an individual delete or
+    /// close and are being given a grace period to exit before they are
+    /// force-killed (SIGKILL) — the non-blocking, per-PTY analogue of
+    /// `shutdown_ptys`. They live here (not dropped from their maps) because
+    /// `PtyClient::drop` hard-kills; `reap_terminating_ptys`, called each engine
+    /// tick on both surfaces, drops them once they exit or their deadline passes.
+    pub terminating_ptys: Vec<TerminatingPty>,
     pub gh_status: GhStatus,
     pub pr_statuses: HashMap<String, PrInfo>,
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,

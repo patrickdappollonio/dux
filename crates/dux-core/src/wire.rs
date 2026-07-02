@@ -2142,6 +2142,17 @@ impl Engine {
                         let pending = WireStatus::from_update(&op.pending_status());
                         self.pending_delete_ops_web
                             .insert(view.session_id.clone(), op);
+                        // Vanish the session now — its PTY + terminals are already
+                        // SIGTERMed and held for a background reap. update_status
+                        // is false so the busy op above stays the only status
+                        // until the deferred worktree removal completes.
+                        let _ = self.apply(Command::FinishDeleteSession {
+                            session_id: view.session_id.clone(),
+                            removal: WorktreeRemoval::Performed {
+                                branch_already_deleted: false,
+                            },
+                            update_status: false,
+                        });
                         vec![pending]
                     }
                     BeginDeleteSessionOutcome::Inline { removal } => {
@@ -5645,11 +5656,12 @@ mod tests {
     }
 
     #[test]
-    fn drive_delete_followup_resolves_op_on_success_present() {
-        // The async success path with the session still present: AsyncStarted
-        // mints the keyed op, then WorktreeRemoveSucceeded runs the cascade and
-        // resolves THAT op so the busy is replaced by its same-key final with the
-        // byte-identical web wording.
+    fn drive_delete_followup_async_vanishes_session_then_resolves_on_completion() {
+        // Graceful flow: AsyncStarted means the agent PTY is already SIGTERMed and
+        // held for a background reap, so the web VANISHES the session immediately
+        // and keeps a keyed busy op for the deferred worktree removal. By the time
+        // WorktreeRemoveCompleted reports back, the session is gone, so the op
+        // resolves via the "gone" final wording.
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         let session = sample_session("s1", "p1", "feat");
@@ -5666,6 +5678,10 @@ mod tests {
         ));
         let busy = engine.drive_delete_followup(&begin);
         let busy_key = busy[0].key.clone().expect("busy key");
+        assert!(
+            !engine.sessions.iter().any(|s| s.id == "s1"),
+            "the session vanishes from the spine immediately, not after removal"
+        );
 
         let reaction = EventReaction::WorktreeRemoveSucceeded {
             session_id: "s1".to_string(),
@@ -5676,12 +5692,7 @@ mod tests {
         assert_eq!(statuses.len(), 1, "expected one final: {statuses:?}");
         assert_eq!(statuses[0].key.as_deref(), Some(busy_key.as_str()));
         assert_eq!(statuses[0].tone, "info");
-        assert!(
-            statuses[0].message.contains("Deleted agent")
-                && statuses[0].message.contains("removed its worktree"),
-            "unexpected status: {}",
-            statuses[0].message
-        );
+        assert_eq!(statuses[0].message, "Agent and worktree removed.");
         assert!(
             engine.pending_delete_ops_web.is_empty(),
             "op must be consumed on resolution"
