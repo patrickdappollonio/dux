@@ -519,6 +519,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.github_integration),
         },
         ConfigEntry::Field {
+            key: "copy_on_select",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; a right-click menu and Ctrl-Shift-C /\n# Ctrl-Insert copy regardless. Toggle at runtime from the web command palette.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
+        },
+        ConfigEntry::Field {
             key: "auto_reopen_agents",
             comment: Some(CommentSource::Static(
                 "# Reopen agent PTYs that were still running when dux last exited.\n# Disabled by default. Toggle project-level and agent-level opt-outs from the command palette.",
@@ -1258,6 +1265,7 @@ mod tests {
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
+        assert!(rendered.contains("copy_on_select = true"));
         assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));

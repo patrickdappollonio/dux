@@ -198,6 +198,11 @@ pub enum WireCommand {
     /// talking to `gh`. The write is eager because the user wants to know if
     /// persisting the toggle failed.
     ToggleGithubIntegration {},
+    /// Flip `ui.copy_on_select` and persist it, mirroring the web
+    /// `toggle-copy-on-select` palette command. The next `config.changed` refetch
+    /// carries the new value so the web terminal enables or disables
+    /// highlight-to-copy. Low-stakes preference, lazy write.
+    ToggleCopyOnSelect {},
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
     /// worktree, the web counterpart to the TUI's kill-running modal (for one
     /// agent). Mirrors the force-reconnect teardown block but stops there (no
@@ -432,6 +437,7 @@ impl WireCommand {
                 | WireCommand::SetChangesPaneVisible { .. }
                 | WireCommand::ToggleRandomizedPetNameDefault {}
                 | WireCommand::TogglePrBannerPosition {}
+                | WireCommand::ToggleCopyOnSelect {}
                 | WireCommand::ToggleGithubIntegration {}
         )
     }
@@ -753,6 +759,13 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::ToggleCopyOnSelect {} => {
+                let status = self.toggle_copy_on_select();
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
                 return Ok(WireCommandOutcome {
@@ -867,6 +880,20 @@ impl Engine {
             "info",
             format!("PR banner moved to the {next} of the agent pane."),
         )
+    }
+
+    /// Flip `ui.copy_on_select` and persist it, mirroring the web
+    /// `toggle-copy-on-select` palette command. Low-stakes preference, lazy write.
+    fn toggle_copy_on_select(&mut self) -> WireStatus {
+        let next = !self.config.ui.copy_on_select;
+        self.config.ui.copy_on_select = next;
+        self.config_writer.save_lazy(self.config.clone());
+        let message = if next {
+            "Copy-on-select enabled. Selecting terminal text now copies it to the clipboard."
+        } else {
+            "Copy-on-select disabled. Use Ctrl-Shift-C, the right-click menu, or Ctrl-Insert to copy."
+        };
+        WireStatus::new("info", message.to_string())
     }
 
     /// Flip `ui.github_integration` and persist it, mirroring the TUI's
@@ -2514,10 +2541,11 @@ impl Engine {
             | WireCommand::SetChangesPaneVisible { .. }
             | WireCommand::ToggleRandomizedPetNameDefault {}
             | WireCommand::TogglePrBannerPosition {}
+            | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
             | WireCommand::KillSessionPty { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-github-integration/kill-session-pty are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/kill-session-pty are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -3266,6 +3294,10 @@ mod tests {
             (
                 r#"{"command":"toggle_github_integration","args":{}}"#,
                 WireCommand::ToggleGithubIntegration {},
+            ),
+            (
+                r#"{"command":"toggle_copy_on_select","args":{}}"#,
+                WireCommand::ToggleCopyOnSelect {},
             ),
         ] {
             let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");

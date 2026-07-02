@@ -445,6 +445,15 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
+        action: Action::ToggleCopyOnSelect,
+        name: "toggle-copy-on-select",
+        description: "Toggle auto-copying selected terminal text (web only)",
+        // Web-only: WireCommand::ToggleCopyOnSelect flips ui.copy_on_select. The
+        // behavior (highlight-to-copy) exists only in the browser terminal, so it
+        // is not surfaced in the TUI palette.
+        surface: PaletteSurface::Web,
+    },
+    PaletteCommand {
         action: Action::ToggleRandomizedPetNameDefault,
         name: "toggle-randomized-pet-name-default",
         description: "Toggle whether new agent prompts start with a random pet name",
@@ -525,6 +534,7 @@ mod tests {
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",
+            "toggle-copy-on-select",
             "toggle-github-integration",
             "toggle-pr-banner-position",
             "toggle-randomized-pet-name-default",

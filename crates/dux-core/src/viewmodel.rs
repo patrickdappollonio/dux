@@ -65,6 +65,10 @@ pub struct BootstrapView {
     /// reachable (a banner the user can't currently see is still a real
     /// preference once `gh` comes back).
     pub github_integration: bool,
+    /// Mirrors `config.ui.copy_on_select`: whether selecting text in the web
+    /// terminal auto-copies it (default true). Read by the terminal pane and the
+    /// web command palette's toggle.
+    pub copy_on_select: bool,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
@@ -405,6 +409,7 @@ impl Engine {
                 .enable_randomized_pet_name_by_default,
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
+            copy_on_select: self.config.ui.copy_on_select,
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
@@ -996,6 +1001,7 @@ mod tests {
             "randomize_agent_names_by_default",
             "gh_available",
             "github_integration",
+            "copy_on_select",
             "pr_banner_position",
             "agent_scrollback_lines",
             "show_changes_pane",

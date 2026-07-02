@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest"
 
-import { applyModifiers, arrowSeq, ctrlByte, ESC, TAB } from "./termkeys"
+import {
+  applyModifiers,
+  arrowSeq,
+  classifyClipboardKey,
+  type ClipboardKeyEvent,
+  ctrlByte,
+  ESC,
+  TAB,
+} from "./termkeys"
 
 describe("constants", () => {
   it("ESC is the ASCII escape byte", () => {
@@ -104,5 +112,129 @@ describe("applyModifiers", () => {
     expect(applyModifiers(chunk, { ctrl: true, alt: false })).toBe(chunk)
     expect(applyModifiers(chunk, { ctrl: false, alt: true })).toBe(chunk)
     expect(applyModifiers(chunk, { ctrl: true, alt: true })).toBe(chunk)
+  })
+})
+
+describe("classifyClipboardKey", () => {
+  // Build a key event with every field defaulted; tests override only what
+  // matters. `code` is the physical-key signal we classify on (NOT `key`).
+  const ev = (over: Partial<ClipboardKeyEvent>): ClipboardKeyEvent => ({
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    metaKey: false,
+    code: "",
+    keyCode: 0,
+    isMac: false,
+    ...over,
+  })
+
+  it("keeps Ctrl-C as passthrough so it still sends SIGINT (non-mac)", () => {
+    expect(classifyClipboardKey(ev({ ctrlKey: true, code: "KeyC", keyCode: 67 }))).toBe(
+      "passthrough",
+    )
+  })
+
+  it("copies on Ctrl-Shift-C (non-mac)", () => {
+    expect(
+      classifyClipboardKey(ev({ ctrlKey: true, shiftKey: true, code: "KeyC", keyCode: 67 })),
+    ).toBe("copy")
+  })
+
+  it("copies on Ctrl-Insert (the Chrome-safe chord)", () => {
+    expect(classifyClipboardKey(ev({ ctrlKey: true, code: "Insert", keyCode: 45 }))).toBe(
+      "copy",
+    )
+  })
+
+  it("pastes on Ctrl-V (non-mac)", () => {
+    expect(classifyClipboardKey(ev({ ctrlKey: true, code: "KeyV", keyCode: 86 }))).toBe(
+      "paste",
+    )
+  })
+
+  it("pastes on Ctrl-Shift-V (non-mac)", () => {
+    expect(
+      classifyClipboardKey(ev({ ctrlKey: true, shiftKey: true, code: "KeyV", keyCode: 86 })),
+    ).toBe("paste")
+  })
+
+  it("passes Shift-Insert through (browser/OS default, not our clipboard)", () => {
+    expect(classifyClipboardKey(ev({ shiftKey: true, code: "Insert", keyCode: 45 }))).toBe(
+      "passthrough",
+    )
+  })
+
+  it("passes Cmd-C and Cmd-V through so the browser does native copy/paste", () => {
+    expect(classifyClipboardKey(ev({ metaKey: true, code: "KeyC", keyCode: 67 }))).toBe(
+      "passthrough",
+    )
+    expect(classifyClipboardKey(ev({ metaKey: true, code: "KeyV", keyCode: 86 }))).toBe(
+      "passthrough",
+    )
+  })
+
+  describe("mac: Control passes through to the app, Ctrl-Shift aliases still work", () => {
+    it("passes mac Control-V through (vim visual-block / verbatim survive)", () => {
+      expect(
+        classifyClipboardKey(ev({ ctrlKey: true, code: "KeyV", keyCode: 86, isMac: true })),
+      ).toBe("passthrough")
+    })
+
+    it("passes mac Control-C through (SIGINT)", () => {
+      expect(
+        classifyClipboardKey(ev({ ctrlKey: true, code: "KeyC", keyCode: 67, isMac: true })),
+      ).toBe("passthrough")
+    })
+
+    it("still copies on mac Ctrl-Shift-C", () => {
+      expect(
+        classifyClipboardKey(
+          ev({ ctrlKey: true, shiftKey: true, code: "KeyC", keyCode: 67, isMac: true }),
+        ),
+      ).toBe("copy")
+    })
+
+    it("still pastes on mac Ctrl-Shift-V", () => {
+      expect(
+        classifyClipboardKey(
+          ev({ ctrlKey: true, shiftKey: true, code: "KeyV", keyCode: 86, isMac: true }),
+        ),
+      ).toBe("paste")
+    })
+  })
+
+  it("passes plain keys and non-clipboard chords through", () => {
+    expect(classifyClipboardKey(ev({ code: "KeyV", keyCode: 86 }))).toBe("passthrough")
+    expect(classifyClipboardKey(ev({ code: "KeyC", keyCode: 67 }))).toBe("passthrough")
+    // Ctrl-Alt-V is excluded so AltGr/Meta chords reach the app.
+    expect(
+      classifyClipboardKey(ev({ ctrlKey: true, altKey: true, code: "KeyV", keyCode: 86 })),
+    ).toBe("passthrough")
+    // Ctrl-1 is not a clipboard chord.
+    expect(classifyClipboardKey(ev({ ctrlKey: true, code: "Digit1", keyCode: 49 }))).toBe(
+      "passthrough",
+    )
+  })
+
+  it("classifies by physical key, not ev.key — so non-Latin layouts still work", () => {
+    // A Cyrillic layout types 'м' on the physical V key, but `code` is still
+    // 'KeyV'. We must intercept it (xterm would otherwise emit \x16 by keyCode).
+    expect(
+      classifyClipboardKey(ev({ ctrlKey: true, code: "KeyV", keyCode: 86 })),
+    ).toBe("paste")
+  })
+
+  it("falls back to keyCode when code is empty", () => {
+    expect(classifyClipboardKey(ev({ ctrlKey: true, code: "", keyCode: 86 }))).toBe("paste")
+    expect(
+      classifyClipboardKey(ev({ ctrlKey: true, shiftKey: true, code: "", keyCode: 67 })),
+    ).toBe("copy")
+  })
+
+  it("is safe when both code and keyCode are unset (synthetic/IME)", () => {
+    expect(classifyClipboardKey(ev({ ctrlKey: true, code: "", keyCode: 0 }))).toBe(
+      "passthrough",
+    )
   })
 })

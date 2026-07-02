@@ -36,6 +36,9 @@ export interface Bootstrap {
    * composite). The palette hides the PR-banner-position command when this is
    * false — i.e. when integration is OFF, not merely when `gh` is unreachable. */
   github_integration: boolean
+  /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
+   * terminal auto-copies it to the clipboard (default true). */
+  copy_on_select: boolean
   /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below
    * the terminal, anything else above. (Server sends a free string; the two
    * known values are the only ones the UI branches on.) */

@@ -56,6 +56,9 @@ export const configApi = {
   // Flip GitHub PR integration (and its engine-side PR-sync side effects).
   toggleGithubIntegration: () =>
     send("POST", "/api/v1/ui/toggle-github-integration", {}),
+  // Flip whether selecting text in the web terminal auto-copies it.
+  toggleCopyOnSelect: () =>
+    send("POST", "/api/v1/ui/toggle-copy-on-select", {}),
   // Read the raw config.toml text for the Monaco editor. Returns the file
   // verbatim (or the plain render of the running config if none exists yet).
   readRawConfig: async (): Promise<string> => {

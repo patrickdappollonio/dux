@@ -15,6 +15,7 @@
 //!   pet-name default.
 //! - `POST /api/v1/ui/toggle-pr-banner-position` — swap the PR banner top/bottom.
 //! - `POST /api/v1/ui/toggle-github-integration` — flip GitHub PR integration.
+//! - `POST /api/v1/ui/toggle-copy-on-select` — flip web-terminal copy-on-select.
 //!
 //! On a successful config change the engine emits a `config.changed` event (via
 //! the Phase 2 forwarder in `server.rs`), so subscribed clients refetch
@@ -54,6 +55,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/ui/toggle-github-integration",
             post(toggle_github_integration),
+        )
+        .route(
+            "/api/v1/ui/toggle-copy-on-select",
+            post(toggle_copy_on_select),
         )
         .route(
             "/api/v1/config/raw",
@@ -173,6 +178,12 @@ async fn toggle_pr_banner_position(State(state): State<AppState>, headers: Heade
 /// (`ui.github_integration`) and its engine-side PR-sync side effects.
 async fn toggle_github_integration(State(state): State<AppState>, headers: HeaderMap) -> Response {
     dispatch(&state, &headers, WireCommand::ToggleGithubIntegration {}).await
+}
+
+/// `POST /api/v1/ui/toggle-copy-on-select`. Flip whether selecting text in the
+/// web terminal auto-copies it (`ui.copy_on_select`).
+async fn toggle_copy_on_select(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    dispatch(&state, &headers, WireCommand::ToggleCopyOnSelect {}).await
 }
 
 // ── Raw config editor (Monaco) ───────────────────────────────────────────────
@@ -386,6 +397,7 @@ mod tests {
             "/api/v1/defaults/toggle-randomized-pet-name",
             "/api/v1/ui/toggle-pr-banner-position",
             "/api/v1/ui/toggle-github-integration",
+            "/api/v1/ui/toggle-copy-on-select",
         ] {
             let (_tmp, app) = router_no_auth();
             let resp = app

@@ -130,3 +130,65 @@ export function applyModifiers(
   }
   return out
 }
+
+/** What the terminal should do with a clipboard key chord. */
+export type ClipboardKeyAction = "copy" | "paste" | "passthrough"
+
+/**
+ * The minimal slice of a `KeyboardEvent` the clipboard classifier reads. We
+ * deliberately omit `key`: xterm decides `Ctrl-V`->`\x16` POSITIONALLY by
+ * `keyCode`, so we must match the same physical-key signal it uses. Keying off
+ * `key` would silently miss on non-Latin layouts (where the V key types e.g.
+ * Cyrillic `м`) and let xterm leak `\x16` to the remote agent — the original
+ * remote-clipboard bug. `isMac` is supplied by the caller so this stays pure.
+ */
+export interface ClipboardKeyEvent {
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  metaKey: boolean
+  code: string
+  keyCode: number
+  isMac: boolean
+}
+
+/**
+ * Classifies a keydown into a clipboard action for the web terminal.
+ *
+ * - `copy`        -> the caller copies `term.getSelection()` (Ctrl-Shift-C, Ctrl-Insert).
+ * - `paste`       -> the caller lets the browser's native paste event flow (Ctrl-V, Ctrl-Shift-V).
+ * - `passthrough` -> xterm handles the key normally (Ctrl-C stays SIGINT, plain
+ *                    typing is untouched, mac Cmd/Control fall through to the app/browser).
+ *
+ * Matching is by physical key (`code`, falling back to `keyCode` when `code` is
+ * empty) so it works across keyboard layouts. See `ClipboardKeyEvent`.
+ */
+export function classifyClipboardKey(ev: ClipboardKeyEvent): ClipboardKeyAction {
+  // Cmd combos (mac) are left entirely to the browser's native copy/paste.
+  if (ev.metaKey) return "passthrough"
+
+  const matches = (code: string, keyCode: number): boolean =>
+    ev.code === code || (ev.code === "" && ev.keyCode === keyCode)
+  const isV = matches("KeyV", 86)
+  const isC = matches("KeyC", 67)
+  const isInsert = matches("Insert", 45)
+
+  // On macOS, Cmd already drives the clipboard, so a lone Control modifier must
+  // keep reaching the app (vim visual-block, readline verbatim-insert, SIGINT).
+  // The Ctrl-Shift aliases below still apply because they also carry Shift.
+  if (ev.isMac && ev.ctrlKey && !ev.shiftKey && !ev.altKey) return "passthrough"
+
+  // Alt as a third level (AltGr / Meta) is never a clipboard chord.
+  if (ev.altKey) return "passthrough"
+
+  if (ev.ctrlKey && ev.shiftKey && isC) return "copy"
+  if (ev.ctrlKey && ev.shiftKey && isV) return "paste"
+  if (ev.ctrlKey && !ev.shiftKey && isV) return "paste"
+  // Ctrl-C without Shift stays SIGINT (`\x03`) — explicit for intent.
+  if (ev.ctrlKey && !ev.shiftKey && isC) return "passthrough"
+  if (ev.ctrlKey && isInsert) return "copy"
+
+  // Shift-Insert (browser/OS default paste, source-dependent) and everything
+  // else is left to xterm / the browser.
+  return "passthrough"
+}
