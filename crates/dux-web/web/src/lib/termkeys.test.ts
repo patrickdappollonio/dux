@@ -6,6 +6,8 @@ import {
   ctrlByte,
   ESC,
   LF,
+  pageKeySeq,
+  sgrWheelSeq,
   softNewline,
   softNewlineAction,
   TAB,
@@ -211,6 +213,48 @@ describe("arrowSeq", () => {
     expect(arrowSeq("down", true)).toBe(`${ESC}OB`)
     expect(arrowSeq("right", true)).toBe(`${ESC}OC`)
     expect(arrowSeq("left", true)).toBe(`${ESC}OD`)
+  })
+})
+
+describe("sgrWheelSeq", () => {
+  // SGR press form: ESC [ < Cb ; Col ; Row M. Button 64 = wheel up (older
+  // output), 65 = wheel down (newer). `lines` is signed like xterm's
+  // scrollLines(): NEGATIVE reveals older output (wheel up), POSITIVE newer.
+  it("emits a wheel-UP (button 64) event for negative lines (reveal older)", () => {
+    expect(sgrWheelSeq(-1, 3, 7)).toBe(`${ESC}[<64;3;7M`)
+  })
+
+  it("emits a wheel-DOWN (button 65) event for positive lines (reveal newer)", () => {
+    expect(sgrWheelSeq(1, 3, 7)).toBe(`${ESC}[<65;3;7M`)
+  })
+
+  it("stacks one wheel event per line, preserving direction", () => {
+    expect(sgrWheelSeq(-3, 1, 1)).toBe(
+      `${ESC}[<64;1;1M${ESC}[<64;1;1M${ESC}[<64;1;1M`,
+    )
+    expect(sgrWheelSeq(2, 1, 1)).toBe(`${ESC}[<65;1;1M${ESC}[<65;1;1M`)
+  })
+
+  it("returns an empty string for a zero scroll", () => {
+    expect(sgrWheelSeq(0, 5, 5)).toBe("")
+  })
+
+  it("clamps the cell to a 1-based minimum so an out-of-bounds touch is valid", () => {
+    expect(sgrWheelSeq(-1, 0, -4)).toBe(`${ESC}[<64;1;1M`)
+  })
+
+  it("truncates fractional line counts and coordinates", () => {
+    expect(sgrWheelSeq(-1.9, 2.8, 4.2)).toBe(`${ESC}[<64;2;4M`)
+  })
+})
+
+describe("pageKeySeq", () => {
+  it("emits the PgUp escape for up", () => {
+    expect(pageKeySeq("up")).toBe(`${ESC}[5~`)
+  })
+
+  it("emits the PgDn escape for down", () => {
+    expect(pageKeySeq("down")).toBe(`${ESC}[6~`)
   })
 })
 

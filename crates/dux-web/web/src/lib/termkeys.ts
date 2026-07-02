@@ -116,6 +116,47 @@ export function arrowSeq(
 }
 
 /**
+ * Encodes a mouse-wheel scroll as SGR (1006) press events for forwarding to a
+ * full-screen (alt-screen) app that has mouse tracking enabled.
+ *
+ * A full-screen TUI owns the alternate screen and keeps its OWN scrollback that
+ * never reaches xterm's viewport, so xterm's local `scrollLines()` cannot move
+ * it. To scroll such an app from a touch drag or the Page buttons we forward the
+ * exact wheel events xterm would synthesize for a real mouse wheel: the SGR
+ * press form `ESC [ < Cb ; Col ; Row M`, with button code 64 = wheel up (older
+ * output) and 65 = wheel down (newer output). `Col`/`Row` are the 1-based cell
+ * under the pointer; most full-screen apps ignore the position for wheel events,
+ * but we send a real in-bounds cell to be safe.
+ *
+ * `lines` is signed the same way as xterm's `scrollLines()`: NEGATIVE reveals
+ * OLDER output (wheel up), POSITIVE reveals NEWER output (wheel down). Returns
+ * `abs(lines)` stacked wheel events (one per line), or `""` for a zero scroll.
+ *
+ * This emits SGR encoding unconditionally, which every modern full-screen CLI
+ * (Claude, Codex, OpenCode, Copilot, vim, less) negotiates via DECSET 1006. The
+ * caller is responsible for only invoking this when `mouseTrackingMode` is not
+ * `"none"`; a legacy app that requested non-SGR mouse encoding would misread it.
+ */
+export function sgrWheelSeq(lines: number, col: number, row: number): string {
+  const count = Math.abs(Math.trunc(lines))
+  if (count === 0) return ""
+  const button = lines < 0 ? 64 : 65
+  const c = Math.max(1, Math.trunc(col))
+  const r = Math.max(1, Math.trunc(row))
+  return `${ESC}[<${button};${c};${r}M`.repeat(count)
+}
+
+/**
+ * Returns the byte sequence for a Page Up / Page Down key, used to page a
+ * full-screen app that scrolls by keyboard rather than mouse (no mouse
+ * tracking). These are the standard CSI tilde sequences `ESC [ 5 ~` (PgUp) and
+ * `ESC [ 6 ~` (PgDn), which do not vary with cursor-key mode.
+ */
+export function pageKeySeq(dir: "up" | "down"): string {
+  return `${ESC}[${dir === "up" ? "5" : "6"}~`
+}
+
+/**
  * Applies sticky modifiers to a single typed chunk.
  *
  * - `ctrl`: maps the character via `ctrlByte`, falling back to the raw

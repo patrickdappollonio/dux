@@ -48,6 +48,12 @@ agent, while keeping its own scrollback for agents that don't. An explicit
 detection; delete the line to return to auto-detect. See
 [Custom CLI Agents](/docs/custom-agents).
 
+The mobile web client behaves the same by touch: over a full-screen agent a
+one-finger drag and the on-screen `PgUp`/`PgDn` buttons forward to the agent
+instead of moving an empty scrollback. The web auto-detects from the agent's
+mouse mode (the `forward_scroll` config lever currently applies to the desktop
+app only).
+
 ### Can I start an agent from a GitHub PR?
 
 Yes, when the `gh` CLI is installed and authenticated. See
