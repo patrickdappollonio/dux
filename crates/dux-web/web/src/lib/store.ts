@@ -197,6 +197,10 @@ export interface DuxState {
     path: string
     currentBranch: string | null
     warning: BranchWarningView | null
+    // `false` when the repo is a fresh `git init` with no commits (unborn HEAD).
+    // Defaults to `true` while loading / on error so the "no commits" offer only
+    // appears once inspection confirms it.
+    hasCommits: boolean
     error: string | null
     loading: boolean
   } | null
@@ -1606,6 +1610,7 @@ export function inspectProjectPath(path: string): void {
       path,
       currentBranch: null,
       warning: null,
+      hasCommits: true,
       error: null,
       loading: true,
     },
@@ -1623,6 +1628,10 @@ export function inspectProjectPath(path: string): void {
           path,
           currentBranch: res.current_branch,
           warning: res.warning,
+          // Treat a missing/non-false value as "has commits" so an older
+          // backend that predates this field (version skew: rolled-back server
+          // + cached newer bundle) never wrongly flags every repo as unborn.
+          hasCommits: res.has_commits !== false,
           error: null,
           loading: false,
         },
@@ -1635,6 +1644,7 @@ export function inspectProjectPath(path: string): void {
           path,
           currentBranch: null,
           warning: null,
+          hasCommits: true,
           error: e instanceof Error ? e.message : "Could not inspect the path.",
           loading: false,
         },
@@ -1662,6 +1672,17 @@ export function addProject(path: string, name: string): void {
 export function addProjectCheckoutDefault(path: string, name: string): void {
   projectsApi
     .create({ path, name, checkout_default: true })
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+    )
+}
+
+// Birth an unborn repo (fresh `git init`, no commits) with an empty initial
+// commit, then add it — the server creates the commit before registering so the
+// repo can back worktrees. Offered when inspect reports `hasCommits: false`.
+export function addProjectCreateInitialCommit(path: string, name: string): void {
+  projectsApi
+    .create({ path, name, create_initial_commit: true })
     .catch((e) =>
       toast.error(e instanceof Error ? e.message : "Could not add the project."),
     )

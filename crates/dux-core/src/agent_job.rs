@@ -98,6 +98,22 @@ pub fn run_create_agent_job(
                     (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
                 crate::project_browser::leading_branch_for_project(&repo_path, cur)
             });
+            // Distinguish an unborn repo (no commits at all) from a genuinely
+            // deleted branch. `local_branch_exists` is false for both, but the
+            // remedies differ: an unborn repo needs an initial commit, not a
+            // "restore the branch" that never existed. Check commits first so
+            // the message is accurate for a freshly `git init`'d project that
+            // slipped in (e.g. added via the raw API, or hand-written config).
+            // Only a CONFIRMED unborn HEAD takes this branch — an indeterminate
+            // git result falls through to the branch-missing check rather than
+            // wrongly advising "create an initial commit" on a repo with history.
+            if !attach_existing && git::repo_commit_state(&repo_path) == git::CommitState::Unborn {
+                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
+                    "Cannot create agent for \"{}\": the repository at {} has no commits yet. Create an initial commit (for example `git commit --allow-empty -m \"Initial commit\"`), then try again.",
+                    project.name, repo_path.display()
+                ) });
+                return;
+            }
             if !attach_existing && !git::local_branch_exists(&repo_path, &leading_branch) {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
                     "Cannot create agent for \"{}\": leading branch \"{}\" no longer exists locally. Restore that branch or re-add the project.",

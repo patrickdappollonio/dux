@@ -47,6 +47,10 @@ impl App {
                 | WorkerEvent::CheckoutProjectDefaultBranchInspected {
                     status_op_id: Some(id),
                     ..
+                }
+                | WorkerEvent::InitialCommitCreated {
+                    status_op_id: Some(id),
+                    ..
                 } => Some(id.clone()),
                 _ => None,
             };
@@ -497,6 +501,36 @@ impl App {
                     path,
                     name,
                     target_branch.clone(),
+                    leading_branch,
+                    status_message,
+                ) {
+                    self.set_error(format!("{e:#}"));
+                }
+            }
+
+            EventReaction::AddProjectAfterInitialCommit {
+                path,
+                name,
+                branch,
+                leading_branch,
+                status_op_id: _,
+            } => {
+                let display_name = if name.trim().is_empty() {
+                    std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("project")
+                        .to_string()
+                } else {
+                    name.trim().to_string()
+                };
+                let status_message = format!(
+                    "Created an initial commit and added project \"{display_name}\" to workspace."
+                );
+                if let Err(e) = self.finish_add_project_with_status(
+                    path,
+                    name,
+                    branch,
                     leading_branch,
                     status_message,
                 ) {

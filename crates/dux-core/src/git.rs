@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 use content_inspector::{ContentType, inspect};
@@ -180,6 +180,229 @@ pub fn is_git_repo(path: &Path) -> bool {
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false)
+}
+
+/// Whether a repository's HEAD resolves to a commit, distinguishing a real
+/// git failure from a genuinely unborn HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitState {
+    /// HEAD resolves to a commit — the repo has history.
+    Born,
+    /// A valid repo whose HEAD is *unborn* (fresh `git init`, no commits yet):
+    /// the branch named by HEAD does not exist under `refs/heads/` until the
+    /// first commit.
+    Unborn,
+    /// Could not determine (git failed to run, not a repo, permission/I-O
+    /// error). Never conflate this with `Unborn`. The safe handling depends on
+    /// the decision: a *reject/gate* site (should this add be blocked? is this
+    /// repo unborn for messaging?) treats it as "not unborn" and proceeds
+    /// (don't block on a transient hiccup); a *mutation* site (about to create a
+    /// commit) refuses (don't mutate a repo whose state we can't confirm).
+    Indeterminate,
+}
+
+/// Precise, fail-closed probe of a repo's commit state. `git rev-parse --verify
+/// --quiet HEAD` exits 0 when HEAD resolves (`Born`), 1 when it doesn't
+/// (`Unborn`), and anything else (or a spawn error) is a real failure
+/// (`Indeterminate`). Prefer this over [`repo_has_commits`] at any site that
+/// makes a hard decision — rejecting an add, failing agent creation, creating a
+/// commit — so a transient git hiccup can't be mistaken for "no commits".
+pub fn repo_commit_state(path: &Path) -> CommitState {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "HEAD",
+        ])
+        .stdin(Stdio::null())
+        .output();
+    match out {
+        Ok(o) => match o.status.code() {
+            Some(0) => CommitState::Born,
+            Some(1) => CommitState::Unborn,
+            _ => CommitState::Indeterminate,
+        },
+        Err(_) => CommitState::Indeterminate,
+    }
+}
+
+/// Returns `true` when the repository at `path` has at least one commit. This is
+/// the **fail-open** convenience form (any inability to tell → `false`), fine
+/// for UI hints; use [`repo_commit_state`] where the Born/Unborn/Indeterminate
+/// distinction matters (any hard reject/gate/mutation).
+pub fn repo_has_commits(path: &Path) -> bool {
+    matches!(repo_commit_state(path), CommitState::Born)
+}
+
+/// Creates an empty initial commit so an otherwise-unborn repo gains a root
+/// commit and can back worktrees.
+///
+/// It is built entirely with **plumbing** (`hash-object` for the empty tree,
+/// `commit-tree` for the commit object, `update-ref` to land it) rather than
+/// `git commit`, which buys three properties `git commit --allow-empty` cannot:
+/// - **No hooks run.** Plumbing never invokes `pre-commit`/`post-commit`/
+///   `reference-transaction`/… — a repo's hook scripts must not execute just
+///   because dux is adding the project. (`--no-verify` only skips the first two.)
+/// - **Empty tree, always.** The commit is built from an explicit empty tree, so
+///   it can never bake in whatever happens to be staged in the index at commit
+///   time (a race `git commit --allow-empty` is subject to). The user's files —
+///   staged or untracked — are left exactly as they were.
+/// - **Atomic and bare-safe.** `update-ref <branch> <sha> ""` is a compare-and-
+///   swap that creates the branch only if it does not yet exist, so a real
+///   commit landing concurrently makes this fail (never a second commit on top);
+///   and none of the steps need a work tree, so a **bare** repo works too.
+///
+/// Returns the short name of the branch the commit landed on, so callers persist
+/// the branch that was actually committed rather than one resolved separately
+/// (which a concurrent HEAD change could make stale).
+///
+/// It is *idempotent*: the goal is "the repo has a commit", so if a commit
+/// already exists — whether at entry or because the update-ref CAS lost a race
+/// to another writer — it returns `Ok(branch)` (no second commit is made)
+/// rather than a scary error, letting the caller register the project. It only
+/// errors when the index has staged changes (a deliberate courtesy stop so dux
+/// doesn't add a project while the user has staged work they may want in the
+/// first commit), when git's state can't be determined, on a detached HEAD, or
+/// on a genuine git failure (committer identity unset, etc. — surfaced verbatim).
+/// Callers still serialize concurrent initial commits on the same repo via the
+/// engine's in-flight gate; the CAS is the cross-process backstop.
+pub fn create_initial_commit(path: &Path) -> Result<String> {
+    let repo = path.to_string_lossy();
+    // Fail closed on commit state — only bootstrap a confirmed-unborn repo. A
+    // Born repo is idempotent success (a commit already exists, e.g. one raced in
+    // between the caller's dispatch-time check and this worker running): the goal
+    // is met, so return the current branch (empty if detached — the caller
+    // handles that like the normal born path) and let it register.
+    match repo_commit_state(path) {
+        CommitState::Born => return Ok(current_branch_opt(path)?.unwrap_or_default()),
+        CommitState::Unborn => {}
+        CommitState::Indeterminate => {
+            return Err(anyhow!(
+                "couldn't determine the commit state of {}, so refusing to create an initial commit",
+                path.display()
+            ));
+        }
+    }
+    // Courtesy refuse-if-staged. The commit uses an empty tree and never reads
+    // the index, so this can't leak staged content into history — it just stops
+    // us from quietly adding a project while the user has staged work pending.
+    let staged = Command::new("git")
+        .args(["-C", repo.as_ref(), "diff", "--cached", "--quiet"])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to inspect the index of {}", path.display()))?;
+    match staged.status.code() {
+        Some(0) => {}
+        Some(1) => {
+            return Err(anyhow!(
+                "refusing to create an initial commit in {}: you have staged changes. Commit or unstage them first, then add the project.",
+                path.display()
+            ));
+        }
+        _ => {
+            return Err(anyhow!(
+                "failed to inspect the index of {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&staged.stderr).trim()
+            ));
+        }
+    }
+    // Now confirmed unborn, so the symbolic HEAD is guaranteed to exist. Its
+    // fully-qualified ref (e.g. `refs/heads/main`) is the branch the commit lands
+    // on. (A detached unborn HEAD has no symbolic ref and can't be bootstrapped —
+    // reported rather than guessed.)
+    let head_ref = run_git_capture(
+        path,
+        &["symbolic-ref", "HEAD"],
+        "resolve the current branch",
+    )?;
+    let short = head_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&head_ref)
+        .to_string();
+    // Build the empty-tree commit object with plumbing (no index, no hooks).
+    let empty_tree = run_git_capture(
+        path,
+        &["hash-object", "-t", "tree", NULL_DEVICE],
+        "compute the empty tree",
+    )?;
+    let commit = run_git_capture(
+        path,
+        &[
+            // `commit.gpgsign=false` so a signing prompt can't block; hooksPath at
+            // /dev/null so no hook runs at any step of this bootstrap.
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit-tree",
+            &empty_tree,
+            "-m",
+            "Initial commit",
+        ],
+        "create the initial commit object",
+    )?;
+    // Land it atomically: CAS with an empty old-value requires the branch to not
+    // yet exist, closing the "a real commit landed concurrently" race. hooksPath
+    // at /dev/null so the ref update runs no `reference-transaction` hook.
+    let update = Command::new("git")
+        .args([
+            "-C",
+            repo.as_ref(),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "update-ref",
+            &head_ref,
+            &commit,
+            "",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to create initial commit in {}", path.display()))?;
+    if !update.status.success() {
+        // The CAS lost the race — most likely another writer (a second dux
+        // instance, or a concurrent `git commit`) just created the first commit.
+        // The goal is "the repo has a commit"; if it's now Born, that goal is
+        // met, so treat it as success (idempotent). Re-resolve the current branch
+        // fresh (not the pre-race `short`) so we persist the branch the repo is
+        // actually on, consistent with the entry-Born path. Only a
+        // still-unborn/indeterminate repo is a real error.
+        if repo_commit_state(path) == CommitState::Born {
+            return Ok(current_branch_opt(path)?.unwrap_or_default());
+        }
+        return Err(anyhow!(
+            "couldn't create the initial commit in {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&update.stderr).trim()
+        ));
+    }
+    // Return the branch the commit actually landed on (short name) so callers
+    // persist THAT, not a name resolved separately before the commit (which a
+    // concurrent HEAD change could make stale).
+    Ok(short)
+}
+
+/// Run a git command that produces a single trimmed line of stdout (a SHA, a
+/// ref, …). Returns `Err` with the stderr on non-zero exit. Stdin is detached.
+fn run_git_capture(path: &Path, args: &[&str], what: &str) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to {what} for {}", path.display()))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "failed to {what} for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktree>> {
@@ -2362,6 +2585,391 @@ mod tests {
                 owner_repo: "octocat/Hello-World".to_string(),
             }),
         );
+    }
+
+    // ── unborn-HEAD / initial-commit tests ───────────────────────
+
+    /// Create a temporary repo with `git init` but NO commit (unborn HEAD),
+    /// with a local identity configured so a commit can be made if asked.
+    fn init_test_repo_no_commit() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "t@t"]);
+        dir
+    }
+
+    #[test]
+    fn repo_has_commits_is_false_on_unborn_head() {
+        let repo = init_test_repo_no_commit();
+        assert!(
+            !repo_has_commits(repo.path()),
+            "a fresh `git init` with no commits must report no commits"
+        );
+    }
+
+    #[test]
+    fn repo_has_commits_is_true_after_a_commit() {
+        let repo = init_test_repo(); // makes one empty commit
+        assert!(
+            repo_has_commits(repo.path()),
+            "a repo with a commit must report having commits"
+        );
+    }
+
+    #[test]
+    fn repo_has_commits_is_false_for_non_repo() {
+        // A plain directory that is not a git repo must not report commits
+        // (and must not panic).
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!repo_has_commits(tmp.path()));
+    }
+
+    #[test]
+    fn create_initial_commit_makes_head_resolvable() {
+        let repo = init_test_repo_no_commit();
+        assert!(!repo_has_commits(repo.path()));
+        create_initial_commit(repo.path()).expect("initial commit should succeed");
+        assert!(
+            repo_has_commits(repo.path()),
+            "after create_initial_commit, HEAD must resolve to a commit"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_does_not_stage_existing_files() {
+        // A folder can contain files before `git init`. The empty initial
+        // commit must NOT commit them: they stay untracked afterwards.
+        let repo = init_test_repo_no_commit();
+        std::fs::write(repo.path().join("wip.txt"), "work in progress").unwrap();
+        create_initial_commit(repo.path()).expect("initial commit should succeed");
+
+        let out = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "status",
+                "--porcelain",
+            ])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            status.contains("?? wip.txt"),
+            "existing file must remain untracked after the empty initial commit, got: {status:?}"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_is_idempotent_when_already_born() {
+        // Called on a repo that already has a commit (e.g. one raced in), it must
+        // NOT add a second commit — it returns Ok with the current branch so the
+        // caller can still register the project.
+        let repo = init_test_repo(); // one empty commit on "main"
+        assert!(repo_has_commits(repo.path()));
+        let count_before = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "rev-list",
+                "--count",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        let before = String::from_utf8_lossy(&count_before.stdout)
+            .trim()
+            .to_string();
+
+        let branch =
+            create_initial_commit(repo.path()).expect("already-born repo is idempotent success");
+        assert_eq!(branch, "main", "returns the current branch");
+
+        let count_after = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "rev-list",
+                "--count",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&count_after.stdout).trim(),
+            before,
+            "must not add a second commit to a born repo"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_produces_a_truly_empty_commit() {
+        // The commit must contain no files, regardless of an untracked working
+        // tree — its tree must equal the empty tree.
+        let repo = init_test_repo_no_commit();
+        std::fs::write(repo.path().join("untracked.txt"), "x").unwrap();
+        create_initial_commit(repo.path()).expect("initial commit should succeed");
+
+        // `git show --stat` on a truly empty commit lists no files.
+        let out = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "show",
+                "--stat",
+                "--format=",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stat.trim().is_empty(),
+            "the initial commit must have an empty tree (no files), got: {stat:?}"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_refuses_when_files_are_staged() {
+        // If the user staged files before adding the repo, we must NOT silently
+        // bake them into the "empty" initial commit. Refuse instead.
+        let repo = init_test_repo_no_commit();
+        std::fs::write(repo.path().join("secret.env"), "TOKEN=abc").unwrap();
+        let add = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "add",
+                "secret.env",
+            ])
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+
+        let result = create_initial_commit(repo.path());
+        assert!(
+            result.is_err(),
+            "create_initial_commit must refuse when the index has staged content"
+        );
+        assert!(
+            !repo_has_commits(repo.path()),
+            "refusing must leave the repo commit-less (nothing was committed)"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_surfaces_the_git_error_when_it_fails() {
+        // Exercise the failure path deterministically: a read-only object store
+        // lets the read-only pre-checks pass (unborn HEAD, clean index) but makes
+        // writing the commit objects fail. The error must be surfaced (carrying
+        // git's stderr) and the repo must stay commit-less.
+        if is_root() {
+            // root bypasses DAC write bits, so the read-only trick can't fail git.
+            return;
+        }
+        let repo = init_test_repo_no_commit();
+        let objects = repo.path().join(".git/objects");
+        let mut perms = std::fs::metadata(&objects).unwrap().permissions();
+        let original = perms.clone();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&objects, perms).unwrap();
+
+        let result = create_initial_commit(repo.path());
+
+        // Restore write permission so the TempDir can be cleaned up.
+        std::fs::set_permissions(&objects, original).unwrap();
+
+        let err = result.expect_err("commit into a read-only object store must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&repo.path().display().to_string()),
+            "error must name the repo path, got: {msg}"
+        );
+        assert!(
+            !repo_has_commits(repo.path()),
+            "a failed commit must leave the repo commit-less"
+        );
+    }
+
+    /// True when the test process runs as uid 0 (root ignores DAC write bits, so
+    /// permission-based failure injection is a no-op).
+    fn is_root() -> bool {
+        Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn create_initial_commit_runs_no_hooks() {
+        // The bootstrap commit is built with plumbing, so NO hook runs — not
+        // pre-commit/commit-msg (which `--no-verify` would skip) and crucially not
+        // post-commit/reference-transaction (which `--no-verify` does NOT skip).
+        let repo = init_test_repo_no_commit();
+        let hooks = repo.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        for name in ["pre-commit", "post-commit", "reference-transaction"] {
+            let hook = hooks.join(name);
+            std::fs::write(&hook, format!("#!/bin/sh\ntouch RAN_{name}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        create_initial_commit(repo.path()).expect("commit should succeed with hooks present");
+        assert!(repo_has_commits(repo.path()));
+        for name in ["pre-commit", "post-commit", "reference-transaction"] {
+            assert!(
+                !repo.path().join(format!("RAN_{name}")).exists(),
+                "the {name} hook must not have executed"
+            );
+        }
+    }
+
+    #[test]
+    fn create_initial_commit_works_on_a_bare_repo() {
+        // A fresh `git init --bare` repo has no work tree, so `git commit` can't
+        // be used — the plumbing path must still bootstrap it.
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        run(&["init", "--bare", "-b", "main"]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "t@t"]);
+        assert_eq!(repo_commit_state(dir.path()), CommitState::Unborn);
+
+        create_initial_commit(dir.path()).expect("bare repo bootstrap should succeed");
+        assert!(
+            repo_has_commits(dir.path()),
+            "the bare repo must have a commit after bootstrap"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_is_idempotent_on_a_born_detached_head() {
+        // Born + detached HEAD (no symbolic ref): still idempotent success (no
+        // second commit, no error), per the documented contract.
+        let repo = init_test_repo(); // one commit on "main"
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        run(&["checkout", "--detach"]);
+        assert_eq!(repo_commit_state(repo.path()), CommitState::Born);
+
+        let branch = create_initial_commit(repo.path())
+            .expect("a born detached-HEAD repo must be idempotent success, not an error");
+        // Detached HEAD has no symbolic branch name — the returned branch is
+        // empty (the worker degrades this to the "main" fallback, tested in
+        // project_browser).
+        assert!(
+            branch.is_empty(),
+            "a detached HEAD has no branch name, got {branch:?}"
+        );
+        let out = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_string_lossy().as_ref(),
+                "rev-list",
+                "--count",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "1",
+            "must not add a second commit"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_is_race_safe_across_threads() {
+        // Two threads bootstrap the SAME unborn repo concurrently (simulating two
+        // dux instances). The update-ref CAS must let exactly one commit land —
+        // never two — and the loser must NOT hard-error: it sees the repo is now
+        // Born and returns Ok too. End state: exactly one commit.
+        let repo = init_test_repo_no_commit();
+        let path = repo.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let p = path.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    create_initial_commit(&p)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "neither racer should hard-error, got: {results:?}"
+        );
+        // Exactly one commit exists (the CAS prevented a second).
+        let out = Command::new("git")
+            .args([
+                "-C",
+                path.to_string_lossy().as_ref(),
+                "rev-list",
+                "--count",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "1",
+            "the race must leave exactly one commit"
+        );
+    }
+
+    #[test]
+    fn repo_commit_state_distinguishes_born_unborn_and_non_repo() {
+        assert_eq!(
+            repo_commit_state(init_test_repo_no_commit().path()),
+            CommitState::Unborn
+        );
+        assert_eq!(
+            repo_commit_state(init_test_repo().path()),
+            CommitState::Born
+        );
+        // A non-repo path can't be classified — Indeterminate, never Unborn.
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(repo_commit_state(tmp.path()), CommitState::Indeterminate);
     }
 
     // ── remote_default_branch tests ──────────────────────────────

@@ -83,8 +83,15 @@ async function request<T>(
 }
 
 export const projectsApi = {
-  create: (body: { path: string; name?: string; checkout_default?: boolean }) =>
-    request<ProjectView>("POST", "/api/v1/projects", body),
+  create: (body: {
+    path: string
+    name?: string
+    checkout_default?: boolean
+    // Birth an empty initial commit before registering an unborn (`git init`,
+    // no commits) repo so it can back worktrees. Backend no-ops if the repo
+    // already has commits.
+    create_initial_commit?: boolean
+  }) => request<ProjectView>("POST", "/api/v1/projects", body),
   remove: (id: string) =>
     request<void>("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`),
   patch: (id: string, body: PatchProjectBody) =>
@@ -109,5 +116,9 @@ export const projectsApi = {
     request<{
       current_branch: string | null
       warning: BranchWarningView | null
+      // `false` for a freshly `git init`'d repo with no commits (unborn HEAD).
+      // Optional: an older backend that predates this field omits it (version
+      // skew), and the store treats a missing value as "has commits".
+      has_commits?: boolean
     }>("GET", `/api/v1/projects/inspect?path=${encodeURIComponent(path)}`),
 }
