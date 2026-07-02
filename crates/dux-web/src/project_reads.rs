@@ -144,6 +144,13 @@ enum BranchWarningView {
 struct InspectReply {
     current_branch: Option<String>,
     warning: Option<BranchWarningView>,
+    /// `false` for a freshly `git init`'d repo with an unborn HEAD (no
+    /// commits). The UI uses this to offer creating an initial commit before
+    /// the repo can back worktrees. NOTE: this is `repo_has_commits`'s fail-open
+    /// bool, so a transient git failure also yields `false` — acceptable for a
+    /// read-only hint (the mutating add path independently re-checks with the
+    /// fail-closed `repo_commit_state` and never double-commits).
+    has_commits: bool,
 }
 
 async fn inspect_path(
@@ -182,14 +189,16 @@ async fn inspect_path(
             }),
             None => None, // detached HEAD: no "not on default branch" warning
         };
-        Ok::<_, String>((branch, warning))
+        let has_commits = dux_core::git::repo_has_commits(repo);
+        Ok::<_, String>((branch, warning, has_commits))
     })
     .await;
 
     match result {
-        Ok(Ok((branch, warning))) => Json(InspectReply {
+        Ok(Ok((branch, warning, has_commits))) => Json(InspectReply {
             current_branch: branch,
             warning,
+            has_commits,
         })
         .into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -335,6 +344,68 @@ mod tests {
             value["warning"].is_null(),
             "expected null warning, got {value}"
         );
+    }
+
+    /// Init a repo with `git init` but NO commit (unborn HEAD).
+    fn init_repo_no_commit(dir: &Path) {
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "Test"]);
+    }
+
+    #[tokio::test]
+    async fn inspect_reports_has_commits_true_for_repo_with_commit() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/projects/inspect?path={path}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["has_commits"], true, "got {value}");
+    }
+
+    #[tokio::test]
+    async fn inspect_reports_no_commits_for_unborn_repo() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_no_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/projects/inspect?path={path}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // An unborn repo is still a valid git repo, so inspect succeeds (200)
+        // and simply reports has_commits: false so the UI can offer to create
+        // the initial commit.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["has_commits"], false, "got {value}");
     }
 
     #[tokio::test]

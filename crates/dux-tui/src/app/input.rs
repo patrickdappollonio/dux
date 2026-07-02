@@ -103,6 +103,8 @@ enum PromptMouseTarget {
     ConfirmQuitConfirm,
     ConfirmDiscardCancel,
     ConfirmDiscardConfirm,
+    ConfirmCreateInitialCommitCancel,
+    ConfirmCreateInitialCommitConfirm,
     ConfirmNonDefaultBranchCancel,
     ConfirmNonDefaultBranchAdd,
     ConfirmUseExistingBranchCancel,
@@ -176,6 +178,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmDiscardConfirm => {
                 Some(ButtonPressedTarget::ConfirmDiscardConfirm)
+            }
+            PromptMouseTarget::ConfirmCreateInitialCommitCancel => {
+                Some(ButtonPressedTarget::ConfirmCreateInitialCommitCancel)
+            }
+            PromptMouseTarget::ConfirmCreateInitialCommitConfirm => {
+                Some(ButtonPressedTarget::ConfirmCreateInitialCommitConfirm)
             }
             PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
                 Some(ButtonPressedTarget::ConfirmNonDefaultBranchCancel)
@@ -2970,6 +2978,30 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ConfirmCreateInitialCommit {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => {
+                    self.resolve_confirm_create_initial_commit(false);
+                }
+                Some(Action::ToggleSelection) => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    self.resolve_confirm_create_initial_commit(confirm);
+                }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    self.resolve_confirm_create_initial_commit(confirm);
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmNonDefaultBranch {
             action,
             focus,
@@ -3784,6 +3816,18 @@ impl App {
                     Some(PromptMouseTarget::ConfirmDiscardCancel)
                 } else if contains_point(discard_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDiscardConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmCreateInitialCommit {
+                cancel_button,
+                create_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmCreateInitialCommitCancel)
+                } else if contains_point(create_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmCreateInitialCommitConfirm)
                 } else {
                     None
                 }
@@ -4717,6 +4761,31 @@ impl App {
         false
     }
 
+    /// Resolve the "create initial commit" prompt shown when adding a repo with
+    /// no commits. On confirm: dispatch the commit to a background worker (which
+    /// registers the project on completion). On cancel: leave the repo and
+    /// workspace untouched. Always returns `false` (never quits).
+    pub(crate) fn resolve_confirm_create_initial_commit(&mut self, confirm: bool) -> bool {
+        let (path, name) = match &self.prompt {
+            PromptState::ConfirmCreateInitialCommit { path, name, .. } => {
+                (path.clone(), name.clone())
+            }
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if !confirm {
+            self.set_info(
+                "Add cancelled. A project needs at least one commit — run \"git commit\" (or re-add and confirm) to create the initial commit.",
+            );
+            return false;
+        }
+        // The commit runs on a worker (it can invoke slow filesystem/lock work);
+        // completion posts `InitialCommitCreated`, whose reaction registers the
+        // project. Keeps the UI thread free per the CLAUDE.md workers tenet.
+        self.dispatch_create_initial_commit(path, name);
+        false
+    }
+
     fn resolve_confirm_non_default_branch(&mut self) -> bool {
         let (action, branch, checkout_default, default_branch) = match &self.prompt {
             PromptState::ConfirmNonDefaultBranch {
@@ -5284,6 +5353,8 @@ impl App {
             | PromptMouseTarget::ConfirmQuitConfirm
             | PromptMouseTarget::ConfirmDiscardCancel
             | PromptMouseTarget::ConfirmDiscardConfirm
+            | PromptMouseTarget::ConfirmCreateInitialCommitCancel
+            | PromptMouseTarget::ConfirmCreateInitialCommitConfirm
             | PromptMouseTarget::ConfirmNonDefaultBranchCancel
             | PromptMouseTarget::ConfirmNonDefaultBranchAdd
             | PromptMouseTarget::ConfirmUseExistingBranchCancel
@@ -5391,6 +5462,12 @@ impl App {
             ButtonPressedTarget::ConfirmQuitConfirm => self.resolve_confirm_quit(true),
             ButtonPressedTarget::ConfirmDiscardCancel => self.resolve_confirm_discard_file(false),
             ButtonPressedTarget::ConfirmDiscardConfirm => self.resolve_confirm_discard_file(true),
+            ButtonPressedTarget::ConfirmCreateInitialCommitCancel => {
+                self.resolve_confirm_create_initial_commit(false)
+            }
+            ButtonPressedTarget::ConfirmCreateInitialCommitConfirm => {
+                self.resolve_confirm_create_initial_commit(true)
+            }
             ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
                 self.prompt = PromptState::None;
                 false

@@ -327,6 +327,41 @@ impl Engine {
                     status_message,
                 } = *action
                 {
+                    // Idempotent on path — the single chokepoint that guards
+                    // against a duplicate registration. `validate_project_add_path`
+                    // rejects a duplicate at request time, but a race can slip two
+                    // adds for the same path past it (e.g. the initial-commit
+                    // born-race fast path registering while a sibling worker's
+                    // followup is still in flight) before either reaches here. If
+                    // the path is already registered, report success against the
+                    // existing project instead of pushing a second record.
+                    if let Some(existing) = self.projects.iter().find(|p| p.path == project.path) {
+                        let existing_id = existing.id.clone();
+                        // Report the TRUTH (already registered), not the losing
+                        // caller's own narrative — the winner may have registered a
+                        // different name than this request intended.
+                        let message = format!(
+                            "Project at this path is already in the workspace as \"{}\"; nothing new was added.",
+                            existing.name
+                        );
+                        return Ok(EventReaction::ProjectPersistenceOutcome(Box::new(
+                            ProjectPersistenceOutcome {
+                                // NOTE: `action.project` is the un-persisted input
+                                // (fresh id), NOT the registered project that
+                                // `view.project_id` points at — the dedup fired. No
+                                // consumer reads `action` for the `Added` view.
+                                action: ProjectPersistenceAction::Add {
+                                    project,
+                                    status_message: message.clone(),
+                                },
+                                view: ProjectPersistenceView::Added {
+                                    project_id: existing_id,
+                                    status_message: message,
+                                },
+                                status_op_id: None,
+                            },
+                        )));
+                    }
                     // Insert the project into SQLite inline so we can roll back
                     // the row if the subsequent config write fails.
                     self.session_store

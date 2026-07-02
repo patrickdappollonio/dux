@@ -65,6 +65,12 @@ struct AddProjectBody {
     /// branch with a known default; the engine re-validates and rejects otherwise.
     #[serde(default)]
     checkout_default: bool,
+    /// Create an empty initial commit BEFORE registering, so a freshly
+    /// `git init`'d repo with an unborn HEAD can back worktrees. No-op (and
+    /// harmless) if the repo already has commits. The user opts in via the
+    /// add-project dialog after inspect reports `has_commits: false`.
+    #[serde(default)]
+    create_initial_commit: bool,
 }
 
 async fn add_project(
@@ -88,7 +94,19 @@ async fn add_project(
         None => return engine_unavailable(),
     };
 
-    let cmd = if body.checkout_default {
+    // Pick the add variant. `create_initial_commit` takes precedence over
+    // `checkout_default` (an unborn repo has no default branch to check out).
+    // Like the checkout-default flow, the engine validates the path, serializes
+    // per repo path, and runs the commit on a worker before registering — so the
+    // mutating git work never runs on the async reactor here, and a failure (or
+    // a repo that gained commits since inspect, which the handler registers as a
+    // plain add) surfaces through the keyed status stream.
+    let cmd = if body.create_initial_commit {
+        WireCommand::AddProjectCreateInitialCommit {
+            path: body.path,
+            name: body.name,
+        }
+    } else if body.checkout_default {
         WireCommand::AddProjectCheckoutDefault {
             path: body.path,
             name: body.name,
@@ -380,4 +398,154 @@ fn engine_unavailable() -> Response {
         "the engine is unavailable; retry shortly",
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::path::Path;
+    use tower::ServiceExt;
+
+    use crate::test_support::router_no_auth;
+
+    /// Init a repo with `git init` but NO commit (unborn HEAD).
+    fn init_repo_no_commit(dir: &Path) {
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "Test"]);
+    }
+
+    fn post_add(path: &str, create_initial_commit: bool) -> Request<Body> {
+        let body = format!(
+            r#"{{"path":{},"create_initial_commit":{}}}"#,
+            serde_json::to_string(path).unwrap(),
+            create_initial_commit
+        );
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn add_with_create_initial_commit_flag_births_head_then_registers() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_no_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+        assert!(!dux_core::git::repo_has_commits(repo.path()));
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app.oneshot(post_add(&path, true)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::CREATED,
+            "add should succeed and create the project"
+        );
+        assert!(
+            dux_core::git::repo_has_commits(repo.path()),
+            "the repo must have a commit after adding with create_initial_commit=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_add_of_unborn_repo_is_rejected_without_committing() {
+        // Fail closed: a plain add (no create_initial_commit flag) of a
+        // commit-less repo must be rejected by the engine, not silently
+        // registered, and must not fabricate a commit. Clients birth the repo
+        // via the create_initial_commit flag instead.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_no_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app.oneshot(post_add(&path, false)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            !dux_core::git::repo_has_commits(repo.path()),
+            "a rejected plain add must not create a commit"
+        );
+    }
+
+    /// Init a repo with `git init` and one commit.
+    fn init_repo_with_commit(dir: &Path) {
+        init_repo_no_commit(dir);
+        let run = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["commit", "--allow-empty", "-q", "-m", "init"]);
+    }
+
+    fn commit_count(dir: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn create_initial_commit_flag_on_already_born_repo_registers_without_a_second_commit() {
+        // Race: a commit landed between the client's inspect and this request.
+        // The flag must gracefully register the repo (no error, no extra commit),
+        // not hard-fail — it's a bootstrap no-op when there's nothing to bootstrap.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let before = commit_count(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app.oneshot(post_add(&path, true)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        assert_eq!(
+            commit_count(repo.path()),
+            before,
+            "a born repo must not gain a second commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_initial_commit_works_on_a_bare_repo_over_rest() {
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        run(&["init", "--bare", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app.oneshot(post_add(&path, true)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        assert!(dux_core::git::repo_has_commits(repo.path()));
+    }
 }

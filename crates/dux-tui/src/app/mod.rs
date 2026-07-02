@@ -944,6 +944,16 @@ pub(crate) enum PromptState {
         is_untracked: bool,
         confirm_selected: bool, // false = Cancel (default), true = Discard
     },
+    /// Shown when adding a project whose repo has no commits yet (a fresh
+    /// `git init` with an unborn HEAD). Confirming creates an empty initial
+    /// commit so the repo can back worktrees, then registers the project.
+    ConfirmCreateInitialCommit {
+        /// Absolute, validated path of the repo being added.
+        path: String,
+        /// Display name entered by the user (empty → derived from the path).
+        name: String,
+        confirm_selected: bool, // false = Cancel (default), true = Create & Add
+    },
     RenameSession {
         session_id: String,
         input: TextInput,
@@ -1352,6 +1362,10 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmDiscardFile {
         cancel_button: Rect,
         discard_button: Rect,
+    },
+    ConfirmCreateInitialCommit {
+        cancel_button: Rect,
+        create_button: Rect,
     },
     ConfirmNonDefaultBranch {
         cancel_button: Rect,

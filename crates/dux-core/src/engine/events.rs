@@ -193,6 +193,19 @@ pub enum EventReaction {
         /// add; `None` for the TUI.
         status_op_id: Option<String>,
     },
+    /// A fresh (unborn) repo has just had its empty initial commit created;
+    /// register the project on its now-born branch. Mirrors
+    /// `AddProjectAfterBranchCheckout` but with no branch switch.
+    AddProjectAfterInitialCommit {
+        path: String,
+        name: String,
+        /// The branch the commit landed on (the repo's real current branch).
+        branch: String,
+        leading_branch: String,
+        /// Correlation id for a web add-project `HandlerStatusOp`. `Some` on the
+        /// web path, resolved in `drive_add_project_followup`; `None` for the TUI.
+        status_op_id: Option<String>,
+    },
 
     // -- Branch inspection follow-ups (App helpers). --
     ContinueCreateAgentAfterInspection {
@@ -1725,6 +1738,42 @@ impl Engine {
                     }
                 }
             }
+            WorkerEvent::InitialCommitCreated {
+                add,
+                result,
+                status_op_id,
+            } => {
+                // Release the per-path serialization gate now that the commit
+                // attempt is done (success or failure).
+                self.clear_in_flight(&InFlightKey::InitialCommit(add.path.clone()));
+                match result {
+                    Ok(()) => EventReaction::AddProjectAfterInitialCommit {
+                        path: add.path,
+                        name: add.name,
+                        branch: add.branch,
+                        leading_branch: add.leading_branch,
+                        // SUCCESS message is built in `drive_add_project_followup`
+                        // after the inline add (web); the TUI builds it in its
+                        // `AddProjectAfterInitialCommit` view handler.
+                        status_op_id,
+                    },
+                    Err(err) => {
+                        logger::error(&format!("initial commit failed for {}: {err}", add.path));
+                        // Web path: resolve the keyed add-project op into its error
+                        // final. TUI path (op map empty here) keeps the unkeyed Status.
+                        if let Some(id) = status_op_id
+                            && let Some(op) = self.pending_web_add_project_ops.remove(&id)
+                        {
+                            return op
+                                .resolve(&crate::engine::WebAddProjectOutcome::AddFailed {
+                                    message: err,
+                                })
+                                .into_reaction();
+                        }
+                        EventReaction::Status(StatusUpdate::error(err))
+                    }
+                }
+            }
             WorkerEvent::CreateAgentBranchInspected {
                 project,
                 result,
@@ -2001,6 +2050,7 @@ mod tests {
             EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",
             EventReaction::ResourceStatsArrived(_) => "ResourceStatsArrived",
             EventReaction::AddProjectAfterBranchCheckout { .. } => "AddProjectAfterBranchCheckout",
+            EventReaction::AddProjectAfterInitialCommit { .. } => "AddProjectAfterInitialCommit",
             EventReaction::ContinueCreateAgentAfterInspection { .. } => {
                 "ContinueCreateAgentAfterInspection"
             }
