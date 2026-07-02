@@ -813,12 +813,13 @@ impl Engine {
             }
 
             Command::DeleteTerminal { terminal_id } => {
-                let label = self
-                    .companion_terminals
-                    .get(&terminal_id)
-                    .map(|t| t.label.clone());
-                // Removing from the map drops PtyClient, which kills the child.
-                self.companion_terminals.remove(&terminal_id);
+                // Graceful close: SIGTERM the terminal and move it to the
+                // terminating set so the reaper force-kills it after the grace if
+                // it ignores SIGTERM — rather than dropping it here (an immediate
+                // hard SIGKILL via `PtyClient::drop`). Non-blocking: the terminal
+                // disappears from the UI now; the child winds down in the
+                // background.
+                let label = self.begin_close_companion_terminal(&terminal_id);
                 Ok(EventReaction::DeleteTerminalView(Box::new(
                     DeleteTerminalView { terminal_id, label },
                 )))

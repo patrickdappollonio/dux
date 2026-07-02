@@ -460,14 +460,16 @@ pub enum BeginDeleteSessionOutcome {
     /// Session or project lookup failed — silent no-op (preserves the
     /// original early-return behaviour).
     NotFound,
-    /// Async path: Engine inserted into `pending_deletions`, spawned the
-    /// `git::remove_worktree` worker (which posts `WorktreeRemoveCompleted`
-    /// back), and stored `busy_message` in `deletion_busy_messages`. Each
-    /// surface mints its OWN keyed `HandlerStatusOp` from this `busy_message`
-    /// (the TUI in `App::pending_delete_ops`, the web in
-    /// `Engine::pending_delete_ops_web`), shows its pending busy, and resolves it
-    /// when `WorktreeRemoveCompleted` reports back — preserving each surface's
-    /// divergent final wording.
+    /// Worktree-removing delete: the Engine has already SIGTERMed the agent PTY
+    /// (and the session's terminals) and moved them to the terminating set,
+    /// capturing the worktree removal to run only after the agent exits. The
+    /// caller **vanishes the session now** (`finish_delete_session` with
+    /// `update_status=false`) and mints its OWN keyed `HandlerStatusOp` from this
+    /// `busy_message` (the TUI in `App::pending_delete_ops`, the web in
+    /// `Engine::pending_delete_ops_web`), showing its pending busy. Once the agent
+    /// PTY is reaped, `reap_terminating_ptys` hands the removal to
+    /// `dispatch_deferred_worktree_removal`, whose worker posts
+    /// `WorktreeRemoveCompleted` — resolving that op with each surface's wording.
     AsyncStarted { busy_message: String },
     /// Inline path: no worktree removal needed (no `delete_worktree` request
     /// or shared with siblings). App should call the existing
@@ -1037,67 +1039,114 @@ impl Engine {
         let should_remove_worktree =
             delete_worktree && !other_sessions_on_worktree && project.is_some();
 
-        if should_remove_worktree {
-            logger::info(&format!(
-                "deleting session {} at {} (delete_worktree=true, async)",
-                session.id, session.worktree_path
-            ));
-            // Mark in-flight BEFORE spawning so a fast follow-up action from
-            // the same event loop tick can see the guard. The worker event
-            // handler clears the entry on completion (Ok or Err).
-            self.pending_deletions.insert(session.id.clone());
-            let sid = session.id.clone();
-            let project_path = project
+        // Graceful, non-blocking close: SIGTERM the agent PTY and its companion
+        // terminals and move them to the terminating set for a background reap,
+        // instead of dropping them here (an immediate hard SIGKILL). The caller
+        // vanishes the session from the UI next (`finish_delete_session`), so this
+        // is snappy. For a worktree-removing delete, the removal is captured on
+        // the agent's terminating entry and dispatched by `reap_terminating_ptys`
+        // only AFTER the agent has actually exited — files are never deleted out
+        // from under a live process (which also avoids git-lock failures).
+        let worktree_removal = should_remove_worktree.then(|| {
+            let project = project
                 .as_ref()
-                .expect("should_remove_worktree implies a project")
-                .path
-                .clone();
-            let worktree_path = session.worktree_path.clone();
-            let branch_name = session.branch_name.clone();
-            let tx = self.worker_tx.clone();
-            std::thread::spawn(move || {
-                use std::panic::AssertUnwindSafe;
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    crate::git::remove_worktree(
-                        std::path::Path::new(&project_path),
-                        std::path::Path::new(&worktree_path),
-                        &branch_name,
-                    )
-                    .map(|r| r.branch_already_deleted)
-                    .map_err(|e| format!("{e:#}"))
-                }))
-                .unwrap_or_else(|payload| {
-                    let reason = crate::engine::spawn_worker::format_panic_payload(payload);
-                    crate::logger::error(&format!(
-                        "worktree-remove worker panicked for session {sid}: {reason}"
-                    ));
-                    Err(format!("Worker panicked: {reason}"))
-                });
-                let _ = tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted {
-                    session_id: sid,
-                    result,
-                });
-            });
-            let busy_message = format!(
-                "Removing worktree for agent \"{}\"\u{2026}",
-                session.branch_name
-            );
-            self.deletion_busy_messages
-                .insert(session.id.clone(), busy_message.clone());
-            BeginDeleteSessionOutcome::AsyncStarted { busy_message }
-        } else {
-            logger::info(&format!(
-                "deleting session {} at {} (delete_worktree={}, inline)",
-                session.id, session.worktree_path, delete_worktree
-            ));
-            BeginDeleteSessionOutcome::Inline {
-                removal: WorktreeRemoval::from_decision(
-                    delete_worktree,
-                    other_sessions_on_worktree,
-                    None,
+                .expect("should_remove_worktree implies a project");
+            super::DeferredWorktreeRemoval {
+                session_id: session.id.clone(),
+                project_path: project.path.clone(),
+                worktree_path: session.worktree_path.clone(),
+                branch_name: session.branch_name.clone(),
+                busy_message: format!(
+                    "Removing worktree for agent \"{}\"\u{2026}",
+                    session.branch_name
                 ),
             }
+        });
+        let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
+        let unhandled =
+            self.begin_close_provider(&session.id, session.branch_name.clone(), worktree_removal);
+        self.begin_close_session_terminals(&session.id);
+        // No live agent PTY to wait for (it already exited): remove the worktree
+        // now — there is nothing to reap, and the reaper would never see it.
+        if let Some(req) = unhandled {
+            let _ = self.dispatch_deferred_worktree_removal(req);
         }
+
+        match busy_message {
+            Some(busy_message) => {
+                logger::info(&format!(
+                    "deleting session {} at {} (delete_worktree=true; worktree removal deferred until the agent exits)",
+                    session.id, session.worktree_path
+                ));
+                // The caller vanishes the session now and mints a keyed op from
+                // `busy_message`; the reaper spawns the worktree worker once the
+                // agent PTY is reaped, and its `WorktreeRemoveCompleted` resolves
+                // that op.
+                BeginDeleteSessionOutcome::AsyncStarted { busy_message }
+            }
+            None => {
+                logger::info(&format!(
+                    "deleting session {} at {} (delete_worktree={}, no worktree removal)",
+                    session.id, session.worktree_path, delete_worktree
+                ));
+                BeginDeleteSessionOutcome::Inline {
+                    removal: WorktreeRemoval::from_decision(
+                        delete_worktree,
+                        other_sessions_on_worktree,
+                        None,
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Spawn the background worker that removes a deleted agent's worktree, now
+    /// that its PTY has been reaped by `reap_terminating_ptys`. Deferred from the
+    /// delete itself (see `begin_delete_session`) so files are never removed out
+    /// from under a still-running process. Mirrors the async branch of
+    /// `begin_delete_session`: marks the in-flight guard, stashes the Busy message
+    /// for status correlation, spawns the worker, and posts
+    /// `WorktreeRemoveCompleted` on completion. Returns the Busy message so the
+    /// caller can mint its keyed status op.
+    pub fn dispatch_deferred_worktree_removal(
+        &mut self,
+        req: super::DeferredWorktreeRemoval,
+    ) -> String {
+        let super::DeferredWorktreeRemoval {
+            session_id,
+            project_path,
+            worktree_path,
+            branch_name,
+            busy_message,
+        } = req;
+        // Guard against a duplicate worker (e.g. a project delete racing the
+        // reap); the completion handler clears it.
+        self.pending_deletions.insert(session_id.clone());
+        self.deletion_busy_messages
+            .insert(session_id.clone(), busy_message.clone());
+        let tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::git::remove_worktree(
+                    std::path::Path::new(&project_path),
+                    std::path::Path::new(&worktree_path),
+                    &branch_name,
+                )
+                .map(|r| r.branch_already_deleted)
+                .map_err(|e| format!("{e:#}"))
+            }))
+            .unwrap_or_else(|payload| {
+                let reason = crate::engine::spawn_worker::format_panic_payload(payload);
+                crate::logger::error(&format!(
+                    "deferred worktree-remove worker panicked for session {session_id}: {reason}"
+                ));
+                Err(format!("Worker panicked: {reason}"))
+            });
+            let _ =
+                tx.send(crate::worker::WorkerEvent::WorktreeRemoveCompleted { session_id, result });
+        });
+        busy_message
     }
 
     pub fn process_agent_launch_failed(

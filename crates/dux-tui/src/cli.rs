@@ -143,6 +143,14 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     let defaults = Config::default();
     let mut changes = Vec::new();
 
+    // top-level (no table)
+    diff_u16(
+        &mut changes,
+        "shutdown_timeout_seconds",
+        defaults.shutdown_timeout_seconds,
+        current.shutdown_timeout_seconds,
+    );
+
     // [defaults]
     diff_str(
         &mut changes,
@@ -327,6 +335,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         "server.max_websocket_terminal_connections",
         defaults.server.max_websocket_terminal_connections as usize,
         current.server.max_websocket_terminal_connections as usize,
+    );
+    diff_u16(
+        &mut changes,
+        "server.shutdown_timeout_seconds",
+        defaults.server.shutdown_timeout_seconds,
+        current.server.shutdown_timeout_seconds,
     );
 
     // [terminal]

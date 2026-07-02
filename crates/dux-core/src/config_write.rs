@@ -167,6 +167,17 @@ pub fn render_config_plain(config: &Config) -> String {
 /// Apply every section patch to `doc`. Mirrors the section sequence the TUI's
 /// existing-file branch ran, so both surfaces produce the same managed shape.
 fn apply_patches(doc: &mut DocumentMut, config: &Config) {
+    // --- top-level (no table) keys ---
+    // A dotless root key must render before any table header or TOML would parse
+    // it as belonging to the preceding table. `patch_root_u16` positions it at
+    // the front of the document, so this is order-safe whether the doc is empty
+    // (plain render) or an existing user file already full of tables (patch).
+    patch_root_u16(
+        doc,
+        "shutdown_timeout_seconds",
+        config.shutdown_timeout_seconds,
+    );
+
     // --- [defaults] ---
     patch_table_str(doc, "defaults", "provider", &config.defaults.provider);
     patch_table_opt_str(
@@ -324,6 +335,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_table_str(doc, "server", "title", &config.server.title);
     patch_table_str(doc, "server", "favicon", &config.server.favicon);
+    patch_table_u16(
+        doc,
+        "server",
+        "shutdown_timeout_seconds",
+        config.server.shutdown_timeout_seconds,
+    );
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -402,6 +419,21 @@ fn patch_table_opt_str(doc: &mut DocumentMut, section: &str, key: &str, value: O
 fn patch_table_u16(doc: &mut DocumentMut, section: &str, key: &str, value: u16) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(i64::from(value));
+}
+
+/// Set a dotless key at the document root. With the pinned `toml_edit`, a
+/// table's own key/value pairs render before its child tables, so a root leaf
+/// key emits at the top of the document, ahead of every `[table]` header — valid
+/// TOML whether the document is empty (plain render) or an existing user file
+/// already full of tables (patch). That ordering is emergent encoder behavior,
+/// not a documented `toml_edit` API guarantee, so it is not assumed blindly: the
+/// `root_key_renders_before_tables_and_round_trips` and
+/// `patch_adds_root_key_to_existing_file_without_corruption` tests re-parse the
+/// rendered output and would fail loudly if a `toml_edit` upgrade ever moved the
+/// bare key after a table header (which would otherwise parse it into that
+/// table). If they break, this key needs an explicit position fix-up here.
+fn patch_root_u16(doc: &mut DocumentMut, key: &str, value: u16) {
+    doc[key] = toml_edit::value(i64::from(value));
 }
 
 fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usize) {
@@ -598,6 +630,77 @@ mod tests {
             .filter(|e| e.file_name() != "config.toml")
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn root_key_renders_before_tables_and_round_trips() {
+        let rendered = render_config_plain(&Config::default());
+
+        // The dotless root key must appear before the first table header, or TOML
+        // would bind it to a table. Guards the toml_edit ordering assumption.
+        let first_table = rendered.find('[').expect("rendered config has tables");
+        let key_pos = rendered
+            .find("shutdown_timeout_seconds")
+            .expect("root shutdown_timeout_seconds present");
+        assert!(
+            key_pos < first_table,
+            "root shutdown_timeout_seconds must render before any table:\n{rendered}"
+        );
+
+        // And it must parse back to the defaults (30 at root and under [server]).
+        let parsed: Config = toml::from_str(&rendered).expect("rendered config re-parses");
+        assert_eq!(parsed.shutdown_timeout_seconds, 30);
+        assert_eq!(parsed.server.shutdown_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn patch_adds_root_key_to_existing_file_without_corruption() {
+        // An existing user file already full of tables and comments — the worst
+        // case for appending a dotless root key.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let original = "# my dux config\n\
+                        [defaults]\n\
+                        provider = \"claude\"\n\n\
+                        # keep this comment\n\
+                        [server]\n\
+                        port = 9000\n";
+        fs::write(&path, original).expect("seed config");
+
+        let config = Config {
+            shutdown_timeout_seconds: 12,
+            server: crate::config::ServerConfig {
+                shutdown_timeout_seconds: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+
+        let saved = fs::read_to_string(&path).expect("read back");
+        // Must still be valid TOML and the root key must not have been swallowed
+        // into [server] (which would make it parse as 0/default, not 12).
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(parsed.shutdown_timeout_seconds, 12, "saved:\n{saved}");
+        assert_eq!(parsed.server.shutdown_timeout_seconds, 7);
+        // User comments are preserved by the surgical patch.
+        assert!(saved.contains("# keep this comment"), "saved:\n{saved}");
+    }
+
+    #[test]
+    fn zero_timeout_round_trips() {
+        let config = Config {
+            shutdown_timeout_seconds: 0,
+            server: crate::config::ServerConfig {
+                shutdown_timeout_seconds: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.shutdown_timeout_seconds, 0);
+        assert_eq!(parsed.server.shutdown_timeout_seconds, 0);
     }
 
     #[test]

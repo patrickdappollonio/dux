@@ -3103,6 +3103,7 @@ mod tests {
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
+            terminating_ptys: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             pr_statuses: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -3292,6 +3293,7 @@ mod tests {
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
+            terminating_ptys: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             pr_statuses: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -4306,13 +4308,12 @@ mod tests {
         );
     }
 
-    /// The async path (`begin_delete_session`) must NOT remove the session
-    /// immediately when the worktree deletion is going to run in a worker —
-    /// otherwise a failed git call would leave the user with a vanished
-    /// agent and no way to retry. The session should only disappear once
-    /// the worker reports success.
+    /// Graceful delete vanishes the session immediately: its PTY is SIGTERMed and
+    /// held for a background reap, and the worktree is removed in the background
+    /// only after the agent exits. The session no longer lingers until the worker
+    /// reports — the user-chosen tradeoff for a snappy, non-blocking delete.
     #[test]
-    fn begin_delete_session_keeps_session_until_worker_replies() {
+    fn begin_delete_session_vanishes_session_immediately() {
         let project_dir = tempdir().expect("project tempdir");
         let worktree_dir = tempdir().expect("worktree tempdir");
         let worktree_path = worktree_dir.path().to_string_lossy().to_string();
@@ -4324,11 +4325,9 @@ mod tests {
 
         app.begin_delete_session("s1", true);
 
-        // Session must still be present: the worker thread has been spawned
-        // but hasn't (at most) completed the cleanup on our thread yet.
         assert!(
-            app.engine.sessions.iter().any(|s| s.id == "s1"),
-            "session must remain until the worker reports success",
+            app.engine.sessions.iter().all(|s| s.id != "s1"),
+            "the session vanishes from the UI at once, not after the worktree removal",
         );
     }
 

@@ -141,6 +141,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         providers: std::collections::HashMap::new(),
         running_provider_pins: std::collections::HashMap::new(),
         companion_terminals: std::collections::HashMap::new(),
+        terminating_ptys: Vec::new(),
         gh_status: crate::model::GhStatus::Unknown,
         pr_statuses: std::collections::HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
