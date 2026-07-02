@@ -33,6 +33,12 @@ Claude Code, Codex, OpenCode, and Copilot are wired in out of the box, and any
 other CLI that runs an interactive session in a terminal can be added. See
 [Custom CLI Agents](/docs/custom-agents).
 
+### Why was the Gemini provider removed?
+
+[Google deprecated the Gemini CLI](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/),
+so dux no longer ships it as a built-in provider. If a worktree was still pinned
+to Gemini, dux won't launch it — switch it to a supported provider and relaunch.
+
 ### How do I add my own CLI as an agent?
 
 Add a `[providers.<name>]` block to your config; no adapters, no protocol layer.
