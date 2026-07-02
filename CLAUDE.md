@@ -86,7 +86,7 @@ The current app provides:
 - Commented user config in the platform-specific dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux)
 - Session persistence in `sessions.sqlite3` alongside the config
 - Logging in `dux.log` alongside the config
-- PTY-based agent startup: spawns CLI tools (`claude`, `codex`, `opencode`, `gemini`) directly in a pseudo-terminal
+- PTY-based agent startup: spawns CLI tools (`claude`, `codex`, `opencode`, `copilot`) directly in a pseudo-terminal
 
 ## Important Constraints
 
