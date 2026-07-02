@@ -2244,6 +2244,13 @@ export function toggleGithubIntegration(): void {
   )
 }
 
+export function toggleCopyOnSelect(): void {
+  fireToggle(
+    configApi.toggleCopyOnSelect(),
+    "Could not toggle copy-on-select.",
+  )
+}
+
 // The kill-running modal (Ctrl+K "kill-running"). Open/close just flip the gate;
 // the dialog derives its rows from the spine.
 export function openKillRunning(): void {

@@ -102,6 +102,7 @@ pub enum Action {
     ToggleDiffLineNumbers,
     ResourceMonitor,
     ToggleGithubIntegration,
+    ToggleCopyOnSelect,
     ToggleProjectAutoReopenAgents,
     ToggleAgentAutoReopen,
     ConfigureStartupCommand,
@@ -200,6 +201,7 @@ impl Action {
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
             Action::ToggleGithubIntegration => "toggle_github_integration",
+            Action::ToggleCopyOnSelect => "toggle_copy_on_select",
             Action::ToggleProjectAutoReopenAgents => "toggle_project_auto_reopen_agents",
             Action::ToggleAgentAutoReopen => "toggle_agent_auto_reopen",
             Action::ConfigureStartupCommand => "configure_startup_command",
@@ -316,6 +318,7 @@ impl Action {
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
             Action::ToggleGithubIntegration => "Toggle GitHub PR integration.",
+            Action::ToggleCopyOnSelect => "Toggle auto-copying selected text in the web terminal.",
             Action::ToggleProjectAutoReopenAgents => {
                 "Toggle startup auto-reopen for agents in the selected project."
             }
@@ -429,6 +432,7 @@ impl Action {
             | Action::ToggleDiffLineNumbers
             | Action::ResourceMonitor
             | Action::ToggleGithubIntegration
+            | Action::ToggleCopyOnSelect
             | Action::ToggleProjectAutoReopenAgents
             | Action::ToggleAgentAutoReopen
             | Action::ConfigureStartupCommand

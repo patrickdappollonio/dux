@@ -2,7 +2,15 @@ import { useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import { Maximize2, Minimize2, MonitorSmartphone } from "lucide-react"
+import {
+  ClipboardCopy,
+  ClipboardPaste,
+  Maximize2,
+  Minimize2,
+  MonitorSmartphone,
+  TextSelect,
+} from "lucide-react"
+import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
 import { MacroPopover } from "@/components/MacroPopover"
@@ -15,12 +23,20 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+} from "@/components/ui/context-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
+import { copyToClipboard } from "@/lib/clipboard"
+import { isApplePlatform } from "@/lib/platform"
 import {
   applyModifiers,
   arrowSeq,
+  classifyClipboardKey,
   ESC,
   LF,
   pageKeySeq,
@@ -92,6 +108,51 @@ function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
   pty?.sendInput(LF_BYTES)
 }
 
+// A minimal virtual anchor (floating-ui shape) so the controlled context menu
+// can position itself at the cursor without a real trigger element.
+type CursorAnchor = { getBoundingClientRect: () => DOMRect }
+
+// Copy the terminal's current selection to the clipboard and toast the result.
+// `copyToClipboard` writes via the async Clipboard API in a secure context and
+// falls back SYNCHRONOUSLY to an execCommand hidden-textarea over plain-HTTP, so
+// calling this from inside a user gesture (mouseup, keydown, menu click) keeps
+// the write permitted even over a Tailscale plain-HTTP origin. The deduped toast
+// id makes rapid copy-on-select replace the toast rather than stack it. Module
+// level so it's a stable reference shared by the mount effect and the menu.
+function copyTermSelection(term: Terminal): void {
+  const sel = term.getSelection()
+  if (!sel) return
+  void copyToClipboard(sel)
+    .then((ok) =>
+      ok
+        ? toast.success("Copied to clipboard", { id: "term-copy" })
+        : toast.error("Couldn't copy to clipboard", { id: "term-copy" }),
+    )
+    .finally(() => term.focus())
+}
+
+// Paste the BROWSER clipboard into the terminal via the async Clipboard API.
+// `readText` needs a secure context (HTTPS/localhost) and THROWS synchronously
+// when `navigator.clipboard` is undefined (plain-HTTP) or `readText` is missing
+// (Firefox web content), so we must guard the call — a bare `.catch` cannot
+// catch a synchronous throw. The plain-HTTP/Ctrl-V path (handled by xterm's
+// native paste event) stays the secure-context-free fallback. `term.paste`
+// applies bracketed-paste (DECSET 2004) and newline normalization.
+function pasteIntoTerm(term: Terminal): void {
+  const read = navigator.clipboard?.readText?.()
+  if (!read) {
+    toast.error("Couldn't read clipboard — use Ctrl+V to paste", { id: "term-paste" })
+    term.focus()
+    return
+  }
+  void read
+    .then((text) => term.paste(text))
+    .catch(() =>
+      toast.error("Couldn't read clipboard — use Ctrl+V to paste", { id: "term-paste" }),
+    )
+    .finally(() => term.focus())
+}
+
 export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // The padded, background-painted host. Padding must live HERE — one layer
   // OUTSIDE the element xterm opens into — because FitAddon measures the open
@@ -159,6 +220,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     scrollbackRef.current =
       bootstrap?.agent_scrollback_lines ?? DEFAULT_SCROLLBACK_LINES
   }, [bootstrap?.agent_scrollback_lines])
+  // Whether selecting text auto-copies it (the `ui.copy_on_select` preference,
+  // default on). Read via a ref inside the stable mount-effect `mouseup` handler
+  // so toggling it never recreates the terminal; the fallback (true) applies only
+  // before the first bootstrap fetch lands.
+  const copyOnSelectRef = useRef(bootstrap?.copy_on_select ?? true)
+  useEffect(() => {
+    copyOnSelectRef.current = bootstrap?.copy_on_select ?? true
+  }, [bootstrap?.copy_on_select])
   const session =
     kind === "agent"
       ? spine?.sessions.find((s) => s.id === id)
@@ -192,6 +261,25 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Cleared on the next (re)open. Input typed while disconnected is dropped by the
   // socket's readyState guard; this overlay is the signal that it would be.
   const [reconnecting, setReconnecting] = useState(false)
+
+  // The desktop right-click clipboard menu, driven in CONTROLLED mode (no
+  // ContextMenuTrigger): base-ui's Trigger hardcodes a 500ms touch long-press
+  // with no opt-out, which would collide with the terminal's own long-press-to-
+  // select gesture. We bind our own `onContextMenu` instead, so the menu only
+  // opens on a real right-click (pointer) and touch keeps its native selection.
+  // `menuAnchor` is a virtual element at the cursor so the menu positions there.
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [menuAnchor, setMenuAnchor] = useState<CursorAnchor | null>(null)
+  // Snapshot whether a selection exists when the menu opens, so "Copy" can be
+  // disabled with no selection (the selection can't change while the menu is up).
+  const [menuHasSelection, setMenuHasSelection] = useState(false)
+  // The pointer type of the most recent press on the host. Android Chrome fires
+  // `contextmenu` on a touch LONG-PRESS, which would hijack the terminal's native
+  // long-press-to-select; we only open our menu for a mouse/pen right-click, so
+  // touch long-press still hands off to native selection. This per-interaction
+  // signal is exact where an `isMobile` width check is not (a touchscreen laptop
+  // with a mouse must still get the right-click menu).
+  const pointerTypeRef = useRef("")
 
   // Per-PTY ownership. A PTY is shared across every connected device, but only
   // the owner drives its size and may type into it; the others render a read-only
@@ -346,34 +434,79 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       pty.sendInput(encoder.encode(out))
     })
 
+    // xterm allows only ONE custom key-event handler, so this single closure owns
+    // both the soft-newline chord and the clipboard chords. They match disjoint
+    // keys (bare Shift-Enter vs Ctrl-based clipboard chords), so soft-newline is
+    // checked first and clipboard classification handles the rest.
+    //
     // Shift-Enter inserts a "soft" newline (LF / Ctrl-J) instead of submitting.
     // xterm collapses both Enter and Shift-Enter to a carriage return before
     // `onData` can see them, so the two are indistinguishable at the data layer —
     // we must intercept at the key-event layer instead. `softNewlineAction` owns
     // the decision (chord match, IME guard, ownership gate, latch clear); this
     // closure is the thin applicator that turns that decision into DOM/PTY effects.
+    //
+    // Clipboard chords: xterm's defaults don't bridge the browser clipboard on
+    // Linux/Windows — Ctrl+V emits \x16 to the REMOTE agent (pasting the server's
+    // clipboard) and Ctrl+C / a selection never reach the system clipboard. We
+    // intercept only the clipboard chords; everything else (Ctrl+C SIGINT, plain
+    // typing, mac Control/Cmd) passes through to xterm unchanged. `isMac` is stable
+    // for this mount.
+    const isMac = isApplePlatform()
     term.attachCustomKeyEventHandler((e) => {
       const action = softNewlineAction(e, {
         isOwner: isOwnerRef.current,
         ctrlLatched: modsRef.current.ctrl,
         altLatched: modsRef.current.alt,
       })
-      if (!action.handled) return true
-      // Cancel the key with the same semantics xterm applies to every key it
-      // handles: `preventDefault` stops the browser dropping a stray newline into
-      // the hidden textarea, `stopPropagation` stops the "handled" key bubbling to
-      // window-level shortcut listeners, and returning `false` tells xterm not to
-      // encode its own CR.
-      e.preventDefault()
-      e.stopPropagation()
-      // Owner-only write. Consume the latch here (the decision came from
-      // `softNewlineAction`), then `writeSoftNewline` replays the scroll/selection
-      // side effects our early return skipped — shared with the accessory bar's
-      // ⇧↵ key so the two entry points can't drift.
-      if (action.send !== null) {
-        if (action.clearLatch) setMods({ ctrl: false, alt: false })
-        writeSoftNewline(term, pty)
+      if (action.handled) {
+        // Cancel the key with the same semantics xterm applies to every key it
+        // handles: `preventDefault` stops the browser dropping a stray newline into
+        // the hidden textarea, `stopPropagation` stops the "handled" key bubbling to
+        // window-level shortcut listeners, and returning `false` tells xterm not to
+        // encode its own CR.
+        e.preventDefault()
+        e.stopPropagation()
+        // Owner-only write. Consume the latch here (the decision came from
+        // `softNewlineAction`), then `writeSoftNewline` replays the scroll/selection
+        // side effects our early return skipped — shared with the accessory bar's
+        // ⇧↵ key so the two entry points can't drift.
+        if (action.send !== null) {
+          if (action.clearLatch) setMods({ ctrl: false, alt: false })
+          writeSoftNewline(term, pty)
+        }
+        return false
       }
+      // Clipboard chords (keydown only).
+      if (e.type !== "keydown") return true
+      const clip = classifyClipboardKey({
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+        code: e.code,
+        keyCode: e.keyCode,
+        isMac,
+      })
+      if (clip === "passthrough") return true
+      if (clip === "copy") {
+        // The chord is not a browser copy event, so we copy the selection
+        // ourselves. preventDefault so the browser/devtools don't also act;
+        // return false so xterm doesn't process the chord.
+        copyTermSelection(term)
+        e.preventDefault()
+        return false
+      }
+      // clip === "paste":
+      if (!isOwnerRef.current) {
+        // Read-only viewer: swallow at the source so no native paste event fires.
+        e.preventDefault()
+        return false
+      }
+      // Owner: return false WITHOUT preventDefault so xterm emits no \x16 and the
+      // browser's default Ctrl+V fires a native `paste` event, which xterm's own
+      // handler reads from clipboardData (secure-context-free) and forwards as
+      // (bracketed) onData.
       return false
     })
 
@@ -384,6 +517,19 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // Skip when we attached as a read-only observer (non-owner): there is nothing
     // to type into, and the take-over placeholder owns the surface instead.
     if (isOwnerRef.current) term.focus()
+
+    // Copy-on-select (highlight to copy), gated by the `copy_on_select`
+    // preference. Runs in the `mouseup` user gesture so the clipboard write is
+    // permitted even over plain-HTTP (copyToClipboard falls synchronously to its
+    // execCommand path there). Skip empty/whitespace-only and trivial 1-char
+    // selections so a stray click-drag doesn't clobber the clipboard.
+    const onMouseUp = () => {
+      if (!copyOnSelectRef.current) return
+      const sel = term.getSelection()
+      if (sel.trim().length === 0 || sel.length < 2) return
+      copyTermSelection(term)
+    }
+    container.addEventListener("mouseup", onMouseUp)
 
     // Touch gestures over the terminal, mapped to the natural mobile model:
     //   - a one-finger DRAG scrolls the scrollback,
@@ -687,6 +833,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       clearTimeout(jiggleTimer)
       clearTimeout(resyncTimer)
       clearTimeout(longPressTimer)
+      container.removeEventListener("mouseup", onMouseUp)
       container.removeEventListener("touchstart", onTouchStart)
       container.removeEventListener("touchmove", onTouchMove)
       container.removeEventListener("touchend", endTouch)
@@ -797,6 +944,25 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
         pendingClaimRef.current = true
       }
     }
+    term?.focus()
+  }
+
+  // Copy the menu's selection. The menu only opens when there is a selection (the
+  // item is disabled otherwise), but re-read defensively.
+  function onMenuCopy() {
+    const term = termRef.current
+    if (term) copyTermSelection(term)
+  }
+  // Paste from the browser clipboard. Gated on ownership (a read-only viewer
+  // can't drive input). Needs a secure context for `readText`; pasteIntoTerm
+  // toasts a "use Ctrl+V" hint when the clipboard can't be read (plain-HTTP).
+  function onMenuPaste() {
+    const term = termRef.current
+    if (term && isOwnerRef.current) pasteIntoTerm(term)
+  }
+  function onMenuSelectAll() {
+    const term = termRef.current
+    term?.selectAll()
     term?.focus()
   }
 
@@ -944,10 +1110,55 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     >
       {/* Padding lives on the host, NOT the measured element below — see the
           hostRef comment: border-box computed heights include padding, and
-          FitAddon would mint a phantom row/column from it. */}
-      <div ref={hostRef} className="h-full w-full p-2">
+          FitAddon would mint a phantom row/column from it. A mouse/pen right-click
+          opens our controlled clipboard menu at the cursor; a TOUCH long-press
+          (which fires `contextmenu` on Android) is left to the native
+          selection gesture — see `pointerTypeRef`. */}
+      <div
+        ref={hostRef}
+        className="h-full w-full p-2"
+        onPointerDown={(e) => {
+          pointerTypeRef.current = e.pointerType
+        }}
+        onContextMenu={(e) => {
+          // Touch long-press: let the OS show its native text-selection menu
+          // instead of ours, preserving the long-press-to-select gesture.
+          if (pointerTypeRef.current === "touch") return
+          e.preventDefault()
+          const x = e.clientX
+          const y = e.clientY
+          setMenuAnchor({ getBoundingClientRect: () => new DOMRect(x, y, 0, 0) })
+          setMenuHasSelection(Boolean(termRef.current?.getSelection()))
+          setMenuOpen(true)
+        }}
+      >
         <div ref={containerRef} className="h-full w-full" />
       </div>
+      {/* Controlled clipboard context menu, anchored at the cursor. No
+          ContextMenuTrigger: base-ui's trigger hardcodes a touch long-press that
+          would fight the terminal's own long-press-to-select. */}
+      <ContextMenu open={menuOpen} onOpenChange={setMenuOpen}>
+        <ContextMenuContent
+          anchor={menuAnchor ?? undefined}
+          align="start"
+          side="bottom"
+          sideOffset={2}
+          className="min-w-40"
+        >
+          <ContextMenuItem disabled={!menuHasSelection} onClick={onMenuCopy}>
+            <ClipboardCopy />
+            Copy
+          </ContextMenuItem>
+          <ContextMenuItem disabled={!isOwner} onClick={onMenuPaste}>
+            <ClipboardPaste />
+            Paste
+          </ContextMenuItem>
+          <ContextMenuItem onClick={onMenuSelectAll}>
+            <TextSelect />
+            Select all
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {/* Pane chrome buttons. Grouped in ONE absolutely-positioned overlay (a
           sibling of the xterm host, NOT inside the unpadded containerRef xterm
           opens into) so they never change the terminal's box measurement — see

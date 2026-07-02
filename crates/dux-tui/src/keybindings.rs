@@ -939,6 +939,16 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
+    // Web-only palette command (highlight-to-copy is a browser-terminal behavior):
+    // joins the registry by Action but its surface is `Web`, so the TUI never
+    // lists or dispatches it.
+    BindingDef {
+        action: Action::ToggleCopyOnSelect,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
     BindingDef {
         action: Action::NewTerminal,
         default_keys: &[],
@@ -2053,7 +2063,7 @@ mod tests {
         // here — the same alarm the old "no Web-only commands" assertion gave,
         // but now allowing intentional exceptions. Web-only commands are also
         // intentionally absent from the TUI listing.
-        const KNOWN_WEB_ONLY: &[&str] = &["edit-config"];
+        const KNOWN_WEB_ONLY: &[&str] = &["edit-config", "toggle-copy-on-select"];
         for cmd in palette::PALETTE_COMMANDS {
             if cmd.surface == PaletteSurface::Web {
                 assert!(

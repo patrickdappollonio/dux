@@ -1,8 +1,8 @@
-// The label for the command-palette shortcut, matched to the platform: the
-// handler accepts BOTH metaKey and ctrlKey (CommandPalette.tsx), so Cmd+K and
-// Ctrl+K always work — but the LABEL should name the key the user actually
-// has. Apple platforms get the ⌘ glyph; everything else gets Ctrl.
-function isApplePlatform(): boolean {
+// Whether the client is an Apple platform. Drives the command-palette shortcut
+// label (Cmd+K vs Ctrl+K, both wired) and the terminal clipboard policy: on Mac
+// the native Cmd shortcuts own copy/paste, so a lone Control modifier passes
+// through to the app instead of being hijacked (see `classifyClipboardKey`).
+export function isApplePlatform(): boolean {
   const platform =
     // Modern Chromium exposes userAgentData; fall back to navigator.platform.
     (navigator as { userAgentData?: { platform?: string } }).userAgentData

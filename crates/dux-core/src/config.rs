@@ -328,6 +328,10 @@ pub struct UiConfig {
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
     pub github_integration: bool,
+    /// Whether selecting text in the web terminal auto-copies it to the
+    /// clipboard (X11-style "highlight to copy"). Toggling it from the web
+    /// command palette persists the new value here. Web-only behavior.
+    pub copy_on_select: bool,
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.
     /// Toggling it from the command palette or the web's Changes actions menu
@@ -448,6 +452,7 @@ impl Default for UiConfig {
             show_diff_line_numbers: false,
             diff_tab_width: 4,
             github_integration: true,
+            copy_on_select: true,
             auto_reopen_agents: false,
             show_changes_pane: true,
             pr_banner_position: "bottom".to_string(),
@@ -920,6 +925,7 @@ impl Default for Config {
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,
                 github_integration: true,
+                copy_on_select: true,
                 auto_reopen_agents: false,
                 show_changes_pane: true,
                 pr_banner_position: "bottom".to_string(),
