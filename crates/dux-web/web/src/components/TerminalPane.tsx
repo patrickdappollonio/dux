@@ -18,7 +18,14 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
-import { applyModifiers, arrowSeq, ESC, TAB } from "@/lib/termkeys"
+import {
+  applyModifiers,
+  arrowSeq,
+  ESC,
+  pageKeySeq,
+  sgrWheelSeq,
+  TAB,
+} from "@/lib/termkeys"
 import { selectSession, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import {
@@ -342,9 +349,16 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // scrollLines() — the same scrollback the accessory-bar page buttons move
     // through (they call scrollPages/scrollToTop/scrollToBottom). Touch-only
     // listeners, so this also lights up a touchscreen laptop, not just the mobile
-    // layout. Only the normal buffer has scrollback; alt-screen TUIs own the
-    // screen (no history), so we leave their touches alone and let the arrow row
-    // drive them.
+    // layout.
+    //
+    // The normal buffer has xterm scrollback, so a drag scrolls it locally. The
+    // ALT-SCREEN (a full-screen TUI like Claude's renderer) has NO xterm
+    // scrollback — the app keeps its own history that never reaches xterm. When
+    // such an app has mouse tracking on and we own the PTY, we forward the drag
+    // to it as SGR wheel events (sgrWheelSeq), so it scrolls its own history just
+    // as a desktop mouse wheel would. If the alt-screen app has no mouse tracking
+    // (or we are a read-only viewer), there is nothing to forward to, so we leave
+    // the touch to native handling and let the arrow row drive it.
     //
     // Disambiguation: a long-press timer marks the gesture as a selection the
     // moment the finger has been held still past the delay; from then on we never
@@ -364,7 +378,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       // Any new touch (including a second finger landing mid-gesture) supersedes
       // a pending long-press, so always cancel it first.
       clearTimeout(longPressTimer)
-      if (e.touches.length !== 1 || term.buffer.active.type !== "normal") {
+      // Track single-finger touches on BOTH buffers: the normal buffer scrolls
+      // xterm's scrollback, the alt-screen may forward to the app (decided per
+      // move in onTouchMove, since mouse-tracking state can change mid-gesture).
+      if (e.touches.length !== 1) {
         touchActive = false
         return
       }
@@ -378,15 +395,17 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       }, LONG_PRESS_MS)
     }
     const onTouchMove = (e: TouchEvent) => {
-      // Re-check the buffer type: an agent can enter an alt-screen TUI (no
-      // scrollback) mid-drag, and we leave those to native handling.
-      if (
-        !touchActive ||
-        touchSelecting ||
-        e.touches.length !== 1 ||
-        term.buffer.active.type !== "normal"
-      )
-        return
+      if (!touchActive || touchSelecting || e.touches.length !== 1) return
+      // Decide the target fresh each move: an agent can flip in or out of an
+      // alt-screen TUI mid-drag. On the alt-screen we can only act if the app
+      // takes mouse input AND we own the PTY; otherwise there is nothing to
+      // forward to, so leave the touch to native handling (selection/long-press).
+      const altScreen = term.buffer.active.type !== "normal"
+      const forwardWheel =
+        altScreen &&
+        isOwnerRef.current &&
+        term.modes.mouseTrackingMode !== "none"
+      if (altScreen && !forwardWheel) return
       const y = e.touches[0].clientY
       touchAccum += y - touchLastY
       touchLastY = y
@@ -401,12 +420,24 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
         term.textarea?.blur()
       }
       e.preventDefault()
-      const { scrollLines, remainderPx } = dragScrollLines(
-        touchAccum,
-        container.clientHeight / term.rows,
-      )
+      const rowHeight = container.clientHeight / term.rows
+      const { scrollLines, remainderPx } = dragScrollLines(touchAccum, rowHeight)
       if (scrollLines !== 0) {
-        term.scrollLines(scrollLines)
+        if (forwardWheel) {
+          // Forward to the full-screen app as wheel events at the finger's cell
+          // (most apps ignore the position, but we send a real in-bounds one).
+          const colWidth = container.clientWidth / term.cols
+          const rect = container.getBoundingClientRect()
+          const col =
+            Math.floor(
+              (e.touches[0].clientX - rect.left) / (colWidth > 0 ? colWidth : 1),
+            ) + 1
+          const cellRow =
+            Math.floor((y - rect.top) / (rowHeight > 0 ? rowHeight : 1)) + 1
+          pty.sendInput(encoder.encode(sgrWheelSeq(scrollLines, col, cellRow)))
+        } else {
+          term.scrollLines(scrollLines)
+        }
         touchAccum = remainderPx
       }
     }
@@ -756,11 +787,17 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     termRef.current?.focus()
   }
 
-  // Scroll the xterm viewport from the accessory bar's second row. These drive
-  // xterm's own scrollback (the normal-buffer history that accumulates as the
-  // agent streams output), giving a reliable touch target the slim scrollbar
-  // can't. (Alt-screen TUIs keep no scrollback, so page/jump scrolling is a
-  // no-op there — the cursor-arrow row drives those instead.)
+  // Scroll the xterm viewport from the accessory bar's second row. On the normal
+  // buffer these drive xterm's own scrollback (the history that accumulates as
+  // the agent streams output), giving a reliable touch target the slim scrollbar
+  // can't.
+  //
+  // On the ALT-SCREEN (a full-screen TUI) xterm has no scrollback, so PgUp/PgDn
+  // forward a page to the app itself, mirroring the TUI's forward-scroll: a
+  // mouse-tracking app (Claude, Codex, ...) gets a screenful of wheel events; a
+  // keyboard-only app gets the PgUp/PgDn keys. Jump-to-top/bottom has no clean
+  // wheel equivalent, so those two stay scrollback-only and are a no-op on the
+  // alt-screen — the cursor-arrow row drives fine-grained movement there.
   //
   // Scrolling is a READ gesture, so it drops the hidden textarea's focus: that
   // slides the soft keyboard away to free the whole screen for reading back and,
@@ -772,6 +809,32 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   function onScroll(dir: ScrollDir) {
     const term = termRef.current
     if (!term) return
+    const altScreen = term.buffer.active.type !== "normal"
+    // On the alt-screen, a Page button forwards to the full-screen app (input,
+    // so only when we own the PTY); top/bottom have no wheel equivalent and fall
+    // through to the local scroll, which is a no-op there.
+    if (
+      altScreen &&
+      isOwnerRef.current &&
+      (dir === "pageUp" || dir === "pageDown")
+    ) {
+      const up = dir === "pageUp"
+      if (term.modes.mouseTrackingMode !== "none") {
+        // A screenful of wheel notches toward older (up) or newer (down) output.
+        // The exact distance depends on the app's per-notch step; one row-height
+        // shy of a full screen is a reasonable page.
+        const lines = Math.max(1, term.rows - 1)
+        const col = Math.max(1, Math.floor(term.cols / 2))
+        const cellRow = Math.max(1, Math.floor(term.rows / 2))
+        const seq = sgrWheelSeq(up ? -lines : lines, col, cellRow)
+        ptyRef.current?.sendInput(encoder.encode(seq))
+      } else {
+        // Keyboard-only full-screen app: send the actual PgUp/PgDn key.
+        ptyRef.current?.sendInput(encoder.encode(pageKeySeq(up ? "up" : "down")))
+      }
+      if (navigator.maxTouchPoints > 0) term.textarea?.blur()
+      return
+    }
     switch (dir) {
       case "top":
         term.scrollToTop()
