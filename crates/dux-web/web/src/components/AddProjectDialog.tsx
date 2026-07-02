@@ -14,10 +14,15 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { addConfirmLabel, branchWarningCopy } from "@/lib/addProjectWarning"
+import {
+  addProjectPrimaryAction,
+  branchWarningCopy,
+  noCommitsCopy,
+} from "@/lib/addProjectWarning"
 import {
   addProject,
   addProjectCheckoutDefault,
+  addProjectCreateInitialCommit,
   browseDir,
   closeAddProject,
   inspectProjectPath,
@@ -44,14 +49,30 @@ function AddProjectBrowser() {
     selected && projectPathInspection?.path === selected
       ? projectPathInspection
       : null
+  const inspecting = inspection?.loading ?? false
+  // A resolved inspection of an unborn repo (fresh `git init`, no commits)
+  // takes precedence over any branch warning: there is no default branch to
+  // check out, and after the initial commit the current branch simply becomes
+  // the leading branch. We only offer it once inspection confirms it.
+  const needsInitialCommit =
+    !!inspection &&
+    !inspection.error &&
+    !inspection.loading &&
+    !inspection.hasCommits
   const warning = inspection && !inspection.error ? inspection.warning : null
   const copy =
-    warning && inspection?.currentBranch
+    !needsInitialCommit && warning && inspection?.currentBranch
       ? branchWarningCopy(warning, inspection.currentBranch)
       : null
   // Only offer the checkbox when the server confidently knows the default.
   const offerCheckout = copy?.canCheckoutDefault ?? false
   const willCheckout = offerCheckout && checkoutDefault
+  const noCommits = needsInitialCommit ? noCommitsCopy() : null
+  const primary = addProjectPrimaryAction({
+    hasCommits: !needsInitialCommit,
+    willCheckout,
+    hasBranchWarning: !!copy,
+  })
 
   function handleEntryClick(entry: DirEntryView) {
     if (entry.is_git_repo) {
@@ -69,7 +90,9 @@ function AddProjectBrowser() {
 
   function handleAdd() {
     if (!selected) return
-    if (willCheckout) {
+    if (primary.action === "initial-commit") {
+      addProjectCreateInitialCommit(selected, name)
+    } else if (primary.action === "checkout-default") {
       addProjectCheckoutDefault(selected, name)
     } else {
       addProject(selected, name)
@@ -79,8 +102,7 @@ function AddProjectBrowser() {
     closeAddProject()
   }
 
-  const inspecting = inspection?.loading ?? false
-  const confirmLabel = copy ? addConfirmLabel(willCheckout) : "Add project"
+  const confirmLabel = primary.label
 
   return (
     <DialogContent className="sm:max-w-xl" showCloseButton={false}>
@@ -141,6 +163,19 @@ function AddProjectBrowser() {
               <BrailleSpinner className="text-muted-foreground" />
               Checking the current branch…
             </span>
+          ) : null}
+          {noCommits ? (
+            <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+                <div className="grid gap-1 text-sm">
+                  <span>{noCommits.message}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {noCommits.note}
+                  </span>
+                </div>
+              </div>
+            </div>
           ) : null}
           {copy ? (
             <div className="grid gap-2 rounded-md border border-amber-600/40 bg-amber-600/10 p-3">

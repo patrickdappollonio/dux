@@ -235,6 +235,18 @@ pub enum WireCommand {
         path: String,
         name: String,
     },
+    /// Create an empty initial commit for a fresh (unborn) repo, THEN register
+    /// it as a project. Used when the client's inspect reported `has_commits:
+    /// false`. Mirrors the L4 worker chain of `AddProjectCheckoutDefault`:
+    /// validates the path, serializes per repo path via
+    /// `InFlightKey::InitialCommit`, spawns `run_create_initial_commit_job`, and
+    /// returns a busy status. Worker completion posts `InitialCommitCreated`,
+    /// whose `AddProjectAfterInitialCommit` reaction is driven to the actual add
+    /// by `drive_add_project_followup` (web) or the TUI's `workers.rs` drain.
+    AddProjectCreateInitialCommit {
+        path: String,
+        name: String,
+    },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
         project_id: String,
@@ -556,6 +568,47 @@ fn wire_status_from_reaction(reaction: &EventReaction) -> Option<WireStatus> {
     }
 }
 
+/// Named-field args for `finish_web_project_add`, so the two adjacent branch
+/// strings (`current_branch`, `leading_branch`) can't be silently transposed at
+/// a call site.
+struct WebProjectAdd<'a> {
+    path: &'a str,
+    display_name: String,
+    current_branch: &'a str,
+    leading_branch: &'a str,
+    status_message: String,
+    /// Prefix for the "git succeeded but registration failed" error message.
+    add_failed_prefix: &'a str,
+    status_op_id: &'a Option<String>,
+}
+
+/// The authoritative "added" status message from a `PersistProject::Add`
+/// reaction (the engine's real outcome — an honest dedup message when a race
+/// hit that path, or the normal success text), or `None` for any other reaction.
+fn added_status_message(reaction: &EventReaction) -> Option<String> {
+    if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
+        && let ProjectPersistenceView::Added { status_message, .. } = &outcome.view
+    {
+        Some(status_message.clone())
+    } else {
+        None
+    }
+}
+
+/// Resolve a project's display name: the trimmed user-supplied name, or the
+/// path's basename when empty. Shared by the add-project followups.
+fn display_project_name(name: &str, path: &str) -> String {
+    if name.trim().is_empty() {
+        PathBuf::from(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string()
+    } else {
+        name.trim().to_string()
+    }
+}
+
 /// Map an `EventReaction` to the user-facing status events it should emit on the
 /// async status stream. Unlike `wire_status_from_reaction` (single value, for a
 /// command's synchronous result), this flattens `Multi` and surfaces launch
@@ -708,6 +761,13 @@ impl Engine {
                 let status = self.add_project_checkout_default(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
+                });
+            }
+            WireCommand::AddProjectCreateInitialCommit { path, name } => {
+                let status = self.add_project_create_initial_commit(&path, name)?;
+                return Ok(WireCommandOutcome {
+                    status,
                     created_op_id: None,
                 });
             }
@@ -1420,6 +1480,15 @@ impl Engine {
         let validated = self
             .validate_project_add_path(path)
             .map_err(|e| anyhow::anyhow!(e))?;
+        // A confirmed unborn repo has no default branch to check out; reject
+        // explicitly rather than relying on `branch_warning_kind` to bail with a
+        // less specific message. Fail open on an indeterminate git result.
+        if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
+            anyhow::bail!(
+                "\"{}\" has no commits yet, so there's no default branch to check out. Create an initial commit first.",
+                validated.display()
+            );
+        }
         let branch = crate::git::current_branch_opt(&validated)?;
         let default_branch = match branch.as_deref() {
             // On a normal HEAD: require a Known default (Heuristic is rejected).
@@ -1486,6 +1555,124 @@ impl Engine {
             );
         });
         Ok(pending)
+    }
+
+    /// Create an empty initial commit for an unborn repo, then register it.
+    /// Borrows the worker-chain SHAPE of [`Self::add_project_checkout_default`]
+    /// (validate → busy status → worker → followup), but ADDITIONALLY serializes
+    /// per repo path via `InFlightKey::InitialCommit` — a gate the checkout-add
+    /// flow doesn't need, since a `git switch` can't silently double-append the
+    /// way an empty-commit bootstrap could. Worker completion drives
+    /// `AddProjectAfterInitialCommit`.
+    fn add_project_create_initial_commit(
+        &mut self,
+        path: &str,
+        name: String,
+    ) -> anyhow::Result<Option<WireStatus>> {
+        let validated = self
+            .validate_project_add_path(path)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let path_str = validated.to_string_lossy().to_string();
+        // Handle the race where a commit landed between the client's inspect and
+        // this request. Fail-closed commit state: only Unborn proceeds to the
+        // bootstrap; a now-Born repo is just registered (no commit needed), and an
+        // indeterminate git state is a hard, synchronous error (not a stranded
+        // busy that expires to a 202).
+        match crate::git::repo_commit_state(&validated) {
+            crate::git::CommitState::Unborn => {}
+            crate::git::CommitState::Born => {
+                // Already has commits — nothing to bootstrap. Register it directly
+                // via the normal add path so the client's request still succeeds
+                // (a true no-op on the bootstrap, not a hard failure). Map the
+                // reaction to a status EXACTLY as the plain `AddProject` handler
+                // does: only a confirmed `Added` outcome is "info"; a rolled-back
+                // add relays its error tone; and a deferred (reload-barrier)
+                // `Nothing` yields `None` (no toast) rather than a fabricated
+                // success.
+                let cmd = self.wire_to_command(WireCommand::AddProject {
+                    path: path_str,
+                    name,
+                })?;
+                let reaction = self.apply(cmd)?;
+                let status = match added_status_message(&reaction) {
+                    Some(message) => Some(WireStatus::new("info", message)),
+                    None => wire_status_from_reaction(&reaction),
+                };
+                return Ok(status);
+            }
+            crate::git::CommitState::Indeterminate => {
+                anyhow::bail!(
+                    "Couldn't determine the commit state of \"{path_str}\"; not creating an initial commit. Check the repository and retry."
+                );
+            }
+        }
+        // Real branch the commit will land on (propagate a git error rather than
+        // silently defaulting the branch, matching the sibling add paths).
+        let branch = crate::git::current_branch_opt(&validated)?.unwrap_or_default();
+        let leading_branch = crate::project_browser::leading_branch_for_project(
+            &validated,
+            (!branch.is_empty()).then_some(branch.as_str()),
+        );
+        // Serialize per repo path: reject a second concurrent request rather than
+        // let two workers both bootstrap. Cleared on completion in
+        // `process_worker_event` (and on a worker panic, below).
+        if !self.mark_in_flight(crate::engine::InFlightKey::InitialCommit(path_str.clone())) {
+            anyhow::bail!(
+                "An initial commit is already being created for \"{path_str}\". Please wait for it to finish."
+            );
+        }
+        let add = crate::worker::InitialCommitAdd {
+            path: path_str.clone(),
+            name,
+            branch,
+            leading_branch,
+        };
+        let busy = format!("Creating an initial commit in {path_str} before adding the project...");
+        // Mint a HandlerStatusOp: SUCCESS resolved in `drive_add_project_followup`
+        // after the inline add; FAILURE resolved in `process_worker_event`. Both
+        // share this op id so the busy is replaced, not stranded.
+        let op = crate::engine::status_op(busy).resolve_in_handler(
+            move |o: &crate::engine::WebAddProjectOutcome| {
+                use crate::engine::{Final, WebAddProjectOutcome};
+                match o {
+                    WebAddProjectOutcome::Added { status_message } => {
+                        Final::info(status_message.clone())
+                    }
+                    WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
+                    // This flow never switches branches, so `SwitchFailed` can't be
+                    // produced for it — but the op type is shared with the
+                    // checkout-add flow, so the match must stay total.
+                    WebAddProjectOutcome::SwitchFailed { repo_path, .. } => Final::error(format!(
+                        "Couldn't add the project at {repo_path} after creating the initial commit."
+                    )),
+                }
+            },
+        );
+        let op = op.with_scope(self.current_origin.clone());
+        let op_id = op.id().to_string();
+        let pending = WireStatus::from_update(&op.pending_status());
+        self.pending_web_add_project_ops.insert(op_id.clone(), op);
+        let worker_tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            // Guarantee the in-flight gate clears and the op resolves even if the
+            // job panics — otherwise the gate would strand the repo path forever.
+            let tx_panic = worker_tx.clone();
+            let add_panic = add.clone();
+            let op_id_panic = op_id.clone();
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::project_browser::run_create_initial_commit_job(add, worker_tx, Some(op_id));
+            }))
+            .is_err()
+            {
+                let _ = tx_panic.send(crate::worker::WorkerEvent::InitialCommitCreated {
+                    add: add_panic,
+                    result: Err("the initial-commit worker panicked".to_string()),
+                    status_op_id: Some(op_id_panic),
+                });
+            }
+        });
+        Ok(Some(pending))
     }
 
     /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
@@ -1712,113 +1899,166 @@ impl Engine {
                 leading_branch,
                 status_op_id,
             } => {
-                let display_name = if name.trim().is_empty() {
-                    PathBuf::from(path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("project")
-                        .to_string()
-                } else {
-                    name.trim().to_string()
-                };
+                let display_name = display_project_name(name, path);
                 let status_message = format!(
                     "Checked out \"{target_branch}\" and added project \"{display_name}\" to the workspace."
                 );
-                let project = Project {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    name: display_name,
-                    path: path.clone(),
-                    explicit_default_provider: None,
-                    default_provider: self.config.default_provider(),
-                    leading_branch: Some(leading_branch.clone()),
-                    auto_reopen_agents: None,
-                    startup_command: None,
-                    env: std::collections::BTreeMap::new(),
-                    current_branch: target_branch.clone(),
-                    branch_status: ProjectBranchStatus::Unknown,
-                    path_missing: false,
-                    created_at: Some(chrono::Utc::now()),
-                };
-                // The add is INLINE: the handler writes config.toml (with SQLite
-                // rollback on failure) and returns the real outcome NOW. On
-                // success it returns `ProjectPersistenceOutcome(Added)`; on a
-                // config-write/DB failure it returns an error-toned `Status`
-                // (still a Rust `Ok`, but the add was rolled back). Inspect the
-                // reaction so a rolled-back add is reported as the failure it was,
-                // not the optimistic "added project" success.
-                //
-                // The user-facing statuses (`statuses`) stay byte-identical to the
-                // pre-StatusOp behavior. When `status_op_id` is Some (always, for
-                // the web), we ALSO resolve the add-project op so its busy is
-                // replaced by the keyed final instead of being separately cleared.
-                // The inline persist can mint a status from `current_origin`;
-                // re-set it to the add-project op's captured scope (reset to `All`
-                // by the worker tick) so any minted status stays scoped to the
-                // originating connection, then restore `All` afterward.
-                let origin = status_op_id
-                    .as_ref()
-                    .and_then(|id| self.pending_web_add_project_ops.get(id))
-                    .map(|op| op.scope().clone())
-                    .unwrap_or(crate::statusline::StatusScope::All);
-                self.current_origin = origin;
-                let statuses = match self.apply(Command::PersistProject {
-                    action: Box::new(ProjectPersistenceAction::Add {
-                        project,
-                        status_message: status_message.clone(),
-                    }),
-                    status_op_id: None,
-                }) {
-                    Ok(EventReaction::ProjectPersistenceOutcome(outcome))
-                        if matches!(outcome.view, ProjectPersistenceView::Added { .. }) =>
-                    {
-                        vec![WireStatus::new("info", status_message.clone())]
-                    }
-                    // A rolled-back add surfaces as an error-toned Status; relay it
-                    // verbatim so the user learns the add failed and was undone.
-                    Ok(reaction) => wire_statuses_from_reaction(&reaction),
-                    Err(e) => vec![WireStatus::new(
-                        "error",
-                        format!(
-                            "Checked out \"{target_branch}\" but couldn't add the project: {e:#}"
-                        ),
-                    )],
-                };
-                self.current_origin = crate::statusline::StatusScope::All;
-
-                // Resolve the add-project op against the same outcome the
-                // `statuses` carry, keying the final to the op's id so it replaces
-                // the busy. The op's resolver re-emits the SAME message: a clean
-                // add → `Added` (info), any failure → `AddFailed` (the relayed
-                // error text). When no op is registered (id None, or already
-                // consumed by a switch-failure path), fall back to `statuses`.
-                if let Some(id) = status_op_id
-                    && let Some(op) = self.pending_web_add_project_ops.remove(id)
-                {
-                    let is_success = statuses.iter().any(|s| s.tone == "info");
-                    let outcome = if is_success {
-                        crate::engine::WebAddProjectOutcome::Added {
-                            status_message: status_message.clone(),
-                        }
-                    } else {
-                        // Surface the same failure text the unkeyed `statuses`
-                        // would have shown (the engine's rolled-back error or the
-                        // apply error), now keyed so it replaces the busy.
-                        let message = statuses
-                            .iter()
-                            .find(|s| s.tone == "error")
-                            .map(|s| s.message.clone())
-                            .unwrap_or_else(|| status_message.clone());
-                        crate::engine::WebAddProjectOutcome::AddFailed { message }
-                    };
-                    // The add-project op always resolves to a Message (never a
-                    // Clear), so `into_reaction()` is a keyed `Status` that
-                    // `wire_statuses_from_reaction` renders directly.
-                    return wire_statuses_from_reaction(&op.resolve(&outcome).into_reaction());
-                }
-                statuses
+                let add_failed_prefix =
+                    format!("Checked out \"{target_branch}\" but couldn't add the project");
+                self.finish_web_project_add(WebProjectAdd {
+                    path,
+                    display_name,
+                    current_branch: target_branch,
+                    leading_branch,
+                    status_message,
+                    add_failed_prefix: &add_failed_prefix,
+                    status_op_id,
+                })
+            }
+            EventReaction::AddProjectAfterInitialCommit {
+                path,
+                name,
+                branch,
+                leading_branch,
+                status_op_id,
+            } => {
+                let display_name = display_project_name(name, path);
+                let status_message = format!(
+                    "Created an initial commit and added project \"{display_name}\" to the workspace."
+                );
+                self.finish_web_project_add(WebProjectAdd {
+                    path,
+                    display_name,
+                    current_branch: branch,
+                    leading_branch,
+                    status_message,
+                    add_failed_prefix: "Created the initial commit but couldn't add the project",
+                    status_op_id,
+                })
             }
             _ => vec![],
         }
+    }
+
+    /// Shared tail of the "do git work, then register the project" web
+    /// followups: build the `Project`, apply the INLINE add (config write with
+    /// SQLite rollback), and resolve the keyed add-project op. Used by both the
+    /// checkout-default and initial-commit flows so the delicate status-op
+    /// correlation lives in one place. Args are a named-field struct so the two
+    /// adjacent branch strings can't be silently transposed.
+    fn finish_web_project_add(&mut self, args: WebProjectAdd) -> Vec<WireStatus> {
+        let WebProjectAdd {
+            path,
+            display_name,
+            current_branch,
+            leading_branch,
+            status_message,
+            add_failed_prefix,
+            status_op_id,
+        } = args;
+        let project = Project {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: display_name,
+            path: path.to_string(),
+            explicit_default_provider: None,
+            default_provider: self.config.default_provider(),
+            leading_branch: Some(leading_branch.to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: std::collections::BTreeMap::new(),
+            current_branch: current_branch.to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: Some(chrono::Utc::now()),
+        };
+        // The add is INLINE: the handler writes config.toml (with SQLite
+        // rollback on failure) and returns the real outcome NOW. On
+        // success it returns `ProjectPersistenceOutcome(Added)`; on a
+        // config-write/DB failure it returns an error-toned `Status`
+        // (still a Rust `Ok`, but the add was rolled back). Inspect the
+        // reaction so a rolled-back add is reported as the failure it was,
+        // not the optimistic "added project" success.
+        //
+        // The user-facing statuses (`statuses`) stay byte-identical to the
+        // pre-StatusOp behavior. When `status_op_id` is Some (always, for
+        // the web), we ALSO resolve the add-project op so its busy is
+        // replaced by the keyed final instead of being separately cleared.
+        // The inline persist can mint a status from `current_origin`;
+        // re-set it to the add-project op's captured scope (reset to `All`
+        // by the worker tick) so any minted status stays scoped to the
+        // originating connection, then restore `All` afterward.
+        let origin = status_op_id
+            .as_ref()
+            .and_then(|id| self.pending_web_add_project_ops.get(id))
+            .map(|op| op.scope().clone())
+            .unwrap_or(crate::statusline::StatusScope::All);
+        self.current_origin = origin;
+        // The engine's Added outcome carries the AUTHORITATIVE message — which is
+        // the dedup chokepoint's honest "already in the workspace" text when a
+        // race hit that path, not this caller's optimistic narrative. Surface
+        // that (falling back to the caller's message only if the engine didn't
+        // provide one), for both the unkeyed status and the keyed op below.
+        let mut success_message = status_message.clone();
+        let statuses = match self.apply(Command::PersistProject {
+            action: Box::new(ProjectPersistenceAction::Add {
+                project,
+                status_message: status_message.clone(),
+            }),
+            status_op_id: None,
+        }) {
+            Ok(EventReaction::ProjectPersistenceOutcome(outcome))
+                if matches!(outcome.view, ProjectPersistenceView::Added { .. }) =>
+            {
+                if let ProjectPersistenceView::Added {
+                    status_message: engine_message,
+                    ..
+                } = &outcome.view
+                {
+                    success_message = engine_message.clone();
+                }
+                vec![WireStatus::new("info", success_message.clone())]
+            }
+            // A rolled-back add surfaces as an error-toned Status; relay it
+            // verbatim so the user learns the add failed and was undone.
+            Ok(reaction) => wire_statuses_from_reaction(&reaction),
+            Err(e) => vec![WireStatus::new(
+                "error",
+                format!("{add_failed_prefix}: {e:#}"),
+            )],
+        };
+        self.current_origin = crate::statusline::StatusScope::All;
+
+        // Resolve the add-project op against the same outcome the
+        // `statuses` carry, keying the final to the op's id so it replaces
+        // the busy. The op's resolver re-emits the SAME message: a clean
+        // add → `Added` (info), any failure → `AddFailed` (the relayed
+        // error text). When no op is registered (id None, or already
+        // consumed by a switch-failure path), fall back to `statuses`.
+        if let Some(id) = status_op_id
+            && let Some(op) = self.pending_web_add_project_ops.remove(id)
+        {
+            let is_success = statuses.iter().any(|s| s.tone == "info");
+            let outcome = if is_success {
+                crate::engine::WebAddProjectOutcome::Added {
+                    status_message: success_message.clone(),
+                }
+            } else {
+                // Surface the same failure text the unkeyed `statuses`
+                // would have shown (the engine's rolled-back error or the
+                // apply error), now keyed so it replaces the busy.
+                let message = statuses
+                    .iter()
+                    .find(|s| s.tone == "error")
+                    .map(|s| s.message.clone())
+                    .unwrap_or_else(|| status_message.clone());
+                crate::engine::WebAddProjectOutcome::AddFailed { message }
+            };
+            // The add-project op always resolves to a Message (never a
+            // Clear), so `into_reaction()` is a keyed `Status` that
+            // `wire_statuses_from_reaction` renders directly.
+            return wire_statuses_from_reaction(&op.resolve(&outcome).into_reaction());
+        }
+        statuses
     }
 
     /// Drive a checkout-related reaction to completion, returning user-facing
@@ -2273,6 +2513,18 @@ impl Engine {
                 let validated = self
                     .validate_project_add_path(&path)
                     .map_err(|e| anyhow::anyhow!(e))?;
+                // Reject a *confirmed* unborn repo: registering a commit-less repo
+                // yields a phantom leading branch that later breaks agent
+                // creation. Clients that want the empty-commit bootstrap send
+                // `AddProjectCreateInitialCommit` instead. Fail OPEN on an
+                // indeterminate git result (don't misdiagnose a transient failure
+                // as "no commits") — `repo_has_commits`'s fail-open bool would.
+                if crate::git::repo_commit_state(&validated) == crate::git::CommitState::Unborn {
+                    anyhow::bail!(
+                        "\"{}\" has no commits yet, so it can't back a worktree. Create an initial commit first (the app offers to do this for you when adding the project).",
+                        validated.display()
+                    );
+                }
                 let branch = crate::git::current_branch_opt(&validated)?;
                 let leading_branch =
                     crate::project_browser::leading_branch_for_project(&validated, branch.as_deref());
@@ -2509,6 +2761,7 @@ impl Engine {
             | WireCommand::RerunStartupCommand { .. }
             | WireCommand::CheckoutProjectDefaultBranch { .. }
             | WireCommand::AddProjectCheckoutDefault { .. }
+            | WireCommand::AddProjectCreateInitialCommit { .. }
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::SetChangesPaneVisible { .. }
@@ -4044,6 +4297,210 @@ mod tests {
                 name: "My Project".to_string(),
             }
         );
+    }
+
+    /// A tempdir repo initialized with `git init` but no commit (unborn HEAD).
+    fn init_unborn_repo_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .status()
+                    .expect("spawn git")
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "test"]);
+        dir
+    }
+
+    #[test]
+    fn apply_wire_create_initial_commit_bootstraps_then_adds() {
+        let repo = init_unborn_repo_dir();
+        let path = repo.path().to_string_lossy().into_owned();
+        let (mut engine, _tmp) = test_engine();
+
+        engine
+            .apply_wire(WireCommand::AddProjectCreateInitialCommit {
+                path: path.clone(),
+                name: "Demo".to_string(),
+            })
+            .expect("dispatch initial-commit add");
+        // Drive the worker chain (InitialCommitCreated → AddProjectAfterInitialCommit
+        // → inline registration) exactly like the checkout-default chain.
+        let statuses = drive_add_project_chain(&mut engine);
+
+        assert!(
+            crate::git::repo_has_commits(repo.path()),
+            "the repo must have a commit after the chain completes"
+        );
+        assert_eq!(engine.projects.len(), 1, "the project must be registered");
+        assert_eq!(engine.projects[0].current_branch, "main");
+        assert!(
+            statuses.iter().any(|s| s.tone == "info"),
+            "a success status must be emitted, got {statuses:?}"
+        );
+    }
+
+    #[test]
+    fn apply_wire_create_initial_commit_rejects_a_concurrent_request() {
+        let repo = init_unborn_repo_dir();
+        // The in-flight gate is keyed by the CANONICAL path (validation
+        // canonicalizes), so pre-mark with the same.
+        let canonical = std::fs::canonicalize(repo.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let (mut engine, _tmp) = test_engine();
+        assert!(
+            engine.mark_in_flight(crate::engine::InFlightKey::InitialCommit(canonical)),
+            "precondition: gate starts free"
+        );
+
+        let res = engine.apply_wire(WireCommand::AddProjectCreateInitialCommit {
+            path: repo.path().to_string_lossy().into_owned(),
+            name: "Demo".to_string(),
+        });
+        assert!(
+            res.is_err(),
+            "a second concurrent initial-commit request for the same repo must be rejected"
+        );
+        assert!(
+            !crate::git::repo_has_commits(repo.path()),
+            "the rejected request must not have committed"
+        );
+    }
+
+    #[test]
+    fn persist_project_add_is_idempotent_on_path() {
+        // The single commit chokepoint must not create a duplicate Project when
+        // two adds for the same path race past the request-time validation (e.g.
+        // the initial-commit born-race registering while a sibling worker's
+        // followup is still in flight).
+        let (mut engine, _tmp) = test_engine();
+        let add = |id: &str| Command::PersistProject {
+            action: Box::new(crate::worker::ProjectPersistenceAction::Add {
+                project: sample_project(id, "/same/path"),
+                status_message: "added".to_string(),
+            }),
+            status_op_id: None,
+        };
+        engine.apply(add("id-a")).expect("first add");
+        let second = engine.apply(add("id-b")).expect("second add (same path)");
+        assert_eq!(
+            engine.projects.len(),
+            1,
+            "a second add for the same path must not create a duplicate"
+        );
+        assert_eq!(engine.projects[0].id, "id-a", "the first registration wins");
+        // The dedup surfaces an honest message (already registered), not a
+        // fabricated "added" narrative.
+        let message = added_status_message(&second).expect("Added outcome");
+        assert!(
+            message.contains("already in the workspace"),
+            "dedup must report the truth, got: {message}"
+        );
+    }
+
+    #[test]
+    fn finish_web_project_add_surfaces_the_dedup_message_not_the_callers_narrative() {
+        // The full web followup path: when a race means the path is already
+        // registered, the status must carry the engine's honest "already in the
+        // workspace" text, not the losing caller's fabricated success narrative.
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .apply(Command::PersistProject {
+                action: Box::new(crate::worker::ProjectPersistenceAction::Add {
+                    project: sample_project("winner", "/p"),
+                    status_message: "added".to_string(),
+                }),
+                status_op_id: None,
+            })
+            .expect("pre-register the winner");
+
+        let statuses = engine.finish_web_project_add(WebProjectAdd {
+            path: "/p",
+            display_name: "Loser".to_string(),
+            current_branch: "main",
+            leading_branch: "main",
+            status_message:
+                "Created an initial commit and added project \"Loser\" to the workspace."
+                    .to_string(),
+            add_failed_prefix: "Created the initial commit but couldn't add the project",
+            status_op_id: &None,
+        });
+
+        assert_eq!(engine.projects.len(), 1, "no duplicate project");
+        let msg = &statuses.last().expect("a status").message;
+        assert!(
+            msg.contains("already in the workspace"),
+            "must surface the honest engine message, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Loser"),
+            "must not echo the losing caller's narrative, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_born_race_during_reload_defers_without_fabricating_success() {
+        // During a config-reload barrier, PersistProject is deferred (reaction is
+        // `Nothing`). The born fast-path must NOT fabricate a "Project added"
+        // success — it returns no status, matching the plain AddProject handler.
+        let repo = init_unborn_repo_dir();
+        run_in_repo(
+            repo.path(),
+            &["commit", "-q", "--allow-empty", "-m", "init"],
+        );
+        let (mut engine, _tmp) = test_engine();
+        engine.reloading = true;
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectCreateInitialCommit {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: "Demo".to_string(),
+            })
+            .expect("dispatch");
+        assert!(
+            outcome.status.is_none(),
+            "a deferred add must not fabricate a success status"
+        );
+        assert!(
+            engine.projects.is_empty(),
+            "deferred — the project isn't registered yet"
+        );
+    }
+
+    fn run_in_repo(dir: &std::path::Path, args: &[&str]) {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("spawn git")
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+
+    #[test]
+    fn apply_wire_checkout_default_rejects_an_unborn_repo() {
+        let repo = init_unborn_repo_dir();
+        let (mut engine, _tmp) = test_engine();
+        let res = engine.apply_wire(WireCommand::AddProjectCheckoutDefault {
+            path: repo.path().to_string_lossy().into_owned(),
+            name: "Demo".to_string(),
+        });
+        assert!(
+            res.is_err(),
+            "checkout-default of a commit-less repo must be rejected, not registered"
+        );
+        assert!(engine.projects.is_empty());
     }
 
     #[test]

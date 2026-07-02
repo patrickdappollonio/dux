@@ -93,6 +93,21 @@ impl NonDefaultBranchAction {
     }
 }
 
+/// Payload for the "create an empty initial commit, then register the project"
+/// flow. A dedicated struct (rather than reusing [`NonDefaultBranchAction`]) so
+/// the completion handler has no impossible variant to swallow, and so the
+/// repo's real current `branch` is carried through to registration distinct
+/// from its resolved `leading_branch`.
+#[derive(Clone, Debug)]
+pub struct InitialCommitAdd {
+    pub path: String,
+    pub name: String,
+    /// The branch HEAD points at (unborn now; the commit lands on it).
+    pub branch: String,
+    /// The resolved leading branch to persist for the project.
+    pub leading_branch: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct CreateAgentBranchInspection {
     pub current_branch: String,
@@ -338,6 +353,17 @@ pub enum WorkerEvent {
         /// outcomes); for an `AddProject` action it resolves the add-project op's
         /// switch FAILURE here (the SUCCESS resolves later in the followup).
         /// `None` for the TUI, which keeps its unkeyed `Status` finals.
+        status_op_id: Option<String>,
+    },
+    /// Background `create_initial_commit` for a fresh (unborn) repo has
+    /// finished. On `Ok`, the followup registers the project on its now-born
+    /// branch. On `Err`, the formatted git error is surfaced.
+    InitialCommitCreated {
+        add: InitialCommitAdd,
+        result: Result<(), String>,
+        /// Correlation id for a web add-project `HandlerStatusOp` (resolved in
+        /// `drive_add_project_followup`), or a TUI `pending_checkout_inspect_ops`
+        /// op (dismissed in `drain_events`). `None` when no keyed status is driven.
         status_op_id: Option<String>,
     },
     /// Background inspection of the selected project checkout before opening

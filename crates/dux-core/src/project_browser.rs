@@ -307,6 +307,41 @@ pub fn run_add_project_checkout_job(
     });
 }
 
+/// Background job for the initial-commit-then-add flow: creates an empty
+/// initial commit in the (unborn) source repo and reports the outcome via
+/// `WorkerEvent::InitialCommitCreated`. Shared by the TUI and the web so the
+/// commit runs off the UI/reactor thread.
+pub fn run_create_initial_commit_job(
+    mut add: crate::worker::InitialCommitAdd,
+    worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
+) {
+    let result = match git::create_initial_commit(Path::new(&add.path)) {
+        Ok(committed_branch) => {
+            // Persist the branch the commit ACTUALLY landed on (create_initial_commit
+            // resolves HEAD itself), and re-derive the leading branch from it — the
+            // pre-commit values on `add` could be stale if HEAD moved concurrently.
+            // Guard the empty case (a Born+detached race yields no branch) so
+            // `leading_branch` degrades to the "main" fallback rather than an
+            // empty string — it MUST be a real branch name (agent creation checks
+            // `local_branch_exists(leading_branch)`). `branch` (the current branch)
+            // is left empty for a detached HEAD on purpose: that's how the whole
+            // codebase represents "detached" (see `load_projects`), and every
+            // consumer guards `current_branch.is_empty()`.
+            let branch_opt = (!committed_branch.is_empty()).then_some(committed_branch.as_str());
+            add.leading_branch = leading_branch_for_project(Path::new(&add.path), branch_opt);
+            add.branch = committed_branch;
+            Ok(())
+        }
+        Err(e) => Err(format!("{e:#}")),
+    };
+    let _ = worker_tx.send(WorkerEvent::InitialCommitCreated {
+        add,
+        result,
+        status_op_id,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -564,5 +599,47 @@ mod tests {
         let tmp = tempdir().unwrap();
         let result = leading_branch_for_project(tmp.path(), Some("feature/my-thing"));
         assert_eq!(result, "feature/my-thing");
+    }
+
+    #[test]
+    fn run_create_initial_commit_job_never_persists_an_empty_leading_branch() {
+        // Born + detached HEAD (a double-race): create_initial_commit returns an
+        // empty branch. The job must degrade leading_branch to the "main" fallback
+        // rather than persist an empty string that would break agent creation.
+        let repo = tempdir().unwrap();
+        run_git(repo.path(), &["init", "-q", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(
+            repo.path(),
+            &["commit", "-q", "--allow-empty", "-m", "init"],
+        );
+        run_git(repo.path(), &["checkout", "-q", "--detach"]);
+
+        let (tx, rx) = mpsc::channel();
+        run_create_initial_commit_job(
+            crate::worker::InitialCommitAdd {
+                path: repo.path().to_string_lossy().into_owned(),
+                name: "x".to_string(),
+                branch: "stale".to_string(),
+                leading_branch: "stale".to_string(),
+            },
+            tx,
+            None,
+        );
+        match rx.recv().unwrap() {
+            WorkerEvent::InitialCommitCreated { add, result, .. } => {
+                assert!(result.is_ok(), "born repo is idempotent success");
+                assert!(
+                    !add.leading_branch.is_empty(),
+                    "leading_branch must never be empty"
+                );
+                assert_eq!(add.leading_branch, "main");
+                // current_branch is intentionally empty for a detached HEAD — the
+                // codebase-standard "detached" representation (consumers guard it).
+                assert_eq!(add.branch, "", "detached HEAD has no current branch");
+            }
+            _ => panic!("expected InitialCommitCreated event"),
+        }
     }
 }

@@ -56,11 +56,52 @@ export function branchWarningCopy(
   }
 }
 
+export interface NoCommitsCopy {
+  // Headline: the repo has no commits yet.
+  message: string
+  // Reassurance: the commit dux makes is empty and won't touch existing files.
+  note: string
+}
+
 /**
- * The confirm-button label for the add-project warning, mirroring the TUI: when
- * the user opts to check out the default first it reads "Check Out & Add",
- * otherwise "Add Anyway".
+ * Copy for the unborn-HEAD case: a freshly `git init`'d repo has no commits, so
+ * it can't back a worktree until it has a root commit. dux offers to create an
+ * empty initial commit; existing files are left untracked.
  */
-export function addConfirmLabel(checkoutDefault: boolean): string {
-  return checkoutDefault ? "Check Out & Add" : "Add Anyway"
+export function noCommitsCopy(): NoCommitsCopy {
+  return {
+    message:
+      "This repository has no commits yet, so agents can't branch worktrees from it.",
+    note: "Dux will make an empty initial commit — your existing files are left untouched (untracked).",
+  }
+}
+
+export type AddProjectAction = "plain" | "checkout-default" | "initial-commit"
+
+export interface AddProjectPrimaryAction {
+  action: AddProjectAction
+  label: string
+}
+
+/**
+ * Decide the add dialog's primary action + button label from the inspection
+ * state. An unborn repo (no commits) takes precedence over any branch warning:
+ * there is no default branch to check out, and after the initial commit the
+ * current branch simply becomes the leading branch.
+ */
+export function addProjectPrimaryAction(opts: {
+  hasCommits: boolean
+  willCheckout: boolean
+  hasBranchWarning: boolean
+}): AddProjectPrimaryAction {
+  if (!opts.hasCommits) {
+    return { action: "initial-commit", label: "Create Initial Commit & Add" }
+  }
+  if (opts.willCheckout) {
+    return { action: "checkout-default", label: "Check Out & Add" }
+  }
+  if (opts.hasBranchWarning) {
+    return { action: "plain", label: "Add Anyway" }
+  }
+  return { action: "plain", label: "Add project" }
 }

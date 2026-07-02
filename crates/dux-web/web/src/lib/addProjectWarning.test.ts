@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 
-import { addConfirmLabel, branchWarningCopy } from "./addProjectWarning"
+import {
+  addProjectPrimaryAction,
+  branchWarningCopy,
+  noCommitsCopy,
+} from "./addProjectWarning"
 
 describe("branchWarningCopy", () => {
   it("names the default branch and offers checkout for a known warning", () => {
@@ -31,12 +35,53 @@ describe("branchWarningCopy", () => {
   })
 })
 
-describe("addConfirmLabel", () => {
-  it("reads 'Check Out & Add' when checking out the default first", () => {
-    expect(addConfirmLabel(true)).toBe("Check Out & Add")
+describe("noCommitsCopy", () => {
+  it("explains the repo has no commits and that an empty commit will be made", () => {
+    const copy = noCommitsCopy()
+    expect(copy.message).toContain("no commits")
+    // The commit is empty and leaves existing files untouched/untracked.
+    expect(copy.note).toContain("empty")
+  })
+})
+
+describe("addProjectPrimaryAction", () => {
+  it("offers to create the initial commit when the repo has none, taking precedence over branch warnings", () => {
+    const action = addProjectPrimaryAction({
+      hasCommits: false,
+      willCheckout: false,
+      hasBranchWarning: true,
+    })
+    expect(action.action).toBe("initial-commit")
+    expect(action.label).toBe("Create Initial Commit & Add")
   })
 
-  it("reads 'Add Anyway' otherwise", () => {
-    expect(addConfirmLabel(false)).toBe("Add Anyway")
+  it("checks out the default first when the user opted in", () => {
+    const action = addProjectPrimaryAction({
+      hasCommits: true,
+      willCheckout: true,
+      hasBranchWarning: true,
+    })
+    expect(action.action).toBe("checkout-default")
+    expect(action.label).toBe("Check Out & Add")
+  })
+
+  it("reads 'Add Anyway' for a branch warning without checkout", () => {
+    const action = addProjectPrimaryAction({
+      hasCommits: true,
+      willCheckout: false,
+      hasBranchWarning: true,
+    })
+    expect(action.action).toBe("plain")
+    expect(action.label).toBe("Add Anyway")
+  })
+
+  it("reads 'Add project' for a clean repo on its default branch", () => {
+    const action = addProjectPrimaryAction({
+      hasCommits: true,
+      willCheckout: false,
+      hasBranchWarning: false,
+    })
+    expect(action.action).toBe("plain")
+    expect(action.label).toBe("Add project")
   })
 })

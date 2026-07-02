@@ -13,6 +13,10 @@ pub enum InFlightKey {
     AgentLaunch(String),
     Pull(String),
     ResourceStats,
+    /// Creating an initial commit for the repo at this path, then registering
+    /// it. Keyed by canonical path so two concurrent "create initial commit &
+    /// add" requests for the same repo can't both run and append two commits.
+    InitialCommit(String),
 }
 
 /// Convenience alias so call sites can spell the storage shape once.

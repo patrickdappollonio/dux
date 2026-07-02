@@ -40,6 +40,23 @@ impl App {
             }
         };
         logger::info(&format!("attempting to add project {}", path.display()));
+
+        // A freshly `git init`'d repo has an unborn HEAD (no commits), so it
+        // cannot back a worktree. Offer to create an empty initial commit
+        // before registering; the branch-warning path below is moot until the
+        // repo has a commit (the current branch becomes the leading branch).
+        // Only redirect on a CONFIRMED unborn HEAD — fail open on an
+        // indeterminate git result so a transient failure doesn't hijack a
+        // normal add with the commit dialog.
+        if git::repo_commit_state(&path) == git::CommitState::Unborn {
+            self.prompt = PromptState::ConfirmCreateInitialCommit {
+                path: path.to_string_lossy().to_string(),
+                name,
+                confirm_selected: false,
+            };
+            return Ok(());
+        }
+
         let branch = git::current_branch_opt(&path)?.unwrap_or_default();
         let leading_branch =
             leading_branch_for_project(&path, (!branch.is_empty()).then_some(branch.as_str()));
@@ -460,6 +477,104 @@ impl App {
                 let _ = tx_panic.send(WorkerEvent::NonDefaultBranchCheckoutCompleted {
                     action: action_panic,
                     target_branch: branch_panic,
+                    result: Err(format!("Worker panicked: {reason}")),
+                    status_op_id: Some(op_id_panic),
+                });
+            }
+        });
+    }
+
+    /// Dispatch the "create an empty initial commit, then add the project"
+    /// flow to a background worker (the commit can hit slow filesystem/lock
+    /// work, so it must stay off the UI thread). Serializes per repo path via
+    /// `InFlightKey::InitialCommit` so a repeat confirm can't double-commit.
+    /// Worker completion posts `InitialCommitCreated`, whose
+    /// `AddProjectAfterInitialCommit` reaction registers the project.
+    pub(crate) fn dispatch_create_initial_commit(&mut self, path: String, name: String) {
+        // Real branch the commit will land on. Propagate a git error rather than
+        // silently defaulting the branch (which would mis-tag the project and
+        // break the next agent creation). We register on this branch directly and
+        // DELIBERATELY skip the non-default-branch heuristic warning (`git init -b
+        // trunk` etc.): for a repo the user just created, "this doesn't look like
+        // main" is noise, not a helpful heads-up (contrast adding a pre-existing
+        // repo, where the warning earns its keep).
+        let branch = match git::current_branch_opt(Path::new(&path)) {
+            Ok(b) => b.unwrap_or_default(),
+            Err(e) => {
+                self.set_error(format!(
+                    "Couldn't read the current branch of \"{path}\": {e:#}"
+                ));
+                return;
+            }
+        };
+        let leading_branch = leading_branch_for_project(
+            Path::new(&path),
+            (!branch.is_empty()).then_some(branch.as_str()),
+        );
+        // Fail-closed commit state, mirroring the web handler: only a confirmed
+        // unborn repo goes through the bootstrap worker. If a commit raced in
+        // since the dialog opened, register it directly; if git can't say, stop.
+        match git::repo_commit_state(Path::new(&path)) {
+            git::CommitState::Unborn => {}
+            git::CommitState::Born => {
+                if let Err(e) = self.finish_add_project(path, name, branch, leading_branch) {
+                    self.set_error(format!("{e:#}"));
+                }
+                return;
+            }
+            git::CommitState::Indeterminate => {
+                self.set_error(format!(
+                    "Couldn't determine the commit state of \"{path}\"; not creating an initial commit. Check the repository and retry."
+                ));
+                return;
+            }
+        }
+        if !self
+            .engine
+            .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(path.clone()))
+        {
+            self.set_warning(format!(
+                "An initial commit is already being created for \"{path}\". Please wait for it to finish."
+            ));
+            return;
+        }
+        let add = dux_core::worker::InitialCommitAdd {
+            path: path.clone(),
+            name,
+            branch,
+            leading_branch,
+        };
+        // Keyed busy dismissed by the op's `Final::Clear` when the worker reports
+        // back (see `drain_events`); the visible final is the add-project view
+        // handler's success message or the engine's error `Status`.
+        let op = dux_core::engine::status_op(format!(
+            "Creating an initial commit in {path} before adding the project..."
+        ))
+        .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
+            TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+        });
+        let pending = op.pending_status();
+        let status_op_id = op.id().to_string();
+        self.pending_checkout_inspect_ops
+            .insert(status_op_id.clone(), op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        let worker_tx = self.engine.worker_tx.clone();
+        thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            let tx_panic = worker_tx.clone();
+            let add_panic = add.clone();
+            let op_id_panic = status_op_id.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                dux_core::project_browser::run_create_initial_commit_job(
+                    add,
+                    worker_tx,
+                    Some(status_op_id),
+                );
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!("initial-commit worker panicked: {reason}"));
+                let _ = tx_panic.send(WorkerEvent::InitialCommitCreated {
+                    add: add_panic,
                     result: Err(format!("Worker panicked: {reason}")),
                     status_op_id: Some(op_id_panic),
                 });
@@ -3508,6 +3623,182 @@ mod tests {
             "expected the success message to remain, got: {}",
             app.status.message()
         );
+    }
+
+    /// Create an unborn git repo (init + identity, NO commit) and return its
+    /// path string.
+    fn init_unborn_repo() -> (tempfile::TempDir, String) {
+        fn run_git(cwd: &Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        let path = repo.path().to_string_lossy().to_string();
+        (repo, path)
+    }
+
+    #[test]
+    fn add_project_on_unborn_repo_prompts_to_create_initial_commit() {
+        let (_repo, path) = init_unborn_repo();
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+
+        app.add_project(path.clone(), "Fresh".to_string())
+            .expect("add_project");
+
+        assert!(
+            matches!(app.prompt, PromptState::ConfirmCreateInitialCommit { .. }),
+            "an unborn repo must prompt to create the initial commit, got {:?}",
+            app.prompt
+        );
+        // Nothing is registered until the user confirms.
+        assert!(
+            app.engine.projects.is_empty(),
+            "the project must not be added before the commit is confirmed"
+        );
+    }
+
+    #[test]
+    fn resolving_create_initial_commit_births_head_and_adds_project() {
+        let (_repo, path) = init_unborn_repo();
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.add_project(path.clone(), "Fresh".to_string())
+            .expect("add_project");
+
+        // Confirming dispatches a background worker; the commit + registration
+        // complete asynchronously. Drain until the project appears (bounded).
+        app.resolve_confirm_create_initial_commit(true);
+        assert!(matches!(app.prompt, PromptState::None));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.engine.projects.is_empty() && std::time::Instant::now() < deadline {
+            app.drain_events();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            dux_core::git::repo_has_commits(Path::new(&path)),
+            "confirming must create the initial commit"
+        );
+        assert_eq!(
+            app.engine.projects.len(),
+            1,
+            "the project must be registered after the commit completes"
+        );
+        // The project is registered on its REAL branch (not the leading-branch
+        // value reused for both fields).
+        assert_eq!(app.engine.projects[0].current_branch, "main");
+        assert_eq!(
+            app.engine.projects[0].leading_branch.as_deref(),
+            Some("main")
+        );
+        // The per-path serialization gate is released once the worker completes.
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::InitialCommit(path.clone())),
+            "the in-flight gate must be cleared after completion"
+        );
+    }
+
+    #[test]
+    fn create_initial_commit_gate_is_released_after_a_failed_commit() {
+        // A failed bootstrap (read-only object store) must still clear the
+        // in-flight gate so the user can retry, and must surface an error.
+        if std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+            .unwrap_or(false)
+        {
+            return; // root bypasses the read-only trick
+        }
+        let (_repo, path) = init_unborn_repo();
+        let objects = Path::new(&path).join(".git/objects");
+        let original = std::fs::metadata(&objects).unwrap().permissions();
+        let mut ro = original.clone();
+        ro.set_readonly(true);
+        std::fs::set_permissions(&objects, ro).unwrap();
+
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.add_project(path.clone(), "Fresh".to_string())
+            .expect("add_project");
+        app.resolve_confirm_create_initial_commit(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app
+            .engine
+            .is_in_flight(&dux_core::engine::InFlightKey::InitialCommit(path.clone()))
+            && std::time::Instant::now() < deadline
+        {
+            app.drain_events();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        std::fs::set_permissions(&objects, original).unwrap();
+
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::InitialCommit(path.clone())),
+            "a failed commit must still release the in-flight gate"
+        );
+        assert!(
+            app.engine.projects.is_empty(),
+            "a failed commit adds nothing"
+        );
+        assert_eq!(app.status.tone(), dux_core::statusline::StatusTone::Error);
+    }
+
+    #[test]
+    fn unborn_repo_on_nonstandard_branch_prompts_for_commit_not_branch_warning() {
+        // A fresh `git init -b trunk` is unborn, so the no-commits prompt takes
+        // precedence over the non-default-branch heuristic warning — the user
+        // just created this branch; warning "that's not main" would be noise.
+        fn run_git(cwd: &Path, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        let repo = tempdir().expect("repo tempdir");
+        run_git(repo.path(), &["init", "-b", "trunk"]);
+        run_git(repo.path(), &["config", "user.name", "test"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        let path = repo.path().to_string_lossy().to_string();
+
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.add_project(path, "Trunk".to_string()).expect("add");
+        assert!(
+            matches!(app.prompt, PromptState::ConfirmCreateInitialCommit { .. }),
+            "unborn repo must prompt for a commit, not the branch warning, got {:?}",
+            app.prompt
+        );
+    }
+
+    #[test]
+    fn cancelling_create_initial_commit_leaves_repo_and_workspace_untouched() {
+        let (_repo, path) = init_unborn_repo();
+        let mut app = test_app_with_sessions(Vec::new(), Vec::new());
+        app.add_project(path.clone(), "Fresh".to_string())
+            .expect("add_project");
+
+        app.resolve_confirm_create_initial_commit(false);
+
+        assert!(
+            !dux_core::git::repo_has_commits(Path::new(&path)),
+            "cancelling must NOT create a commit"
+        );
+        assert!(
+            app.engine.projects.is_empty(),
+            "cancelling must not register the project"
+        );
+        assert!(matches!(app.prompt, PromptState::None));
     }
 
     /// Mint and stash a checkout/inspect op exactly as the three dispatch sites
