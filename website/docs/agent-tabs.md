@@ -30,10 +30,11 @@ stays sane; the `+` button politely bows out once you hit it.
 
 Here's the one bit of physics worth knowing. A provider's "continue where we left
 off" flag is tied to the *directory* **and to that provider**, not to a specific
-conversation. Each CLI keeps its own history in the worktree, so a Claude tab and
-a Codex tab can both resume at once without stepping on each other. But two tabs of
-the *same* provider would both reopen the exact same conversation and show you
-identical output.
+conversation. Claude, Codex, and OpenCode each keep their own history in the
+worktree, so a Claude tab and a Codex tab can both resume at once without stepping
+on each other. But two tabs of the *same* provider would both reopen the exact
+same conversation and show you identical output. Copilot doesn't support resume
+at all today, so a Copilot tab always starts fresh, no matter what else is running.
 
 So dux hands the resume slot to a tab **only when it's the sole tab of its provider
 coming up** — when no other tab running the *same* provider is already live or

@@ -103,9 +103,9 @@ pub struct Engine {
     /// the agent. Cleared whenever the PTY is torn down.
     pub running_provider_pins: HashMap<String, ProviderKind>,
     pub companion_terminals: HashMap<String, CompanionTerminal>,
-    /// Persisted **Support tabs** (secondary provider tabs), keyed by tab id with
+    /// Persisted **extra tabs** (secondary provider tabs), keyed by tab id with
     /// the owning `session_id` carried in the value (mirrors `companion_terminals`
-    /// so ownership resolves O(1) with no side index). The Main tab has no entry —
+    /// so ownership resolves O(1) with no side index). The session-slot tab has no entry —
     /// it is derived from the `AgentSession` row (`tab_id == session_id`). Seeded
     /// from `session_store.load_agent_tabs()` at construction.
     pub agent_tabs: HashMap<String, AgentTab>,
@@ -1295,19 +1295,19 @@ impl Engine {
     /// full process tree under each root.
     fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
         let mut targets = Vec::new();
-        // `providers` is keyed by tab id (Main tab == session id). Iterate it so
+        // `providers` is keyed by tab id (session-slot tab == session id). Iterate it so
         // every live tab's process is a target, not just one per session.
         for (tab_id, pty) in &self.providers {
             let Some(pid) = pty.child_process_id() else {
                 continue;
             };
             if let Some(session) = self.sessions.iter().find(|s| s.id == *tab_id) {
-                // Main tab.
+                // session-slot tab.
                 let title = session.title.as_deref().unwrap_or(&session.branch_name);
                 let provider = self.running_provider_for(session);
                 targets.push((format!("Agent ({}): {title}", provider.as_str()), pid));
             } else if let Some(tab) = self.agent_tabs.get(tab_id) {
-                // Support tab: resolve its owning session for a readable label.
+                // extra tab: resolve its owning session for a readable label.
                 let title = self
                     .sessions
                     .iter()
@@ -1475,7 +1475,7 @@ impl Engine {
 
     /// Record that `provider` has launched in this session's worktree. Takes the
     /// launched provider explicitly (rather than reading `session.provider`) so a
-    /// Support tab that ran a *different* provider than the session default still
+    /// extra tab that ran a *different* provider than the session default still
     /// records directory-scoped resume state under the provider that actually ran.
     pub fn mark_session_provider_started(&mut self, session_id: &str, provider: &ProviderKind) {
         let Some(session) = self
@@ -1666,7 +1666,7 @@ impl Engine {
     }
 
     /// Every runtime-map key owned by a session: its session-slot tab (== session id) plus
-    /// every Support tab id. The single source of truth for teardown fan-out — a
+    /// every extra tab id. The single source of truth for teardown fan-out — a
     /// full-session teardown must clear all of these, not just the session id.
     pub fn tab_ids_for_session(&self, session_id: &str) -> Vec<String> {
         let mut ids = vec![session_id.to_string()];
@@ -1760,13 +1760,13 @@ impl Engine {
         crate::config::normalized_agent_tabs_max(self.config.ui.agent_tabs_max)
     }
 
-    /// Create a new Support tab for `session_id` running `provider`, persist its
-    /// row, and dispatch a FRESH launch (Support tabs never resume). Returns the
+    /// Create a new extra tab for `session_id` running `provider`, persist its
+    /// row, and dispatch a FRESH launch (extra tabs never resume). Returns the
     /// new tab id synchronously; the spawn itself is asynchronous — a spawn
     /// failure lands in `process_agent_launch_failed`'s `Tab` arm, which removes
     /// this just-created row (it is `is_fresh`). The per-agent cap is enforced
     /// here, in one synchronous call (the single-threaded engine makes the
-    /// check-then-insert atomic); it counts the Main tab.
+    /// check-then-insert atomic); it counts the session-slot tab.
     pub fn create_tab(
         &mut self,
         session_id: &str,
@@ -1796,7 +1796,7 @@ impl Engine {
             anyhow::bail!("provider \"{}\" is not configured", provider.as_str());
         }
 
-        // Per-agent cap (the `+ 1` accounts for the Main tab, which has no row).
+        // Per-agent cap (the `+ 1` accounts for the session-slot tab, which has no row).
         let max_per_agent = i64::from(self.agent_tabs_max());
         if self.session_store.count_agent_tabs(session_id)? + 1 >= max_per_agent {
             anyhow::bail!("this agent already has the maximum of {max_per_agent} tabs",);
@@ -1854,7 +1854,7 @@ impl Engine {
                     self.agent_tabs.remove(&tab_id);
                 }
                 Err(err) => crate::logger::error(&format!(
-                    "failed to delete ghost support tab {tab_id}: {err}",
+                    "failed to delete ghost extra tab {tab_id}: {err}",
                 )),
             }
             let message = match reaction {
@@ -1871,7 +1871,7 @@ impl Engine {
         Ok(tab_id)
     }
 
-    /// Close a Support tab: delete its row first (so a persistence failure leaves
+    /// Close a extra tab: delete its row first (so a persistence failure leaves
     /// in-memory state untouched), then gracefully tear down its PTY and clear all
     /// of its runtime-map entries. The session-slot tab's close is a separate path
     /// (`KillSessionPty`) — this is only for extra tabs (`tab_id != session_id`).
@@ -1911,9 +1911,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Retarget a tab's provider (effective on its next launch). For the Main tab
+    /// Retarget a tab's provider (effective on its next launch). For the session-slot tab
     /// (`tab_id == session_id`) this delegates to the untouched
-    /// [`Engine::change_agent_provider`]; for a Support tab it updates only that
+    /// [`Engine::change_agent_provider`]; for a extra tab it updates only that
     /// tab's row, pinning the previously-running provider if it is live.
     pub fn change_tab_provider(
         &mut self,
@@ -1957,7 +1957,7 @@ impl Engine {
                 .or_insert_with(|| previous.clone());
         }
 
-        // Resume eligibility for a Support tab retarget follows the same rule
+        // Resume eligibility for a extra tab retarget follows the same rule
         // as an actual launch: the newly-selected provider must be
         // resume-eligible for this session AND no other live/launching tab of
         // the session currently owns that provider's conversation. Compute it
@@ -3094,7 +3094,7 @@ mod tab_ops_tests {
         engine
             .change_tab_provider("s1", "s1", ProviderKind::new("codex"))
             .unwrap();
-        // Delegation mutates the session's own provider (the Main tab).
+        // Delegation mutates the session's own provider (the session-slot tab).
         assert_eq!(engine.sessions[0].provider.as_str(), "codex");
     }
 
@@ -3116,7 +3116,7 @@ mod tab_ops_tests {
 
     #[test]
     fn change_tab_provider_reports_resume_available_when_eligible() {
-        // Retargeting a Support tab to a provider that has already started in
+        // Retargeting a extra tab to a provider that has already started in
         // this worktree, and is not live/launching under any other tab, must
         // report resume_available: true rather than the old hardcoded false.
         let (mut engine, _tmp) = test_engine();
@@ -3199,7 +3199,7 @@ mod tab_ops_tests {
             client: spawn_cat(tmp.path()),
         });
 
-        // The Support tab's PTY is tracked under its own key...
+        // The extra tab's PTY is tracked under its own key...
         assert!(engine.providers.contains_key("tab-1"));
         // ...but the session stays Main-scoped: not flipped to Active.
         assert_eq!(engine.sessions[0].status, SessionStatus::Detached);

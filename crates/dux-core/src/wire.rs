@@ -327,18 +327,18 @@ pub enum WireCommand {
         session_id: String,
         provider: String,
     },
-    /// Close a Support tab (a non-Main provider tab): tear down its PTY and delete
-    /// its `agent_tabs` row. Destructive and unrecoverable (Support tabs are
-    /// ephemeral). The Main tab is never closed through here — a Main "close" is a
+    /// Close a extra tab (a non-Main provider tab): tear down its PTY and delete
+    /// its `agent_tabs` row. Destructive and unrecoverable (extra tabs are
+    /// ephemeral). The session-slot tab is never closed through here — a Main "close" is a
     /// detach via `KillSessionPty`. `tab_id` must belong to `session_id`.
     CloseAgentTab {
         session_id: String,
         tab_id: String,
     },
     /// Retarget one tab's provider (effective on its next launch), mirroring
-    /// `ChangeAgentProvider` but scoped to a single tab. For the Main tab
+    /// `ChangeAgentProvider` but scoped to a single tab. For the session-slot tab
     /// (`tab_id == session_id`) this delegates to the session-level change; for a
-    /// Support tab it updates only that tab. `provider` is validated server-side.
+    /// extra tab it updates only that tab. `provider` is validated server-side.
     ChangeAgentTabProvider {
         session_id: String,
         tab_id: String,
@@ -2442,7 +2442,7 @@ impl Engine {
                             clear_keys: Vec::new(),
                         }
                     } else {
-                        // Main tab (tab_id == session_id): resolve its pending
+                        // session-slot tab (tab_id == session_id): resolve its pending
                         // reconnect op keyed by the session id, as before.
                         self.resolve_web_launch_op_or(
                             &outcome.tab_id,
@@ -2524,8 +2524,12 @@ impl Engine {
                     clear_keys: Vec::new(),
                 },
                 // A create-kind launch failure is resolved engine-side, not here.
+                // `Silent` is a ghost-tab launch failure: the row is already
+                // gone from the user's perspective, so there is nothing to
+                // surface, mirroring the ready-path `SessionMissing` view.
                 AgentLaunchFailedOutcome::ResumeFallback
-                | AgentLaunchFailedOutcome::Create { .. } => WebFollowupStatuses::default(),
+                | AgentLaunchFailedOutcome::Create { .. }
+                | AgentLaunchFailedOutcome::Silent => WebFollowupStatuses::default(),
             },
             _ => WebFollowupStatuses::default(),
         }

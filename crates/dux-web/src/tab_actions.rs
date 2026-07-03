@@ -115,24 +115,27 @@ async fn delete_tab(
         return match state
             .engine
             .apply_wire_scoped(
-                WireCommand::KillSessionPty { session_id: id.clone() },
+                WireCommand::KillSessionPty {
+                    session_id: id.clone(),
+                },
                 scope_from_headers(&headers, &state.connections),
             )
             .await
         {
             // `KillSessionPty` only detaches the agent when it was the LAST
-            // live tab; with live siblings the agent stays Active. Read the
-            // session's real post-kill status rather than hardcoding true, so
-            // the client's `{ "detached": <bool> }` reflects what actually
-            // happened.
+            // live tab; with live siblings the agent keeps running. Derive the
+            // real outcome from whether ANY tab still has a live process after
+            // the kill rather than hardcoding true — persisted session status
+            // is session-slot-scoped (a support-tab-only-live agent still reads
+            // "detached"), so it is not a reliable liveness signal here.
             Ok(_) => {
                 let detached = state
                     .engine
                     .session(id)
                     .await
                     .flatten()
-                    .map(|s| s.status == "detached")
-                    .unwrap_or(false);
+                    .map(|s| !s.tabs.iter().any(|t| t.has_live_process))
+                    .unwrap_or(true);
                 (StatusCode::OK, Json(DetachedTab { detached })).into_response()
             }
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),

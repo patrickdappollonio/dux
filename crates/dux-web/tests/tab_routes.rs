@@ -148,12 +148,47 @@ async fn post_tabs_rejects_an_unconfigured_provider() {
     assert_eq!(resp.status(), 400);
 }
 
+/// Poll `/api/v1/sessions/:id` until `pred` matches the decoded body, or give
+/// up after ~5s. Used to wait out the async tab-launch job before asserting on
+/// its liveness, rather than racing it.
+async fn wait_for_session<F>(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    id: &str,
+    pred: F,
+) -> serde_json::Value
+where
+    F: Fn(&serde_json::Value) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let session: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if pred(&session) || tokio::time::Instant::now() >= deadline {
+            return session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+fn tab_has_live_process(session: &serde_json::Value, tab_id: &str) -> bool {
+    session["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["id"].as_str() == Some(tab_id) && t["has_live_process"] == true)
+}
+
 #[tokio::test]
-async fn delete_main_tab_detaches_and_keeps_the_session() {
+async fn delete_main_tab_detaches_when_no_other_tab_is_live() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    // A Support tab exists alongside Main; the Main detach must not close it.
-    let support = create_support_tab(&client, addr, "s1").await;
 
     let resp = client
         .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/s1"))
@@ -163,8 +198,41 @@ async fn delete_main_tab_detaches_and_keeps_the_session() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["detached"], true);
+}
 
-    // The session still exists and its Support tab survived the Main detach.
+/// F9 regression: `KillSessionPty` on the session-slot tab detaches the agent
+/// only when it was the LAST live tab. With a live Support-tab sibling, the
+/// agent stays Active and `detached` must be false, not the old hardcoded
+/// `true`.
+#[tokio::test]
+async fn delete_main_tab_with_live_sibling_does_not_detach() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    // A Support tab exists alongside Main; the Main detach must not close it.
+    let support = create_support_tab(&client, addr, "s1").await;
+    // Wait for the async tab-launch job to actually spawn the sibling's PTY,
+    // so the assertion below reflects a truly live sibling, not a race.
+    let session =
+        wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &support)).await;
+    assert!(
+        tab_has_live_process(&session, &support),
+        "support tab never came up live; got {session}"
+    );
+
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/s1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["detached"], false,
+        "closing Main while a sibling tab is live must not report detached"
+    );
+
+    // The session still exists and its Support tab survived the Main close,
+    // still with a live process.
     let session: serde_json::Value = client
         .get(format!("http://{addr}/api/v1/sessions/s1"))
         .send()
@@ -173,13 +241,10 @@ async fn delete_main_tab_detaches_and_keeps_the_session() {
         .json()
         .await
         .unwrap();
-    let tab_ids: Vec<&str> = session["tabs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["id"].as_str().unwrap())
-        .collect();
-    assert!(tab_ids.contains(&support.as_str()));
+    assert!(
+        tab_has_live_process(&session, &support),
+        "the live sibling tab must survive the Main close: {session}"
+    );
 }
 
 #[tokio::test]

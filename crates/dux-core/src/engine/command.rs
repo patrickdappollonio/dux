@@ -575,6 +575,11 @@ impl Engine {
             Command::DispatchAgentLaunch { request } => {
                 let branch_name = request.session.branch_name.clone();
                 let session_id = request.session.id.clone();
+                // The in-flight launch lock is keyed by tab id (one lock per tab),
+                // so two tabs of the same session can launch concurrently. The
+                // View keeps `session_id` for UI correlation. For the session-slot
+                // tab these are equal.
+                let tab_id = request.tab_id.clone();
                 // Guard the shared launch chokepoint against a session whose
                 // worktree is mid-removal. `create_tab` and the web extra-tab
                 // launch branch already check `closing_sessions` themselves,
@@ -597,11 +602,6 @@ impl Engine {
                         },
                     )));
                 }
-                // The in-flight launch lock is keyed by tab id (one lock per tab),
-                // so two tabs of the same session can launch concurrently. The
-                // View keeps `session_id` for UI correlation. For the Main tab
-                // these are equal.
-                let tab_id = request.tab_id.clone();
                 // Pre-check in-flight so the View carries the exact "already
                 // launching" message regardless of the primitive's generic
                 // already-running fallback.
@@ -1222,6 +1222,47 @@ mod tests {
             .filter(|s| s.project_id == project_id)
             .map(|s| s.id.clone())
             .collect()
+    }
+
+    #[test]
+    fn dispatch_agent_launch_refuses_a_closing_session() {
+        // F2 regression: the shared launch chokepoint must refuse a launch into
+        // a session that is mid-deletion (`closing_sessions`), covering every
+        // launch path (reconnect, resume-fallback, web-dormant-relaunch,
+        // session-slot reconnect) that funnels through DispatchAgentLaunch.
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session.clone());
+        engine.closing_sessions.insert("s1".to_string());
+
+        let request = engine.build_agent_launch_request(
+            session,
+            false,
+            (24, 80),
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: String::new(),
+            },
+        );
+        let reaction = engine
+            .apply(Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .expect("apply");
+
+        match reaction {
+            EventReaction::DispatchAgentLaunchView(view) => {
+                assert!(!view.launched, "a closing session must not launch");
+                let status = view.status.expect("a refusal status");
+                assert!(
+                    status.message.contains("being deleted"),
+                    "msg: {}",
+                    status.message
+                );
+            }
+            _ => panic!("expected DispatchAgentLaunchView"),
+        }
+        // No in-flight launch key was set (the guard returned before dispatch).
+        assert!(!engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())));
     }
 
     #[test]

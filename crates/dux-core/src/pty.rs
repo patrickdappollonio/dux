@@ -667,6 +667,18 @@ impl PtyClient {
                 }
             }
         }
+        // The PTY is gone (EOF/error): drop every subscriber sender so each live
+        // web viewer's receiver disconnects promptly. Without this the senders
+        // linger in the shared list (each `PtyViewerGuard` holds an `Arc` clone
+        // that keeps the `Vec`, and therefore the `Sender`s, alive), so a
+        // web forwarder blocked on `recv_timeout` would only ever see `Timeout`,
+        // never `Disconnected` — its task would never end and its PTY socket
+        // would dangle (pinning a connection-cap permit) until the browser
+        // itself disconnected. Clearing here is what lets the socket's
+        // forwarder-completion arm reap the connection on server-side teardown.
+        if let Ok(mut subs) = subscribers.lock() {
+            subs.clear();
+        }
     }
 
     /// Write raw bytes to the PTY (forwards keystrokes to the child process).

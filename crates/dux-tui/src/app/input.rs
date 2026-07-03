@@ -5716,7 +5716,10 @@ impl App {
                 "Interactive mode. Keys forwarded to agent. {exit_key} exits."
             ));
         } else if tab_id != session_id {
-            // Dormant Support tab: start a fresh session (never resume).
+            // Dormant Support tab: launch it. Resume eligibility is decided
+            // dynamically by `tab_resume_decision` inside the launch — this
+            // tab may resume its provider's prior conversation if it is the
+            // sole live/launching tab of that provider, not "never resume".
             self.launch_focused_support_tab(&session_id, &tab_id)?;
         } else {
             self.reconnect_selected_session()?;

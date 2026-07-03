@@ -357,6 +357,12 @@ pub enum AgentLaunchFailedOutcome {
         branch_name: String,
         message: String,
     },
+    /// A launch failure for a Support tab whose row was deleted while the
+    /// launch was in flight (mirrors `AgentLaunchReadyView::SessionMissing` on
+    /// the success path). Silent by design: the tab is already closed from the
+    /// user's perspective, so there is nothing to warn about and no row left
+    /// to delete again.
+    Silent,
 }
 
 /// Domain mutations the Engine performed in response to a
@@ -1472,6 +1478,24 @@ impl Engine {
                 )
             }
             AgentLaunchKind::Tab { is_fresh, .. } => {
+                // Ghost-launch guard, mirroring `process_agent_launch_ready`: a
+                // Support tab whose row was deleted while its launch was in
+                // flight must not be treated as a real failure. Without this,
+                // an abort-during-launch would log an ERROR, call
+                // `delete_agent_tab` again (hitting the "map and SQLite may
+                // have diverged" WARN in storage.rs for a row that is already
+                // gone), and surface a user-facing "Tab launch failed"
+                // warning for a tab the user already closed. The Main tab
+                // (`tab_id == session.id`, which never has an `agent_tabs`
+                // row) is exempt, same as the ready-path guard.
+                let is_main = tab_id == session.id;
+                if !is_main && !self.agent_tabs.contains_key(&tab_id) {
+                    logger::info(&format!(
+                        "dropping launch-failed event for closed support tab {tab_id} of session {}",
+                        session.id,
+                    ));
+                    return (AgentLaunchFailedOutcome::Silent, None);
+                }
                 logger::error(&format!(
                     "support tab {tab_id} launch failed for agent \"{}\": {}",
                     session.branch_name, message,
@@ -3174,6 +3198,80 @@ mod tests {
             AgentLaunchFailedOutcome::StartupAutoReopen { session_id, branch_name, message }
                 if session_id == "s1" && branch_name == "feat/x" && message == "boom"
         ));
+    }
+
+    /// Build failed-launch data for a Support tab: `tab_id` differs from the
+    /// session id, mirroring a real extra-tab launch.
+    fn make_tab_failed_data(
+        session_id: &str,
+        tab_id: &str,
+        branch: &str,
+        is_fresh: bool,
+        message: &str,
+    ) -> AgentLaunchFailedData {
+        let session = sample_session(session_id, "project-1", branch);
+        AgentLaunchFailedData {
+            request: AgentLaunchRequest {
+                tab_id: tab_id.to_string(),
+                provider: session.provider.clone(),
+                session,
+                provider_config: ProviderCommandConfig::default(),
+                env: Vec::new(),
+                resume: false,
+                pty_size: (24, 80),
+                scrollback_lines: 1000,
+                kind: AgentLaunchKind::Tab {
+                    is_fresh,
+                    status_message: String::new(),
+                },
+            },
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn process_agent_launch_failed_tab_returns_message_when_row_still_exists() {
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_session("s1", "project-1", "feat/x"));
+        let tab = crate::model::AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+
+        let data = make_tab_failed_data("s1", "tab-1", "feat/x", true, "boom");
+        let (outcome, _) = engine.process_agent_launch_failed(data);
+
+        assert!(matches!(
+            outcome,
+            AgentLaunchFailedOutcome::Tab { tab_id, branch_name, message, .. }
+                if tab_id == "tab-1" && branch_name == "feat/x" && message == "boom"
+        ));
+    }
+
+    #[test]
+    fn process_agent_launch_failed_tab_is_silent_for_a_ghost_tab() {
+        // F10 regression: a Support tab whose row was deleted (closed by the
+        // user) while its launch was in flight must not be treated as a real
+        // failure — no ERROR log's worth of user-facing warning, and no
+        // redundant `delete_agent_tab` call against a row that is already
+        // gone. The engine has no `agent_tabs` row for "tab-1" here, exactly
+        // like a tab closed mid-launch.
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_session("s1", "project-1", "feat/x"));
+
+        let data = make_tab_failed_data("s1", "tab-1", "feat/x", true, "boom");
+        let (outcome, create_final) = engine.process_agent_launch_failed(data);
+
+        assert!(matches!(outcome, AgentLaunchFailedOutcome::Silent));
+        assert!(create_final.is_none());
     }
 
     #[test]

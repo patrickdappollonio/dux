@@ -864,36 +864,55 @@ async fn terminal_rest_create_and_delete() {
     );
 }
 
-/// Deleting a terminal server-side while a client is still attached to its PTY
-/// socket must proactively close that socket instead of leaving it dangling
-/// until the client disconnects on its own. Before the `pty_forwarder`
-/// completion arm was added to `handle_pty_socket`'s `select!` loop, the
-/// forwarder task ending (because the PTY was torn down) was invisible to the
-/// loop, so the socket (and its connection-cap permit/guard) would linger.
+/// Tearing an agent's PTY down server-side (here via `POST .../kill`, which
+/// hard-drops the provider) while a client is still attached to its PTY socket
+/// must proactively close that socket instead of leaving it dangling until the
+/// client disconnects on its own. Before the `pty_forwarder` completion arm was
+/// added to `handle_pty_socket`'s `select!` loop, the forwarder task ending
+/// (because the PTY was torn down) was invisible to the loop, so the socket
+/// (and its connection-cap permit/guard) would linger. The kill path drops the
+/// `PtyClient` immediately (hard SIGKILL), so the forwarder ends deterministically.
 #[tokio::test]
-async fn deleting_terminal_closes_its_attached_pty_socket() {
+async fn tearing_down_agent_pty_closes_its_attached_socket() {
     let (addr, _tmp) = boot().await;
     let client = reqwest::Client::new();
-    let terminal_id = create_terminal_via_rest(addr, "s1").await;
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-        "ws://{addr}/ws/sessions/s1/terminals/{terminal_id}/pty"
-    ))
-    .await
-    .expect("connect terminal pty socket");
-    // Claim ownership so the socket is fully attached, matching a real client.
+    // Connecting subscribes + launches the `cat` provider, so after this the
+    // agent has a live PTY the kill can tear down.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/pty"))
+        .await
+        .expect("connect agent pty socket");
+    // Claim ownership and echo a marker so we know the PTY is fully up before
+    // we kill it (avoids racing the launch).
     ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
         .await
         .unwrap();
+    ws.send(Message::Binary(b"dux-kill-marker\n".to_vec()))
+        .await
+        .unwrap();
+    let up_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut acc = Vec::new();
+    while tokio::time::Instant::now() < up_deadline {
+        if let Ok(Some(Ok(Message::Binary(b)))) =
+            tokio::time::timeout(Duration::from_millis(300), ws.next()).await
+        {
+            acc.extend_from_slice(&b);
+            if String::from_utf8_lossy(&acc).contains("dux-kill-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-kill-marker"),
+        "agent PTY never came up"
+    );
 
-    let deleted = client
-        .delete(format!(
-            "http://{addr}/api/v1/sessions/s1/terminals/{terminal_id}"
-        ))
+    let killed = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/kill"))
         .send()
         .await
         .unwrap();
-    assert_eq!(deleted.status().as_u16(), 204, "delete → 204");
+    assert_eq!(killed.status().as_u16(), 200, "kill → 200");
 
     // The socket must close on its own (Close frame or stream end) well within
     // the liveness-ping window, not merely go quiet.
@@ -901,11 +920,7 @@ async fn deleting_terminal_closes_its_attached_pty_socket() {
     let mut closed = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
-            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                closed = true;
-                break;
-            }
-            Ok(Some(Err(_))) => {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
                 closed = true;
                 break;
             }
@@ -914,7 +929,7 @@ async fn deleting_terminal_closes_its_attached_pty_socket() {
     }
     assert!(
         closed,
-        "pty socket for a deleted terminal was not proactively closed"
+        "pty socket for a torn-down agent was not proactively closed"
     );
 }
 

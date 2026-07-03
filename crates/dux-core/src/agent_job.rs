@@ -642,7 +642,7 @@ pub fn run_create_agent_job(
     // crossterm::terminal::size() returns (cols, rows).
     let (cols, rows) = term_size;
     let request = AgentLaunchRequest {
-        // Create is always the Main tab: tab_id == session.id, effective
+        // Create is always the session-slot tab: tab_id == session.id, effective
         // provider == session.provider. (Evaluated before `session` is moved.)
         tab_id: session.id.clone(),
         provider: session.provider.clone(),

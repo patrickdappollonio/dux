@@ -62,10 +62,6 @@ pub struct PrunedPty {
     /// The owning session id (agent). For a companion terminal this is the
     /// terminal's owning session; empty only for an orphan with no session.
     pub session_id: String,
-    /// True when this was the agent's session-slot tab (`id == session_id`). Used
-    /// only to decide whether a clean exit cancels auto-reopen; no tab is
-    /// privileged for detach purposes (see `agent_detached`).
-    pub is_main: bool,
     /// True when this exit detached the agent — i.e. it was the agent's LAST live
     /// tab, so the session is now Detached. Surfaces show the workspace-wide
     /// "Agent exited" notice for this; a tab exit that leaves siblings running
@@ -187,7 +183,7 @@ impl Engine {
             // the label falls back to a raw UUID and the session-state marks
             // silently no-op on the wrong key.
             let owning = self.owning_session_for_tab(&tab_id);
-            let is_main = owning.as_deref() == Some(tab_id.as_str());
+            let is_session_slot = owning.as_deref() == Some(tab_id.as_str());
             let (session_id, label) = match &owning {
                 Some(sid) => {
                     let branch = self
@@ -196,7 +192,7 @@ impl Engine {
                         .find(|s| &s.id == sid)
                         .map(|s| s.branch_name.clone())
                         .unwrap_or_else(|| sid.clone());
-                    if is_main {
+                    if is_session_slot {
                         (sid.clone(), branch)
                     } else {
                         let provider = self
@@ -225,7 +221,7 @@ impl Engine {
                 // A clean exit of the session-slot tab is the "user quit the
                 // agent" signal that cancels auto-reopen; an extra tab exiting (or
                 // any crash) leaves the auto-reopen intent untouched.
-                if is_main && exit_success == Some(true) {
+                if is_session_slot && exit_success == Some(true) {
                     self.mark_session_desired_running(&session_id, false);
                 }
                 self.mark_session_status(&session_id, SessionStatus::Detached);
@@ -234,7 +230,6 @@ impl Engine {
                 kind: PrunedPtyKind::Agent,
                 id: tab_id,
                 session_id,
-                is_main,
                 agent_detached,
                 label,
             });
@@ -263,7 +258,6 @@ impl Engine {
                 kind: PrunedPtyKind::Terminal,
                 id: terminal_id,
                 session_id,
-                is_main: false,
                 agent_detached: false,
                 label,
             });
@@ -1374,7 +1368,6 @@ mod tests {
             .find(|p| p.id == "tab-2")
             .expect("support tab pruned");
         assert_eq!(p.kind, PrunedPtyKind::Agent);
-        assert!(!p.is_main, "an extra tab exit is not a session-slot exit");
         assert_eq!(p.session_id, "s1", "resolves the owning session");
         assert!(
             p.label.contains("feat") && p.label.contains("codex"),

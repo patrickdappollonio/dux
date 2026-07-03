@@ -1297,6 +1297,10 @@ impl App {
                     "Tab launch failed for \"{branch_name}\": {message}"
                 ));
             }
+            AgentLaunchFailedOutcome::Silent => {
+                // Ghost-tab launch failure: the row was already closed by the
+                // user, so there is nothing to warn about.
+            }
         }
     }
 
