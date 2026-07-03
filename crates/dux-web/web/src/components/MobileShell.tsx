@@ -41,6 +41,8 @@ import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { PrBanner } from "@/components/PrBanner"
+import { AgentTabsStrip } from "@/components/AgentTabsStrip"
+import { DormantTabCard } from "@/components/DormantTabCard"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
@@ -63,6 +65,7 @@ import {
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { agentRowVisual } from "@/lib/agentRow"
+import { isSupportTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
@@ -667,8 +670,15 @@ function HomeScreen() {
 // The focused-terminal spoke: a slim top bar (back · project·branch · changes
 // count · ⋯ actions) over the full-screen shared terminal.
 function TerminalScreen() {
-  const { spine, selectedSessionId, selectedTarget, terminalEpoch, changes } =
-    useDux()
+  const {
+    spine,
+    bootstrap,
+    selectedSessionId,
+    selectedTarget,
+    terminalEpoch,
+    changes,
+    startedDormantTabs,
+  } = useDux()
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
   const project = session
     ? spine?.projects.find((p) => p.id === session.project_id)
@@ -691,11 +701,24 @@ function TerminalScreen() {
   const targetId =
     selectedTarget.kind === "terminal"
       ? selectedTarget.terminalId
-      : selectedTarget.sessionId
+      : selectedTarget.tabId
   // Remount on reconnect (see App.tsx TerminalArea): a bumped epoch forces the
   // focused agent pane to re-subscribe to the freshly launched provider.
   const paneKey =
     selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
+
+  const tabs = session.tabs ?? []
+  const focusedTab =
+    selectedTarget.kind === "agent"
+      ? tabs.find((t) => t.id === selectedTarget.tabId)
+      : undefined
+  // A dormant tab (see App.tsx): render its card WITHOUT mounting the
+  // pane, since mounting subscribes = force-launches the provider.
+  const isSupportDormant = isSupportTabDormant(
+    selectedTarget,
+    focusedTab,
+    startedDormantTabs,
+  )
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -748,21 +771,37 @@ function TerminalScreen() {
           and the pane's ResizeObserver refits. */}
       {session.pr ? <PrBanner pr={session.pr} /> : null}
 
+      {selectedTarget.kind === "agent" && shouldShowTabStrip(tabs) ? (
+        <AgentTabsStrip
+          session={session}
+          activeTabId={selectedTarget.tabId}
+          maxTabs={bootstrap?.agent_tabs_max}
+        />
+      ) : null}
+
       <div className="min-h-0 flex-1">
         {/* Suspense fallback null: the lazy chunk loads fast and TerminalPane
             shows its own readiness spinner once mounted. ChunkBoundary wraps
             Suspense so a stale-bundle import failure recovers instead of
             unmounting the tree. */}
-        <ChunkBoundary>
-          <Suspense fallback={null}>
-            <LazyTerminalPane
-              key={paneKey}
-              kind={selectedTarget.kind}
-              id={targetId}
-              sessionId={selectedTarget.sessionId}
-            />
-          </Suspense>
-        </ChunkBoundary>
+        {isSupportDormant && focusedTab ? (
+          <DormantTabCard
+            sessionId={selectedTarget.sessionId}
+            tabId={focusedTab.id}
+            provider={focusedTab.provider}
+          />
+        ) : (
+          <ChunkBoundary>
+            <Suspense fallback={null}>
+              <LazyTerminalPane
+                key={paneKey}
+                kind={selectedTarget.kind}
+                id={targetId}
+                sessionId={selectedTarget.sessionId}
+              />
+            </Suspense>
+          </ChunkBoundary>
+        )}
       </div>
     </div>
   )

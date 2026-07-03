@@ -279,6 +279,9 @@ pub struct DetachedSession {
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 pub struct AgentLaunchReadyOutcome {
     pub session: AgentSession,
+    /// The tab whose launch completed (== `session.id` for the Main tab). Lets a
+    /// surface route a Support-tab ready to the correct pane without re-deriving.
+    pub tab_id: String,
     pub pty_size: (u16, u16),
     pub detached_session_id: Option<String>,
     pub view: AgentLaunchReadyView,
@@ -341,6 +344,16 @@ pub enum AgentLaunchFailedOutcome {
     /// session id for the same keying purpose as `Reconnect`.
     StartupAutoReopen {
         session_id: String,
+        branch_name: String,
+        message: String,
+    },
+    /// A Support-tab launch failed. `tab_id` keys the failure toast to the
+    /// specific tab. For an `is_fresh` create the Engine has already deleted the
+    /// tab's row (the create never came up); for a dormant relaunch the row is
+    /// kept so the user can retry.
+    Tab {
+        session_id: String,
+        tab_id: String,
         branch_name: String,
         message: String,
     },
@@ -473,6 +486,12 @@ pub enum BeginDeleteSessionOutcome {
     /// Session or project lookup failed — silent no-op (preserves the
     /// original early-return behaviour).
     NotFound,
+    /// A tab of this session still has a launch in flight (marked in-flight but
+    /// not yet registered in `providers`). Such a tab is invisible to the
+    /// live-tab check, so deleting now could remove the worktree out from under
+    /// the still-spawning process. The caller shows a "try again" error and does
+    /// NOT delete.
+    TabLaunching,
     /// Worktree-removing delete: the Engine has already SIGTERMed the agent PTY
     /// (and the session's terminals) and moved them to the terminating set,
     /// capturing the worktree removal to run only after the agent exits. The
@@ -524,6 +543,8 @@ pub struct BeginDeleteSessionView {
 /// with its session without re-deriving it from the request.
 pub struct DispatchAgentLaunchView {
     pub session_id: String,
+    /// The tab whose launch was dispatched (== `session_id` for the Main tab).
+    pub tab_id: String,
     pub launched: bool,
     pub status: Option<StatusUpdate>,
 }
@@ -567,15 +588,24 @@ impl Engine {
             .find(|s| {
                 s.id != exclude_id
                     && s.worktree_path == worktree_path
-                    && self.providers.contains_key(&s.id)
+                    // Tab-aware: a conflicting session may have its Main tab dead
+                    // while a Support tab is still live in the shared worktree.
+                    // `providers` is tab-keyed, so check every tab, not just `s.id`.
+                    && self
+                        .tab_ids_for_session(&s.id)
+                        .iter()
+                        .any(|id| self.providers.contains_key(id))
             })
             .cloned()?;
 
         let label = session_label(&conflicting);
         let provider = conflicting.provider.as_str().to_string();
-        self.providers.remove(&conflicting.id);
-        self.running_provider_pins.remove(&conflicting.id);
-        self.resume_fallback_candidates.remove(&conflicting.id);
+        // Tear down EVERY tab of the conflicting agent (Main + Support) — a
+        // Support tab left running would keep holding the contested worktree.
+        // Keep its `agent_tabs` rows: the session still exists, just detached.
+        // This also drops the tabs' `pty_activity`/`pty_input` entries, so the
+        // callers no longer need their own follow-up clear.
+        self.clear_session_tab_runtime(&conflicting.id);
         self.mark_session_status(&conflicting.id, SessionStatus::Detached);
 
         logger::info(&format!(
@@ -624,7 +654,11 @@ impl Engine {
         let AgentLaunchReadyData { request, client } = data;
         let session = request.session.clone();
         let pty_size = request.pty_size;
-        self.clear_in_flight(&InFlightKey::AgentLaunch(session.id.clone()));
+        // Runtime PTY/provider state is keyed by tab id (== session.id for the
+        // Main tab). Use it for the in-flight clear, the providers insert, and
+        // the resume-fallback candidate so a Support tab tracks under its own key.
+        let tab_id = request.tab_id.clone();
+        self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
 
         if let AgentLaunchKind::Create { status_op_id, .. } = &request.kind {
             let status_op_id = status_op_id.clone();
@@ -643,6 +677,7 @@ impl Engine {
                 return (
                     AgentLaunchReadyOutcome {
                         session,
+                        tab_id: tab_id.clone(),
                         pty_size,
                         detached_session_id: None,
                         view: AgentLaunchReadyView::CreatePersistFailed {
@@ -654,16 +689,16 @@ impl Engine {
             }
             let detached =
                 self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-            self.providers.insert(session.id.clone(), client);
+            self.providers.insert(tab_id.clone(), client);
             self.sessions.insert(0, session.clone());
             // Correlate this create op with the session it just produced so a REST
             // create handler holding the op id (from `WireCommandOutcome.created_op_id`)
             // resolves its exact session without a racy set-difference scan.
             self.record_created_session(status_op_id.clone(), session.id.clone());
-            self.mark_session_provider_started(&session.id);
+            self.mark_session_provider_started(&session.id, &session.provider);
             if request.resume {
                 self.resume_fallback_candidates
-                    .insert(session.id.clone(), Instant::now());
+                    .insert(tab_id.clone(), Instant::now());
             }
             self.update_branch_sync_sessions();
 
@@ -694,6 +729,7 @@ impl Engine {
             return (
                 AgentLaunchReadyOutcome {
                     session,
+                    tab_id: tab_id.clone(),
                     pty_size,
                     detached_session_id: detached.map(|d| d.id),
                     view: AgentLaunchReadyView::CreateCommitted {
@@ -714,6 +750,30 @@ impl Engine {
             return (
                 AgentLaunchReadyOutcome {
                     session,
+                    tab_id: tab_id.clone(),
+                    pty_size,
+                    detached_session_id: None,
+                    view: AgentLaunchReadyView::SessionMissing,
+                },
+                None,
+            );
+        }
+
+        // Ghost-launch guard: a Support tab whose row was deleted while its
+        // launch was in flight must not resurrect a live PTY under a dead tab
+        // id. Dropping `client` here (PtyClient::Drop) terminates the freshly
+        // spawned process. The Main tab (`tab_id == session.id`, which never has
+        // an `agent_tabs` row) is exempt — "no row" is normal for Main.
+        let is_main = tab_id == session.id;
+        if !is_main && !self.agent_tabs.contains_key(&tab_id) {
+            logger::info(&format!(
+                "dropping launched PTY for closed support tab {tab_id} of session {}",
+                session.id,
+            ));
+            return (
+                AgentLaunchReadyOutcome {
+                    session,
+                    tab_id: tab_id.clone(),
                     pty_size,
                     detached_session_id: None,
                     view: AgentLaunchReadyView::SessionMissing,
@@ -724,14 +784,22 @@ impl Engine {
 
         let detached =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-        self.providers.insert(session.id.clone(), client);
+        self.providers.insert(tab_id.clone(), client);
         if request.resume {
             self.resume_fallback_candidates
-                .insert(session.id.clone(), Instant::now());
+                .insert(tab_id.clone(), Instant::now());
         }
-        self.mark_session_desired_running(&session.id, true);
-        self.mark_session_status(&session.id, SessionStatus::Active);
-        self.mark_session_provider_started(&session.id);
+        // Session-level running state stays Main-scoped: a Support-tab launch
+        // must not flip the whole agent to Active or persist desired_running
+        // (that would light the sidebar and auto-reopen the Main provider).
+        if is_main {
+            self.mark_session_desired_running(&session.id, true);
+            self.mark_session_status(&session.id, SessionStatus::Active);
+        }
+        // Record the provider that actually launched (the effective per-tab
+        // provider), so directory-scoped resume state stays correct even when a
+        // Support tab ran a different provider than the session default.
+        self.mark_session_provider_started(&session.id, &request.provider);
 
         let view = match request.kind {
             AgentLaunchKind::Reconnect { status_message }
@@ -745,12 +813,18 @@ impl Engine {
                 }
             }
             AgentLaunchKind::StartupAutoReopen => AgentLaunchReadyView::StartupAutoReopen,
+            // A Support-tab ready behaves like a reconnect for the view (show the
+            // surface + info); it is never resumed and never Main-scoped.
+            AgentLaunchKind::Tab { status_message, .. } => {
+                AgentLaunchReadyView::Reconnect { status_message }
+            }
             AgentLaunchKind::Create { .. } => unreachable!("create launch handled above"),
         };
 
         (
             AgentLaunchReadyOutcome {
                 session,
+                tab_id,
                 pty_size,
                 detached_session_id: detached.map(|d| d.id),
                 view,
@@ -888,13 +962,71 @@ impl Engine {
     /// session_id — they will see stale data. If a future helper needs to
     /// observe view state during deletion, the deletion sequence must be
     /// re-architected to invert the engine/view ordering.
+    /// Clear every runtime map entry (`providers`, `running_provider_pins`,
+    /// `resume_fallback_candidates`, `pty_activity`, `pty_input`, and the
+    /// in-flight `AgentLaunch` key) for ALL of a session's tabs — the Main tab
+    /// (`tab_id == session_id`) and every Support tab. Does NOT remove the
+    /// persisted `agent_tabs` records: a detach keeps them (the session lives on,
+    /// just disconnected); a delete removes them separately via `agent_tabs.retain`.
+    ///
+    /// This is the tab-aware replacement for the single-`session.id` map clears
+    /// every WHOLE-AGENT teardown path used before tabs existed. Main-scoped
+    /// operations (`kill_session_pty`, force-reconnect) deliberately do NOT use
+    /// it — they act on the Main provider only and must leave the user's
+    /// independent Support tabs running.
+    fn clear_session_tab_runtime(&mut self, session_id: &str) {
+        for tab_id in self.tab_ids_for_session(session_id) {
+            self.clear_tab_runtime(&tab_id);
+        }
+    }
+
+    /// Clear every runtime map keyed by ONE tab id (`providers`,
+    /// `running_provider_pins`, `resume_fallback_candidates`, `pty_activity`,
+    /// `pty_input`, and the in-flight `AgentLaunch` key). The SINGLE source of
+    /// truth for the per-tab teardown map list: both `close_tab` (a single
+    /// Support tab) and `clear_session_tab_runtime` (a whole session, looped)
+    /// call this, so adding a new tab-keyed map is a one-line change here rather
+    /// than a comment-enforced convention across two files.
+    pub(crate) fn clear_tab_runtime(&mut self, tab_id: &str) {
+        self.providers.remove(tab_id);
+        self.running_provider_pins.remove(tab_id);
+        self.resume_fallback_candidates.remove(tab_id);
+        self.pty_activity.remove(tab_id);
+        self.pty_input.remove(tab_id);
+        self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.to_string()));
+    }
+
     pub fn finish_delete_session(
         &mut self,
         session_id: &str,
     ) -> anyhow::Result<Option<FinishDeleteSessionOutcome>> {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+        if !self.sessions.iter().any(|s| s.id == session_id) {
             return Ok(None);
-        };
+        }
+        // Persist the deletion FIRST so a DB failure leaves in-memory state
+        // untouched and the session remains visible in the UI. If we cleared
+        // in-memory state first and the DB call then failed, the session
+        // would vanish from the UI but reappear on restart.
+        self.session_store.delete_session(session_id)?;
+        Ok(self.finish_delete_session_memory(session_id))
+    }
+
+    /// The IN-MEMORY half of a session deletion (no DB write): tear down the
+    /// runtime maps for every tab, drop the session/companion-terminals/Support-tab
+    /// records, and refresh derived state. Infallible. `finish_delete_session`
+    /// calls this after persisting; `Command::RemoveProject` calls it directly,
+    /// because `remove_project_records` already deleted the rows transactionally —
+    /// re-running `delete_session` there (and letting a transient DB error abort
+    /// the in-memory cleanup) would strand ghost sessions/tabs against an empty DB.
+    pub(crate) fn finish_delete_session_memory(
+        &mut self,
+        session_id: &str,
+    ) -> Option<FinishDeleteSessionOutcome> {
+        let session = self.sessions.iter().find(|s| s.id == session_id).cloned()?;
+        // The session is being removed now, so drop any "closing" marker set at the
+        // start of its delete (both the async and synchronous delete paths clear it
+        // here, in addition to the async worktree-removal-completed path).
+        self.closing_sessions.remove(session_id);
         let project = self
             .projects
             .iter()
@@ -905,25 +1037,22 @@ impl Engine {
             .iter()
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
 
-        // Persist the deletion FIRST so a DB failure leaves in-memory state
-        // untouched and the session remains visible in the UI. If we cleared
-        // in-memory state first and the DB call then failed, the session
-        // would vanish from the UI but reappear on restart.
-        self.session_store.delete_session(&session.id)?;
         crate::startup::spawn_delete_startup_command_logs(
             self.paths.clone(),
             session.project_id.clone(),
             session.id.clone(),
         );
 
-        self.providers.remove(&session.id);
-        self.running_provider_pins.remove(&session.id);
-        self.resume_fallback_candidates.remove(&session.id);
-        self.pty_activity.remove(&session.id);
-        self.pty_input.remove(&session.id);
+        // Tear down the runtime maps for EVERY tab of this agent (Main + Support),
+        // then drop the session, its companion terminals, and its Support-tab
+        // records. The graceful `begin_delete_session` already moved live tab
+        // PTYs into the terminating set, so `providers.remove` here is a no-op for
+        // those; this cleans up the remaining pin/activity/input/in-flight entries.
+        self.clear_session_tab_runtime(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.companion_terminals
             .retain(|_, t| t.session_id != session.id);
+        self.agent_tabs.retain(|_, t| t.session_id != session.id);
         self.update_branch_sync_sessions();
 
         let project_still_has_sessions = self
@@ -931,12 +1060,12 @@ impl Engine {
             .iter()
             .any(|candidate| candidate.project_id == session.project_id);
 
-        Ok(Some(FinishDeleteSessionOutcome {
+        Some(FinishDeleteSessionOutcome {
             session,
             project,
             other_sessions_on_worktree,
             project_still_has_sessions,
-        }))
+        })
     }
 
     /// Synchronous engine half of "delete this session" — looks up the session
@@ -990,15 +1119,61 @@ impl Engine {
             ));
             return Ok(None);
         }
+        // Refuse if any tab of this session has a launch in flight: such a tab is
+        // marked in-flight but not yet in `providers`, so the pre-kill below cannot
+        // reach it and `git::remove_worktree` could race the provider mid-spawn in
+        // the worktree (git-lock / cwd-deleted-under-fork). Mirrors the blanket
+        // precondition in `begin_delete_session`.
+        if should_remove_worktree
+            && self
+                .tab_ids_for_session(session_id)
+                .iter()
+                .any(|id| self.is_in_flight(&InFlightKey::AgentLaunch(id.clone())))
+        {
+            crate::logger::error(&format!(
+                "do_delete_session for {session_id}: a tab is still launching \u{2014} refusing to remove its worktree to avoid racing the spawning provider",
+            ));
+            return Ok(None);
+        }
+        // Mark the session "closing" so a concurrent `create_tab`/`launch_agent`
+        // can't spawn a fresh provider into the worktree we are about to remove.
+        // `finish_delete_session_memory` (called below) clears it. This path is
+        // synchronous so the window is tiny, but the flag keeps the invariant with
+        // `begin_delete_session` uniform.
+        if should_remove_worktree {
+            self.closing_sessions.insert(session.id.clone());
+        }
         let remove_outcome = if should_remove_worktree {
+            // Hard-kill every live tab PTY (Main + Support) and companion terminal
+            // of this session BEFORE removing the worktree: dropping a `PtyClient`
+            // SIGKILLs its whole process group, so no provider process is alive in
+            // the directory when `git::remove_worktree` runs. `finish_delete_session`
+            // below then clears the remaining runtime map entries. (This is the
+            // synchronous counterpart to `begin_delete_session`'s deferred group
+            // barrier — the project-delete loop that calls us is synchronous.)
+            for tab_id in self.tab_ids_for_session(session_id) {
+                self.providers.remove(&tab_id);
+            }
+            self.companion_terminals
+                .retain(|_, t| t.session_id != session_id);
             let project = project
                 .as_ref()
                 .expect("should_remove_worktree implies a project");
-            let result = crate::git::remove_worktree(
+            // Clear `closing_sessions` even if removal fails: the session record
+            // survives an `Err` (the `?` aborts the delete), and unlike the async
+            // `WorktreeRemoveCompleted` handler nothing else would clear the flag,
+            // leaving the agent permanently barred from creating/relaunching tabs.
+            let result = match crate::git::remove_worktree(
                 std::path::Path::new(&project.path),
                 std::path::Path::new(&session.worktree_path),
                 &session.branch_name,
-            )?;
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    self.closing_sessions.remove(session_id);
+                    return Err(err);
+                }
+            };
             Some(result.branch_already_deleted)
         } else {
             None
@@ -1036,6 +1211,19 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
             return BeginDeleteSessionOutcome::NotFound;
         };
+        // Blanket precondition: refuse while ANY tab of this session has a launch
+        // in flight. Such a tab is marked in-flight but not yet in `providers`, so
+        // it is invisible to the `live_tabs` check below — a worktree-removing
+        // delete could otherwise dispatch `git worktree remove` while the provider
+        // is mid-spawn in that worktree (git-lock / cwd-deleted-under-fork). Must
+        // run before ANY removal branch is selected.
+        if self
+            .tab_ids_for_session(&session.id)
+            .iter()
+            .any(|id| self.is_in_flight(&InFlightKey::AgentLaunch(id.clone())))
+        {
+            return BeginDeleteSessionOutcome::TabLaunching;
+        }
         // The project may be ABSENT for an orphaned session (its project was
         // removed but the session record outlived it). We can still delete the
         // session record; we just cannot run `git worktree remove` without the
@@ -1051,6 +1239,16 @@ impl Engine {
             .any(|s| s.id != session.id && s.worktree_path == session.worktree_path);
         let should_remove_worktree =
             delete_worktree && !other_sessions_on_worktree && project.is_some();
+
+        // Mark the session "closing" synchronously, for the whole grace window
+        // (until `WorktreeRemoveCompleted`). While set, `create_tab`/`launch_agent`
+        // refuse to spawn a fresh provider into the worktree that is about to be
+        // removed. `pending_deletions` alone is insufficient: it isn't set until
+        // the removal worker is actually dispatched, which for a live agent only
+        // happens after its PTYs reap — leaving a create-race window open.
+        if should_remove_worktree {
+            self.closing_sessions.insert(session.id.clone());
+        }
 
         // Graceful, non-blocking close: SIGTERM the agent PTY and its companion
         // terminals and move them to the terminating set for a background reap,
@@ -1076,14 +1274,57 @@ impl Engine {
             }
         });
         let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
-        let unhandled =
-            self.begin_close_provider(&session.id, session.branch_name.clone(), worktree_removal);
-        self.begin_close_session_terminals(&session.id);
-        // No live agent PTY to wait for (it already exited): remove the worktree
-        // now — there is nothing to reap, and the reaper would never see it.
-        if let Some(req) = unhandled {
-            let _ = self.dispatch_deferred_worktree_removal(req);
+
+        // Gracefully close EVERY live tab PTY of this agent (the Main tab and any
+        // Support tabs), not just the Main provider — a Support tab left running
+        // would be orphaned and, for a worktree-removing delete, keep writing into
+        // a worktree about to be removed.
+        let live_tabs: Vec<String> = self
+            .tab_ids_for_session(&session.id)
+            .into_iter()
+            .filter(|id| self.providers.contains_key(id))
+            .collect();
+        match worktree_removal {
+            // No live tab PTY to wait for (the agent already exited): remove the
+            // worktree now — there is nothing to reap, and the reaper would never
+            // see it.
+            Some(removal) if live_tabs.is_empty() => {
+                let _ = self.dispatch_deferred_worktree_removal(removal);
+            }
+            // Exactly one live tab: carry the removal on its terminating entry;
+            // `reap_terminating_ptys` dispatches it when that PTY reaps.
+            Some(removal) if live_tabs.len() == 1 => {
+                let unhandled = self.begin_close_provider(
+                    &live_tabs[0],
+                    session.branch_name.clone(),
+                    Some(removal),
+                );
+                if let Some(req) = unhandled {
+                    let _ = self.dispatch_deferred_worktree_removal(req);
+                }
+            }
+            // Multiple live tabs: close each with no per-entry removal and park a
+            // GROUP barrier so the removal fires exactly once, only after the LAST
+            // tab PTY has reaped (clean exit or force-kill) — never out from under
+            // a still-running sibling tab.
+            Some(removal) => {
+                for id in &live_tabs {
+                    let _ = self.begin_close_provider(id, session.branch_name.clone(), None);
+                }
+                self.pending_group_removals
+                    .push(super::GroupWorktreeRemoval {
+                        pending_ids: live_tabs.iter().cloned().collect(),
+                        removal,
+                    });
+            }
+            // Keep-worktree delete: gracefully close every live tab, nothing deferred.
+            None => {
+                for id in &live_tabs {
+                    let _ = self.begin_close_provider(id, session.branch_name.clone(), None);
+                }
+            }
         }
+        self.begin_close_session_terminals(&session.id);
 
         match busy_message {
             Some(busy_message) => {
@@ -1167,8 +1408,11 @@ impl Engine {
         data: AgentLaunchFailedData,
     ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
         let AgentLaunchFailedData { request, message } = data;
+        // Clear the tab-keyed in-flight lock (== session.id for the Main tab),
+        // mirroring the success path in `process_agent_launch_ready`.
+        let tab_id = request.tab_id.clone();
         let session = request.session;
-        self.clear_in_flight(&InFlightKey::AgentLaunch(session.id.clone()));
+        self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
 
         match request.kind {
             AgentLaunchKind::Create { status_op_id, .. } => {
@@ -1221,6 +1465,40 @@ impl Engine {
                 (
                     AgentLaunchFailedOutcome::StartupAutoReopen {
                         session_id: session.id,
+                        branch_name: session.branch_name,
+                        message,
+                    },
+                    None,
+                )
+            }
+            AgentLaunchKind::Tab { is_fresh, .. } => {
+                logger::error(&format!(
+                    "support tab {tab_id} launch failed for agent \"{}\": {}",
+                    session.branch_name, message,
+                ));
+                // A brand-new tab whose very first spawn failed never had a
+                // conversation — remove its row so it does not linger as a
+                // permanently-broken dormant tab. An explicit relaunch of an
+                // already-persisted dormant tab keeps its row so the user can
+                // retry; either way the real error is surfaced to the caller.
+                if is_fresh {
+                    // Persist-first (mirrors close_tab): only drop the in-memory
+                    // entry once the row is actually gone, so a failed DB delete
+                    // leaves a visible/closeable tab rather than an invisible
+                    // ghost that still consumes a cap slot.
+                    match self.session_store.delete_agent_tab(&tab_id) {
+                        Ok(()) => {
+                            self.agent_tabs.remove(&tab_id);
+                        }
+                        Err(err) => logger::error(&format!(
+                            "failed to delete failed-create support tab {tab_id}: {err}",
+                        )),
+                    }
+                }
+                (
+                    AgentLaunchFailedOutcome::Tab {
+                        session_id: session.id,
+                        tab_id,
                         branch_name: session.branch_name,
                         message,
                     },
@@ -1677,6 +1955,9 @@ impl Engine {
                 // interactive again — whether we're about to remove it
                 // (Ok path) or leave it in place for retry (Err path).
                 self.pending_deletions.remove(&session_id);
+                // The worktree removal is done (or failed and will be retried), so
+                // the session is no longer "closing" — allow tab creation again.
+                self.closing_sessions.remove(&session_id);
 
                 // Retrieve (and remove) the exact Busy message we set when
                 // the worker was spawned. The App compares this against the
@@ -1971,7 +2252,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::config::ProviderCommandConfig;
-    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::engine::test_support::{sample_project, sample_session, sample_tab, test_engine};
     use crate::model::{
         GhStatus, PrInfo, PrState, ProjectBranchStatus, ProviderKind, SessionStatus,
     };
@@ -2008,6 +2289,160 @@ mod tests {
         assert_eq!(outcome.project.as_ref().map(|p| p.id.as_str()), Some("p1"));
         assert!(!outcome.other_sessions_on_worktree);
         assert!(!outcome.project_still_has_sessions);
+    }
+
+    #[test]
+    fn finish_delete_session_clears_every_tab_and_drops_support_rows() {
+        use std::time::Instant;
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        // A Support tab of s1 with runtime state spread across the maps, plus a
+        // Main-tab activity stamp.
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .running_provider_pins
+            .insert("tab-2".to_string(), ProviderKind::new("codex"));
+        engine
+            .pty_activity
+            .insert("tab-2".to_string(), Instant::now());
+        engine.pty_input.insert("tab-2".to_string(), Instant::now());
+        engine
+            .resume_fallback_candidates
+            .insert("tab-2".to_string(), Instant::now());
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+
+        engine
+            .finish_delete_session("s1")
+            .unwrap()
+            .expect("outcome");
+
+        // Every tab's runtime state is gone (Main AND Support), and the
+        // Support-tab record is dropped from the in-memory map.
+        for key in ["s1", "tab-2"] {
+            assert!(!engine.pty_activity.contains_key(key));
+            assert!(!engine.pty_input.contains_key(key));
+            assert!(!engine.running_provider_pins.contains_key(key));
+            assert!(!engine.resume_fallback_candidates.contains_key(key));
+        }
+        assert!(engine.agent_tabs.is_empty());
+    }
+
+    #[test]
+    fn do_delete_session_clears_closing_flag_when_worktree_removal_fails() {
+        // A failed synchronous worktree removal must still clear `closing_sessions`
+        // so the agent isn't permanently barred from creating/relaunching tabs
+        // (the async `WorktreeRemoveCompleted` handler already guarantees this;
+        // the sync path must match it).
+        let (mut engine, tmp) = test_engine();
+        // A real (existing) worktree dir under a NON-git project: `git -C <proj>
+        // worktree remove` fails, and because the path exists on disk
+        // `remove_worktree` returns Err instead of the "already gone" Ok path.
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        engine
+            .projects
+            .push(sample_project("p1", proj.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = worktree.to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let result = engine.do_delete_session("s1", true);
+
+        assert!(
+            result.is_err(),
+            "removing a worktree from a non-git project must fail"
+        );
+        assert!(
+            !engine.closing_sessions.contains("s1"),
+            "closing_sessions must be cleared after a failed sync worktree removal"
+        );
+        // The delete aborted, so the session record survives.
+        assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+    }
+
+    #[test]
+    fn detach_conflicting_tears_down_all_tabs_but_keeps_support_rows() {
+        use crate::pty::PtyClient;
+        use std::time::Instant;
+        let (mut engine, _tmp) = test_engine();
+        let tmp = tempfile::tempdir().expect("worktree dir");
+        let worktree = tmp.path().to_string_lossy().to_string();
+
+        // The conflicting ("victim") session that holds the shared worktree's live
+        // PTY, plus a Support tab with runtime state.
+        let mut victim = sample_session("victim", "p1", "feat");
+        victim.worktree_path = worktree.clone();
+        engine.sessions.push(victim);
+        engine.agent_tabs.insert(
+            "v-tab".to_string(),
+            sample_tab("v-tab", "victim", "codex", 1),
+        );
+        engine.providers.insert(
+            "victim".to_string(),
+            PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[]).unwrap(),
+        );
+        engine
+            .running_provider_pins
+            .insert("v-tab".to_string(), ProviderKind::new("codex"));
+        engine
+            .pty_activity
+            .insert("v-tab".to_string(), Instant::now());
+
+        // A second session sharing the same worktree requests it.
+        let mut requester = sample_session("req", "p1", "feat2");
+        requester.worktree_path = worktree.clone();
+        engine.sessions.push(requester);
+
+        let detached = engine.detach_conflicting_worktree_session(&worktree, "req");
+        assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
+        // Every tab of the victim is torn down (Main provider + the Support tab's
+        // runtime maps)...
+        assert!(!engine.providers.contains_key("victim"));
+        assert!(!engine.pty_activity.contains_key("v-tab"));
+        assert!(!engine.running_provider_pins.contains_key("v-tab"));
+        // ...but its Support-tab ROW survives: the session still exists, detached.
+        assert!(engine.agent_tabs.contains_key("v-tab"));
+    }
+
+    #[test]
+    fn detach_conflicting_detects_a_conflict_when_only_a_support_tab_is_live() {
+        use crate::pty::PtyClient;
+        let (mut engine, _tmp) = test_engine();
+        let tmp = tempfile::tempdir().expect("worktree dir");
+        let worktree = tmp.path().to_string_lossy().to_string();
+
+        // Victim whose MAIN tab is dead (absent from `providers`) but a Support
+        // tab is still live in the shared worktree.
+        let mut victim = sample_session("victim", "p1", "feat");
+        victim.worktree_path = worktree.clone();
+        engine.sessions.push(victim);
+        engine.agent_tabs.insert(
+            "v-tab".to_string(),
+            sample_tab("v-tab", "victim", "codex", 1),
+        );
+        // Provider keyed under the SUPPORT tab id, not the session/Main id.
+        engine.providers.insert(
+            "v-tab".to_string(),
+            PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[]).unwrap(),
+        );
+
+        let mut requester = sample_session("req", "p1", "feat2");
+        requester.worktree_path = worktree.clone();
+        engine.sessions.push(requester);
+
+        // A Main-only check would MISS this (no "victim" key in `providers`); the
+        // tab-aware detection finds it and tears the live Support tab down.
+        let detached = engine.detach_conflicting_worktree_session(&worktree, "req");
+        assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
+        assert!(!engine.providers.contains_key("v-tab"));
     }
 
     #[test]
@@ -2644,9 +3079,12 @@ mod tests {
         kind: AgentLaunchKind,
         message: &str,
     ) -> AgentLaunchFailedData {
+        let session = sample_session(session_id, "project-1", branch);
         AgentLaunchFailedData {
             request: AgentLaunchRequest {
-                session: sample_session(session_id, "project-1", branch),
+                tab_id: session.id.clone(),
+                provider: session.provider.clone(),
+                session,
                 provider_config: ProviderCommandConfig::default(),
                 env: Vec::new(),
                 resume: false,
@@ -2847,6 +3285,24 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine.begin_delete_session("missing", true);
         assert!(matches!(outcome, BeginDeleteSessionOutcome::NotFound));
+    }
+
+    #[test]
+    fn begin_delete_session_refuses_while_a_tab_is_launching() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = sample_tab("tab-1", "s1", "codex", 1);
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        // A Support tab whose launch is in flight is marked in-flight but not yet
+        // in `providers`, so it is invisible to the live-tab check. Deleting must
+        // refuse rather than race the worktree removal against the spawn.
+        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-1".to_string()));
+        let outcome = engine.begin_delete_session("s1", true);
+        assert!(matches!(outcome, BeginDeleteSessionOutcome::TabLaunching));
     }
 
     #[test]
@@ -3113,6 +3569,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn do_delete_session_refuses_worktree_removal_while_a_tab_is_launching() {
+        // Round-2 fix: a tab whose launch is in flight is marked in-flight but not
+        // yet in `providers`, so the pre-kill can't reach it — a worktree-removing
+        // delete must refuse rather than race git::remove_worktree against the
+        // spawning provider.
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        // The Main tab's id equals the session id; mark its launch in flight.
+        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+
+        let outcome = engine
+            .do_delete_session("s1", true)
+            .expect("soft-return does not error");
+        assert!(
+            outcome.is_none(),
+            "do_delete_session must soft-return Ok(None) while a tab is launching",
+        );
+        assert!(
+            engine.sessions.iter().any(|s| s.id == "s1"),
+            "session should be untouched when the tab-launch guard fires",
+        );
+    }
+
     // ── Engine::apply on the deletion family (E4a) ───────────────────────
 
     #[test]
@@ -3247,6 +3730,8 @@ mod tests {
         let session = sample_session("s1", "p1", "feat/x");
         engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
         let request = AgentLaunchRequest {
+            tab_id: session.id.clone(),
+            provider: session.provider.clone(),
             session,
             provider_config: ProviderCommandConfig::default(),
             env: Vec::new(),

@@ -711,6 +711,119 @@ impl App {
         }
     }
 
+    /// Add a fresh support tab to the selected agent, defaulting to the
+    /// project's default provider, and focus it.
+    pub(crate) fn new_tab_for_selected_session(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session() else {
+            return Ok(());
+        };
+        let session_id = session.id.clone();
+        let project_id = session.project_id.clone();
+        let provider = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.default_provider.clone())
+            .unwrap_or_else(|| self.engine.config.default_provider());
+        let pty_size = self.pty_size_for_launch();
+        match self.engine.create_tab(&session_id, provider, pty_size) {
+            Ok(tab_id) => {
+                self.set_focused_tab(&session_id, &tab_id);
+                self.rebuild_left_items();
+                self.set_info(
+                    "Added a tab. It starts fresh — a new tab does not resume a prior conversation."
+                        .to_string(),
+                );
+            }
+            Err(e) => self.set_error(format!("Could not add tab: {e}")),
+        }
+        Ok(())
+    }
+
+    /// Launch a dormant focused tab. Used by the Enter/activate path when the
+    /// focused tab has no live process (e.g. after a restart). Resume is decided
+    /// per-provider: reopening resumes that provider's conversation when it is the
+    /// sole live tab of that provider (see `tab_resume_decision`); otherwise fresh.
+    pub(crate) fn launch_focused_support_tab(
+        &mut self,
+        session_id: &str,
+        tab_id: &str,
+    ) -> Result<()> {
+        let Some(session) = self
+            .engine
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let provider = self
+            .engine
+            .agent_tabs
+            .get(tab_id)
+            .map(|t| t.provider.clone())
+            .unwrap_or_else(|| session.provider.clone());
+        let pty_size = self.pty_size_for_launch();
+        let resume = self
+            .engine
+            .tab_resume_decision(&session, tab_id, &provider, true);
+        let status_message = if resume {
+            format!(
+                "Resumed the {} conversation in this tab.",
+                provider.as_str()
+            )
+        } else {
+            format!(
+                "Starting a fresh {} session in this tab.",
+                provider.as_str()
+            )
+        };
+        let request = self.engine.build_tab_launch_request(
+            tab_id.to_string(),
+            Some(provider),
+            session,
+            resume,
+            pty_size,
+            AgentLaunchKind::Tab {
+                is_fresh: false,
+                status_message,
+            },
+        );
+        self.dispatch_agent_launch(request);
+        Ok(())
+    }
+
+    /// Close-tab entry point. Opens the confirmation dialog for the focused
+    /// tab: closing the Main tab detaches the agent (non-destructive); closing a
+    /// Support tab ends that session for good (destructive).
+    pub(crate) fn close_focused_tab_prompt(&mut self) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let tab_id = self.focused_tab_id(&session_id);
+        let is_main = tab_id == session_id;
+        let provider = if is_main {
+            session.provider.as_str().to_string()
+        } else {
+            self.engine
+                .agent_tabs
+                .get(&tab_id)
+                .map(|t| t.provider.as_str().to_string())
+                .unwrap_or_else(|| session.provider.as_str().to_string())
+        };
+        let provider_label = Self::title_case_word(&provider);
+        self.prompt = PromptState::ConfirmCloseTab {
+            session_id,
+            tab_id,
+            provider_label,
+            is_main,
+            confirm_selected: false,
+        };
+    }
+
     pub(crate) fn agent_launch_request(
         &self,
         session: AgentSession,
@@ -1177,6 +1290,7 @@ impl App {
         self.engine.pty_activity.remove(session_id);
         self.engine.pty_input.remove(session_id);
         self.clear_companion_terminals_for_session(session_id);
+        self.clear_focused_tab_for_session(session_id);
 
         // Derived view state.
         self.rebuild_left_items();
@@ -1302,8 +1416,10 @@ impl App {
         }
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
+        let tab_id = self.focused_tab_id(&session.id);
         self.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
             session_id: session.id.clone(),
+            tab_id,
             session_label: self.session_label(&session),
             worktree_path: session.worktree_path.clone(),
             options: self.change_agent_provider_options(&session),
@@ -1350,9 +1466,12 @@ impl App {
         self.prompt = PromptState::None;
 
         let session_id = self.engine.sessions[session_index].id.clone();
-        let outcome = self
-            .engine
-            .change_agent_provider(&session_id, selected.provider.clone())?;
+        // Retarget the focused tab (Main delegates to the session-level change).
+        let outcome = self.engine.change_tab_provider(
+            &session_id,
+            &prompt.tab_id,
+            selected.provider.clone(),
+        )?;
         self.rebuild_left_items();
 
         let reconnect_key = self.bindings.label_for(Action::ReconnectAgent);
@@ -2334,6 +2453,26 @@ impl App {
             return Ok(());
         }
 
+        // Refuse the WHOLE project delete up front if any tab of any of its
+        // sessions has a launch in flight. `do_delete_session`'s per-session guard
+        // would soft-refuse (Ok(None)) that one session, but the loop below ignores
+        // the soft-refuse and would then report "Deleted project and all its
+        // agents" while silently leaving that session (and its worktree) behind.
+        let launching_in_project = self.engine.sessions.iter().any(|s| {
+            s.project_id == project.id
+                && self.engine.tab_ids_for_session(&s.id).iter().any(|id| {
+                    self.engine
+                        .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(id.clone()))
+                })
+        });
+        if launching_in_project {
+            self.set_error(
+                "Cannot delete project while an agent tab is still launching. \
+                 Wait a moment, then try again.",
+            );
+            return Ok(());
+        }
+
         logger::info(&format!("deleting project {}", project.path));
         let session_ids = self
             .engine
@@ -2771,29 +2910,69 @@ impl App {
         let mut runtimes = Vec::new();
 
         for session in &self.engine.sessions {
-            if !self.engine.providers.contains_key(&session.id) {
+            let main_running = self.engine.providers.contains_key(&session.id);
+            let has_live_support = self
+                .engine
+                .tab_ids_for_session(&session.id)
+                .into_iter()
+                .any(|tab_id| tab_id != session.id && self.engine.providers.contains_key(&tab_id));
+            // Skip only when NEITHER the Main tab nor any Support tab is live.
+            if !main_running && !has_live_support {
                 continue;
             }
             let project_name = self.engine.project_name_for_session(session);
             let agent_name = self.session_label(session);
-            let provider_name = session.provider.as_str();
-            let label = Self::title_case_word(provider_name);
-            let context = format!("on agent \"{agent_name}\" under project \"{project_name}\"");
-            let search_text = format!(
-                "{} {} {} {} {}",
-                label,
-                context,
-                provider_name,
-                agent_name,
-                KillableRuntimeKind::Agent.noun()
-            );
-            runtimes.push(KillableRuntime {
-                id: RuntimeTargetId::Agent(session.id.clone()),
-                kind: KillableRuntimeKind::Agent,
-                label,
-                context,
-                search_text,
-            });
+            if main_running {
+                let provider_name = session.provider.as_str();
+                let label = Self::title_case_word(provider_name);
+                let context = format!("on agent \"{agent_name}\" under project \"{project_name}\"");
+                let search_text = format!(
+                    "{} {} {} {} {}",
+                    label,
+                    context,
+                    provider_name,
+                    agent_name,
+                    KillableRuntimeKind::Agent.noun()
+                );
+                runtimes.push(KillableRuntime {
+                    id: RuntimeTargetId::Agent(session.id.clone()),
+                    kind: KillableRuntimeKind::Agent,
+                    label,
+                    context,
+                    search_text,
+                });
+            }
+
+            // Support tabs are independent live provider processes keyed by tab
+            // id. List each running one so a runaway support tab can be killed;
+            // killing it stops the process but keeps the (now dormant) tab.
+            for tab_id in self.engine.tab_ids_for_session(&session.id) {
+                if tab_id == session.id || !self.engine.providers.contains_key(&tab_id) {
+                    continue;
+                }
+                let Some(tab) = self.engine.agent_tabs.get(&tab_id) else {
+                    continue;
+                };
+                let tab_provider = tab.provider.as_str();
+                let tab_label = format!("{} tab", Self::title_case_word(tab_provider));
+                let tab_context =
+                    format!("on agent \"{agent_name}\" under project \"{project_name}\"");
+                let tab_search = format!(
+                    "{} {} {} {} {} tab",
+                    tab_label,
+                    tab_context,
+                    tab_provider,
+                    agent_name,
+                    KillableRuntimeKind::Agent.noun()
+                );
+                runtimes.push(KillableRuntime {
+                    id: RuntimeTargetId::Tab(tab_id.clone()),
+                    kind: KillableRuntimeKind::Agent,
+                    label: tab_label,
+                    context: tab_context,
+                    search_text: tab_search,
+                });
+            }
         }
 
         for (terminal_id, terminal) in self.terminal_items() {
@@ -2963,12 +3142,36 @@ impl App {
                         // dropping the provider without clearing this would leak the
                         // entry (it's keyed only off the now-removed provider).
                         self.engine.resume_fallback_candidates.remove(session_id);
-                        self.engine
-                            .mark_session_status(session_id, SessionStatus::Detached);
+                        // No tab is privileged: stopping the session-slot tab
+                        // detaches the agent only when it was the last live tab.
+                        // With extra tabs still running the agent stays Active.
+                        if !self.engine.any_tab_active(session_id) {
+                            self.engine
+                                .mark_session_status(session_id, SessionStatus::Detached);
+                        }
                         killed_agents += 1;
                         if selected_session_id.as_deref() == Some(session_id.as_str()) {
                             selected_agent_killed = true;
                         }
+                    }
+                }
+                RuntimeTargetId::Tab(tab_id) => {
+                    // Kill an extra tab's process but KEEP its `agent_tabs` row:
+                    // the tab becomes dormant (relaunchable). Do not touch the row
+                    // here (that is `close_tab`'s job). The agent still detaches if
+                    // this happened to be its LAST live tab.
+                    if self.engine.providers.remove(tab_id).is_some() {
+                        self.engine.running_provider_pins.remove(tab_id);
+                        self.engine.pty_activity.remove(tab_id);
+                        self.engine.pty_input.remove(tab_id);
+                        self.engine.resume_fallback_candidates.remove(tab_id);
+                        if let Some(session_id) = self.engine.owning_session_for_tab(tab_id)
+                            && !self.engine.any_tab_active(&session_id)
+                        {
+                            self.engine
+                                .mark_session_status(&session_id, SessionStatus::Detached);
+                        }
+                        killed_agents += 1;
                     }
                 }
                 RuntimeTargetId::Terminal(terminal_id) => {
@@ -3010,7 +3213,7 @@ impl App {
         (killed_agents, killed_terminals)
     }
 
-    fn session_label(&self, session: &AgentSession) -> String {
+    pub(crate) fn session_label(&self, session: &AgentSession) -> String {
         session
             .title
             .clone()
@@ -3022,9 +3225,9 @@ impl App {
     /// human-readable label of the detached session, if any.
     ///
     /// Thin view wrapper over `Engine::detach_conflicting_worktree_session`:
-    /// the engine performs the domain-state mutation and returns the detached
-    /// session's id + label; the App clears the engine's `pty_activity` entry
-    /// for the id and surfaces the label for status messages.
+    /// the engine tears down every tab of the conflicting agent (Main + Support)
+    /// via `clear_session_tab_runtime`, clearing all six runtime maps, so no
+    /// caller-side follow-up clear is needed; the App just surfaces the label.
     pub(crate) fn detach_conflicting_worktree_session(
         &mut self,
         worktree_path: &str,
@@ -3033,8 +3236,6 @@ impl App {
         let detached = self
             .engine
             .detach_conflicting_worktree_session(worktree_path, exclude_id)?;
-        self.engine.pty_activity.remove(&detached.id);
-        self.engine.pty_input.remove(&detached.id);
         Some(detached.label)
     }
 
@@ -3204,7 +3405,9 @@ mod tests {
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
+            agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
+            pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             pr_statuses: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -3214,6 +3417,7 @@ mod tests {
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashMap::new(),
             pending_deletions: std::collections::HashSet::new(),
+            closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             watched_session_id: None,
@@ -3273,6 +3477,9 @@ mod tests {
             session_surface: crate::model::SessionSurface::Agent,
             clipboard: Clipboard::new(),
             active_terminal_id: None,
+            focused_tabs: std::collections::HashMap::new(),
+            agent_tab_regions: Vec::new(),
+            agent_tab_add_region: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             prev_scrollback_offset: 0,
@@ -3394,7 +3601,9 @@ mod tests {
             providers: std::collections::HashMap::new(),
             running_provider_pins: std::collections::HashMap::new(),
             companion_terminals: std::collections::HashMap::new(),
+            agent_tabs: std::collections::HashMap::new(),
             terminating_ptys: Vec::new(),
+            pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             pr_statuses: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -3404,6 +3613,7 @@ mod tests {
             refs_watch_paths: std::collections::HashMap::new(),
             resume_fallback_candidates: std::collections::HashMap::new(),
             pending_deletions: std::collections::HashSet::new(),
+            closing_sessions: std::collections::HashSet::new(),
             deletion_busy_messages: std::collections::HashMap::new(),
             watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
             watched_session_id: None,
@@ -3425,6 +3635,51 @@ mod tests {
             last_created_op_id: None,
             created_session_by_op: std::collections::HashMap::new(),
         }
+    }
+
+    fn seed_tab(app: &mut App, id: &str, session_id: &str, provider: &str, order: i64) {
+        app.engine.agent_tabs.insert(
+            id.to_string(),
+            crate::model::AgentTab {
+                id: id.to_string(),
+                session_id: session_id.to_string(),
+                provider: ProviderKind::from_str(provider),
+                sort_order: order,
+                created_at: Utc::now(),
+            },
+        );
+    }
+
+    #[test]
+    fn session_tab_ids_are_main_first_then_sorted() {
+        let mut app =
+            test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        seed_tab(&mut app, "t2", "s1", "codex", 2);
+        seed_tab(&mut app, "t1", "s1", "claude", 1);
+        seed_tab(&mut app, "other", "s2", "claude", 1);
+        assert_eq!(
+            app.session_tab_ids("s1"),
+            vec!["s1".to_string(), "t1".to_string(), "t2".to_string()]
+        );
+    }
+
+    #[test]
+    fn focused_tab_defaults_to_main_and_clamps_when_gone() {
+        let mut app =
+            test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        seed_tab(&mut app, "t1", "s1", "claude", 1);
+        // Default is Main (the session id).
+        assert_eq!(app.focused_tab_id("s1"), "s1");
+        app.set_focused_tab("s1", "t1");
+        assert_eq!(app.focused_tab_id("s1"), "t1");
+        // A stored-but-missing tab clamps back to Main.
+        app.focused_tabs
+            .insert("s1".to_string(), "gone".to_string());
+        assert_eq!(app.focused_tab_id("s1"), "s1");
+        // Teardown prune drops the entry.
+        app.set_focused_tab("s1", "t1");
+        app.clear_focused_tab_for_session("s1");
+        assert_eq!(app.focused_tab_id("s1"), "s1");
     }
 
     #[test]
@@ -4454,7 +4709,8 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![session], vec![project]);
 
-        app.engine.mark_session_provider_started("s1");
+        app.engine
+            .mark_session_provider_started("s1", &dux_core::model::ProviderKind::new("claude"));
 
         assert_eq!(
             app.engine.sessions[0].started_providers,
@@ -4988,6 +5244,38 @@ mod tests {
             crate::statusline::StatusTone::Error,
             "should show an error explaining why deletion was blocked",
         );
+    }
+
+    #[test]
+    fn delete_selected_project_blocked_when_a_tab_is_launching() {
+        let project_dir = tempdir().expect("project tempdir");
+        let worktree_dir = tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_dir.path().to_string_lossy().to_string();
+
+        let mut s1 = make_session("s1", "claude", &worktree_path);
+        s1.project_id = "project-1".to_string();
+        let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
+        let mut app = test_app_with_sessions(vec![s1], vec![project]);
+
+        // A tab of this project's session has a launch in flight (Main tab id ==
+        // session id). Deleting the project must be refused up front, not silently
+        // skip this session and then falsely claim success.
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+        app.selected_left = 0;
+
+        app.delete_selected_project()
+            .expect("should return Ok (error reported via status line)");
+
+        assert!(
+            app.engine.sessions.iter().any(|s| s.id == "s1"),
+            "session must not be removed while a tab is launching",
+        );
+        assert!(
+            app.engine.projects.iter().any(|p| p.id == "project-1"),
+            "project must not be removed while a tab is launching",
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
     }
 
     /// When the worker fails to delete a worktree, the error message should

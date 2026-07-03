@@ -42,6 +42,7 @@ pub mod server;
 pub mod session_actions;
 pub mod spine_routes;
 pub mod startup_logs;
+pub mod tab_actions;
 pub mod terminal_actions;
 pub mod web_assets;
 
@@ -322,6 +323,8 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
         engine.config.server.max_websocket_events_connections,
         engine.config.server.max_websocket_agent_connections,
         engine.config.server.max_websocket_terminal_connections,
+        engine.config.server.max_websocket_tab_connections,
+        engine.config.server.max_websocket_tabs_per_agent,
     );
     let engine_allowed_hosts = engine.config.server.allowed_hosts.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -382,7 +385,13 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
             axum::Router::new(),
             RouterParams::plain_http()
                 .with_console(console.clone(), access_log)
-                .with_max_websocket_connections(max_ws_caps.0, max_ws_caps.1, max_ws_caps.2)
+                .with_max_websocket_connections(
+                    max_ws_caps.0,
+                    max_ws_caps.1,
+                    max_ws_caps.2,
+                    max_ws_caps.3,
+                    max_ws_caps.4,
+                )
                 .with_host_allowlist(bound_ips, engine_allowed_hosts.clone()),
         );
 
@@ -631,6 +640,8 @@ pub fn serve_with_engine(
         engine.config.server.max_websocket_events_connections,
         engine.config.server.max_websocket_agent_connections,
         engine.config.server.max_websocket_terminal_connections,
+        engine.config.server.max_websocket_tab_connections,
+        engine.config.server.max_websocket_tabs_per_agent,
     );
 
     // The std listeners travel through the flip (the TUI bound them BEFORE tearing
@@ -696,7 +707,13 @@ pub fn serve_with_engine(
                 // in the panel, and access() never reaches emit() to be captured
                 // anyway) while the WS handlers feed lifecycle events into the ring.
                 .with_console(console.clone(), false)
-                .with_max_websocket_connections(flip_max_ws.0, flip_max_ws.1, flip_max_ws.2)
+                .with_max_websocket_connections(
+                    flip_max_ws.0,
+                    flip_max_ws.1,
+                    flip_max_ws.2,
+                    flip_max_ws.3,
+                    flip_max_ws.4,
+                )
                 .with_host_allowlist(flip_bound_ips, flip_allowed_hosts),
         )
     };

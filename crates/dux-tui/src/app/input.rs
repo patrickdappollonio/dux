@@ -97,6 +97,8 @@ enum PromptMouseTarget {
     ConfirmDeleteConfirm,
     ConfirmDeleteTerminalCancel,
     ConfirmDeleteTerminalConfirm,
+    ConfirmCloseTabCancel,
+    ConfirmCloseTabConfirm,
     ConfirmDeleteMacroCancel,
     ConfirmDeleteMacroConfirm,
     ConfirmQuitCancel,
@@ -164,6 +166,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmDeleteTerminalConfirm => {
                 Some(ButtonPressedTarget::ConfirmDeleteTerminalConfirm)
+            }
+            PromptMouseTarget::ConfirmCloseTabCancel => {
+                Some(ButtonPressedTarget::ConfirmCloseTabCancel)
+            }
+            PromptMouseTarget::ConfirmCloseTabConfirm => {
+                Some(ButtonPressedTarget::ConfirmCloseTabConfirm)
             }
             PromptMouseTarget::ConfirmDeleteMacroCancel => {
                 Some(ButtonPressedTarget::ConfirmDeleteMacroCancel)
@@ -740,25 +748,30 @@ impl App {
                 Action::FocusAgent if !in_diff => self.activate_center_agent()?,
                 Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
+                Action::NextTab if !in_diff => self.focus_tab_relative(true),
+                Action::PrevTab if !in_diff => self.focus_tab_relative(false),
+                Action::NewTab if !in_diff => self.new_tab_for_selected_session()?,
+                Action::CloseTab if !in_diff => self.close_focused_tab_prompt(),
+                Action::SelectTab1 if !in_diff => self.focus_tab_index(0),
+                Action::SelectTab2 if !in_diff => self.focus_tab_index(1),
+                Action::SelectTab3 if !in_diff => self.focus_tab_index(2),
+                Action::SelectTab4 if !in_diff => self.focus_tab_index(3),
+                Action::SelectTab5 if !in_diff => self.focus_tab_index(4),
+                Action::SelectTab6 if !in_diff => self.focus_tab_index(5),
+                Action::SelectTab7 if !in_diff => self.focus_tab_index(6),
+                Action::SelectTab8 if !in_diff => self.focus_tab_index(7),
+                Action::SelectTab9 if !in_diff => self.focus_tab_index(8),
                 Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::RenameSession if !in_diff => self.open_rename_session()?,
                 Action::OpenCurrentPullRequest if !in_diff && self.current_pr_info().is_some() => {
                     self.open_current_pr_in_browser()?
                 }
                 Action::ReconnectAgent if !in_diff => {
-                    // Allow relaunching an exited agent from the center pane,
-                    // or entering interactive mode if the agent is active.
-                    let has_provider = self
-                        .selected_session()
-                        .map(|s| self.engine.providers.contains_key(&s.id))
-                        .unwrap_or(false);
-                    if has_provider {
-                        self.reset_pty_scrollback();
-                        self.input_target = InputTarget::Agent;
-                        self.fullscreen_overlay = FullscreenOverlay::Agent;
-                    } else if self.selected_session().is_some() {
-                        self.reconnect_selected_session()?;
-                    }
+                    // Delegate to the shared focused-tab logic: enter interactive
+                    // mode on a live tab, launch a dormant Support tab fresh, or
+                    // relaunch a dormant Main tab — resolving the FOCUSED tab so
+                    // this never acts on the Main tab while a Support tab is shown.
+                    self.activate_center_agent()?;
                 }
                 Action::ScrollPageUp => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
@@ -1866,9 +1879,13 @@ impl App {
         // [`Engine::note_pty_input`].
         if forwarded_to_pty
             && matches!(self.input_target, InputTarget::Agent)
-            && let Some(id) = self.selected_session().map(|s| s.id.clone())
+            && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
         {
-            self.engine.note_pty_input(&id);
+            // Stamp the FOCUSED tab (where the bytes actually went), not the
+            // session/Main id — otherwise typing into a Support tab bumps the
+            // wrong tab's suppression window.
+            let tab_id = self.focused_tab_id(&session_id);
+            self.engine.note_pty_input(&tab_id);
         }
 
         Ok(false)
@@ -2935,6 +2952,27 @@ impl App {
             }
         }
 
+        if let PromptState::ConfirmCloseTab {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::ToggleSelection) => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_close_tab(confirm));
+                }
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    return Ok(self.resolve_confirm_close_tab(confirm));
+                }
+                _ => {}
+            }
+        }
+
         if let PromptState::ConfirmQuit {
             confirm_selected, ..
         } = &mut self.prompt
@@ -3780,6 +3818,18 @@ impl App {
                     Some(PromptMouseTarget::ConfirmDeleteTerminalCancel)
                 } else if contains_point(delete_button, column, row) {
                     Some(PromptMouseTarget::ConfirmDeleteTerminalConfirm)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::ConfirmCloseTab {
+                cancel_button,
+                confirm_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmCloseTabCancel)
+                } else if contains_point(confirm_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmCloseTabConfirm)
                 } else {
                     None
                 }
@@ -4675,6 +4725,50 @@ impl App {
         false
     }
 
+    fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
+        let (session_id, tab_id, is_main) = match &self.prompt {
+            PromptState::ConfirmCloseTab {
+                session_id,
+                tab_id,
+                is_main,
+                ..
+            } => (session_id.clone(), tab_id.clone(), *is_main),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if !confirm {
+            return false;
+        }
+        if is_main {
+            // Closing the session-slot tab (which has no row) stops just that
+            // tab's provider; the agent detaches only when it was the last live
+            // tab (kill_runtime_targets handles the detach-if-last). Other tabs
+            // keep running and the agent stays Active.
+            self.kill_runtime_targets(&[RuntimeTargetId::Agent(session_id.clone())]);
+            if self.engine.any_tab_active(&session_id) {
+                self.set_info("Tab closed. The agent's other tabs are still running.".to_string());
+            } else {
+                self.set_info(
+                    "Closed the last tab, so the agent detached. It stays in Projects and can be reopened at any time.".to_string(),
+                );
+            }
+        } else {
+            match self.engine.close_tab(&session_id, &tab_id) {
+                Ok(()) => {
+                    // Return focus to the session-slot tab (also resets the
+                    // snapshot so its PTY renders immediately).
+                    self.set_focused_tab(&session_id, &session_id);
+                    self.rebuild_left_items();
+                    self.set_info("Tab closed.".to_string());
+                }
+                Err(e) => {
+                    self.set_error(format!("Could not close the tab: {e}"));
+                }
+            }
+        }
+        false
+    }
+
     fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
         let confirm_prompt = match &self.prompt {
             PromptState::ConfirmKillRunning(confirm_prompt) => confirm_prompt.clone(),
@@ -5347,6 +5441,8 @@ impl App {
             | PromptMouseTarget::ConfirmDeleteConfirm
             | PromptMouseTarget::ConfirmDeleteTerminalCancel
             | PromptMouseTarget::ConfirmDeleteTerminalConfirm
+            | PromptMouseTarget::ConfirmCloseTabCancel
+            | PromptMouseTarget::ConfirmCloseTabConfirm
             | PromptMouseTarget::ConfirmDeleteMacroCancel
             | PromptMouseTarget::ConfirmDeleteMacroConfirm
             | PromptMouseTarget::ConfirmQuitCancel
@@ -5452,6 +5548,8 @@ impl App {
             ButtonPressedTarget::ConfirmDeleteTerminalConfirm => {
                 self.resolve_confirm_delete_terminal(true)
             }
+            ButtonPressedTarget::ConfirmCloseTabCancel => self.resolve_confirm_close_tab(false),
+            ButtonPressedTarget::ConfirmCloseTabConfirm => self.resolve_confirm_close_tab(true),
             ButtonPressedTarget::ConfirmDeleteMacroCancel => {
                 self.resolve_confirm_delete_macro(false)
             }
@@ -5600,12 +5698,16 @@ impl App {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
         }
-        if self.selected_session().is_some()
-            && self
-                .selected_session()
-                .map(|s| self.engine.providers.contains_key(&s.id))
-                .unwrap_or(false)
-        {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            let n = self.bindings.label_for(Action::NewAgent);
+            self.set_error(format!(
+                "No agent selected. Press \"{n}\" to create a new one."
+            ));
+            return Ok(());
+        };
+        // Resolve the FOCUSED tab so activation acts on the visible tab.
+        let tab_id = self.focused_tab_id(&session_id);
+        if self.engine.providers.contains_key(&tab_id) {
             self.reset_pty_scrollback();
             self.input_target = InputTarget::Agent;
             self.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -5613,13 +5715,11 @@ impl App {
             self.set_info(format!(
                 "Interactive mode. Keys forwarded to agent. {exit_key} exits."
             ));
-        } else if self.selected_session().is_some() {
-            self.reconnect_selected_session()?;
+        } else if tab_id != session_id {
+            // Dormant Support tab: start a fresh session (never resume).
+            self.launch_focused_support_tab(&session_id, &tab_id)?;
         } else {
-            let n = self.bindings.label_for(Action::NewAgent);
-            self.set_error(format!(
-                "No agent selected. Press \"{n}\" to create a new one."
-            ));
+            self.reconnect_selected_session()?;
         }
         Ok(())
     }
@@ -5765,6 +5865,31 @@ impl App {
             matches!(mouse.kind, MouseEventKind::ScrollUp),
             MOUSE_WHEEL_LINES,
         );
+    }
+
+    /// Handle a left-click on the agent tab strip. Returns true if the click
+    /// landed on a tab (focus it) or the `+` add button (create a tab).
+    fn handle_agent_tab_strip_click(&mut self, column: u16, row: u16) -> bool {
+        if let Some(add) = self.agent_tab_add_region
+            && contains_point(add, column, row)
+        {
+            self.focus = FocusPane::Center;
+            let _ = self.new_tab_for_selected_session();
+            return true;
+        }
+        if let Some((tab_id, _)) = self
+            .agent_tab_regions
+            .iter()
+            .find(|(_, rect)| contains_point(*rect, column, row))
+            .map(|(id, rect)| (id.clone(), *rect))
+        {
+            if let Some(session_id) = self.selected_session().map(|s| s.id.clone()) {
+                self.focus = FocusPane::Center;
+                self.set_focused_tab(&session_id, &tab_id);
+            }
+            return true;
+        }
+        false
     }
 
     fn update_dragged_panes(&mut self, column: u16, row: u16) {
@@ -5933,6 +6058,11 @@ impl App {
                 if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
                     self.mouse_drag = Some(drag);
                     self.update_dragged_panes(mouse.column, mouse.row);
+                    return false;
+                }
+
+                // Agent tab strip: click a tab to focus it, or `+` to add one.
+                if self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
                     return false;
                 }
 
@@ -14574,6 +14704,129 @@ cyan = "#00ffff"
         assert!(
             !rendered.contains("→"),
             "arrow should disappear once no swap is pending, got: {rendered}"
+        );
+    }
+
+    fn spawn_test_provider(worktree: &std::path::Path) -> PtyClient {
+        PtyClient::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 5".to_string()],
+            worktree,
+            24,
+            80,
+            1_000,
+        )
+        .expect("spawn test provider")
+    }
+
+    fn insert_support_tab(app: &mut App, session_id: &str, tab_id: &str) {
+        app.engine.agent_tabs.insert(
+            tab_id.to_string(),
+            dux_core::model::AgentTab {
+                id: tab_id.to_string(),
+                session_id: session_id.to_string(),
+                provider: dux_core::model::ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    #[test]
+    fn confirm_close_support_tab_closes_and_refocuses_main() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let tab_id = "tab-1".to_string();
+        insert_support_tab(&mut app, &session_id, &tab_id);
+        app.engine
+            .providers
+            .insert(tab_id.clone(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, &tab_id);
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: tab_id.clone(),
+            provider_label: "Codex".to_string(),
+            is_main: false,
+            confirm_selected: true,
+        };
+        // Space activates the focused (Close) button.
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        assert!(
+            !app.engine.agent_tabs.contains_key(&tab_id),
+            "closing a support tab must delete its row"
+        );
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            session_id,
+            "focus should return to the Main tab after closing a support tab"
+        );
+    }
+
+    #[test]
+    fn confirm_close_main_tab_detaches_without_deleting() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        // A support tab exists; detaching the Main tab must NOT touch it.
+        let tab_id = "tab-1".to_string();
+        insert_support_tab(&mut app, &session_id, &tab_id);
+        app.engine
+            .providers
+            .insert(session_id.clone(), spawn_test_provider(&worktree));
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: session_id.clone(),
+            provider_label: "Codex".to_string(),
+            is_main: true,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle detach");
+
+        assert!(
+            !app.engine.providers.contains_key(&session_id),
+            "detaching the Main tab stops its provider"
+        );
+        assert!(
+            app.engine.agent_tabs.contains_key(&tab_id),
+            "detaching the Main tab must not delete support tab rows"
+        );
+    }
+
+    #[test]
+    fn kill_running_lists_live_support_tab_and_keeps_its_row() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        let tab_id = "tab-1".to_string();
+        insert_support_tab(&mut app, &session_id, &tab_id);
+        app.engine
+            .providers
+            .insert(tab_id.clone(), spawn_test_provider(&worktree));
+
+        let snapshot = app.running_runtime_snapshot();
+        assert!(
+            snapshot
+                .iter()
+                .any(|r| r.id == RuntimeTargetId::Tab(tab_id.clone())),
+            "a live support tab should be a killable runtime"
+        );
+
+        let (agents, _terminals) =
+            app.kill_runtime_targets(&[RuntimeTargetId::Tab(tab_id.clone())]);
+        assert_eq!(agents, 1, "killing the support tab counts as an agent kill");
+        assert!(
+            !app.engine.providers.contains_key(&tab_id),
+            "killing a support tab stops its process"
+        );
+        assert!(
+            app.engine.agent_tabs.contains_key(&tab_id),
+            "killing a support tab keeps its row (it becomes dormant)"
         );
     }
 }

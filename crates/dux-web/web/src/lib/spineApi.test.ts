@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { SpineFetchError, fetchSpine } from "./spineApi"
 
 // The spine client is a thin GET wrapper (mirrors bootstrapApi/changesApi): on
-// 2xx it returns the parsed JSON; on a non-2xx it throws a `SpineFetchError`
-// carrying the HTTP status; on a transport failure it throws status 0.
+// 2xx it returns the parsed JSON (coercing each session's `tabs` to an array so
+// an older server that omits the field degrades safely); on a non-2xx it throws a
+// `SpineFetchError` carrying the HTTP status; on a transport failure it throws 0.
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -31,7 +32,11 @@ describe("fetchSpine", () => {
     vi.stubGlobal("fetch", fetchMock)
 
     const result = await fetchSpine()
-    expect(result).toEqual(body)
+    // A session that omits `tabs` (an older server) is coerced to `tabs: []`.
+    expect(result).toEqual({
+      ...body,
+      sessions: [{ id: "s1", project_id: "p1", tabs: [] }],
+    })
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/spine", {
       credentials: "same-origin",
     })

@@ -46,6 +46,17 @@ export function terminalPtyUrl(sessionId: string, terminalId: string): string {
   )}/terminals/${encodeURIComponent(terminalId)}/pty`
 }
 
+// A Support tab's PTY socket URL, nested under its owning session so the server
+// can enforce that the tab belongs to that session. Used ONLY for Support tabs;
+// the Main tab keeps `agentPtyUrl` (its `tab_id === session_id`, served by the
+// existing `/ws/sessions/:id/pty` route). Connecting launches the Support tab's
+// provider fresh (there is no resume for Support tabs).
+export function tabPtyUrl(sessionId: string, tabId: string): string {
+  return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
+    sessionId,
+  )}/tabs/${encodeURIComponent(tabId)}/pty`
+}
+
 export class PtySocket {
   private url: string
   private ws: WebSocket | null = null

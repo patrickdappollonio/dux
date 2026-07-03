@@ -115,6 +115,19 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         surface: PaletteSurface::Tui,
     },
     PaletteCommand {
+        action: Action::NewTab,
+        name: "new-tab",
+        description: "Add a tab to the selected agent (starts fresh)",
+        // Per-session: web adds tabs from the tab strip's + button.
+        surface: PaletteSurface::Tui,
+    },
+    PaletteCommand {
+        action: Action::CloseTab,
+        name: "close-tab",
+        description: "Close the focused tab of the selected agent",
+        surface: PaletteSurface::Tui,
+    },
+    PaletteCommand {
         action: Action::ChangeDefaultProvider,
         name: "change-default-provider",
         description: "Change the global default provider for new agents in projects without a project-specific override",

@@ -453,13 +453,14 @@ impl Engine {
                 // reappear on restart). The rows are gone before any in-memory state
                 // changes, and on error nothing is mutated. Tolerates a ghost id.
                 let removed = self.session_store.remove_project_records(&project_id)?;
-                // The DB rows are gone; finish_delete_session now only runs the
-                // (infallible) in-memory/runtime teardown per session — its own
-                // delete_session is a no-op on the already-removed row. Dropping
-                // each provider SIGKILLs the PTY process group; worktrees are
-                // deliberately left on disk.
+                // The DB rows are already gone (one transaction above), so run ONLY
+                // the infallible in-memory/runtime teardown per session — never
+                // re-invoke delete_session here, so a transient DB error can't abort
+                // the cleanup and strand ghost sessions/tabs against an empty DB.
+                // Dropping each provider SIGKILLs the PTY process group; worktrees
+                // are deliberately left on disk.
                 for id in &removed {
-                    let _ = self.finish_delete_session(id);
+                    self.finish_delete_session_memory(id);
                 }
                 // Remove the project from memory synchronously so a concurrent
                 // CreateAgent cannot attach a new session to a project mid-removal.
@@ -574,13 +575,41 @@ impl Engine {
             Command::DispatchAgentLaunch { request } => {
                 let branch_name = request.session.branch_name.clone();
                 let session_id = request.session.id.clone();
-                // Pre-check in-flight so the View carries the exact "already
-                // launching" message regardless of the primitive's generic
-                // already-running fallback.
-                if self.is_in_flight(&InFlightKey::AgentLaunch(session_id.clone())) {
+                // Guard the shared launch chokepoint against a session whose
+                // worktree is mid-removal. `create_tab` and the web extra-tab
+                // launch branch already check `closing_sessions` themselves,
+                // but every launch path (reconnect, resume-fallback,
+                // web-dormant-relaunch, session-slot reconnect) funnels through
+                // this command, so checking once here covers all of them —
+                // including the residual window where a transient
+                // `finish_delete_session` DB failure leaves the record
+                // lingering in `closing_sessions` past the synchronous delete.
+                if self.closing_sessions.contains(&session_id) {
                     return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
+                            tab_id,
+                            launched: false,
+                            status: Some(StatusUpdate::error(format!(
+                                "Agent \"{}\" is being deleted and cannot be launched.",
+                                branch_name,
+                            ))),
+                        },
+                    )));
+                }
+                // The in-flight launch lock is keyed by tab id (one lock per tab),
+                // so two tabs of the same session can launch concurrently. The
+                // View keeps `session_id` for UI correlation. For the Main tab
+                // these are equal.
+                let tab_id = request.tab_id.clone();
+                // Pre-check in-flight so the View carries the exact "already
+                // launching" message regardless of the primitive's generic
+                // already-running fallback.
+                if self.is_in_flight(&InFlightKey::AgentLaunch(tab_id.clone())) {
+                    return Ok(EventReaction::DispatchAgentLaunchView(Box::new(
+                        DispatchAgentLaunchView {
+                            session_id,
+                            tab_id,
                             launched: false,
                             status: Some(StatusUpdate::info(format!(
                                 "Agent \"{}\" is already launching.",
@@ -596,8 +625,8 @@ impl Engine {
                 let panic_request = (*request).clone();
                 let reaction = self.spawn_command_worker(
                     CommandWorkerSpec {
-                        label: format!("agent-launch:{session_id}"),
-                        in_flight_key: Some(InFlightKey::AgentLaunch(session_id.clone())),
+                        label: format!("agent-launch:{tab_id}"),
+                        in_flight_key: Some(InFlightKey::AgentLaunch(tab_id.clone())),
                         busy_status: None, // View variant carries the user-facing status
                         already_running_status: None, // handled by the pre-check above
                         panic_event: Some(Box::new(move |reason| {
@@ -617,6 +646,7 @@ impl Engine {
                     EventReaction::Nothing => Ok(EventReaction::DispatchAgentLaunchView(Box::new(
                         DispatchAgentLaunchView {
                             session_id,
+                            tab_id: tab_id.clone(),
                             launched: true,
                             status: None,
                         },
@@ -624,6 +654,7 @@ impl Engine {
                     EventReaction::Status(status) => Ok(EventReaction::DispatchAgentLaunchView(
                         Box::new(DispatchAgentLaunchView {
                             session_id,
+                            tab_id,
                             launched: false,
                             status: Some(status),
                         }),

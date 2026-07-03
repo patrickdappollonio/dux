@@ -6,7 +6,7 @@
 use serde::Serialize;
 
 use crate::engine::Engine;
-use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus};
+use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
 
 /// The projects/sessions/sidebar "spine" a web client reads via `GET /api/v1/spine`
 /// (and the thin per-resource reads `GET /api/v1/projects`, `GET /api/v1/sessions`,
@@ -105,6 +105,11 @@ pub struct BootstrapView {
     /// and applies it; an unrecognized value falls back to the bundled logo.
     /// Older servers omit it (the web treats a missing value as the default).
     pub favicon: String,
+    /// The per-agent tab cap (`config.ui.agent_tabs_max`, normalized/clamped),
+    /// INCLUDING the Main tab. The web disables the "+" add-tab affordance once a
+    /// session already has this many tabs; the server re-enforces it on create.
+    /// Older servers omit it, so the web falls back to a sane default.
+    pub agent_tabs_max: u16,
 }
 
 /// A single text macro projected for web clients, from
@@ -172,6 +177,11 @@ pub struct SessionView {
     pub pr: Option<PrView>,
     /// Companion terminals open for this session, sorted by `id` for stability.
     pub terminals: Vec<TerminalView>,
+    /// Provider tabs for this session, **Main first** (`tabs[0]`, `id ==
+    /// session id`) then Support tabs in creation order. Always non-empty. The
+    /// client shows the tab strip only when `tabs.len() >= 2`; with one tab the
+    /// pane looks exactly as it did before tabs existed.
+    pub tabs: Vec<AgentTabView>,
     /// Whether the session's PTY has emitted any output yet. The web UI shows a
     /// readiness spinner until this is true.
     pub has_output: bool,
@@ -208,6 +218,31 @@ pub struct TerminalView {
     /// slowly and the coarse `sessions.changed` signal stays calm. The web UI
     /// shows this as the terminal's title when present, falling back to `label`.
     pub foreground_cmd: Option<String>,
+}
+
+/// One provider tab of an agent, projected for the tab strip. `order == 0` is
+/// the **Main tab** (the only resumable one). Support tabs (`order >= 1`) are
+/// ephemeral and always launch fresh.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentTabView {
+    /// Tab id. Equals the session id for the session-slot tab.
+    pub id: String,
+    /// Effective provider name (the running pin if a swap happened while live,
+    /// otherwise the tab's configured provider).
+    pub provider: String,
+    /// Position in the strip: 0 = session-slot tab, 1..N = extra tabs in creation
+    /// order. Display ordering only — no tab is privileged (resume is decided
+    /// dynamically at launch by liveness, not by position).
+    pub order: u32,
+    /// Whether this tab's PTY is actively streaming (per-tab hysteresis boolean).
+    pub working: bool,
+    /// Whether this tab's PTY has emitted any output yet.
+    pub has_output: bool,
+    /// Whether a live PTY exists for this tab right now. `false` for a dormant
+    /// Support tab (e.g. reopened after a restart) — the web client renders the
+    /// dormant card from this flag *without* subscribing, because subscribing
+    /// would force-launch the provider.
+    pub has_live_process: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -259,10 +294,12 @@ impl ProjectView {
 }
 
 impl SessionView {
+    #[allow(clippy::too_many_arguments)]
     fn from_session(
         s: &AgentSession,
         pr: Option<&PrInfo>,
         terminals: Vec<TerminalView>,
+        tabs: Vec<AgentTabView>,
         has_output: bool,
         working: bool,
     ) -> Self {
@@ -277,6 +314,7 @@ impl SessionView {
             auto_reopen_enabled: s.auto_reopen_enabled,
             pr: pr.map(PrView::from_pr),
             terminals,
+            tabs,
             has_output,
             working,
             created_at: s.created_at.to_rfc3339(),
@@ -318,6 +356,17 @@ impl Engine {
     /// out so the REST read and the change-detection that emits
     /// `projects.changed`/`sessions.changed` share one source of truth.
     pub fn spine(&self) -> SpineView {
+        // Group Support tabs by session id in ONE pass (O(total tabs)) so each
+        // per-session projection costs only its own tab count, instead of every
+        // `project_session` re-scanning the whole `agent_tabs` map (O(S * T)).
+        let mut support_by_session: std::collections::HashMap<&str, Vec<&crate::model::AgentTab>> =
+            std::collections::HashMap::new();
+        for t in self.agent_tabs.values() {
+            support_by_session
+                .entry(t.session_id.as_str())
+                .or_default()
+                .push(t);
+        }
         SpineView {
             projects: self
                 .projects
@@ -327,7 +376,13 @@ impl Engine {
             sessions: self
                 .sessions
                 .iter()
-                .map(|s| self.project_session(s))
+                .map(|s| {
+                    let support = support_by_session
+                        .get(s.id.as_str())
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    self.project_session(s, support)
+                })
                 .collect(),
             sidebar: crate::sidebar::build_sidebar(
                 &self.projects,
@@ -341,7 +396,11 @@ impl Engine {
     /// terminals, PR status, output, and streaming flag exactly as [`Engine::spine`]
     /// does. Factored out so the per-session REST read (`GET /api/v1/sessions/:id`)
     /// can project ONLY the requested session instead of building the whole spine.
-    fn project_session(&self, s: &AgentSession) -> SessionView {
+    fn project_session(
+        &self,
+        s: &AgentSession,
+        support_tabs: &[&crate::model::AgentTab],
+    ) -> SessionView {
         let mut terminals: Vec<TerminalView> = self
             .companion_terminals
             .iter()
@@ -354,29 +413,71 @@ impl Engine {
             })
             .collect();
         terminals.sort_by(|a, b| a.id.cmp(&b.id));
-        let has_output = self
-            .providers
-            .get(&s.id)
-            .map(|p| p.has_output())
-            .unwrap_or(false);
-        let working = self.is_agent_streaming(&s.id);
+        // The sidebar-facing status reflects ANY live tab: the agent is "active"
+        // when any of its tabs (session-slot or extra) has a live PTY. (The
+        // persisted `desired_running` auto-reopen intent stays agent-level and is
+        // NOT churned by transient per-tab activity — that's set/cleared on the
+        // delete/detach paths, not here.)
+        let tab_ids = self.tab_ids_for_session(&s.id);
+        let has_output = tab_ids
+            .iter()
+            .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
+        let working = tab_ids.iter().any(|id| self.is_agent_streaming(id));
+        // Tabs, session-slot first, then extras in creation order.
+        let mut tabs = vec![self.tab_view(&s.id, self.running_provider_for(s), 0)];
+        let mut support: Vec<_> = support_tabs.to_vec();
+        support.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+        for (i, t) in support.into_iter().enumerate() {
+            let effective = self
+                .running_provider_pins
+                .get(&t.id)
+                .cloned()
+                .unwrap_or_else(|| t.provider.clone());
+            tabs.push(self.tab_view(&t.id, effective, (i + 1) as u32));
+        }
         SessionView::from_session(
             s,
             self.pr_statuses.get(&s.id),
             terminals,
+            tabs,
             has_output,
             working,
         )
+    }
+
+    /// Project one tab id into an [`AgentTabView`] from the tab-keyed runtime maps.
+    /// `order` is display position only; no tab is privileged.
+    fn tab_view(&self, id: &str, provider: ProviderKind, order: u32) -> AgentTabView {
+        AgentTabView {
+            id: id.to_string(),
+            provider: provider.as_str().to_string(),
+            order,
+            working: self.is_agent_streaming(id),
+            has_output: self
+                .providers
+                .get(id)
+                .map(|p| p.has_output())
+                .unwrap_or(false),
+            has_live_process: self.providers.contains_key(id),
+        }
     }
 
     /// Project ONLY the session with `id` into a [`SessionView`], or `None` if no
     /// such session exists. Serves `GET /api/v1/sessions/:id` without building the
     /// whole projects/sessions/sidebar spine just to find one session.
     pub fn session_view(&self, id: &str) -> Option<SessionView> {
-        self.sessions
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| self.project_session(s))
+        self.sessions.iter().find(|s| s.id == id).map(|s| {
+            let support: Vec<&crate::model::AgentTab> = self
+                .agent_tabs
+                .values()
+                .filter(|t| t.session_id == s.id)
+                .collect();
+            self.project_session(s, &support)
+        })
     }
 
     /// Project the build-/config-static snapshot served once via
@@ -417,6 +518,7 @@ impl Engine {
             status_clear_seconds: self.config.ui.status_clear_seconds,
             title: self.config.server.title.clone(),
             favicon: self.config.server.favicon.clone(),
+            agent_tabs_max: self.agent_tabs_max(),
         }
     }
 }
@@ -715,6 +817,64 @@ mod tests {
             vm.sessions[0].working,
             "a session stamped with fresh PTY activity should project working=true"
         );
+    }
+
+    #[test]
+    fn any_tab_activity_lights_the_sidebar() {
+        use std::time::Instant;
+
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        // An extra tab of s1, with its own id.
+        engine.agent_tabs.insert(
+            "t1".to_string(),
+            crate::model::AgentTab {
+                id: "t1".to_string(),
+                session_id: "s1".to_string(),
+                provider: crate::model::ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        // Only the extra tab is streaming; the session-slot tab (s1) is idle.
+        engine.pty_activity.insert("t1".to_string(), Instant::now());
+
+        let vm = engine.spine();
+        let session = &vm.sessions[0];
+
+        // Sidebar status now reflects ANY tab: an extra tab streaming lights the
+        // row even though the session-slot tab is idle (no tab is privileged).
+        assert!(
+            session.working,
+            "activity on any tab must light the sidebar"
+        );
+
+        // Tabs: session-slot first, then the extra tab, each with its own flags.
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.tabs[0].id, "s1");
+        assert_eq!(session.tabs[0].order, 0);
+        assert!(!session.tabs[0].working);
+        assert_eq!(session.tabs[1].id, "t1");
+        assert_eq!(session.tabs[1].order, 1);
+        assert_eq!(session.tabs[1].provider, "codex");
+        assert!(session.tabs[1].working, "the extra tab itself is streaming");
+        assert!(
+            !session.tabs[1].has_live_process,
+            "no PtyClient was inserted"
+        );
+    }
+
+    #[test]
+    fn single_tab_session_projects_just_the_session_slot_tab() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+
+        let vm = engine.spine();
+        assert_eq!(vm.sessions[0].tabs.len(), 1);
+        assert_eq!(vm.sessions[0].tabs[0].id, "s1");
+        assert_eq!(vm.sessions[0].tabs[0].order, 0);
     }
 
     #[test]

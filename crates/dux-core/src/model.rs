@@ -162,6 +162,20 @@ impl AgentSession {
     }
 }
 
+/// A persisted **Support tab** (a secondary provider tab) belonging to an agent
+/// session. The Main tab is synthesized from the `AgentSession` row and has no
+/// `AgentTab`; only tabs 2..N are stored here. Kept in SQLite (derived runtime
+/// state), never in portable config. `sort_order` is an append-only stamp that
+/// fixes creation order (Main renders first, then these by `sort_order`).
+#[derive(Clone, Debug)]
+pub struct AgentTab {
+    pub id: String,
+    pub session_id: String,
+    pub provider: ProviderKind,
+    pub sort_order: i64,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChangedFile {
     pub status: String,

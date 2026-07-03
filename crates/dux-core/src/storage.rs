@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 use crate::config::ProjectConfig;
-use crate::model::{AgentSession, SessionStatus};
+use crate::model::{AgentSession, AgentTab, ProviderKind, SessionStatus};
 
 /// A stored PR association loaded from the database.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,7 +178,122 @@ impl SessionStore {
             );
             "#,
         )?;
+        // Support tabs (secondary provider tabs). Additive and backward
+        // compatible: existing databases start with zero rows and behave exactly
+        // as before. The Main tab has no row here — it is derived from the
+        // `agent_sessions` row. Rows are removed when the owning session (or its
+        // project) is deleted (see `delete_session`/`remove_project_records`).
+        self.conn.execute_batch(
+            r#"
+            create table if not exists agent_tabs (
+                id text primary key,
+                session_id text not null,
+                provider text not null,
+                sort_order integer not null default 0,
+                created_at text not null
+            );
+            create index if not exists idx_agent_tabs_session on agent_tabs(session_id);
+            "#,
+        )?;
         Ok(())
+    }
+
+    /// Insert a new Support tab row.
+    pub fn insert_agent_tab(&self, tab: &AgentTab) -> Result<()> {
+        self.conn.execute(
+            "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
+             values (?1, ?2, ?3, ?4, ?5)",
+            params![
+                tab.id,
+                tab.session_id,
+                tab.provider.as_str(),
+                tab.sort_order,
+                tab.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a single Support tab row (closing a Support tab).
+    pub fn delete_agent_tab(&self, tab_id: &str) -> Result<()> {
+        let affected = self
+            .conn
+            .execute("delete from agent_tabs where id = ?1", params![tab_id])?;
+        if affected == 0 {
+            crate::logger::warn(&format!(
+                "delete_agent_tab affected no rows for {tab_id} — the in-memory tab map and \
+                 SQLite may have diverged",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Load every Support tab, ordered so a session's tabs come out in a stable
+    /// creation order. A cheap orphan sweep first drops any rows whose owning
+    /// session no longer exists — belt-and-suspenders for tabs an older binary
+    /// (which predates this table) could have left behind when deleting a session.
+    pub fn load_agent_tabs(&self) -> Result<Vec<AgentTab>> {
+        self.conn.execute(
+            "delete from agent_tabs where session_id not in (select id from agent_sessions)",
+            [],
+        )?;
+        let mut stmt = self.conn.prepare(
+            "select id, session_id, provider, sort_order, created_at \
+             from agent_tabs order by session_id, sort_order, created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let created_at: String = row.get(4)?;
+            Ok(AgentTab {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                provider: ProviderKind::from_str(row.get::<_, String>(2)?.as_str()),
+                sort_order: row.get(3)?,
+                created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
+            })
+        })?;
+        let mut tabs = Vec::new();
+        for row in rows {
+            tabs.push(row?);
+        }
+        Ok(tabs)
+    }
+
+    /// Retarget a Support tab's provider (effective on its next launch).
+    pub fn update_agent_tab_provider(&self, tab_id: &str, provider: &str) -> Result<()> {
+        let affected = self.conn.execute(
+            "update agent_tabs set provider = ?2 where id = ?1",
+            params![tab_id, provider],
+        )?;
+        if affected == 0 {
+            crate::logger::warn(&format!(
+                "update_agent_tab_provider affected no rows for {tab_id} — the in-memory tab map \
+                 and SQLite may have diverged",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The largest `sort_order` among a session's Support tabs, if any — used to
+    /// append a new tab after the existing ones.
+    pub fn max_tab_sort_order(&self, session_id: &str) -> Result<Option<i64>> {
+        let value: Option<i64> = self.conn.query_row(
+            "select max(sort_order) from agent_tabs where session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(value)
+    }
+
+    /// Number of Support tabs for one session (excludes the Main tab, which has
+    /// no row). The per-agent cap counts Main as tab 1, so the create path checks
+    /// `count_agent_tabs(session_id) + 1 >= max_per_agent`.
+    pub fn count_agent_tabs(&self, session_id: &str) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "select count(*) from agent_tabs where session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     /// Atomically bump and return the next changed-files revision for `session_id`.
@@ -435,6 +550,14 @@ impl SessionStore {
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
         tx.execute(
             "delete from changes_rev where session_id in \
+             (select id from agent_sessions where project_id = ?1)",
+            params![project_id],
+        )?;
+        // Drop the sessions' Support tabs BEFORE the sessions themselves (the
+        // subquery resolves the ids while the parent rows still exist), so a
+        // project removal cannot leave orphaned `agent_tabs` rows behind.
+        tx.execute(
+            "delete from agent_tabs where session_id in \
              (select id from agent_sessions where project_id = ?1)",
             params![project_id],
         )?;
@@ -734,18 +857,21 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
-        // Clear the session's PR associations first. `session_prs` declares an
-        // ON DELETE CASCADE FK to `agent_sessions`, but the connection never
-        // enables `PRAGMA foreign_keys`, so that cascade does not fire — delete
-        // the rows explicitly to avoid leaking orphaned PR records.
-        self.conn
-            .execute("delete from session_prs where session_id = ?1", params![id])?;
+        // Delete the session and all of its dependent rows atomically. These
+        // tables declare ON DELETE CASCADE FKs to `agent_sessions`, but the
+        // connection never enables `PRAGMA foreign_keys`, so those cascades do
+        // not fire — delete the rows explicitly. Wrapped in a transaction so a
+        // mid-sequence failure leaves either all of the session's rows or none,
+        // never a half-deleted session (e.g. tabs gone but the session surviving).
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("delete from session_prs where session_id = ?1", params![id])?;
         // Drop the per-session changed-files revision counter too, so a deleted
         // session leaves no housekeeping rows behind.
-        self.conn
-            .execute("delete from changes_rev where session_id = ?1", params![id])?;
-        self.conn
-            .execute("delete from agent_sessions where id = ?1", params![id])?;
+        tx.execute("delete from changes_rev where session_id = ?1", params![id])?;
+        // Drop the session's Support tabs (the Main tab has no row).
+        tx.execute("delete from agent_tabs where session_id = ?1", params![id])?;
+        tx.execute("delete from agent_sessions where id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -861,10 +987,105 @@ fn test_session_in(
     }
 }
 
+/// Builds a Support-tab row owned by `session_id`.
+#[cfg(test)]
+fn test_tab(id: &str, session_id: &str, sort_order: i64) -> crate::model::AgentTab {
+    crate::model::AgentTab {
+        id: id.to_string(),
+        session_id: session_id.to_string(),
+        provider: crate::model::ProviderKind::new("codex"),
+        sort_order,
+        created_at: Utc::now(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn agent_tabs_table_is_idempotent_and_empty_on_fresh_db() {
+        let store = test_store();
+        // migrate() ran in open(); a second migrate is a no-op.
+        store.migrate().unwrap();
+        assert!(store.load_agent_tabs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_tab_crud_round_trips() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.insert_agent_tab(&test_tab("t1", "s1", 1)).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 2)).unwrap();
+
+        let loaded = store.load_agent_tabs().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, "t1");
+        assert_eq!(loaded[0].provider.as_str(), "codex");
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 2);
+        assert_eq!(store.max_tab_sort_order("s1").unwrap(), Some(2));
+        assert_eq!(store.max_tab_sort_order("nope").unwrap(), None);
+
+        store.update_agent_tab_provider("t1", "claude").unwrap();
+        assert_eq!(
+            store.load_agent_tabs().unwrap()[0].provider.as_str(),
+            "claude"
+        );
+
+        store.delete_agent_tab("t1").unwrap();
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_session_removes_its_agent_tabs_rows() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.upsert_session(&test_session("s2", now, now)).unwrap();
+        store.insert_agent_tab(&test_tab("t1", "s1", 1)).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s2", 1)).unwrap();
+
+        store.delete_session("s1").unwrap();
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 0);
+        // A sibling session's tabs are untouched.
+        assert_eq!(store.count_agent_tabs("s2").unwrap(), 1);
+    }
+
+    #[test]
+    fn remove_project_records_removes_all_its_sessions_tabs() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("s1", "projA", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("s2", "projB", now, now))
+            .unwrap();
+        store.insert_agent_tab(&test_tab("t1", "s1", 1)).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s2", 1)).unwrap();
+
+        store.remove_project_records("projA").unwrap();
+        assert_eq!(store.count_agent_tabs("s1").unwrap(), 0);
+        assert_eq!(store.count_agent_tabs("s2").unwrap(), 1);
+    }
+
+    #[test]
+    fn load_agent_tabs_sweeps_orphans_with_no_session() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.insert_agent_tab(&test_tab("t1", "s1", 1)).unwrap();
+        // A row whose session was removed by an older binary that didn't cascade.
+        store
+            .insert_agent_tab(&test_tab("orphan", "gone", 1))
+            .unwrap();
+
+        let loaded = store.load_agent_tabs().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "t1");
+    }
 
     fn stored_pr(session_id: &str, pr_number: u64) -> StoredPr {
         StoredPr {

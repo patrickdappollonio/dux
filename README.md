@@ -14,7 +14,7 @@ Oh, and it's fast and consumes low resources: more RAM is left for Claude, Codex
 
 ## Why dux?
 
-Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Open companion terminals next to your agents for builds, tests, or just poking around.
+Most AI coding tools give you one agent in one directory. dux gives you **unlimited agents across unlimited worktrees**, all visible at once. Spawn five agents on five branches and let them work in parallel. Fork a session to try a different approach without losing the original. Run several provider tabs inside a single agent to point, say, Claude and Codex at the very same checkout at once. Open companion terminals next to your agents for builds, tests, or just poking around.
 
 Every agent runs through a PTY, the same pseudo-terminal your shell uses. That means the CLI tool (Claude, Codex, Copilot, OpenCode, or literally anything else) runs exactly like it would in your regular terminal. Your MCP servers, hooks, skills, slash commands, and permission dialogs all work. We don't mess with your setup.
 

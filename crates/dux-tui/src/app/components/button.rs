@@ -86,6 +86,8 @@ pub(crate) enum ButtonPressedTarget {
     ConfirmDeleteConfirm,
     ConfirmDeleteTerminalCancel,
     ConfirmDeleteTerminalConfirm,
+    ConfirmCloseTabCancel,
+    ConfirmCloseTabConfirm,
     ConfirmDeleteMacroCancel,
     ConfirmDeleteMacroConfirm,
     ConfirmQuitCancel,

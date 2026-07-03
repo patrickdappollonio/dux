@@ -12,7 +12,12 @@
 // A non-2xx is thrown as a `SpineFetchError` carrying the HTTP status so the
 // caller can branch.
 
-import type { ProjectView, SessionView, SidebarModel } from "./types"
+import type {
+  AgentTabView,
+  ProjectView,
+  SessionView,
+  SidebarModel,
+} from "./types"
 
 // The spine document. Field names/types mirror the server's JSON and the values
 // the legacy ViewModel carried, so consumers move over without a shape change.
@@ -55,5 +60,14 @@ export async function fetchSpine(): Promise<Spine> {
       resp.status,
     )
   }
-  return (await resp.json()) as Spine
+  // Coerce each session's `tabs` to an array at the single ingestion boundary: an
+  // older server (e.g. after a binary downgrade, seen by an already-open client)
+  // omits the field, and every downstream consumer treats `tabs` as required.
+  const raw = (await resp.json()) as Omit<Spine, "sessions"> & {
+    sessions: Array<Omit<SessionView, "tabs"> & { tabs?: AgentTabView[] }>
+  }
+  return {
+    ...raw,
+    sessions: raw.sessions.map((s) => ({ ...s, tabs: s.tabs ?? [] })),
+  }
 }

@@ -494,7 +494,7 @@ impl PtyClient {
             cmd.env(name, value);
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .with_context(|| format!("failed to spawn '{command}' in PTY"))?;
@@ -502,14 +502,35 @@ impl PtyClient {
         // Drop slave so reads on master get EOF when child exits.
         drop(pair.slave);
 
-        let reader = pair
+        // A child is already forked at this point. If the reader/writer setup
+        // fails we must reap it before returning `Err`, or a live orphaned
+        // process leaks with no `PtyClient` (and no `providers` entry) to track
+        // or terminate it — the tab-create failure cleanup relies on a spawn
+        // `Err` meaning "no live process".
+        let reader = match pair
             .master
             .try_clone_reader()
-            .context("failed to clone PTY reader")?;
-        let pty_writer = pair
+            .context("failed to clone PTY reader")
+        {
+            Ok(reader) => reader,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
+            }
+        };
+        let pty_writer = match pair
             .master
             .take_writer()
-            .context("failed to take PTY writer")?;
+            .context("failed to take PTY writer")
+        {
+            Ok(writer) => writer,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
+            }
+        };
 
         let terminal = Arc::new(Mutex::new(TerminalState::new(rows, cols, scrollback_lines)));
         let writer = PtyWriter::spawn(pty_writer);

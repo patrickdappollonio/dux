@@ -10,7 +10,12 @@ import type { Spine } from "./spineApi"
 // `history.replaceState` (never `pushState`, so the mobile back-stack is intact).
 
 function makeSpine(
-  sessions: { id: string; project_id: string; terminals?: string[] }[],
+  sessions: {
+    id: string
+    project_id: string
+    terminals?: string[]
+    tabs?: string[]
+  }[],
 ): Spine {
   return {
     projects: [],
@@ -18,6 +23,9 @@ function makeSpine(
       id: s.id,
       project_id: s.project_id,
       terminals: (s.terminals ?? []).map((id) => ({ id })),
+      // The Main tab's id always equals the session id; any extra ids are
+      // Support tabs.
+      tabs: [{ id: s.id }, ...(s.tabs ?? []).map((id) => ({ id }))],
     })) as unknown as Spine["sessions"],
     sidebar: { groups: [], agentless_start: null },
   }
@@ -118,6 +126,40 @@ describe("deep-link restore on load", () => {
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
+      tabId: "s1",
+    })
+  })
+
+  it("restores a Support-tab selection from #/agent/<id>/tab/<tabId>", async () => {
+    const mod = await loadStore("#/agent/s1/tab/t2", [
+      { id: "s1", project_id: "p1", tabs: ["t2"] },
+    ])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t2",
+    })
+  })
+
+  it("falls back to the Main tab when the Support tab id is gone", async () => {
+    const mod = await loadStore("#/agent/s1/tab/gone", [
+      { id: "s1", project_id: "p1", tabs: ["t-other"] },
+    ])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+  })
+
+  it("normalizes a self-aliased #/agent/<id>/tab/<id> to the Main tab", async () => {
+    const mod = await loadStore("#/agent/s1/tab/s1", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
     })
   })
 
@@ -139,6 +181,7 @@ describe("deep-link restore on load", () => {
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
+      tabId: "s1",
     })
   })
 
@@ -177,6 +220,19 @@ describe("selection writes the hash", () => {
     const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
     replaceStateMock.mockClear()
     mod.selectSession("s1")
+    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
+  })
+
+  it("selecting a Support tab writes the /tab/ form; Main stays bare", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["t2"] },
+    ])
+    replaceStateMock.mockClear()
+    mod.selectTab("s1", "t2")
+    expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1/tab/t2")
+    replaceStateMock.mockClear()
+    // Focusing the Main tab (tabId === sessionId) collapses back to the bare form.
+    mod.selectTab("s1", "s1")
     expect(replaceStateMock).toHaveBeenCalledWith(null, "", "#/agent/s1")
   })
 

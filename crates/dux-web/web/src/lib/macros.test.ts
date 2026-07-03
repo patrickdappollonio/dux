@@ -13,7 +13,11 @@ import {
 import type { SelectedTarget } from "./store"
 import type { MacroView } from "./types"
 
-const agentTarget: SelectedTarget = { kind: "agent", sessionId: "s1" }
+const agentTarget: SelectedTarget = {
+  kind: "agent",
+  sessionId: "s1",
+  tabId: "s1",
+}
 const terminalTarget: SelectedTarget = {
   kind: "terminal",
   terminalId: "t1",

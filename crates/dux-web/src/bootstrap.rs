@@ -64,6 +64,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
     let sessions = session_store.load_sessions()?;
+    let agent_tabs = session_store.load_agent_tabs()?;
     let projects = dux_core::project_browser::load_projects(
         &session_store.load_projects()?,
         &session_store.load_project_created_ats()?,
@@ -104,7 +105,9 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),
+        agent_tabs: agent_tabs.into_iter().map(|t| (t.id.clone(), t)).collect(),
         terminating_ptys: Vec::new(),
+        pending_group_removals: Vec::new(),
         gh_status: GhStatus::Unknown,
         pr_statuses: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -114,6 +117,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         refs_watch_paths: HashMap::new(),
         resume_fallback_candidates: HashMap::new(),
         pending_deletions: HashSet::new(),
+        closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
         watched_session_id: None,

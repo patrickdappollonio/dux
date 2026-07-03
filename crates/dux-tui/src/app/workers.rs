@@ -109,37 +109,41 @@ impl App {
         // skipped by the destructive second loop AND by the post-exit UI/PR
         // follow-ups below.
         let mut handled = HashSet::new();
-        for (session_id, _, is_minimal, _) in &exited {
-            if !self
-                .engine
-                .resume_fallback_candidates
-                .contains_key(session_id)
-            {
+        // `exited` is keyed by tab id (the `providers` map key). Resume
+        // candidates are seeded per tab, so the fallback is tab-aware: the
+        // session-slot tab resolves to itself, an extra tab via its row.
+        for (tab_id, _, is_minimal, _) in &exited {
+            if !self.engine.resume_fallback_candidates.contains_key(tab_id) {
                 continue;
             }
             if !is_minimal {
                 // Non-minimal exit of a resume candidate: preserve today's
                 // behavior — drop the candidate unconditionally and let the
                 // second loop mark it Detached.
-                self.engine.resume_fallback_candidates.remove(session_id);
+                self.engine.resume_fallback_candidates.remove(tab_id);
                 continue;
             }
+            let Some(session_id) = self.engine.owning_session_for_tab(tab_id) else {
+                // Owning session gone: drop the stale candidate, fall through.
+                self.engine.resume_fallback_candidates.remove(tab_id);
+                continue;
+            };
             let Some(session) = self
                 .engine
                 .sessions
                 .iter()
-                .find(|s| s.id == *session_id)
+                .find(|s| s.id == session_id)
                 .cloned()
             else {
-                // Session gone: drop the stale candidate, fall through.
-                self.engine.resume_fallback_candidates.remove(session_id);
+                self.engine.resume_fallback_candidates.remove(tab_id);
                 continue;
             };
+            let provider = self.engine.tab_running_provider(&session, tab_id);
             let proj_name = self.engine.project_name_for_session(&session);
             let status_message = format!(
                 "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
                 session.branch_name,
-                session.provider.as_str(),
+                provider.as_str(),
                 proj_name,
             );
             logger::info(&format!(
@@ -149,18 +153,18 @@ impl App {
             let pty_size = self.pty_size_for_launch();
             match self
                 .engine
-                .retry_resume_fallback(session_id, pty_size, status_message)
+                .retry_resume_fallback(tab_id, pty_size, status_message)
             {
                 ResumeFallbackOutcome::Retried { reaction } => {
-                    self.engine.pty_activity.remove(session_id);
-                    self.engine.pty_input.remove(session_id);
+                    self.engine.pty_activity.remove(tab_id);
+                    self.engine.pty_input.remove(tab_id);
                     self.apply_reaction(*reaction);
-                    handled.insert(session_id.clone());
+                    handled.insert(tab_id.clone());
                 }
                 ResumeFallbackOutcome::InFlight => {
                     // Protect: a launch is already in flight; do not let the
                     // second loop tear this session down.
-                    handled.insert(session_id.clone());
+                    handled.insert(tab_id.clone());
                 }
                 ResumeFallbackOutcome::NotCandidate => {
                     // Candidate was removed by another path this tick; fall
@@ -169,19 +173,43 @@ impl App {
             }
         }
 
-        for (session_id, exit_success, _, _) in &exited {
-            if handled.contains(session_id) {
+        for (tab_id, exit_success, _, _) in &exited {
+            if handled.contains(tab_id) {
                 continue;
             }
-            self.engine.providers.remove(session_id);
-            self.engine.running_provider_pins.remove(session_id);
-            self.engine.pty_activity.remove(session_id);
-            self.engine.pty_input.remove(session_id);
-            if *exit_success == Some(true) {
-                self.engine.mark_session_desired_running(session_id, false);
+            // `providers` is keyed by tab id. Resolve the exited PTY's owning
+            // session and whether it was the session-slot tab BEFORE mutating. No
+            // tab is privileged: the agent detaches only once its LAST live tab is
+            // gone, so we recompute liveness AFTER clearing this tab's maps.
+            let owning = self.engine.owning_session_for_tab(tab_id);
+            let is_main = owning.as_deref() == Some(tab_id.as_str());
+            let support_provider = (!is_main).then(|| {
+                self.engine
+                    .agent_tabs
+                    .get(tab_id)
+                    .map(|t| t.provider.as_str().to_string())
+                    .unwrap_or_default()
+            });
+            self.engine.providers.remove(tab_id);
+            self.engine.running_provider_pins.remove(tab_id);
+            self.engine.pty_activity.remove(tab_id);
+            self.engine.pty_input.remove(tab_id);
+            self.engine.resume_fallback_candidates.remove(tab_id);
+            if let Some(session_id) = owning {
+                if !self.engine.any_tab_active(&session_id) {
+                    // A clean exit of the session-slot tab is the "user quit the
+                    // agent" signal that cancels auto-reopen; an extra tab (or a
+                    // crash) leaves the auto-reopen intent untouched.
+                    if is_main && *exit_success == Some(true) {
+                        self.engine.mark_session_desired_running(&session_id, false);
+                    }
+                    self.engine
+                        .mark_session_status(&session_id, SessionStatus::Detached);
+                }
+                if let Some(provider) = support_provider {
+                    self.set_info(format!("Tab ({provider}) exited."));
+                }
             }
-            self.engine
-                .mark_session_status(session_id, SessionStatus::Detached);
         }
         if !exited.is_empty() {
             // If the currently-viewed session just exited (and was not handled
@@ -190,6 +218,12 @@ impl App {
                 && let Some((_, exit_success, is_minimal, excerpt)) =
                     exited.iter().find(|(id, _, _, _)| id == &current.id)
                 && !handled.contains(&current.id)
+                // Don't bounce out of the pane if a live Support tab is focused:
+                // the Main provider exited, but the user is driving a Support tab.
+                && {
+                    let focused = self.focused_tab_id(&current.id);
+                    focused == current.id || !self.engine.providers.contains_key(&focused)
+                }
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
@@ -220,11 +254,14 @@ impl App {
                     ));
                 }
             }
-            // Trigger PR status check for exited agents.
+            // Trigger PR status check for exited Main-tab agents only (a Support
+            // tab id is not a session id; a Support-tab exit is not an agent exit).
             for sid in &exited {
-                let session_id = &sid.0;
-                if !handled.contains(session_id) {
-                    self.engine.spawn_pr_check_for_session(session_id);
+                let tab_id = &sid.0;
+                let is_main =
+                    self.engine.owning_session_for_tab(tab_id).as_deref() == Some(tab_id.as_str());
+                if is_main && !handled.contains(tab_id) {
+                    self.engine.spawn_pr_check_for_session(tab_id);
                 }
             }
         }
@@ -710,6 +747,11 @@ impl App {
                             "Deletion already in progress for this agent. Wait for it to finish.",
                         );
                     }
+                    BeginDeleteSessionOutcome::TabLaunching => {
+                        self.set_error(
+                            "A tab is still launching for this agent. Try again in a moment.",
+                        );
+                    }
                     BeginDeleteSessionOutcome::NotFound => {}
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
                         // The agent PTY + its terminals are already SIGTERMed and
@@ -743,6 +785,7 @@ impl App {
             EventReaction::DispatchAgentLaunchView(view) => {
                 let DispatchAgentLaunchView {
                     session_id: _,
+                    tab_id: _,
                     launched: _,
                     status,
                 } = *view;
@@ -1117,10 +1160,9 @@ impl App {
 
     fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
         self.last_pty_size = outcome.pty_size;
-        if let Some(id) = outcome.detached_session_id {
-            self.engine.pty_activity.remove(&id);
-            self.engine.pty_input.remove(&id);
-        }
+        // The engine's `detach_conflicting_worktree_session` already cleared every
+        // runtime map (incl. pty_activity/pty_input) for the detached agent's
+        // tabs, so `detached_session_id` no longer needs a follow-up clear here.
         match outcome.view {
             AgentLaunchReadyView::CreatePersistFailed { .. } => {
                 // The create op's keyed error final is resolved ENGINE-SIDE and
@@ -1166,8 +1208,12 @@ impl App {
                 // the "Launching…"/"Starting fresh…" busy. Falls back to an
                 // anonymous info when no op is stashed (e.g. a launch not driven
                 // through the reconnect dispatch sites).
+                // Key by tab id: the Main tab's == its session id (resolves its
+                // pending reconnect op as before), but a Support-tab launch has no
+                // op under its tab id, so it falls through to an anonymous status
+                // instead of resolving the Main tab's op with the wrong message.
                 self.resolve_reconnect_op_or(
-                    &outcome.session.id,
+                    &outcome.tab_id,
                     TuiReconnectOutcome::Ready { status_message },
                 );
             }
@@ -1239,6 +1285,18 @@ impl App {
                     "Couldn't auto-reopen agent \"{branch_name}\": {message}"
                 ));
             }
+            AgentLaunchFailedOutcome::Tab {
+                branch_name,
+                message,
+                ..
+            } => {
+                // A tab launch failed (fresh create or dormant relaunch): surface
+                // the real error so the user knows why nothing came up. The Engine
+                // has already removed a failed fresh-create's row.
+                self.set_warning(format!(
+                    "Tab launch failed for \"{branch_name}\": {message}"
+                ));
+            }
         }
     }
 
@@ -1270,27 +1328,38 @@ impl App {
     fn retry_hung_resume_sessions(&mut self) {
         let mut hung = Vec::new();
 
-        for (session_id, started_at) in &self.engine.resume_fallback_candidates {
-            let Some(session) = self.engine.sessions.iter().find(|s| s.id == *session_id) else {
+        // Candidates are keyed by tab id; resolve each tab's owning session and
+        // the provider it is actually running so the timeout uses that provider's
+        // config and the retry rebuilds the right tab.
+        for (tab_id, started_at) in &self.engine.resume_fallback_candidates {
+            let Some(session_id) = self.engine.owning_session_for_tab(tab_id) else {
                 continue;
             };
-            let cfg = provider_config(&self.engine.config, &session.provider);
+            let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) else {
+                continue;
+            };
+            let provider = self.engine.tab_running_provider(session, tab_id);
+            let cfg = provider_config(&self.engine.config, &provider);
             let Some(timeout_ms) = cfg.resume_wait_timeout_ms.filter(|timeout| *timeout > 0) else {
                 continue;
             };
             if started_at.elapsed() < Duration::from_millis(timeout_ms) {
                 continue;
             }
-            let Some(provider) = self.engine.providers.get(session_id) else {
+            let Some(client) = self.engine.providers.get(tab_id) else {
                 continue;
             };
-            if provider.has_output() {
+            if client.has_output() {
                 continue;
             }
-            hung.push(session_id.clone());
+            hung.push(tab_id.clone());
         }
 
-        for session_id in hung {
+        for tab_id in hung {
+            let Some(session_id) = self.engine.owning_session_for_tab(&tab_id) else {
+                self.engine.resume_fallback_candidates.remove(&tab_id);
+                continue;
+            };
             let Some(session) = self
                 .engine
                 .sessions
@@ -1300,14 +1369,15 @@ impl App {
             else {
                 // Session vanished between detection and retry; drop any stale
                 // candidate so it can't leak.
-                self.engine.resume_fallback_candidates.remove(&session_id);
+                self.engine.resume_fallback_candidates.remove(&tab_id);
                 continue;
             };
+            let provider = self.engine.tab_running_provider(&session, &tab_id);
             let proj_name = self.engine.project_name_for_session(&session);
             let status_message = format!(
                 "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
                 session.branch_name,
-                session.provider.as_str(),
+                provider.as_str(),
                 proj_name,
             );
             logger::info(&format!(
@@ -1317,11 +1387,11 @@ impl App {
             let pty_size = self.pty_size_for_launch();
             match self
                 .engine
-                .retry_resume_fallback(&session_id, pty_size, status_message)
+                .retry_resume_fallback(&tab_id, pty_size, status_message)
             {
                 ResumeFallbackOutcome::Retried { reaction } => {
-                    self.engine.pty_activity.remove(&session_id);
-                    self.engine.pty_input.remove(&session_id);
+                    self.engine.pty_activity.remove(&tab_id);
+                    self.engine.pty_input.remove(&tab_id);
                     self.apply_reaction(*reaction);
                 }
                 // InFlight: a launch is already in progress — leave it alone.
@@ -1504,6 +1574,7 @@ mod tests {
         let session = app.engine.sessions[0].clone();
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
             session,
             pty_size: (80, 24),
             detached_session_id: None,
@@ -1536,6 +1607,7 @@ mod tests {
         app.pending_reconnect_ops.insert(session.id.clone(), op);
 
         app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
@@ -1620,8 +1692,11 @@ mod tests {
     fn launch_job_fails_before_pty_when_provider_command_is_missing() {
         let tmp = tempdir().expect("tempdir");
         let (worker_tx, worker_rx) = mpsc::channel();
+        let session = test_session(tmp.path());
         let request = AgentLaunchRequest {
-            session: test_session(tmp.path()),
+            tab_id: session.id.clone(),
+            provider: session.provider.clone(),
+            session,
             provider_config: crate::config::ProviderCommandConfig {
                 command: "definitely-missing-provider-command".to_string(),
                 args: vec!["--ignored".to_string()],

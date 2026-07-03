@@ -395,6 +395,107 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::Center, "Terminal"),
         ],
     },
+    // ── Agent tabs (Center-scope; non-interactive only) ───────────
+    BindingDef {
+        action: Action::NextTab,
+        default_keys: &[key!(ctrl - Right)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Next tab",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PrevTab,
+        default_keys: &[key!(ctrl - Left)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Previous tab",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab1,
+        default_keys: &[key!(ctrl - 1)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Focus tab 1-9",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab2,
+        default_keys: &[key!(ctrl - 2)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab3,
+        default_keys: &[key!(ctrl - 3)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab4,
+        default_keys: &[key!(ctrl - 4)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab5,
+        default_keys: &[key!(ctrl - 5)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab6,
+        default_keys: &[key!(ctrl - 6)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab7,
+        default_keys: &[key!(ctrl - 7)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab8,
+        default_keys: &[key!(ctrl - 8)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::SelectTab9,
+        default_keys: &[key!(ctrl - 9)],
+        scopes: &[BindingScope::Center],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::NewTab,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::CloseTab,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
     BindingDef {
         action: Action::DeleteSession,
         default_keys: &[key!(ctrl - d)],
@@ -2232,7 +2333,22 @@ mod tests {
         // so it appears in the help overlay. MoveUp is the sole exception
         // because it's shown via MoveDown's combined "j/k" label.
         for def in BINDING_DEFS {
-            if def.default_keys.is_empty() || def.action == Action::MoveUp {
+            // SelectTab2..9 are shown via SelectTab1's combined "Focus tab 1-9"
+            // label, mirroring how MoveUp rides MoveDown's "j/k" label.
+            if def.default_keys.is_empty()
+                || def.action == Action::MoveUp
+                || matches!(
+                    def.action,
+                    Action::SelectTab2
+                        | Action::SelectTab3
+                        | Action::SelectTab4
+                        | Action::SelectTab5
+                        | Action::SelectTab6
+                        | Action::SelectTab7
+                        | Action::SelectTab8
+                        | Action::SelectTab9
+                )
+            {
                 continue;
             }
             assert!(

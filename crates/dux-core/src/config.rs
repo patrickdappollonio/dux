@@ -156,6 +156,41 @@ pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
 /// Default cap on concurrent terminal-PTY WebSocket connections — see
 /// [`ServerConfig::max_websocket_terminal_connections`].
 pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
+/// Default cap on concurrent Support-tab PTY WebSocket connections across ALL
+/// agents — see [`ServerConfig::max_websocket_tab_connections`]. A pool of its
+/// own so tab sockets can never starve the agent-PTY (Main-tab) pool.
+pub const DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS: u32 = 64;
+
+/// Default per-agent cap on concurrent live Support-tab PTY sockets, checked
+/// before a permit is taken from the shared tab pool — see
+/// [`ServerConfig::max_websocket_tabs_per_agent`]. Keeps one agent's tabs from
+/// monopolizing that pool and starving other agents' tabs.
+pub const DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT: u32 = 8;
+
+/// Default per-agent tab cap (see [`UiConfig::agent_tabs_max`]), counting the
+/// Main tab — so the default 20 allows the Main tab plus 19 Support tabs.
+pub const DEFAULT_AGENT_TABS_MAX: u16 = 20;
+/// Hard ceiling the per-agent tab cap is clamped to, so a fat-fingered config
+/// value can't ask the app to keep unbounded live PTYs per agent.
+pub const MAX_AGENT_TABS_MAX: u16 = 100;
+
+/// The effective per-agent tab cap: `0` (or an absent key) means "use the
+/// default"; larger values are clamped to [`MAX_AGENT_TABS_MAX`] with a warning,
+/// mirroring [`shutdown_grace`]'s clamp-at-use discipline so a bad value degrades
+/// gracefully instead of nuking the setting.
+pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
+    if configured == 0 {
+        return DEFAULT_AGENT_TABS_MAX;
+    }
+    if configured > MAX_AGENT_TABS_MAX {
+        crate::logger::warn(&format!(
+            "[ui] agent_tabs_max = {configured} exceeds the maximum of \
+             {MAX_AGENT_TABS_MAX} and is being clamped",
+        ));
+        return MAX_AGENT_TABS_MAX;
+    }
+    configured
+}
 
 /// Default seconds to wait for SIGTERMed agents/terminals to exit before
 /// force-killing them on shutdown. Shared by the top-level
@@ -243,6 +278,23 @@ pub struct ServerConfig {
     /// Changing this requires a server restart to take effect: the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
     pub max_websocket_terminal_connections: u32,
+    /// Maximum number of concurrent Support-tab PTY WebSocket connections across
+    /// ALL agents. Tab sockets draw from THIS pool, not the agent-PTY pool, so a
+    /// few agents each showing many tabs cannot 503 every other agent's Main
+    /// terminal. Once this many are live, further tab-socket upgrades are rejected
+    /// with HTTP 503 until a slot frees. Default 64. A value of 0 permanently
+    /// blocks all Support-tab PTY sockets until the server restarts. Changing this
+    /// requires a server restart to take effect.
+    pub max_websocket_tab_connections: u32,
+    /// Maximum concurrent live Support-tab PTY WebSocket connections a SINGLE
+    /// agent may hold, checked BEFORE a permit is taken from the shared tab pool
+    /// (`max_websocket_tab_connections`). This is a per-agent fairness sub-quota on
+    /// top of that pool: it stops one agent showing many tabs from monopolizing the
+    /// pool and starving other agents' tabs. Once an agent reaches this many live
+    /// tab sockets, further tab-socket upgrades for THAT agent are rejected with
+    /// HTTP 503 until one closes. Default 8. A value of 0 permanently blocks all
+    /// Support-tab PTY sockets until the server restarts.
+    pub max_websocket_tabs_per_agent: u32,
     /// WEB-ONLY display name for this dux instance. Drives the browser tab
     /// `<title>` and the brand wordmark in the web projects pane (the version
     /// line stays directly below it). Set a distinct value per instance (e.g.
@@ -320,6 +372,11 @@ pub struct UiConfig {
     pub staged_pane_height_pct: u16,
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
+    /// Maximum number of tabs a single agent may have, counting the Main tab
+    /// (so 20 means the Main tab plus up to 19 ephemeral Support tabs). The "+"
+    /// affordance disables at the cap. `0` means use the default (20); values
+    /// above the internal ceiling are clamped with a warning. Default 20.
+    pub agent_tabs_max: u16,
     /// Seconds before a transient status-line message (a success/info
     /// confirmation) auto-clears. Busy/pending and warning/error messages are
     /// unaffected — they persist until replaced. 0 disables auto-clear entirely.
@@ -430,6 +487,8 @@ impl Default for ServerConfig {
             max_websocket_events_connections: DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
             max_websocket_agent_connections: DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
             max_websocket_terminal_connections: DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
+            max_websocket_tab_connections: DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
+            max_websocket_tabs_per_agent: DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
             title: "dux".to_string(),
             favicon: String::new(),
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
@@ -447,6 +506,7 @@ impl Default for UiConfig {
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
             agent_scrollback_lines: 10_000,
+            agent_tabs_max: DEFAULT_AGENT_TABS_MAX,
             status_clear_seconds: 6,
             branch_sync_interval: 30,
             show_diff_line_numbers: false,
@@ -920,6 +980,7 @@ impl Default for Config {
                 staged_pane_height_pct: 50,
                 commit_pane_height_pct: 40,
                 agent_scrollback_lines: 10_000,
+                agent_tabs_max: DEFAULT_AGENT_TABS_MAX,
                 status_clear_seconds: 6,
                 branch_sync_interval: 30,
                 show_diff_line_numbers: false,
@@ -976,6 +1037,100 @@ pub fn validate_config_str(s: &str) -> Result<Config, String> {
 /// (logging the error). Always applies provider defaults. Unlike the TUI's
 /// `ensure_config`, this never creates, migrates, or writes the config file — the
 /// server must not mutate config (that's the TUI's canonical renderer).
+/// Deserialize `raw` into a [`Config`], recovering from a bad field or section
+/// instead of discarding the entire file. A full-document parse success is used
+/// directly; otherwise the offending key(s) are pruned — at FIELD granularity
+/// where a single field can be isolated, else the whole top-level section — reset
+/// to their defaults, warned to the log, and the rest is kept. A genuine TOML
+/// syntax error (or a structure that can't be recovered) still falls back to
+/// `Config::default()`. This means one bad value (e.g. `agent_tabs_max = -1`) can
+/// never silently discard every other setting the user configured.
+fn recover_config(raw: &str) -> Config {
+    let doc: toml::Table = match toml::from_str::<toml::Table>(raw) {
+        Ok(t) => t,
+        Err(e) => {
+            crate::logger::error(&format!("config is not valid TOML ({e}); using defaults"));
+            return Config::default();
+        }
+    };
+    // Fast path: the whole document deserializes cleanly.
+    if let Ok(cfg) = table_into_config(doc.clone()) {
+        return cfg;
+    }
+    // Recovery: a section that deserializes in isolation is fine (missing sections
+    // use serde defaults, so a single-section document is always structurally ok).
+    // For a bad section, drop only the offending FIELDS where each can be isolated;
+    // otherwise reset the whole section.
+    let mut pruned = doc.clone();
+    for (section, value) in doc.iter() {
+        if section_solo_ok(section, value.clone()) {
+            continue;
+        }
+        if let toml::Value::Table(tbl) = value {
+            let mut fixed = tbl.clone();
+            let mut reset_fields: Vec<String> = Vec::new();
+            for _ in 0..tbl.len() {
+                if section_solo_ok(section, toml::Value::Table(fixed.clone())) {
+                    break;
+                }
+                let field_keys: Vec<String> = fixed.keys().cloned().collect();
+                let mut removed = false;
+                for fk in field_keys {
+                    let mut trial = fixed.clone();
+                    trial.remove(&fk);
+                    if section_solo_ok(section, toml::Value::Table(trial.clone())) {
+                        reset_fields.push(fk);
+                        fixed = trial;
+                        removed = true;
+                        break;
+                    }
+                }
+                if !removed {
+                    break;
+                }
+            }
+            if section_solo_ok(section, toml::Value::Table(fixed.clone())) {
+                for fk in &reset_fields {
+                    crate::logger::warn(&format!(
+                        "config [{section}] {fk} is invalid; resetting it to its default"
+                    ));
+                }
+                pruned.insert(section.clone(), toml::Value::Table(fixed));
+                continue;
+            }
+        }
+        crate::logger::warn(&format!(
+            "config section [{section}] is invalid; resetting it to defaults"
+        ));
+        pruned.remove(section);
+    }
+    match table_into_config(pruned) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            crate::logger::error(&format!(
+                "config could not be recovered ({e}); using defaults"
+            ));
+            Config::default()
+        }
+    }
+}
+
+/// True if a document containing only `section = value` deserializes into a
+/// `Config` (every other section defaulted). Used to test one section at a time.
+fn section_solo_ok(section: &str, value: toml::Value) -> bool {
+    let mut t = toml::Table::new();
+    t.insert(section.to_string(), value);
+    table_into_config(t).is_ok()
+}
+
+/// Deserialize a `toml::Table` into a `Config`, round-tripping through a string so
+/// this uses the exact same path as `toml::from_str` everywhere else (no reliance
+/// on a `Value::try_into` API that varies across toml versions).
+fn table_into_config(table: toml::Table) -> Result<Config, String> {
+    let s = toml::to_string(&table).map_err(|e| e.to_string())?;
+    toml::from_str::<Config>(&s).map_err(|e| e.to_string())
+}
+
 pub fn load_config(paths: &DuxPaths) -> Config {
     let mut config = match std::fs::read_to_string(&paths.config_path) {
         Ok(raw) => {
@@ -984,16 +1139,7 @@ pub fn load_config(paths: &DuxPaths) -> Config {
             // load (ServerConfig has no deny_unknown_fields), so warn once so the
             // operator knows their old value is no longer in effect.
             warn_on_removed_max_websocket_connections(&raw);
-            match toml::from_str::<Config>(&raw) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    crate::logger::error(&format!(
-                        "failed to parse {}: {e}; using defaults",
-                        paths.config_path.display()
-                    ));
-                    Config::default()
-                }
-            }
+            recover_config(&raw)
         }
         Err(_) => Config::default(),
     };
@@ -1946,5 +2092,25 @@ max_websocket_connections = 16
             "[server]\nmax_websocket_events_connections = 16\n"
         ));
         assert!(!raw_has_removed_max_websocket_connections("[server]\n"));
+    }
+}
+
+#[cfg(test)]
+mod agent_tabs_cap_tests {
+    use super::*;
+
+    #[test]
+    fn normalized_agent_tabs_max_substitutes_default_for_zero() {
+        assert_eq!(normalized_agent_tabs_max(0), DEFAULT_AGENT_TABS_MAX);
+    }
+
+    #[test]
+    fn normalized_agent_tabs_max_clamps_oversized_values() {
+        assert_eq!(normalized_agent_tabs_max(10_000), MAX_AGENT_TABS_MAX);
+    }
+
+    #[test]
+    fn normalized_agent_tabs_max_passes_through_sane_values() {
+        assert_eq!(normalized_agent_tabs_max(8), 8);
     }
 }

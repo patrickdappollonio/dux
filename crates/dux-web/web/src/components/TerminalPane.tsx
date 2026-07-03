@@ -51,6 +51,7 @@ import {
   agentPtyUrl,
   getActivePtySocket,
   setActivePtySocket,
+  tabPtyUrl,
   terminalPtyUrl,
 } from "@/lib/ptySocket"
 import {
@@ -63,8 +64,9 @@ import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
-  // The streamed target: an agent session or one of its companion terminals.
-  // `id` is the session id for an agent and the terminal id for a terminal.
+  // The streamed target: an agent tab or one of its companion terminals.
+  // `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
+  // `sessionId`; an extra tab's does not) and the terminal id for a terminal.
   kind: "agent" | "terminal"
   id: string
   // The owning session id. Equal to `id` for an agent; the parent session for a
@@ -229,24 +231,30 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   useEffect(() => {
     copyOnSelectRef.current = bootstrap?.copy_on_select ?? true
   }, [bootstrap?.copy_on_select])
+  // Always resolve the owning session by `sessionId` (for an agent, `id` is the
+  // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
+  // tab's does not, so a lookup by `id` would miss). The focused tab, when this
+  // is an agent, drives the provider label / readiness / exit gating.
   const session =
     kind === "agent"
-      ? spine?.sessions.find((s) => s.id === id)
+      ? spine?.sessions.find((s) => s.id === sessionId)
       : spine?.sessions.find((s) => s.terminals.some((t) => t.id === id))
+  const focusedTab =
+    kind === "agent" ? session?.tabs.find((t) => t.id === id) : undefined
+  const isSessionSlotTab = kind === "agent" && id === sessionId
   const hasOutput =
     kind === "agent"
-      ? (session?.has_output ?? false)
+      ? (focusedTab?.has_output ?? session?.has_output ?? false)
       : (session?.terminals.find((t) => t.id === id)?.has_output ?? false)
-  const providerName = session?.provider
-  // The macro popover's target. For an agent the streamed id IS the session id;
-  // for a terminal it is the terminal id, and the owning session id comes from
-  // the resolved `session` (falls back to the prop, though a focused terminal
-  // always resolves a session). Mirrors the store's `SelectedTarget` shape so
-  // the popover filters macros by the focused surface and runs against the
-  // right PTY.
+  const providerName =
+    kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
+  // The macro popover's target. For an agent the streamed id is the FOCUSED TAB
+  // id; for a terminal it is the terminal id. Mirrors the store's
+  // `SelectedTarget` shape so the popover filters macros by the focused surface
+  // and runs against the right PTY.
   const macroTarget: SelectedTarget =
     kind === "agent"
-      ? { kind: "agent", sessionId: id }
+      ? { kind: "agent", sessionId, tabId: id }
       : { kind: "terminal", terminalId: id, sessionId }
   // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
   // even if a later view model reports `has_output: false` (e.g. an exited
@@ -313,12 +321,17 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // — the exit prune marks it detached), reset the center pane back to the
   // welcome screen. The "Agent exited" toast explains why. A fresh selection
   // of the detached agent remounts this pane and relaunches it.
+  // Reset to the welcome screen only when the session-slot tab we were attached to
+  // stops and the whole agent left `active` (status is any-tab-active). Gate on
+  // `isSessionSlotTab`: an extra tab's own exit just turns it dormant via the spine
+  // (handled in `App`, its card rendered there), so we don't eject the user from
+  // here in that case.
   const sessionStatus = session?.status
   useEffect(() => {
-    if (kind === "agent" && everReady && sessionStatus && sessionStatus !== "active") {
+    if (isSessionSlotTab && everReady && sessionStatus && sessionStatus !== "active") {
       selectSession(null)
     }
-  }, [kind, everReady, sessionStatus])
+  }, [isSessionSlotTab, everReady, sessionStatus])
 
   useEffect(() => {
     const host = hostRef.current
@@ -399,9 +412,18 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // exactly as the legacy `Subscribe` did. Registered as the active socket so the
     // macro picker can write to it; cleared on unmount. The byte feed and the
     // first-frame resize are wired further down (after the sizing state exists).
-    const pty = new PtySocket(
-      kind === "agent" ? agentPtyUrl(id) : terminalPtyUrl(sessionId, id),
-    )
+    // For an agent, the session-slot tab (`id === sessionId`) uses the session PTY
+    // route; an extra tab uses its own nested route. Opening a tab's socket launches
+    // it if it isn't running (resume is decided server-side: it continues only when
+    // it's the sole tab coming up). A dormant tab is never auto-mounted (App renders
+    // its card instead), so reaching here for one is an intentional launch.
+    const ptyUrl =
+      kind === "agent"
+        ? id === sessionId
+          ? agentPtyUrl(sessionId)
+          : tabPtyUrl(sessionId, id)
+        : terminalPtyUrl(sessionId, id)
+    const pty = new PtySocket(ptyUrl)
     ptyRef.current = pty
     setActivePtySocket(pty)
     // Record this socket's connection id (the socket's first `connected` frame, and

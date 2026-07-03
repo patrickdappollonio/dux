@@ -214,6 +214,16 @@ pub enum WireCommand {
     KillSessionPty {
         session_id: String,
     },
+    /// Detach an agent WHOLE: stop every one of its tabs' provider processes,
+    /// mark the session Detached, and clear `desired_running` so startup
+    /// auto-reopen does not relaunch it. This is the agent-level "Detach agent"
+    /// action (the sidebar/menu), DISTINCT from closing a single tab (which stops
+    /// only that tab and detaches the agent only when it was the last live one).
+    /// The row and worktree are kept, so the agent can be reconnected. Unknown
+    /// session is an `Err`; an agent with no live tabs is an idempotent no-op.
+    DetachAgent {
+        session_id: String,
+    },
     /// Register an existing git repository on the server as a project. `name`
     /// may be empty to derive the display name from the path's basename.
     AddProject {
@@ -315,6 +325,23 @@ pub enum WireCommand {
     /// is a no-op.
     ChangeAgentProvider {
         session_id: String,
+        provider: String,
+    },
+    /// Close a Support tab (a non-Main provider tab): tear down its PTY and delete
+    /// its `agent_tabs` row. Destructive and unrecoverable (Support tabs are
+    /// ephemeral). The Main tab is never closed through here — a Main "close" is a
+    /// detach via `KillSessionPty`. `tab_id` must belong to `session_id`.
+    CloseAgentTab {
+        session_id: String,
+        tab_id: String,
+    },
+    /// Retarget one tab's provider (effective on its next launch), mirroring
+    /// `ChangeAgentProvider` but scoped to a single tab. For the Main tab
+    /// (`tab_id == session_id`) this delegates to the session-level change; for a
+    /// Support tab it updates only that tab. `provider` is validated server-side.
+    ChangeAgentTabProvider {
+        session_id: String,
+        tab_id: String,
         provider: String,
     },
     /// Switch a project's SOURCE checkout back to its default branch, mirroring
@@ -840,6 +867,31 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::DetachAgent { session_id } => {
+                let status = self.detach_agent(&session_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
+            WireCommand::CloseAgentTab { session_id, tab_id } => {
+                let status = self.close_agent_tab_wire(&session_id, &tab_id)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
+            WireCommand::ChangeAgentTabProvider {
+                session_id,
+                tab_id,
+                provider,
+            } => {
+                let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::AddProject { .. } => {
                 // The direct add (no branch-checkout step) is the primary web add
                 // path. Like the inline checkout-add in `drive_add_project_followup`,
@@ -1015,28 +1067,84 @@ impl Engine {
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
         // No live PTY → nothing to kill. Idempotent success so a double-click or
         // a kill racing a natural exit is not surfaced as an error.
-        if self.providers.remove(&session.id).is_none() {
+        if !self.providers.contains_key(&session.id) {
             return Ok(WireStatus::new(
                 "info",
                 format!("Agent \"{}\" is not running.", session.branch_name),
             ));
         }
-        // The provider was just dropped (SIGKILL). Clear the rest of the resume
-        // state exactly like the force-reconnect block, then detach the session.
-        self.running_provider_pins.remove(&session.id);
-        self.pty_activity.remove(&session.id);
-        self.pty_input.remove(&session.id);
-        self.resume_fallback_candidates.remove(&session.id);
+        // Drop the provider (SIGKILL) and clear every runtime map keyed by this
+        // tab id in one call — including the in-flight `AgentLaunch` key, which
+        // a hand-rolled list of individual `.remove()` calls previously missed.
+        // A `KillSessionPty` racing an in-flight launch for this tab would
+        // otherwise leave that key set, so `DispatchAgentLaunch` kept reporting
+        // "already launching" for it until restart.
+        self.clear_tab_runtime(&session.id);
+        // No tab is privileged: stopping the session-slot tab detaches the AGENT
+        // only when it was the last live tab. With extra tabs still running this
+        // just closes that one tab and the agent stays Active in the sidebar.
+        if self.any_tab_active(&session.id) {
+            return Ok(WireStatus::new(
+                "info",
+                format!(
+                    "Closed a tab for agent \"{}\". Its other tabs are still running.",
+                    session.branch_name
+                ),
+            ));
+        }
         self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
-        // An explicit kill means the user no longer wants this agent running, so
-        // clear desired_running — otherwise the TUI's startup auto-reopen would
-        // relaunch the agent the user just killed.
+        // Closing the agent's last live tab means the user no longer wants it
+        // running, so clear desired_running — otherwise the TUI's startup
+        // auto-reopen would relaunch the agent the user just detached.
         self.mark_session_desired_running(&session.id, false);
         Ok(WireStatus::new(
             "info",
             format!(
-                "Killed the running process for agent \"{}\". It is now detached — reconnect it from the agent menu.",
+                "Closed the last tab for agent \"{}\". It is now detached — reconnect it from the agent menu.",
                 session.branch_name
+            ),
+        ))
+    }
+
+    /// Detach an agent WHOLE: stop every one of its tabs' provider processes and
+    /// mark the session Detached. Unlike `kill_session_pty` (which stops a single
+    /// tab and detaches only when it was the last live one), this is the explicit
+    /// agent-level "Detach agent" action and always tears down every tab. The row
+    /// and worktree are kept so the agent can be reconnected; `desired_running` is
+    /// cleared so startup auto-reopen does not relaunch it. Unknown session is an
+    /// `Err`; an agent with no live tabs is an idempotent no-op.
+    fn detach_agent(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+        let tabs = self.tab_ids_for_session(&session.id);
+        let stopped = tabs
+            .iter()
+            .filter(|tab_id| self.providers.contains_key(*tab_id))
+            .count();
+        // Clear every tab's runtime maps (drops each live provider on the way,
+        // SIGKILL on Drop), whether or not it was live, so no stale entry leaks.
+        for tab_id in &tabs {
+            self.clear_tab_runtime(tab_id);
+        }
+        if stopped == 0 {
+            return Ok(WireStatus::new(
+                "info",
+                format!("Agent \"{}\" is not running.", session.branch_name),
+            ));
+        }
+        self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
+        self.mark_session_desired_running(&session.id, false);
+        Ok(WireStatus::new(
+            "info",
+            format!(
+                "Detached agent \"{}\" and stopped {} tab{}. It stays in Projects — reconnect it from the agent menu.",
+                session.branch_name,
+                stopped,
+                if stopped == 1 { "" } else { "s" },
             ),
         ))
     }
@@ -1173,6 +1281,69 @@ impl Engine {
         }
     }
 
+    /// Close an extra tab and produce a confirming status. Reads the tab's
+    /// provider label before the close (the row is gone afterward). The
+    /// session-slot tab is rejected here (its "close" goes through
+    /// `KillSessionPty`).
+    fn close_agent_tab_wire(
+        &mut self,
+        session_id: &str,
+        tab_id: &str,
+    ) -> anyhow::Result<WireStatus> {
+        let provider = self
+            .agent_tabs
+            .get(tab_id)
+            .map(|t| t.provider.as_str().to_string());
+        self.close_tab(session_id, tab_id)?;
+        Ok(WireStatus::new(
+            "info",
+            match provider {
+                Some(p) => format!("Closed the {p} tab."),
+                None => "Closed the tab.".to_string(),
+            },
+        ))
+    }
+
+    /// Retarget one tab's provider, validating the choice server-side. The
+    /// session-slot tab delegates to the session-level change (identical UX); an
+    /// extra tab updates only that tab.
+    fn change_tab_provider_wire(
+        &mut self,
+        session_id: &str,
+        tab_id: &str,
+        provider: &str,
+    ) -> anyhow::Result<WireStatus> {
+        if tab_id == session_id {
+            return self.change_agent_provider_wire(session_id, provider);
+        }
+        if !self.config.providers.commands.contains_key(provider) {
+            anyhow::bail!(
+                "Provider \"{provider}\" is not configured. Pick one of the configured providers."
+            );
+        }
+        let provider = ProviderKind::new(provider);
+        let outcome = self.change_tab_provider(session_id, tab_id, provider.clone())?;
+        if outcome.running {
+            Ok(WireStatus::new(
+                "warning",
+                format!(
+                    "This tab is set to {}, but the {} process is still running. Close and reopen the tab to relaunch with {}.",
+                    provider.as_str(),
+                    outcome.previous.as_str(),
+                    provider.as_str(),
+                ),
+            ))
+        } else {
+            Ok(WireStatus::new(
+                "info",
+                format!(
+                    "This tab will use {} on its next launch (it starts fresh).",
+                    provider.as_str(),
+                ),
+            ))
+        }
+    }
+
     /// Reconnect (relaunch) an agent session's provider. Mirrors the TUI's
     /// `reconnect_selected_session` (`force == false`) and `force_reconnect_agent`
     /// (`force == true`):
@@ -1235,16 +1406,12 @@ impl Engine {
         }
 
         // Detach any other session holding the same worktree's live PTY. The
-        // engine method marks it Detached and clears provider/pin/candidate;
-        // mirror the TUI App wrapper by also clearing its `pty_activity` and
-        // `pty_input` entries.
+        // engine method tears down every tab of the conflicting agent (Main +
+        // Support), clearing all six runtime maps and marking it Detached, so no
+        // caller-side follow-up clear is needed.
         let detached_label = self
             .detach_conflicting_worktree_session(&session.worktree_path, &session.id)
-            .map(|detached| {
-                self.pty_activity.remove(&detached.id);
-                self.pty_input.remove(&detached.id);
-                detached.label
-            });
+            .map(|detached| detached.label);
 
         let use_resume = if force {
             false
@@ -2139,6 +2306,10 @@ impl Engine {
                         "error",
                         "Deletion already in progress for this agent. Wait for it to finish.",
                     )],
+                    BeginDeleteSessionOutcome::TabLaunching => vec![WireStatus::new(
+                        "error",
+                        "A tab is still launching for this agent. Try again in a moment.",
+                    )],
                     BeginDeleteSessionOutcome::NotFound => vec![],
                     BeginDeleteSessionOutcome::AsyncStarted { busy_message } => {
                         // Mint a keyed HandlerStatusOp whose opaque id correlates
@@ -2257,13 +2428,30 @@ impl Engine {
         match reaction {
             EventReaction::AgentLaunchReadyView(outcome) => match &outcome.view {
                 AgentLaunchReadyView::Reconnect { status_message }
-                | AgentLaunchReadyView::ResumeFallback { status_message, .. } => self
-                    .resolve_web_launch_op_or(
-                        &outcome.session.id,
-                        crate::engine::WebLaunchOutcome::Ready {
-                            status_message: status_message.clone(),
-                        },
-                    ),
+                | AgentLaunchReadyView::ResumeFallback { status_message, .. } => {
+                    if outcome.tab_id != outcome.session.id {
+                        // Support-tab launch success: no op is stashed under a tab
+                        // id, so emit a status KEYED `tab-launch-<tab_id>` (matching
+                        // the failure path) rather than an unkeyed one — otherwise an
+                        // unrelated unkeyed toast could clobber this confirmation.
+                        WebFollowupStatuses {
+                            statuses: vec![
+                                WireStatus::new("info", status_message.clone())
+                                    .with_key(format!("tab-launch-{}", outcome.tab_id)),
+                            ],
+                            clear_keys: Vec::new(),
+                        }
+                    } else {
+                        // Main tab (tab_id == session_id): resolve its pending
+                        // reconnect op keyed by the session id, as before.
+                        self.resolve_web_launch_op_or(
+                            &outcome.tab_id,
+                            crate::engine::WebLaunchOutcome::Ready {
+                                status_message: status_message.clone(),
+                            },
+                        )
+                    }
+                }
                 AgentLaunchReadyView::SessionMissing => self.resolve_web_launch_op_or(
                     &outcome.session.id,
                     crate::engine::WebLaunchOutcome::Missing,
@@ -2311,6 +2499,28 @@ impl Engine {
                         "warning",
                         format!("Couldn't auto-reopen agent \"{branch_name}\": {message}"),
                     )],
+                    clear_keys: Vec::new(),
+                },
+                // Support-tab launch failure: surface the real error as a warning
+                // keyed to the tab, so a failed fresh-create / dormant relaunch
+                // tells the user why nothing came up (never a "can't resume" note).
+                AgentLaunchFailedOutcome::Tab {
+                    tab_id,
+                    branch_name,
+                    message,
+                    ..
+                } => WebFollowupStatuses {
+                    // Keyed by the tab (`tab-launch-<tab_id>`) so this warning is not
+                    // clobbered by an unrelated unkeyed toast, and so the web client
+                    // can clear its "started" latch for this tab (re-showing the
+                    // dormant retry card and stopping the reconnect loop).
+                    statuses: vec![
+                        WireStatus::new(
+                            "warning",
+                            format!("Tab launch failed for \"{branch_name}\": {message}"),
+                        )
+                        .with_key(format!("tab-launch-{tab_id}")),
+                    ],
                     clear_keys: Vec::new(),
                 },
                 // A create-kind launch failure is resolved engine-side, not here.
@@ -2807,9 +3017,12 @@ impl Engine {
             | WireCommand::TogglePrBannerPosition {}
             | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
-            | WireCommand::KillSessionPty { .. } => {
+            | WireCommand::KillSessionPty { .. }
+            | WireCommand::DetachAgent { .. }
+            | WireCommand::CloseAgentTab { .. }
+            | WireCommand::ChangeAgentTabProvider { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/kill-session-pty are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -3747,7 +3960,7 @@ mod tests {
             .expect("apply kill");
         let status = outcome.status.expect("a status");
         assert!(
-            status.message.contains("Killed the running process"),
+            status.message.contains("Closed the last tab"),
             "msg: {}",
             status.message
         );
@@ -3772,6 +3985,125 @@ mod tests {
         assert!(
             !engine.sessions[0].desired_running,
             "an explicit kill clears desired_running"
+        );
+    }
+
+    #[test]
+    fn apply_wire_kill_session_pty_clears_in_flight_launch_key() {
+        // F8 regression: kill_session_pty used to hand-roll the tab-runtime
+        // clear (providers/pins/pty_activity/pty_input/resume_fallback), which
+        // missed the in-flight `AgentLaunch` key. A KillSessionPty racing an
+        // in-flight launch for that tab left the key set, so a subsequent
+        // DispatchAgentLaunch for the same tab id kept reporting "already
+        // launching" forever. Routing through `clear_tab_runtime` fixes it.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let client = crate::pty::PtyClient::spawn_with_env(
+            "cat",
+            &[],
+            worktree.path(),
+            24,
+            80,
+            engine.config.ui.agent_scrollback_lines,
+            &[],
+        )
+        .expect("spawn cat provider");
+        engine.providers.insert("s1".to_string(), client);
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
+
+        engine
+            .apply_wire(WireCommand::KillSessionPty {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply kill");
+
+        assert!(
+            !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
+            "kill_session_pty must clear the in-flight AgentLaunch key for the killed tab"
+        );
+    }
+
+    #[test]
+    fn apply_wire_detach_agent_stops_every_tab() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // An extra tab with its own row, plus a live provider for BOTH the
+        // session-slot tab (keyed by session id) and the extra tab.
+        let tab = crate::model::AgentTab {
+            id: "tab-2".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+
+        let spawn = |name: &str| {
+            crate::pty::PtyClient::spawn_with_env(
+                name,
+                &[],
+                worktree.path(),
+                24,
+                80,
+                engine.config.ui.agent_scrollback_lines,
+                &[],
+            )
+            .expect("spawn provider")
+        };
+        engine.providers.insert("s1".to_string(), spawn("cat"));
+        engine.providers.insert("tab-2".to_string(), spawn("cat"));
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+        engine.mark_session_desired_running("s1", true);
+
+        let outcome = engine
+            .apply_wire(WireCommand::DetachAgent {
+                session_id: "s1".to_string(),
+            })
+            .expect("apply detach");
+        let status = outcome.status.expect("a status");
+        assert!(
+            status.message.contains("Detached agent") && status.message.contains("2 tab"),
+            "msg: {}",
+            status.message
+        );
+        // EVERY tab's provider is gone — not just the session-slot one.
+        assert!(
+            !engine.providers.contains_key("s1"),
+            "session-slot tab stopped"
+        );
+        assert!(!engine.providers.contains_key("tab-2"), "extra tab stopped");
+        // The agent is detached (not deleted) and its rows survive.
+        assert_eq!(
+            engine.sessions[0].status,
+            crate::model::SessionStatus::Detached
+        );
+        assert!(
+            engine.agent_tabs.contains_key("tab-2"),
+            "detach keeps tab rows (reopenable)"
+        );
+        assert!(
+            !engine.sessions[0].desired_running,
+            "detach clears desired_running"
         );
     }
 
@@ -4925,6 +5257,7 @@ mod tests {
         // `engine::events` tests, where the private op registry is accessible.)
         let committed = crate::engine::AgentLaunchReadyOutcome {
             session: sample_session("s1", "p1", "feat"),
+            tab_id: "s1".to_string(),
             pty_size: (24, 80),
             detached_session_id: None,
             view: AgentLaunchReadyView::CreateCommitted {
@@ -4939,6 +5272,7 @@ mod tests {
 
         let startup_failed = crate::engine::AgentLaunchReadyOutcome {
             session: sample_session("s1", "p1", "feat"),
+            tab_id: "s1".to_string(),
             pty_size: (24, 80),
             detached_session_id: None,
             view: AgentLaunchReadyView::CreatePersistFailed {
@@ -5599,6 +5933,7 @@ mod tests {
         engine.pending_web_launch_ops.insert("s1".into(), op);
 
         let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
             session: session.clone(),
             pty_size: (80, 24),
             detached_session_id: None,
@@ -5629,6 +5964,7 @@ mod tests {
 
         // SessionMissing resolves the op to a CLEAR (no replacement message).
         let reaction = EventReaction::AgentLaunchReadyView(Box::new(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
             session,
             pty_size: (80, 24),
             detached_session_id: None,
@@ -7211,6 +7547,7 @@ mod tests {
             AgentLaunchReadyView::StartupAutoReopen,
         ] {
             let outcome = crate::engine::AgentLaunchReadyOutcome {
+                tab_id: session.id.clone(),
                 session: session.clone(),
                 pty_size: (24, 80),
                 detached_session_id: None,

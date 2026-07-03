@@ -63,6 +63,20 @@ pub struct AppState {
     /// scratch-terminal stream. Sized and exhausted INDEPENDENTLY of the events and
     /// agent classes.
     pub ws_terminal_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Caps concurrent SUPPORT-TAB PTY WebSocket connections across all agents
+    /// (`[server] max_websocket_tab_connections`). Tab sockets draw from THIS pool,
+    /// not `ws_agent_semaphore`, so tabs can never starve the Main-tab (agent) pool.
+    pub ws_tab_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Per-agent fairness sub-quota (`[server] max_websocket_tabs_per_agent`) on
+    /// top of `ws_tab_semaphore`: the count of live Support-tab sockets keyed by
+    /// owning session id. `ws_tab_pty_upgrade` refuses a new tab socket for a
+    /// session already at `max_ws_tabs_per_agent` BEFORE taking a tab-pool permit,
+    /// so one agent's tabs cannot monopolize the shared tab pool. A [`TabWsGuard`]
+    /// increments on connect and decrements on drop (every early return included).
+    pub tab_ws_counts: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
+    /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
+    pub max_ws_tabs_per_agent: u32,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -146,6 +160,13 @@ pub struct RouterParams {
     /// (`[server] max_websocket_terminal_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS`].
     pub max_websocket_terminal_connections: u32,
+    /// Cap on concurrent Support-tab PTY WebSocket connections across all agents
+    /// (`[server] max_websocket_tab_connections`). Defaults to
+    /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS`].
+    pub max_websocket_tab_connections: u32,
+    /// Per-agent live-tab-socket sub-quota (`[server] max_websocket_tabs_per_agent`).
+    /// Defaults to [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT`].
+    pub max_websocket_tabs_per_agent: u32,
     /// The IPs the server actually bound to. When non-empty, `build_app` wraps
     /// the router with the Host allowlist (DNS-rebinding defense). An empty vec
     /// disables the guard; used by tests that do not exercise the host guard.
@@ -171,6 +192,8 @@ impl RouterParams {
                 dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
             max_websocket_terminal_connections:
                 dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
+            max_websocket_tab_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
+            max_websocket_tabs_per_agent: dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
         }
@@ -194,10 +217,14 @@ impl RouterParams {
         events: u32,
         agent: u32,
         terminal: u32,
+        tab: u32,
+        tab_per_agent: u32,
     ) -> Self {
         self.max_websocket_events_connections = events;
         self.max_websocket_agent_connections = agent;
         self.max_websocket_terminal_connections = terminal;
+        self.max_websocket_tab_connections = tab;
+        self.max_websocket_tabs_per_agent = tab_per_agent;
         self
     }
 
@@ -264,6 +291,18 @@ pub fn build_app(
              WebSocket upgrade will be refused with HTTP 503 until the server restarts",
         );
     }
+    if params.max_websocket_tab_connections == 0 {
+        dux_core::logger::warn(
+            "[server] max_websocket_tab_connections = 0: every support-tab PTY \
+             WebSocket upgrade will be refused with HTTP 503 until the server restarts",
+        );
+    }
+    if params.max_websocket_tabs_per_agent == 0 {
+        dux_core::logger::warn(
+            "[server] max_websocket_tabs_per_agent = 0: every support-tab PTY \
+             WebSocket upgrade will be refused with HTTP 503 until the server restarts",
+        );
+    }
     // The event bus and changed-files service are web-layer concerns built here.
     // `ChangesService::new` spawns its supervised poller, so this must run inside a
     // tokio runtime context -- the CLI serve paths build inside `block_on`, and the
@@ -298,6 +337,11 @@ pub fn build_app(
         ws_terminal_semaphore: Arc::new(tokio::sync::Semaphore::new(
             params.max_websocket_terminal_connections as usize,
         )),
+        ws_tab_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            params.max_websocket_tab_connections as usize,
+        )),
+        tab_ws_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        max_ws_tabs_per_agent: params.max_websocket_tabs_per_agent,
         event_bus,
         changes,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
@@ -317,6 +361,7 @@ pub fn build_app(
             "/ws/sessions/{id}/terminals/{tid}/pty",
             get(ws_terminal_pty_upgrade),
         )
+        .route("/ws/sessions/{id}/tabs/{tab}/pty", get(ws_tab_pty_upgrade))
         .merge(crate::git_routes::routes())
         .merge(crate::file_routes::routes())
         .merge(crate::changes_routes::routes())
@@ -327,6 +372,7 @@ pub fn build_app(
         .merge(crate::project_reads::routes())
         .merge(crate::startup_logs::routes())
         .merge(crate::terminal_actions::routes())
+        .merge(crate::tab_actions::routes())
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())
         .merge(extra_gated)
@@ -584,15 +630,19 @@ fn acquire_ws_permit(
 enum PtyTarget {
     Agent(String),
     Terminal(String),
+    /// A Support tab's provider PTY, keyed by tab id. Resolves through the same
+    /// tab-keyed `providers` map as `Agent` (Main's tab id == session id), so the
+    /// socket loop treats it identically once subscribed.
+    Tab(String),
 }
 
 impl PtyTarget {
     /// The id used to route stdin writes and resizes (the session id for an agent,
-    /// the terminal id for a companion terminal). The engine's `pty_for` accepts
-    /// either keyspace.
+    /// the terminal id for a companion terminal, the tab id for a Support tab). The
+    /// engine's `pty_for` accepts any of these keyspaces.
     fn pty_id(&self) -> &str {
         match self {
-            PtyTarget::Agent(id) | PtyTarget::Terminal(id) => id,
+            PtyTarget::Agent(id) | PtyTarget::Terminal(id) | PtyTarget::Tab(id) => id,
         }
     }
 }
@@ -879,6 +929,145 @@ async fn ws_terminal_pty_upgrade(
         .into_response()
 }
 
+/// RAII guard for the per-agent live-tab-socket sub-quota
+/// (`[server] max_websocket_tabs_per_agent`). `acquire` increments the owning
+/// session's count when it is below the cap (returning `None` to refuse at/over
+/// the cap, and — because `0 >= 0` — when the cap is `0`, which blocks all tab
+/// sockets); `Drop` decrements it, so every early return and socket close releases
+/// the slot. The count map is shared via `AppState.tab_ws_counts`.
+struct TabWsGuard {
+    counts: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    session_id: String,
+}
+
+impl TabWsGuard {
+    fn acquire(
+        counts: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+        session_id: String,
+        max_per_agent: u32,
+    ) -> Option<Self> {
+        {
+            let mut map = counts.lock().unwrap_or_else(|e| e.into_inner());
+            let n = map.entry(session_id.clone()).or_insert(0);
+            if *n as u32 >= max_per_agent {
+                // At/over the cap (or `max_per_agent == 0` blocks all). Don't leave
+                // a freshly-created zero entry lingering in the map.
+                if *n == 0 {
+                    map.remove(&session_id);
+                }
+                return None;
+            }
+            *n += 1;
+        }
+        Some(Self { counts, session_id })
+    }
+}
+
+impl Drop for TabWsGuard {
+    fn drop(&mut self) {
+        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.session_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty` — stream a Support
+/// tab's provider PTY. Support-only (the Main tab uses `/ws/sessions/:id/pty`).
+/// Validates origin, id bounds, session existence, and Support-tab ownership
+/// (`:tab` belongs to `:id`), then takes a permit from the DEDICATED tab-socket
+/// pool (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`) — separate
+/// from the agent-PTY pool, so tab sockets can never 503 the Main-tab streams.
+/// Each failing branch is a 404/503 BEFORE the upgrade.
+async fn ws_tab_pty_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path((id, tab)): Path<(String, String)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
+    if !crate::rest_common::id_within_bound(&id) || !crate::rest_common::id_within_bound(&tab) {
+        return (StatusCode::NOT_FOUND, "unknown tab").into_response();
+    }
+    if state.engine.session_worktree(id.clone()).await.is_none() {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    }
+    // Support-only ownership: a Main tab has no `agent_tabs` row, so `tab_session`
+    // returns `None` and this 404s (Main streams over `/ws/sessions/:id/pty`).
+    match state.engine.tab_session(tab.clone()).await {
+        Some(owner) if owner == id => {}
+        _ => return (StatusCode::NOT_FOUND, "unknown tab").into_response(),
+    }
+    // Per-agent fairness sub-quota: refuse a new tab socket for a session already
+    // at `max_ws_tabs_per_agent` BEFORE taking a shared tab-pool permit, so one
+    // agent's tabs can't monopolize that pool. The guard decrements on drop, so a
+    // failed permit acquisition below (early return) also releases the slot.
+    let tab_guard = match TabWsGuard::acquire(
+        Arc::clone(&state.tab_ws_counts),
+        id.clone(),
+        state.max_ws_tabs_per_agent,
+    ) {
+        Some(guard) => guard,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many tab connections for this agent; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let permit = match acquire_ws_permit(
+        &state.ws_tab_semaphore,
+        peer.ip(),
+        "/ws/sessions/:id/tabs/:tab/pty",
+        "max_websocket_tab_connections",
+    ) {
+        Some(permit) => permit,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let engine = state.engine.clone();
+    let console = state.console.clone();
+    let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let bus = Arc::clone(&state.event_bus);
+    let connections = Arc::clone(&state.connections);
+    let peer_ip = peer.ip();
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| async move {
+            // Hold the per-agent sub-quota guard for the socket's lifetime; it
+            // decrements the agent's tab-socket count when this future is dropped.
+            let _tab_guard = tab_guard;
+            handle_pty_socket(
+                socket,
+                engine,
+                PtyTarget::Tab(tab),
+                console,
+                peer_ip,
+                permit,
+                pty_size_owners,
+                bus,
+                connections,
+            )
+            .await
+        })
+        .into_response()
+}
+
 /// Drive one nested per-PTY socket. On open, subscribe to the target PTY and replay
 /// the buffered scrollback/repaint (sized to `agent_scrollback_lines` inside the
 /// `PtyClient`). Then:
@@ -908,7 +1097,8 @@ async fn handle_pty_socket(
     // own); the guard deregisters on every exit path.
     let registry_id = uuid::Uuid::new_v4().to_string();
     let conn_class = match &target {
-        PtyTarget::Agent(_) => crate::rest_common::ConnClass::AgentPty,
+        // Support tabs run provider CLIs, so they count as agent-PTY connections.
+        PtyTarget::Agent(_) | PtyTarget::Tab(_) => crate::rest_common::ConnClass::AgentPty,
         PtyTarget::Terminal(_) => crate::rest_common::ConnClass::TerminalPty,
     };
     connections.insert(registry_id.clone(), conn_class);
@@ -923,7 +1113,9 @@ async fn handle_pty_socket(
     // provider if it isn't running yet (the same flow the legacy Subscribe uses);
     // a terminal subscribe attaches to an already-created companion terminal.
     let subscription = match &target {
-        PtyTarget::Agent(id) => engine.subscribe_pty(id.clone()).await,
+        // A tab subscribe resolves through the same tab-keyed `subscribe_pty`; for a
+        // dormant Support tab this launches it fresh (the "Start fresh session" path).
+        PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone()).await,
         PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
     };
     // Bind the guard for the socket's full lifetime. Dropping it when this
@@ -972,7 +1164,7 @@ async fn handle_pty_socket(
     .await;
     // Replay the buffered scrollback/repaint before streaming live bytes.
     send_binary(&sink, repaint).await;
-    let pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
+    let mut pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
 
     // Liveness ping (every connection). Consume the immediate first tick so the
     // first real ping waits a full period.
@@ -987,6 +1179,18 @@ async fn handle_pty_socket(
                     break;
                 }
                 continue;
+            }
+            // The forwarder task ends when the PTY is torn down server-side
+            // (close_tab/DetachAgent/crash) even while the client stays
+            // connected. Without this arm the socket + its connection-cap
+            // permit/guard linger until the client itself disconnects, which
+            // can pin the small per-agent WS sub-quota. Proactively tell the
+            // client to close and tear down our own loop the same way a
+            // client-initiated Close would.
+            _ = &mut pty_forwarder => {
+                let mut guard = sink.lock().await;
+                let _ = guard.send(Message::Close(None)).await;
+                break;
             }
             next = stream.next() => match next {
                 Some(Ok(msg)) => msg,

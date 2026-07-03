@@ -72,6 +72,20 @@ pub enum EngineRequest {
     /// subscribing to or deleting it (the legacy `SubscribeTerminal`/`DeleteTerminal`
     /// path looks terminals up by id alone and does not check session ownership).
     TerminalSession(String, oneshot::Sender<Option<String>>),
+    /// Create a Support tab for a session running the given provider (or the
+    /// session's project default when `None`), replying `(tab_id, provider)`. The
+    /// launch is fire-and-forget (async worker); the id returns synchronously so
+    /// the REST handler can echo it and the client can attach.
+    CreateAgentTab(
+        String,
+        Option<String>,
+        oneshot::Sender<Result<(String, String), String>>,
+    ),
+    /// Resolve the owning session id of a SUPPORT tab (instant lookup), or `None`
+    /// when the tab id is unknown or is a Main tab (which has no `agent_tabs` row
+    /// and is served by `/ws/sessions/:id/pty`). Lets the tab PTY socket and tab
+    /// REST routes enforce that a `:tab` belongs to its path `:id`.
+    TabSession(String, oneshot::Sender<Option<String>>),
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
@@ -576,6 +590,37 @@ impl EngineHandle {
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    /// Create a Support tab for `session_id` (provider `None` → project default),
+    /// replying `(tab_id, provider)`. Direct-return, mirroring `create_terminal`.
+    pub async fn create_agent_tab(
+        &self,
+        session_id: String,
+        provider: Option<String>,
+    ) -> Result<(String, String), String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::CreateAgentTab(session_id, provider, tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    /// The session id that owns SUPPORT tab `tab_id`, or `None` when the tab is
+    /// unknown or is a Main tab. Used by the tab PTY socket and the tab REST routes
+    /// to enforce that the tab belongs to the path's session before acting.
+    pub async fn tab_session(&self, tab_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::TabSession(tab_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
     }
 
     /// The session id that owns companion terminal `terminal_id`, or `None` when the
@@ -1114,8 +1159,16 @@ pub(crate) fn run_engine_loop(
         }
         for pruned in pruned {
             let status = match pruned.kind {
-                PrunedPtyKind::Agent => {
+                // A last-tab exit detaches the whole agent — a workspace-level
+                // event worth a warning. A tab exit that leaves siblings running is
+                // routine and scoped: a quiet info notice naming the tab, never the
+                // loud "Agent exited" warning (which would falsely imply the agent
+                // died).
+                PrunedPtyKind::Agent if pruned.agent_detached => {
                     WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
+                }
+                PrunedPtyKind::Agent => {
+                    WireStatus::new("info", format!("Tab ({}) exited.", pruned.label))
                 }
                 PrunedPtyKind::Terminal => {
                     WireStatus::new("info", format!("Terminal \"{}\" closed.", pruned.label))
@@ -1220,7 +1273,9 @@ pub(crate) fn run_engine_loop(
                     // any genuinely missed mutator is still caught by the backstop.)
                     let mutates = matches!(
                         req,
-                        EngineRequest::ApplyWire(..) | EngineRequest::CreateTerminal(..)
+                        EngineRequest::ApplyWire(..)
+                            | EngineRequest::CreateTerminal(..)
+                            | EngineRequest::CreateAgentTab(..)
                     );
                     handle_request(
                         &mut engine,
@@ -1604,6 +1659,16 @@ fn handle_request(
                 .map(|t| t.session_id.clone());
             let _ = reply.send(owner);
         }
+        EngineRequest::CreateAgentTab(session_id, provider, reply) => {
+            let res = create_agent_tab_inner(engine, &session_id, provider);
+            let _ = reply.send(res);
+        }
+        EngineRequest::TabSession(tab_id, reply) => {
+            // Support-only ownership: a Main tab has no `agent_tabs` row (`None`),
+            // so the tabs route 404s it — Main is served by `/ws/sessions/:id/pty`.
+            let owner = engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone());
+            let _ = reply.send(owner);
+        }
         EngineRequest::SessionWorktree(session_id, reply) => {
             let worktree = engine
                 .sessions
@@ -1780,34 +1845,130 @@ fn handle_subscribe(
     }
 }
 
-/// Launch (or resume) the real agent provider for `session_id` through the
-/// engine's standard launch flow. The provider is NOT inserted here: the
-/// dispatched launch runs in a background worker and the provider appears later
-/// via the worker-event drain (`process_agent_launch_ready`), the same path the
-/// TUI uses. The caller's `PendingSubscribe` waits for it.
-fn launch_agent(engine: &mut Engine, session_id: &str) -> Result<(), String> {
+/// Resolve `provider` (or the session's project default) and create a Support
+/// tab, replying `(tab_id, provider)`. Mirrors the `create_terminal` direct
+/// return: the launch is dispatched fire-and-forget inside `Engine::create_tab`.
+fn create_agent_tab_inner(
+    engine: &mut Engine,
+    session_id: &str,
+    provider: Option<String>,
+) -> Result<(String, String), String> {
     let session = engine
         .sessions
         .iter()
         .find(|s| s.id == session_id)
         .cloned()
         .ok_or_else(|| format!("unknown session {session_id}"))?;
-    // A launch is already running for this session: just wait for it.
-    if engine.is_in_flight(&InFlightKey::AgentLaunch(session_id.to_string())) {
+    let provider = match provider {
+        Some(p) => {
+            if !engine.config.providers.commands.contains_key(&p) {
+                return Err(format!(
+                    "Provider \"{p}\" is not configured. Pick one of the configured providers."
+                ));
+            }
+            dux_core::model::ProviderKind::new(p)
+        }
+        None => engine
+            .projects
+            .iter()
+            .find(|pr| pr.id == session.project_id)
+            .map(|pr| pr.default_provider.clone())
+            .unwrap_or_else(|| engine.config.default_provider()),
+    };
+    let provider_str = provider.as_str().to_string();
+    let tab_id = engine
+        .create_tab(session_id, provider, (24, 80))
+        .map_err(|e| e.to_string())?;
+    Ok((tab_id, provider_str))
+}
+
+/// Launch (or resume) the real provider for a subscribed id. The id is either a
+/// session id (the session-slot tab) or an extra tab id; either is resume-eligible
+/// per-provider (see `tab_resume_decision`).
+/// The provider is NOT inserted here: the dispatched launch runs in a background
+/// worker and the provider appears later via the worker-event drain
+/// (`process_agent_launch_ready`). The caller's `PendingSubscribe` waits for it.
+/// This subscribe-launches path is the web "start a dormant Support tab" action.
+fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> {
+    // A launch is already running for THIS id (session or tab): just wait for it.
+    // The guard keys by the subscribed id, matching the tab-keyed in-flight lock.
+    if engine.is_in_flight(&InFlightKey::AgentLaunch(subscribed_id.to_string())) {
         return Ok(());
     }
-    let resume = engine.should_resume_session(&session);
-    // Use the SAME completion message the TUI shows on reconnect-ready (via
-    // Engine::agent_reconnect_status_message) rather than a static "attaching…"
-    // placeholder. The launch-ready reaction echoes this status_message back as
-    // the final status; echoing a placeholder is what left the status line stuck
-    // on "Attaching to agent" forever after the agent had already attached.
-    let status_message = engine.agent_reconnect_status_message(&session, resume);
-    let request = engine.build_agent_launch_request(
+    // Main tab: the subscribed id is a session id -> resume-eligible reconnect.
+    if let Some(session) = engine
+        .sessions
+        .iter()
+        .find(|s| s.id == subscribed_id)
+        .cloned()
+    {
+        // Derive the message from the ACTUAL resume decision, not just
+        // `should_resume_session`: a live same-provider extra tab downgrades the
+        // session-slot launch to fresh (per-provider collision), and the toast
+        // must not claim "Resumed" when the dispatch actually starts fresh. The
+        // session-slot tab id equals the session id.
+        let resume = engine.tab_resume_decision(&session, &session.id, &session.provider, true);
+        // Use the SAME completion message the TUI shows on reconnect-ready rather
+        // than a static "attaching…" placeholder (which left the status line stuck).
+        let status_message = engine.agent_reconnect_status_message(&session, resume);
+        let request = engine.build_agent_launch_request(
+            session,
+            resume,
+            (24, 80),
+            AgentLaunchKind::Reconnect { status_message },
+        );
+        engine
+            .apply(Command::DispatchAgentLaunch {
+                request: Box::new(request),
+            })
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // Extra tab: resolve the owning session + the tab's own provider and launch.
+    // Resume is per-provider — reopening a dormant tab resumes that provider's
+    // conversation when it is the sole live tab of that provider (see
+    // `tab_resume_decision`). A tab-aware status message avoids the Main-only
+    // `agent_reconnect_status_message` (which would name the wrong provider).
+    let tab = engine
+        .agent_tabs
+        .get(subscribed_id)
+        .cloned()
+        .ok_or_else(|| format!("unknown session {subscribed_id}"))?;
+    let session = engine
+        .sessions
+        .iter()
+        .find(|s| s.id == tab.session_id)
+        .cloned()
+        .ok_or_else(|| format!("unknown session {}", tab.session_id))?;
+    // Refuse to (re)launch a Support tab into a session that is mid-deletion: its
+    // worktree is about to be removed, so spawning a fresh provider there would
+    // race `git::remove_worktree`. Mirrors the `closing_sessions` guard in
+    // `Engine::create_tab`.
+    if engine.closing_sessions.contains(&tab.session_id) {
+        return Err(format!(
+            "session {} is being deleted; not launching its tab",
+            tab.session_id
+        ));
+    }
+    let resume = engine.tab_resume_decision(&session, subscribed_id, &tab.provider, true);
+    let status_message = if resume {
+        format!(
+            "Resumed the {} conversation in this tab.",
+            tab.provider.as_str()
+        )
+    } else {
+        format!("Started a fresh {} tab.", tab.provider.as_str())
+    };
+    let request = engine.build_tab_launch_request(
+        subscribed_id.to_string(),
+        Some(tab.provider.clone()),
         session,
         resume,
         (24, 80),
-        AgentLaunchKind::Reconnect { status_message },
+        AgentLaunchKind::Tab {
+            is_fresh: false,
+            status_message,
+        },
     );
     engine
         .apply(Command::DispatchAgentLaunch {

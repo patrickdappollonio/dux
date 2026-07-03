@@ -35,6 +35,20 @@ pub enum Action {
     // Agent pane
     InteractAgent,
     ShowTerminal,
+    // Agent tabs (Center-scope; non-interactive only)
+    NextTab,
+    PrevTab,
+    NewTab,
+    CloseTab,
+    SelectTab1,
+    SelectTab2,
+    SelectTab3,
+    SelectTab4,
+    SelectTab5,
+    SelectTab6,
+    SelectTab7,
+    SelectTab8,
+    SelectTab9,
     ExitInteractive,
     OpenMacroBar,
     OpenCurrentPullRequest,
@@ -144,6 +158,19 @@ impl Action {
             Action::DeleteTerminal => "delete_terminal",
             Action::InteractAgent => "interact_agent",
             Action::ShowTerminal => "show_terminal",
+            Action::NextTab => "next_tab",
+            Action::PrevTab => "prev_tab",
+            Action::NewTab => "new_tab",
+            Action::CloseTab => "close_tab",
+            Action::SelectTab1 => "select_tab_1",
+            Action::SelectTab2 => "select_tab_2",
+            Action::SelectTab3 => "select_tab_3",
+            Action::SelectTab4 => "select_tab_4",
+            Action::SelectTab5 => "select_tab_5",
+            Action::SelectTab6 => "select_tab_6",
+            Action::SelectTab7 => "select_tab_7",
+            Action::SelectTab8 => "select_tab_8",
+            Action::SelectTab9 => "select_tab_9",
             Action::ExitInteractive => "exit_interactive",
             Action::OpenMacroBar => "open_macro_bar",
             Action::OpenCurrentPullRequest => "open_current_pull_request",
@@ -257,6 +284,19 @@ impl Action {
             Action::ShowTerminal => {
                 "Open the first companion terminal for the selected agent, or launch a new one if none exists."
             }
+            Action::NextTab => "Focus the next tab of the selected agent.",
+            Action::PrevTab => "Focus the previous tab of the selected agent.",
+            Action::NewTab => "Add a tab to the selected agent (starts fresh).",
+            Action::CloseTab => "Close the focused tab of the selected agent.",
+            Action::SelectTab1 => "Focus tab 1 of the selected agent.",
+            Action::SelectTab2 => "Focus tab 2 of the selected agent.",
+            Action::SelectTab3 => "Focus tab 3 of the selected agent.",
+            Action::SelectTab4 => "Focus tab 4 of the selected agent.",
+            Action::SelectTab5 => "Focus tab 5 of the selected agent.",
+            Action::SelectTab6 => "Focus tab 6 of the selected agent.",
+            Action::SelectTab7 => "Focus tab 7 of the selected agent.",
+            Action::SelectTab8 => "Focus tab 8 of the selected agent.",
+            Action::SelectTab9 => "Focus tab 9 of the selected agent.",
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::OpenMacroBar => "Open the macro command bar to send text macros.",
@@ -381,7 +421,20 @@ impl Action {
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
-            | Action::ShowTerminal => Some("Agent pane"),
+            | Action::ShowTerminal
+            | Action::NextTab
+            | Action::PrevTab
+            | Action::NewTab
+            | Action::CloseTab
+            | Action::SelectTab1
+            | Action::SelectTab2
+            | Action::SelectTab3
+            | Action::SelectTab4
+            | Action::SelectTab5
+            | Action::SelectTab6
+            | Action::SelectTab7
+            | Action::SelectTab8
+            | Action::SelectTab9 => Some("Agent pane"),
             Action::ScrollLineUp
             | Action::ScrollLineDown
             | Action::ScrollToBottom

@@ -497,6 +497,17 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(c.ui.agent_scrollback_lines),
         },
         ConfigEntry::Field {
+            key: "agent_tabs_max",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of tabs a single agent may have, counting its Main\n\
+                 # tab. An agent's first (Main) tab is the one that resumes its previous\n\
+                 # conversation; every extra tab is a fresh, ephemeral \"support\" session.\n\
+                 # The \"+\" button stops adding tabs once an agent reaches this limit.\n\
+                 # Clamped to a sane ceiling; 0 falls back to the default (20).",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.agent_tabs_max),
+        },
+        ConfigEntry::Field {
             key: "status_clear_seconds",
             comment: Some(CommentSource::Static(
                 "# Seconds before a transient status-line message auto-clears.\n# Applies to success/info confirmations only; busy/pending messages stay\n# until the operation finishes, and warnings/errors stay until replaced.\n# Set to 0 to disable auto-clear (messages persist until the next one).",
@@ -699,6 +710,32 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # to take effect (a reload of the running server cannot resize the cap).",
             )),
             value_fn: |c| FieldValue::Usize(c.server.max_websocket_terminal_connections as usize),
+        },
+        ConfigEntry::Field {
+            key: "max_websocket_tab_connections",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of concurrent extra-tab PTY WebSocket connections\n\
+                 # across ALL agents. Tab streams draw from THIS pool, not the agent-PTY\n\
+                 # pool, so a few agents each showing many tabs cannot 503 every other\n\
+                 # agent's primary terminal. Once this many are live, further tab streams\n\
+                 # are refused with HTTP 503 until a slot frees. A value of 0 PERMANENTLY\n\
+                 # blocks all tab streams until the server restarts. Changing this needs a\n\
+                 # server restart to take effect.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_tab_connections as usize),
+        },
+        ConfigEntry::Field {
+            key: "max_websocket_tabs_per_agent",
+            comment: Some(CommentSource::Static(
+                "# Maximum concurrent live extra-tab PTY streams a SINGLE agent may\n\
+                 # hold, checked BEFORE a permit is taken from the shared tab pool above.\n\
+                 # A per-agent fairness sub-quota so one agent showing many tabs cannot\n\
+                 # monopolize that pool and starve other agents' tabs. Once an agent hits\n\
+                 # this many live tab streams, further ones for THAT agent are refused with\n\
+                 # HTTP 503 until one closes. A value of 0 PERMANENTLY blocks all tab\n\
+                 # streams until the server restarts.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.max_websocket_tabs_per_agent as usize),
         },
         ConfigEntry::Field {
             key: "title",
@@ -1313,6 +1350,8 @@ mod tests {
         assert!(rendered.contains("max_websocket_events_connections = 32"));
         assert!(rendered.contains("max_websocket_agent_connections = 32"));
         assert!(rendered.contains("max_websocket_terminal_connections = 64"));
+        assert!(rendered.contains("max_websocket_tab_connections = 64"));
+        assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
         // emits favicon only as a comment is caught.

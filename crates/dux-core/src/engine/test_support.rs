@@ -12,7 +12,7 @@ use crate::config::{Config, DuxPaths};
 use crate::engine::Engine;
 use crate::lockfile::SingleInstanceLock;
 use crate::model::{
-    AgentSession, GhStatus, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
+    AgentSession, AgentTab, GhStatus, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
 };
 use crate::storage::SessionStore;
 
@@ -56,7 +56,9 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         providers: HashMap::new(),
         running_provider_pins: HashMap::new(),
         companion_terminals: HashMap::new(),
+        agent_tabs: HashMap::new(),
         terminating_ptys: Vec::new(),
+        pending_group_removals: Vec::new(),
         gh_status: GhStatus::Unknown,
         pr_statuses: HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
@@ -66,6 +68,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         refs_watch_paths: HashMap::new(),
         resume_fallback_candidates: HashMap::new(),
         pending_deletions: HashSet::new(),
+        closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),
         watched_worktree: Arc::new(Mutex::new(None::<PathBuf>)),
         watched_session_id: None,
@@ -88,6 +91,17 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         created_session_by_op: HashMap::new(),
     };
     (engine, tmp)
+}
+
+/// A Support-tab record (`agent_tabs` entry) owned by `session_id`.
+pub(crate) fn sample_tab(id: &str, session_id: &str, provider: &str, sort_order: i64) -> AgentTab {
+    AgentTab {
+        id: id.to_string(),
+        session_id: session_id.to_string(),
+        provider: ProviderKind::new(provider),
+        sort_order,
+        created_at: Utc::now(),
+    }
 }
 
 pub(crate) fn sample_project(id: &str, path: &str) -> Project {

@@ -205,6 +205,19 @@ describe("store write actions surface REST errors as a toast", () => {
     )
   })
 
+  it("deleteSession does NOT toast a 409 (refusal already surfaced via /ws)", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    actionStatus = 409
+    mod.deleteSession("s1", true)
+    // Let the DELETE fire and its rejection chain (the .catch) fully settle.
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // A delete refused because a tab is still launching is broadcast over /ws;
+    // the REST .catch must stay silent so the user sees exactly one toast.
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
   it("reorderProjects clears its optimistic overlay and toasts on error", async () => {
     const mod = await loadStore()
     actionFails = true

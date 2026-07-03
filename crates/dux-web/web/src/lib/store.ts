@@ -13,6 +13,7 @@ import { getActivePtySocket } from "./ptySocket"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes } from "./macros"
 import { terminalsApi } from "./terminalsApi"
+import { tabsApi } from "./tabsApi"
 import { browseApi } from "./browseApi"
 import { configApi } from "./configApi"
 import { setConnectionId } from "./connection"
@@ -41,7 +42,10 @@ import type {
 // companion terminals. Both carry a `sessionId` so session-scoped UI (the
 // breadcrumb, changed files) keeps working regardless of which is focused.
 export type SelectedTarget =
-  | { kind: "agent"; sessionId: string }
+  // An agent tab. `tabId === sessionId` for the Main tab; a Support tab carries
+  // its own id. The streamed PTY and all per-tab UI resolve from `tabId`, while
+  // session-scoped UI keeps using `sessionId`.
+  | { kind: "agent"; sessionId: string; tabId: string }
   | { kind: "terminal"; terminalId: string; sessionId: string }
 
 // The mobile hub-&-spoke shell shows one screen at a time: the project/session
@@ -159,6 +163,19 @@ export interface DuxState {
   // The companion terminal id pending close confirmation, or null. Mirrors the
   // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
   deleteTerminalTarget: string | null
+  // The tab pending close confirmation, or null. Closing always confirms; all
+  // tabs are generic. Closing a tab ends it, and closing the agent's last tab
+  // detaches the agent (which stays in Projects, reopenable).
+  closeTabTarget: { sessionId: string; tabId: string } | null
+  // Session ids with a tab-create request in flight, so the strip's "+" disables
+  // until it resolves (a double-click can't spawn two tabs). The per-agent tab
+  // cap still guards the server; this is the common-case UX guard.
+  createTabInFlight: string[]
+  // Support tab ids the user explicitly started from their dormant card. Lets the
+  // pane mount (subscribe = launch fresh) for a tab whose server-reported
+  // `has_live_process` is still false — so FOCUS alone never launches a dormant
+  // tab, only the "Start fresh session" button does.
+  startedDormantTabs: string[]
   // The unstaged file pending discard confirmation, or null. The TUI confirms
   // every discard (it's destructive); the web mirrors that.
   discardTarget: DiscardTarget | null
@@ -389,6 +406,9 @@ let state: DuxState = {
   commitDraft: "",
   deleteTarget: null,
   deleteTerminalTarget: null,
+  closeTabTarget: null,
+  createTabInFlight: [],
+  startedDormantTabs: [],
   discardTarget: null,
   globalEnvOpen: false,
   projectSettingsTarget: null,
@@ -502,6 +522,26 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   // and unwinds any optimistic reorder overlay — mirroring the old `onStatus`.
   if (ev.event === "status") {
     if (ev.tone === "error") setState({ ...clearPendingClientIntent() })
+    // A `tab-launch-<tabId>` keyed status carries BOTH outcomes of a Support-tab
+    // launch: a `warning` on failure and an `info` on success (both keyed the same
+    // so neither is clobbered by an unrelated toast). Only the FAILURE clears that
+    // tab's "explicitly started" latch — so `isSupportTabDormant` goes true again,
+    // the dormant retry card returns, and the pane stops auto-reconnecting the
+    // failing launch. The SUCCESS path must NOT touch the latch here: the latch is
+    // cleared race-free by `applySpine` in the same tick it flips `has_live_process`
+    // true, and stripping it early (before the spine refetch lands) would briefly
+    // re-mark the tab dormant, unmounting the just-launched pane and flashing the
+    // "Start fresh session" card back until the spine catches up.
+    if (ev.tone === "warning" && ev.key?.startsWith("tab-launch-")) {
+      const tabId = ev.key.slice("tab-launch-".length)
+      if (state.startedDormantTabs.includes(tabId)) {
+        setState({
+          startedDormantTabs: state.startedDormantTabs.filter(
+            (id) => id !== tabId,
+          ),
+        })
+      }
+    }
     showStatusToast(ev.key, ev.tone ?? "info", ev.message ?? "")
     return
   }
@@ -758,10 +798,25 @@ function loadSpine(): void {
 // this (now-stale) result if a newer load has since started, so a slow older
 // response can never overwrite a fresher spine (and re-run focus/prune against
 // outdated data).
-function applySpine(spine: Spine, seq: number): void {
+function applySpine(rawSpine: Spine, seq: number): void {
   if (seq < loadSpineSeq) return
+  // `tabs` is normalized to an array at the fetch boundary (`fetchSpine`), so an
+  // older server that omits the field degrades to an empty strip rather than
+  // throwing on the `session.tabs` derefs downstream.
+  const spine = rawSpine
+  // Clear the "explicitly started" latch for any tab whose process is now live.
+  // The latch only bridges the click->process-up gap; once the process is up it
+  // is no longer needed, and dropping it means a *later* exit (has_live_process
+  // back to false) correctly re-shows the dormant card so a plain refocus can't
+  // force-launch. Tabs that are started-but-not-yet-live keep their latch.
+  const liveTabIds = new Set(
+    spine.sessions.flatMap((s) => s.tabs.filter((t) => t.has_live_process).map((t) => t.id)),
+  )
+  const prunedDormant = state.startedDormantTabs.filter((id) => !liveTabIds.has(id))
   setState({
     spine,
+    startedDormantTabs:
+      prunedDormant.length === state.startedDormantTabs.length ? state.startedDormantTabs : prunedDormant,
     pendingSessionOrder: reconcilePendingSessionOrder(spine, state.pendingSessionOrder),
     pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
   })
@@ -817,12 +872,27 @@ function reconcilePendingProjectOrder(
 function pruneSelectionIfGone(spine: Spine): void {
   const target = state.selectedTarget
   if (!target) return
+  const session = spine.sessions.find((s) => s.id === target.sessionId)
+  if (target.kind === "agent") {
+    // The session must still exist; if a Support tab is focused, it must still be
+    // in that session's tab list (a Support tab can be closed by ANOTHER client,
+    // whose local retarget-to-Main never ran here — this is the shared-workspace
+    // heal path). A gone Support tab falls back to the Main tab rather than
+    // ejecting the user to the welcome screen.
+    if (!session) {
+      selectSession(null)
+    } else if (
+      target.tabId !== target.sessionId &&
+      !session.tabs.some((t) => t.id === target.tabId)
+    ) {
+      selectSession(target.sessionId)
+    }
+    return
+  }
+  // A terminal: it must still exist UNDER its owning session (scope by
+  // `sessionId`, not a cross-session `.some`).
   const stillExists =
-    target.kind === "agent"
-      ? spine.sessions.some((s) => s.id === target.sessionId)
-      : spine.sessions.some((s) =>
-          s.terminals.some((t) => t.id === target.terminalId),
-        )
+    session?.terminals.some((t) => t.id === target.terminalId) ?? false
   if (!stillExists) {
     // `selectSession(null)` clears the target and, on mobile, unwinds the spoke
     // so the back stack matches the screen (see `unwindMobileSpoke`). This is
@@ -1047,7 +1117,11 @@ export function useDux(): DuxState {
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
 function parseSelectionHash(hash: string): SelectedTarget | null {
-  const m = hash.match(/^#\/agent\/([^/]+)(?:\/terminal\/([^/]+))?$/)
+  // Three mutually-exclusive shapes: bare agent (`#/agent/<sid>` = Main tab), a
+  // Support tab (`#/agent/<sid>/tab/<tabId>`), or a companion terminal
+  // (`#/agent/<sid>/terminal/<tid>`). The literal `tab`/`terminal` keyword
+  // disambiguates, so a tab/terminal literally named "tab" can't be confused.
+  const m = hash.match(/^#\/agent\/([^/]+)(?:\/(tab|terminal)\/([^/]+))?$/)
   if (!m) return null
   // `decodeURIComponent` throws a URIError on malformed percent-encoding (e.g.
   // `#/agent/%ZZ`). This runs at module init, so an unguarded throw would blank
@@ -1055,24 +1129,38 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
   try {
     const sessionId = decodeURIComponent(m[1])
     if (!sessionId) return null
-    if (m[2]) {
-      const terminalId = decodeURIComponent(m[2])
+    if (m[2] === "terminal") {
+      const terminalId = decodeURIComponent(m[3])
       if (!terminalId) return null
       return { kind: "terminal", terminalId, sessionId }
     }
-    return { kind: "agent", sessionId }
+    if (m[2] === "tab") {
+      const tabId = decodeURIComponent(m[3])
+      if (!tabId) return null
+      // A self-aliased `#/agent/<sid>/tab/<sid>` is the Main tab written the
+      // long way — normalize to the canonical bare Main target so there is only
+      // ever one representation of Main (a real Support tab never has
+      // `tabId === sessionId`).
+      return { kind: "agent", sessionId, tabId }
+    }
+    return { kind: "agent", sessionId, tabId: sessionId }
   } catch {
     return null
   }
 }
 
-// The hash for a target (or the bare path when nothing is selected).
+// The hash for a target (or the bare path when nothing is selected). The `/tab/`
+// segment is emitted ONLY for a Support tab; the Main tab (`tabId === sessionId`)
+// stays the bare `#/agent/<sid>` so existing bookmarks remain valid.
 function selectionHash(target: SelectedTarget | null): string {
   if (!target) return ""
   const base = `#/agent/${encodeURIComponent(target.sessionId)}`
-  return target.kind === "terminal"
-    ? `${base}/terminal/${encodeURIComponent(target.terminalId)}`
-    : base
+  if (target.kind === "terminal") {
+    return `${base}/terminal/${encodeURIComponent(target.terminalId)}`
+  }
+  return target.tabId === target.sessionId
+    ? base
+    : `${base}/tab/${encodeURIComponent(target.tabId)}`
 }
 
 // Mirror the current selection into the URL hash without growing the back stack.
@@ -1119,6 +1207,14 @@ function restoreDeepLink(spine: Spine): void {
       return
     }
     // Terminal id gone — fall back to the owning agent.
+  } else if (link.tabId !== link.sessionId) {
+    // A Support-tab deep link: restore it only if the tab still exists, else
+    // fall through to the Main tab.
+    const stillThere = session.tabs.some((t) => t.id === link.tabId)
+    if (stillThere) {
+      selectTab(link.sessionId, link.tabId)
+      return
+    }
   }
   selectSession(link.sessionId)
 }
@@ -1145,7 +1241,8 @@ export function selectSession(id: string | null): void {
     return
   }
   setState({
-    selectedTarget: { kind: "agent", sessionId: id },
+    // Selecting a session focuses its Main tab (tabId === sessionId).
+    selectedTarget: { kind: "agent", sessionId: id, tabId: id },
     selectedSessionId: id,
     // Re-selecting the same session keeps its loaded data; a real switch enters
     // the loading window so the pane shows a spinner, not the previous session's
@@ -1157,6 +1254,21 @@ export function selectSession(id: string | null): void {
   switchChangesSubscription(prev, id)
   writeSelectionHash()
   if (prev !== id) loadChanges(id)
+}
+
+// Focus a specific provider tab of a session. `tabId === sessionId` focuses the
+// Main tab (equivalent to `selectSession`). The changed files belong to the
+// SESSION, so the subscription/fetch key off `sessionId` regardless of tab.
+export function selectTab(sessionId: string, tabId: string): void {
+  const prev = state.selectedSessionId
+  setState({
+    selectedTarget: { kind: "agent", sessionId, tabId },
+    selectedSessionId: sessionId,
+    changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
+  })
+  switchChangesSubscription(prev, sessionId)
+  writeSelectionHash()
+  if (prev !== sessionId) loadChanges(sessionId)
 }
 
 // Select one of a session's companion terminals as the streamed target. The
@@ -1225,6 +1337,110 @@ export function deleteTerminal(terminalId: string): void {
     )
 }
 
+// --- Agent tabs -------------------------------------------------------------
+
+// Add a Support tab to a session, then focus it. The 201 reply carries the new
+// tab id; focus it immediately (opening its PTY socket, which launches it fresh)
+// rather than waiting for the spine refetch, mirroring `createTerminal`. The "+"
+// is disabled while a create is in flight so a double-click can't spawn two tabs.
+export function addTab(sessionId: string, provider?: string): void {
+  if (state.createTabInFlight.includes(sessionId)) return
+  setState({ createTabInFlight: [...state.createTabInFlight, sessionId] })
+  const clearInFlight = () =>
+    setState({
+      createTabInFlight: state.createTabInFlight.filter((s) => s !== sessionId),
+    })
+  tabsApi
+    .create(sessionId, provider)
+    .then((created) => {
+      clearInFlight()
+      // A newly-added tab launches immediately (never dormant), so just focus it;
+      // the pane subscribes on mount.
+      selectTab(sessionId, created.tab_id)
+    })
+    .catch((e) => {
+      clearInFlight()
+      toast.error(e instanceof Error ? e.message : "Could not create the tab.")
+    })
+}
+
+// Open the close-tab confirmation. Closing ALWAYS confirms; all tabs are generic.
+// Closing a tab ends it, and closing the agent's last tab detaches the agent.
+export function openCloseTab(sessionId: string, tabId: string): void {
+  setState({ closeTabTarget: { sessionId, tabId } })
+}
+
+export function closeCloseTab(): void {
+  setState({ closeTabTarget: null })
+}
+
+// Close a tab via REST. Closing the session-slot tab (`tabId === sessionId`) stops
+// that tab and detaches the agent only if it was the last live tab (server 200,
+// session survives); an extra tab is destroyed (204). If the closed tab was the
+// focused target, move focus off it so the pane never sits on the just-closed tab
+// and re-subscribes it (subscribing force-relaunches the provider): an extra tab
+// falls back to the session-slot tab; the session-slot tab falls back to a live
+// sibling when the agent still has one. A failure toasts.
+export function closeTab(sessionId: string, tabId: string): void {
+  const target = state.selectedTarget
+  const focused =
+    target?.kind === "agent" &&
+    target.sessionId === sessionId &&
+    target.tabId === tabId
+  if (focused) {
+    if (tabId !== sessionId) {
+      selectSession(sessionId) // focus the session-slot tab
+    } else {
+      // Closing the focused session-slot tab: if other tabs are still live, focus
+      // a live sibling so the closed slot isn't re-subscribed (which would relaunch
+      // it). With no live sibling the agent is detaching — leave selection put.
+      const liveSibling = state.spine?.sessions
+        .find((s) => s.id === sessionId)
+        ?.tabs.find((t) => t.id !== tabId && t.has_live_process)
+      if (liveSibling) selectTab(sessionId, liveSibling.id)
+    }
+  }
+  setState({
+    startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
+  })
+  tabsApi
+    .remove(sessionId, tabId)
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not close the tab."),
+    )
+}
+
+// Retarget a tab's provider (effective on its next launch). Validated up front
+// against the configured list, mirroring `changeAgentProvider`. Resolves `true`
+// on success, `false` (after toasting) so a dialog can stay open.
+export async function retargetTab(
+  sessionId: string,
+  tabId: string,
+  provider: string,
+): Promise<boolean> {
+  if (!providerIsConfigured(provider)) {
+    toast.error(`Provider "${provider}" is not configured.`)
+    return false
+  }
+  try {
+    await tabsApi.patch(sessionId, tabId, provider)
+    return true
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Could not change the provider.")
+    return false
+  }
+}
+
+// Explicitly start a dormant Support tab from its dormant card: mark it started
+// (so the pane mounts and subscribes = launches fresh) and focus it. This is the
+// ONLY path that launches a dormant tab — focusing one never does.
+export function startDormantTab(sessionId: string, tabId: string): void {
+  if (!state.startedDormantTabs.includes(tabId)) {
+    setState({ startedDormantTabs: [...state.startedDormantTabs, tabId] })
+  }
+  selectTab(sessionId, tabId)
+}
+
 // Open the discard-confirmation dialog for an unstaged file. The TUI confirms
 // every discard because it's destructive — an untracked file is deleted, a
 // tracked one loses its working-tree changes. The web mirrors that.
@@ -1289,9 +1505,15 @@ export function closeDelete(): void {
 export function deleteSession(sessionId: string, deleteWorktree: boolean): void {
   sessionsApi
     .remove(sessionId, deleteWorktree)
-    .catch((e) =>
-      toast.error(e instanceof Error ? e.message : "Could not delete the session."),
-    )
+    .catch((e) => {
+      // A 409 is a refusal (a tab is still launching, or a delete is already in
+      // flight). The server already surfaces that message over the /ws status
+      // stream, so don't toast it a second time. Mirrors `toastCreateError`.
+      if (e instanceof SessionsApiError && e.status === 409) return
+      toast.error(
+        e instanceof Error ? e.message : "Could not delete the session.",
+      )
+    })
 }
 
 // Open the rename dialog for a session, pre-filling the current custom title
@@ -1411,7 +1633,8 @@ export function reconnectSession(sessionId: string, force: boolean): void {
       ),
     )
   setState({
-    selectedTarget: { kind: "agent", sessionId },
+    // Reconnect is a Main-tab operation, so focus the Main tab.
+    selectedTarget: { kind: "agent", sessionId, tabId: sessionId },
     selectedSessionId: sessionId,
     terminalEpoch: state.terminalEpoch + 1,
   })

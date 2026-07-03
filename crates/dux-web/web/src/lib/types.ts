@@ -51,6 +51,24 @@ export interface PrView {
   url: string
 }
 
+// One provider tab of an agent, mirroring the Rust `AgentTabView`. Tabs are
+// generic provider sessions in the agent's shared worktree, in creation order
+// (`tabs[0]` is the session-slot tab whose `id === session.id`, an implementation
+// detail — no tab is privileged). Resume is decided dynamically at launch: a tab
+// resumes the worktree's prior conversation only when it is the sole tab coming up
+// (no other tab live/launching); concurrent tabs start fresh. `has_live_process`
+// is false for a tab with no running PTY (a tab reopened dormant after a restart)
+// — the web must render its dormant card WITHOUT opening the PTY socket, because
+// subscribing force-launches the provider server-side.
+export interface AgentTabView {
+  id: string
+  provider: string
+  order: number
+  working: boolean
+  has_output: boolean
+  has_live_process: boolean
+}
+
 export interface TerminalView {
   id: string
   label: string
@@ -73,6 +91,12 @@ export interface SessionView {
   auto_reopen_enabled: boolean
   pr?: PrView
   terminals: TerminalView[]
+  /** The agent's provider tabs in creation order (`tabs[0].id === id`). A session
+   * always has at least one tab; the tab strip renders only when there are two or
+   * more. See `AgentTabView`. An older server that predates tabs (e.g. after a
+   * binary downgrade, seen by an already-open client) omits the field; `applySpine`
+   * normalizes a missing value to `[]` at ingestion. */
+  tabs: AgentTabView[]
   has_output: boolean
   /** Hysteresis boolean: the agent emitted PTY output within the last second.
    * Drives the "working" ping-ring animation on the active status badge. */

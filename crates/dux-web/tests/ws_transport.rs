@@ -864,6 +864,60 @@ async fn terminal_rest_create_and_delete() {
     );
 }
 
+/// Deleting a terminal server-side while a client is still attached to its PTY
+/// socket must proactively close that socket instead of leaving it dangling
+/// until the client disconnects on its own. Before the `pty_forwarder`
+/// completion arm was added to `handle_pty_socket`'s `select!` loop, the
+/// forwarder task ending (because the PTY was torn down) was invisible to the
+/// loop, so the socket (and its connection-cap permit/guard) would linger.
+#[tokio::test]
+async fn deleting_terminal_closes_its_attached_pty_socket() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let terminal_id = create_terminal_via_rest(addr, "s1").await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/sessions/s1/terminals/{terminal_id}/pty"
+    ))
+    .await
+    .expect("connect terminal pty socket");
+    // Claim ownership so the socket is fully attached, matching a real client.
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+
+    let deleted = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1/terminals/{terminal_id}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status().as_u16(), 204, "delete → 204");
+
+    // The socket must close on its own (Close frame or stream end) well within
+    // the liveness-ping window, not merely go quiet.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut closed = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                closed = true;
+                break;
+            }
+            Ok(Some(Err(_))) => {
+                closed = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        closed,
+        "pty socket for a deleted terminal was not proactively closed"
+    );
+}
+
 /// The session-nested git and file routes reach their handlers over real HTTP (a
 /// stage against an unknown session 404s), and the old body-keyed `/api/v1/git/*` /
 /// `/api/v1/file/*` paths no longer reach the handler (they fall through to the SPA

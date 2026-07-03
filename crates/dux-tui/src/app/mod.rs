@@ -39,8 +39,8 @@ use crate::keybindings::{
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;
 use crate::model::{
-    AgentSession, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus, ProviderKind,
-    SessionStatus, SessionSurface,
+    AgentSession, AgentTab, ChangedFile, CompanionTerminalStatus, Project, ProjectBranchStatus,
+    ProviderKind, SessionStatus, SessionSurface,
 };
 
 use crate::pty::PtyClient;
@@ -94,6 +94,17 @@ pub struct App {
     pub(crate) session_surface: SessionSurface,
     pub(crate) clipboard: Clipboard,
     pub(crate) active_terminal_id: Option<String>,
+    /// Which tab is focused in the center pane, per session (session_id →
+    /// tab_id). Missing or equal-to-session-id means the Main tab. Only the
+    /// center pane resolves the focused tab; sidebar/session labels stay
+    /// Main-scoped. Pruned when a session is torn down.
+    pub(crate) focused_tabs: HashMap<String, String>,
+    /// Click hit-boxes for the agent tab strip, rebuilt each frame while the
+    /// strip is drawn: (tab_id, cell rect) for each tab, plus the `+` add rect.
+    /// Kept out of `MouseLayoutState` (which is `Copy`); reset by the strip
+    /// renderer, empty when the strip is hidden (< 2 tabs) or in fullscreen.
+    pub(crate) agent_tab_regions: Vec<(String, Rect)>,
+    pub(crate) agent_tab_add_region: Option<Rect>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) last_pty_size: (u16, u16),
     pub(crate) prev_scrollback_offset: usize,
@@ -631,6 +642,10 @@ impl KillableRuntimeKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeTargetId {
     Agent(String),
+    /// A Support tab's provider process (keyed by tab id). Killing it stops the
+    /// process but keeps the tab row, so the tab becomes dormant (unlike
+    /// `Agent`, which detaches the whole session).
+    Tab(String),
     Terminal(String),
 }
 
@@ -726,6 +741,10 @@ pub(crate) struct ChangeAgentProviderOption {
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeAgentProviderPrompt {
     pub(crate) session_id: String,
+    /// The tab being retargeted. Equals `session_id` for the Main tab (which
+    /// delegates to the session-level provider change); a Support tab id
+    /// otherwise. Lets `ctrl+p` retarget the focused tab, not just the agent.
+    pub(crate) tab_id: String,
     pub(crate) session_label: String,
     pub(crate) worktree_path: String,
     pub(crate) options: Vec<ChangeAgentProviderOption>,
@@ -927,6 +946,16 @@ pub(crate) enum PromptState {
         /// an idle terminal merely ends the shell.
         foreground_cmd: Option<String>,
         confirm_selected: bool, // false = Cancel (default), true = Delete
+    },
+    /// Close/detach an agent tab. Closing the Main tab (`is_main`) detaches the
+    /// agent (non-destructive, stays in Projects); closing a Support tab ends
+    /// that session for good (destructive), so it defaults to Cancel.
+    ConfirmCloseTab {
+        session_id: String,
+        tab_id: String,
+        provider_label: String,
+        is_main: bool,
+        confirm_selected: bool, // false = Cancel (default), true = Close/Detach
     },
     ConfirmQuit {
         agent_count: usize,
@@ -1345,6 +1374,10 @@ pub(crate) enum OverlayMouseLayout {
         cancel_button: Rect,
         delete_button: Rect,
     },
+    ConfirmCloseTab {
+        cancel_button: Rect,
+        confirm_button: Rect,
+    },
     ConfirmDeleteMacro {
         cancel_button: Rect,
         delete_button: Rect,
@@ -1557,6 +1590,7 @@ impl App {
             &session_store,
         )?;
         let sessions = session_store.load_sessions()?;
+        let agent_tabs = session_store.load_agent_tabs()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
@@ -1604,7 +1638,9 @@ impl App {
             providers: HashMap::new(),
             running_provider_pins: HashMap::new(),
             companion_terminals: HashMap::new(),
+            agent_tabs: agent_tabs.into_iter().map(|t| (t.id.clone(), t)).collect(),
             terminating_ptys: Vec::new(),
+            pending_group_removals: Vec::new(),
             gh_status: crate::model::GhStatus::Unknown,
             pr_statuses: HashMap::new(),
             branch_sync_sessions,
@@ -1614,6 +1650,7 @@ impl App {
             refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashMap::new(),
             pending_deletions: HashSet::new(),
+            closing_sessions: HashSet::new(),
             deletion_busy_messages: HashMap::new(),
             watched_worktree: Arc::clone(&watched_worktree),
             watched_session_id: None,
@@ -1709,6 +1746,9 @@ impl App {
             session_surface: SessionSurface::Agent,
             clipboard: Clipboard::new(),
             active_terminal_id: None,
+            focused_tabs: HashMap::new(),
+            agent_tab_regions: Vec::new(),
+            agent_tab_add_region: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             prev_scrollback_offset: 0,
@@ -2364,6 +2404,11 @@ impl App {
             "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
+            "new-tab" => self.new_tab_for_selected_session(),
+            "close-tab" => {
+                self.close_focused_tab_prompt();
+                Ok(())
+            }
             "change-default-provider" => self.open_change_default_provider_prompt(),
             "change-project-default-provider" => self.open_change_project_default_provider_prompt(),
             "change-theme" => self.open_change_theme_prompt(),
@@ -3172,7 +3217,8 @@ impl App {
         match self.session_surface {
             SessionSurface::Agent => {
                 let session = self.selected_session()?;
-                provider_config(&self.engine.config, &session.provider).forward_scroll
+                let provider = self.focused_tab_provider(session);
+                provider_config(&self.engine.config, &provider).forward_scroll
             }
             SessionSurface::Terminal => None,
         }
@@ -3181,13 +3227,125 @@ impl App {
     pub(crate) fn selected_terminal_surface_client(&self) -> Option<&PtyClient> {
         match self.session_surface {
             SessionSurface::Agent => {
-                let session_id = self.selected_session()?.id.as_str();
-                self.engine.providers.get(session_id)
+                let session_id = self.selected_session()?.id.clone();
+                self.engine.providers.get(&self.focused_tab_id(&session_id))
             }
             SessionSurface::Terminal => {
                 let id = self.active_terminal_id.as_ref()?;
                 self.engine.companion_terminals.get(id).map(|t| &t.client)
             }
+        }
+    }
+
+    // ---- Agent tabs: per-session focused tab, switching, labels ----
+
+    /// The focused tab id for a session, defaulting to the Main tab (the
+    /// session id). Clamps to Main when the stored tab no longer exists, so
+    /// every seam that resolves the focused tab is safe after a tab close.
+    pub(crate) fn focused_tab_id(&self, session_id: &str) -> String {
+        match self.focused_tabs.get(session_id) {
+            Some(id) if id == session_id => id.clone(),
+            Some(id)
+                if self
+                    .engine
+                    .agent_tabs
+                    .get(id)
+                    .is_some_and(|t| t.session_id == session_id) =>
+            {
+                id.clone()
+            }
+            _ => session_id.to_string(),
+        }
+    }
+
+    /// The effective provider of a session's focused tab (Main resolves to the
+    /// session's running/pinned provider; a Support tab to its own, honoring a
+    /// swap-while-running pin). Used for the center title, caption, and
+    /// scroll-routing config lookup.
+    pub(crate) fn focused_tab_provider(&self, session: &AgentSession) -> ProviderKind {
+        let tab = self.focused_tab_id(&session.id);
+        if tab == session.id {
+            self.engine.running_provider_for(session)
+        } else {
+            self.engine
+                .running_provider_pins
+                .get(&tab)
+                .cloned()
+                .or_else(|| self.engine.agent_tabs.get(&tab).map(|t| t.provider.clone()))
+                .unwrap_or_else(|| session.provider.clone())
+        }
+    }
+
+    /// Ordered tab ids for a session: Main (session id) first, then Support
+    /// tabs by (sort_order, created_at).
+    pub(crate) fn session_tab_ids(&self, session_id: &str) -> Vec<String> {
+        let mut support: Vec<&AgentTab> = self
+            .engine
+            .agent_tabs
+            .values()
+            .filter(|t| t.session_id == session_id)
+            .collect();
+        support.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+        let mut ids = Vec::with_capacity(support.len() + 1);
+        ids.push(session_id.to_string());
+        ids.extend(support.into_iter().map(|t| t.id.clone()));
+        ids
+    }
+
+    /// Set the focused tab for a session (Main clears the entry). Switching
+    /// forces a snapshot + PTY-size refresh and clears the terminal selection,
+    /// mirroring the side effects of a surface change.
+    pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
+        if tab_id == session_id {
+            self.focused_tabs.remove(session_id);
+        } else {
+            self.focused_tabs
+                .insert(session_id.to_string(), tab_id.to_string());
+        }
+        self.last_snapshot_id = None;
+        self.last_pty_size = (0, 0);
+        self.terminal_selection = None;
+    }
+
+    /// Drop a session's focused-tab entry (called on session teardown so
+    /// stale entries can't leak). Mirrors `clear_companion_terminals_for_session`.
+    pub(crate) fn clear_focused_tab_for_session(&mut self, session_id: &str) {
+        self.focused_tabs.remove(session_id);
+    }
+
+    /// Move focus to the next/previous tab of the selected session (wrapping).
+    /// No-op when the session has fewer than two tabs.
+    pub(crate) fn focus_tab_relative(&mut self, forward: bool) {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        let ids = self.session_tab_ids(&session_id);
+        if ids.len() < 2 {
+            return;
+        }
+        let cur = self.focused_tab_id(&session_id);
+        let idx = ids.iter().position(|i| *i == cur).unwrap_or(0);
+        let next = if forward {
+            (idx + 1) % ids.len()
+        } else {
+            (idx + ids.len() - 1) % ids.len()
+        };
+        let target = ids[next].clone();
+        self.set_focused_tab(&session_id, &target);
+    }
+
+    /// Jump to the nth tab (0-based) of the selected session, if it exists.
+    pub(crate) fn focus_tab_index(&mut self, n: usize) {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        let ids = self.session_tab_ids(&session_id);
+        if let Some(target) = ids.get(n).cloned() {
+            self.set_focused_tab(&session_id, &target);
         }
     }
 
@@ -3201,8 +3359,9 @@ impl App {
                     Some(s) => s.id.clone(),
                     None => return false,
                 };
-                let provider = self.engine.providers.get(&session_id);
-                (session_id, provider)
+                let tab_id = self.focused_tab_id(&session_id);
+                let provider = self.engine.providers.get(&tab_id);
+                (tab_id, provider)
             }
             SessionSurface::Terminal => {
                 let id = match self.active_terminal_id.as_ref() {
@@ -3225,6 +3384,23 @@ impl App {
             false
         }
     }
+}
+
+/// Disambiguated tab labels: each provider name is used as-is the first time
+/// and suffixed with " 2", " 3", … for repeats, in order. Pure, unit-tested.
+pub(crate) fn tab_labels(providers: &[&str]) -> Vec<String> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut out = Vec::with_capacity(providers.len());
+    for p in providers {
+        let n = seen.entry(*p).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            out.push((*p).to_string());
+        } else {
+            out.push(format!("{p} {n}"));
+        }
+    }
+    out
 }
 
 pub(crate) use dux_core::project_browser::load_projects;
@@ -3585,6 +3761,25 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn tab_labels_disambiguate_duplicate_providers() {
+        assert_eq!(tab_labels(&["claude", "codex"]), vec!["claude", "codex"]);
+        assert_eq!(
+            tab_labels(&["codex", "codex"]),
+            vec!["codex".to_string(), "codex 2".to_string()]
+        );
+        assert_eq!(
+            tab_labels(&["claude", "codex", "codex", "claude"]),
+            vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "codex 2".to_string(),
+                "claude 2".to_string()
+            ]
+        );
+        assert!(tab_labels(&[]).is_empty());
     }
 
     #[test]

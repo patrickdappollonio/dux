@@ -243,6 +243,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "agent_scrollback_lines",
         config.ui.agent_scrollback_lines,
     );
+    patch_table_u16(doc, "ui", "agent_tabs_max", config.ui.agent_tabs_max);
     patch_table_u16(
         doc,
         "ui",
@@ -333,6 +334,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "server",
         "max_websocket_terminal_connections",
         config.server.max_websocket_terminal_connections as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_tab_connections",
+        config.server.max_websocket_tab_connections as usize,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "max_websocket_tabs_per_agent",
+        config.server.max_websocket_tabs_per_agent as usize,
     );
     patch_table_str(doc, "server", "title", &config.server.title);
     patch_table_str(doc, "server", "favicon", &config.server.favicon);
@@ -871,6 +884,48 @@ unknown_key = \"untouched\"
         assert_eq!(project.startup_command.as_deref(), Some("npm install"));
         assert_eq!(project.auto_reopen_agents, Some(true));
         assert_eq!(project.env.get("KEY").map(String::as_str), Some("value"));
+    }
+
+    #[test]
+    fn patch_materializes_tab_cap_keys_on_a_file_that_predates_them() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        // Simulate a config written before the tab-cap keys existed: the full
+        // canonical render with those three keys stripped back out.
+        let mut doc: DocumentMut = render_config_plain(&Config::default())
+            .parse()
+            .expect("parse render");
+        doc["ui"]
+            .as_table_mut()
+            .expect("[ui] table")
+            .remove("agent_tabs_max");
+        let server = doc["server"].as_table_mut().expect("[server] table");
+        server.remove("max_websocket_tab_connections");
+        server.remove("max_websocket_tabs_per_agent");
+        fs::write(&config_path, doc.to_string()).expect("write older config");
+        assert!(
+            !fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("agent_tabs_max")
+        );
+
+        let mut config = Config::default();
+        config.ui.agent_tabs_max = 7;
+        config.server.max_websocket_tab_connections = 123;
+        config.server.max_websocket_tabs_per_agent = 5;
+
+        patch_config_file(&config_path, &config).expect("patch");
+
+        let saved = fs::read_to_string(&config_path).expect("read back");
+        // The patch path must materialize the new keys (parity with the sibling
+        // ws caps), not rely on defaults being filled in at load time.
+        assert!(saved.contains("agent_tabs_max"));
+        assert!(saved.contains("max_websocket_tab_connections"));
+        assert!(saved.contains("max_websocket_tabs_per_agent"));
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.ui.agent_tabs_max, 7);
+        assert_eq!(parsed.server.max_websocket_tab_connections, 123);
+        assert_eq!(parsed.server.max_websocket_tabs_per_agent, 5);
     }
 
     #[test]

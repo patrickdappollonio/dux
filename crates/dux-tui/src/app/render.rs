@@ -823,7 +823,10 @@ impl App {
                 // Center pane always renders the agent; terminal is an overlay.
                 let saved = self.session_surface;
                 self.session_surface = SessionSurface::Agent;
-                self.render_agent_terminal(frame, pane_area, &title, focused);
+                // Draw the tab strip (>=2 tabs) above the terminal and render
+                // the terminal into the remaining area.
+                let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area, true);
+                self.render_agent_terminal(frame, term_area, &title, focused);
                 self.session_surface = saved;
             }
         }
@@ -937,6 +940,51 @@ impl App {
 
     /// Render the ASCII "dux" logo centered in the given area, with an
     /// optional feature tip displayed below.
+    /// Centered, provider-agnostic message shown when a focused tab has no live
+    /// process (dormant, e.g. after a restart). dux does not restore a tab's
+    /// conversation across a restart; the message points the user at their CLI's
+    /// own history.
+    fn render_dormant_support_tab(&mut self, frame: &mut Frame, area: Rect) {
+        self.welcome_logo_visible = false;
+        if area.height < 5 || area.width < 20 {
+            return;
+        }
+        let title_style = Style::default()
+            .fg(self.theme.title_focused)
+            .add_modifier(Modifier::BOLD);
+        let body_style = Style::default().fg(self.theme.hint_desc_fg);
+        let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        let key_style = Style::default().fg(self.theme.hint_key_fg);
+        let lines = vec![
+            Line::from(Span::styled("Tab not running", title_style)),
+            Line::from(""),
+            Line::from(Span::styled(
+                "dux doesn't restore a tab's conversation across a restart.",
+                body_style,
+            )),
+            Line::from(Span::styled(
+                "To pick up its previous conversation, start a fresh",
+                dim_style,
+            )),
+            Line::from(Span::styled(
+                "session and use your CLI's own history command.",
+                dim_style,
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Press ", body_style),
+                Span::styled("Enter", key_style),
+                Span::styled(" to start a fresh session.", body_style),
+            ]),
+        ];
+        let h = lines.len() as u16;
+        let y = area.y + (area.height.saturating_sub(h)) / 2;
+        let card = Rect::new(area.x, y, area.width, h.min(area.height));
+        Paragraph::new(lines)
+            .alignment(ratatui::layout::Alignment::Center)
+            .render(card, frame.buffer_mut());
+    }
+
     fn render_ascii_logo(&mut self, frame: &mut Frame, area: Rect) {
         if area.width < ASCII_LOGO_WIDTH || area.height < ASCII_LOGO_HEIGHT {
             return;
@@ -1084,6 +1132,153 @@ impl App {
             );
     }
 
+    /// Provider label for a specific tab of a session (Main resolves to the
+    /// session's running provider; a Support tab to its pin/row provider).
+    fn tab_provider_label(&self, session: &AgentSession, tab_id: &str) -> String {
+        if tab_id == session.id {
+            self.engine
+                .running_provider_for(session)
+                .as_str()
+                .to_string()
+        } else {
+            self.engine
+                .running_provider_pins
+                .get(tab_id)
+                .cloned()
+                .or_else(|| {
+                    self.engine
+                        .agent_tabs
+                        .get(tab_id)
+                        .map(|t| t.provider.clone())
+                })
+                .unwrap_or_else(|| session.provider.clone())
+                .as_str()
+                .to_string()
+        }
+    }
+
+    /// If the selected agent has two or more tabs, draw a single-row desktop-style
+    /// tab strip at the top of `area` and return the reduced rect for the terminal
+    /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
+    /// single-tab agents look exactly as before. When `record_clicks` is false
+    /// (fullscreen) the strip is display-only and no hit-boxes are recorded.
+    fn render_agent_tab_strip_if_needed(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        record_clicks: bool,
+    ) -> Rect {
+        self.agent_tab_regions.clear();
+        self.agent_tab_add_region = None;
+
+        let Some(session) = self.selected_session() else {
+            return area;
+        };
+        let session_id = session.id.clone();
+        let tab_ids = self.session_tab_ids(&session_id);
+        if tab_ids.len() < 2 || area.height < 4 || area.width < 12 {
+            return area;
+        }
+        let focused_id = self.focused_tab_id(&session_id);
+        let at_cap = tab_ids.len() >= self.engine.agent_tabs_max() as usize;
+
+        // Gather owned per-tab data under immutable borrows, then render/mutate.
+        let providers: Vec<String> = tab_ids
+            .iter()
+            .map(|id| self.tab_provider_label(session, id))
+            .collect();
+        let labels = tab_labels(&providers.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+        let [strip_area, term_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .areas(area);
+
+        // Add button occupies the rightmost columns.
+        let add_text = " + ";
+        let add_w = add_text.chars().count() as u16;
+        let avail = strip_area.width.saturating_sub(add_w);
+
+        // Segment text/width per tab. All tabs are generic — no per-tab marker.
+        let seg_text: Vec<String> = labels.iter().map(|l| format!(" {l} ")).collect();
+        let seg_w: Vec<u16> = seg_text.iter().map(|t| t.chars().count() as u16).collect();
+
+        // Choose a start index so the focused tab is visible within `avail`.
+        let focused_idx = tab_ids.iter().position(|i| *i == focused_id).unwrap_or(0);
+        let mut start = 0usize;
+        loop {
+            let mut w = 0u16;
+            let mut count = 0usize;
+            for width in seg_w.iter().skip(start) {
+                if w + *width > avail {
+                    break;
+                }
+                w += *width;
+                count += 1;
+            }
+            let end = start + count;
+            if focused_idx >= end && end < seg_w.len() {
+                start += 1;
+                if start >= seg_w.len() {
+                    start = seg_w.len() - 1;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        let buf = frame.buffer_mut();
+        // Base fill for the strip row.
+        let base_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        for x in strip_area.x..strip_area.x + strip_area.width {
+            buf[(x, strip_area.y)].set_symbol(" ").set_style(base_style);
+        }
+
+        let mut x = strip_area.x;
+        for i in start..seg_text.len() {
+            if x + seg_w[i] > strip_area.x + avail {
+                // No more room; show an overflow marker if any remain.
+                if i < seg_text.len() {
+                    let ell_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+                    if x < strip_area.x + avail {
+                        buf[(x, strip_area.y)].set_symbol("…").set_style(ell_style);
+                    }
+                }
+                break;
+            }
+            let active = tab_ids[i] == focused_id;
+            let style = if active {
+                Style::default()
+                    .fg(self.theme.title_focused)
+                    .bg(self.theme.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.hint_dim_desc_fg)
+            };
+            buf.set_string(x, strip_area.y, &seg_text[i], style);
+            if record_clicks {
+                self.agent_tab_regions
+                    .push((tab_ids[i].clone(), Rect::new(x, strip_area.y, seg_w[i], 1)));
+            }
+            x += seg_w[i];
+        }
+
+        // Trailing add button.
+        let add_x = strip_area.x + strip_area.width - add_w;
+        let add_style = if at_cap {
+            Style::default().fg(self.theme.hint_dim_desc_fg)
+        } else {
+            Style::default().fg(self.theme.hint_key_fg)
+        };
+        buf.set_string(add_x, strip_area.y, add_text, add_style);
+        if record_clicks && !at_cap {
+            self.agent_tab_add_region = Some(Rect::new(add_x, strip_area.y, add_w, 1));
+        }
+
+        term_area
+    }
+
     fn render_agent_terminal(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let nudge_active = self.is_nudge_active();
         let outer_block = if nudge_active {
@@ -1117,12 +1312,14 @@ impl App {
             .areas(inner);
         self.mouse_layout.agent_term = Some(term_area);
 
-        // Get the selected session's PTY screen.
+        // Get the selected session's PTY screen. Resolve the FOCUSED tab so the
+        // caption/liveness reflect the visible tab, not just the Main provider.
         let session_id = self.selected_session().map(|s| s.id.clone());
+        let focused_tab = session_id.as_ref().map(|id| self.focused_tab_id(id));
         let session_provider_name = match active_surface {
             SessionSurface::Agent => self
                 .selected_session()
-                .map(|s| self.engine.running_provider_for(s).as_str().to_owned()),
+                .map(|s| self.focused_tab_provider(s).as_str().to_owned()),
             SessionSurface::Terminal => Some(
                 self.engine
                     .config
@@ -1135,7 +1332,7 @@ impl App {
             ),
         };
         let session_active = match active_surface {
-            SessionSurface::Agent => session_id
+            SessionSurface::Agent => focused_tab
                 .as_ref()
                 .map(|id| self.engine.providers.contains_key(id))
                 .unwrap_or(false),
@@ -1357,7 +1554,18 @@ impl App {
         if rendered_content {
             self.welcome_logo_visible = false;
         } else {
+            // A focused Support tab with no live process is "dormant" (e.g. after
+            // a restart): show a provider-agnostic can't-resume message instead of
+            // the welcome logo, with the launch key to start it fresh.
+            let dormant_support = matches!(
+                (&session_id, &focused_tab),
+                (Some(sid), Some(fid)) if fid != sid
+            );
             match active_surface {
+                SessionSurface::Agent if dormant_support => {
+                    self.welcome_logo_visible = false;
+                    self.render_dormant_support_tab(frame, term_area);
+                }
                 SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
                 SessionSurface::Terminal => {
                     self.welcome_logo_visible = false;
@@ -4250,7 +4458,9 @@ impl App {
                 let (agent_count, terminal_count) = confirm_prompt.target_ids.iter().fold(
                     (0usize, 0usize),
                     |(agents, terminals), target_id| match target_id {
-                        RuntimeTargetId::Agent(_) => (agents + 1, terminals),
+                        RuntimeTargetId::Agent(_) | RuntimeTargetId::Tab(_) => {
+                            (agents + 1, terminals)
+                        }
                         RuntimeTargetId::Terminal(_) => (agents, terminals + 1),
                     },
                 );
@@ -4763,6 +4973,109 @@ impl App {
                 self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteTerminal {
                     cancel_button: cancel_area,
                     delete_button: delete_area,
+                };
+            }
+            PromptState::ConfirmCloseTab {
+                session_id,
+                provider_label,
+                is_main,
+                confirm_selected,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(56, 30, frame.area());
+                self.clear_overlay_area(frame, area);
+                // Closing the agent's only tab detaches the agent instead of
+                // ending a single tab; word the copy accordingly.
+                let only_tab = self.engine.tab_ids_for_session(session_id).len() <= 1;
+                let outer = self.themed_overlay_block("Close Tab");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let agent_name = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .find(|s| &s.id == session_id)
+                    .map(|s| self.session_label(s))
+                    .unwrap_or_else(|| session_id.clone());
+
+                let tail = confirm_close_tab_tail(only_tab, *is_main);
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" Close the "),
+                        Span::styled(
+                            provider_label.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" tab on "),
+                        Span::styled(
+                            agent_name.as_str(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("?"),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        tail,
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 16u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let confirm_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmCloseTabCancel,
+                        self.pressed_button,
+                        !confirm_selected,
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Close")
+                    .kind(ButtonKind::Danger)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmCloseTabConfirm,
+                        self.pressed_button,
+                        *confirm_selected,
+                        true,
+                    ))
+                    .render(frame, confirm_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmCloseTab {
+                    cancel_button: cancel_area,
+                    confirm_button: confirm_area,
                 };
             }
             PromptState::ConfirmQuit {
@@ -6224,7 +6537,8 @@ impl App {
             .set_style(area, Style::default().bg(self.theme.app_bg));
         let title = match self.selected_session() {
             Some(session) => {
-                let provider = capitalize(self.engine.running_provider_for(session).as_str());
+                // Reflect the focused tab's provider in the fullscreen title.
+                let provider = capitalize(self.focused_tab_provider(session).as_str());
                 let name = session.title.as_deref().unwrap_or(&session.branch_name);
                 let pr_suffix = self
                     .engine
@@ -6238,7 +6552,9 @@ impl App {
         };
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Agent;
-        self.render_agent_terminal(frame, area, &title, true);
+        // Display-only tab strip in fullscreen (no switching / no click Rects).
+        let term_area = self.render_agent_tab_strip_if_needed(frame, area, false);
+        self.render_agent_terminal(frame, term_area, &title, true);
         self.session_surface = saved;
     }
 
@@ -6614,7 +6930,8 @@ impl App {
 
     fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
-            let provider = capitalize(self.engine.running_provider_for(session).as_str());
+            // Reflect the FOCUSED tab's provider, not just the Main one.
+            let provider = capitalize(self.focused_tab_provider(session).as_str());
             let base = format!("{provider} agent");
             let count = self.session_terminal_count(&session.id);
             if count == 1 {
@@ -7310,6 +7627,23 @@ fn status_footer_lines(status_text: &str, width: u16) -> u16 {
     }
 }
 
+/// The `ConfirmCloseTab` dialog's warning tail must match what
+/// `resolve_confirm_close_tab` actually does, not just whether this is the
+/// agent's only tab: closing the session-slot tab of a MULTI-tab agent only
+/// stops that tab (no `agent_tabs` row to delete, the agent keeps running via
+/// its siblings, and the session-slot tab itself stays reopenable) —
+/// non-destructive, unlike closing an extra tab, which permanently deletes
+/// that tab's row.
+fn confirm_close_tab_tail(only_tab: bool, is_main: bool) -> &'static str {
+    if only_tab {
+        " It's this agent's only tab, so the agent detaches and stays in Projects, reopenable."
+    } else if is_main {
+        " Other tabs on this agent keep running; this tab stops and can be reopened fresh from the agent."
+    } else {
+        " dux can't reopen this exact conversation — a recent one can be recovered from a fresh tab via your provider's own history command."
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7317,6 +7651,35 @@ mod tests {
     use crate::app::test_support::{default_bindings, test_app, wait_for_agent_cursor};
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
+
+    /// F6 regression: closing the session-slot tab (`is_main`) while other
+    /// tabs are live must show the non-destructive copy, not the "can't
+    /// reopen this exact conversation" destructive copy meant for extra tabs.
+    #[test]
+    fn confirm_close_tab_tail_is_non_destructive_for_main_with_siblings() {
+        let tail = confirm_close_tab_tail(false, true);
+        assert!(
+            tail.contains("keep running"),
+            "expected non-destructive copy for is_main with siblings, got: {tail}"
+        );
+        assert!(!tail.contains("can't reopen"));
+    }
+
+    /// Closing an extra (non-main) tab while siblings are live is destructive
+    /// (the row is permanently deleted) and must keep the original warning.
+    #[test]
+    fn confirm_close_tab_tail_is_destructive_for_extra_tab_with_siblings() {
+        let tail = confirm_close_tab_tail(false, false);
+        assert!(tail.contains("can't reopen"));
+    }
+
+    /// Closing the agent's only tab (main or extra) detaches the whole agent,
+    /// which is the pre-existing non-destructive-but-detaching copy.
+    #[test]
+    fn confirm_close_tab_tail_only_tab_detaches_regardless_of_main() {
+        assert!(confirm_close_tab_tail(true, true).contains("only tab"));
+        assert!(confirm_close_tab_tail(true, false).contains("only tab"));
+    }
 
     /// Regression test for issue #258: while the interactive agent terminal is
     /// rendered, the real (hardware) terminal cursor must be moved onto the

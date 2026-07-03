@@ -279,7 +279,19 @@ async fn delete_session(
         )
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        // An `Ok` error-toned status means the delete was REFUSED, not performed
+        // (a tab is still launching, or an async delete is already in flight) —
+        // report 409 with the message rather than a misleading 204 "deleted".
+        Ok(outcome) => {
+            if outcome_is_error(&outcome) {
+                let msg = outcome
+                    .status
+                    .map(|s| s.message)
+                    .unwrap_or_else(|| "delete refused".to_string());
+                return (StatusCode::CONFLICT, msg).into_response();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -478,11 +490,12 @@ async fn rerun_startup_command(
 
 // ── Kill (force-detach a running agent) ──────────────────────────────────────
 
-/// Force-kill the agent's running PTY without deleting its session or worktree
-/// (the web counterpart to one row of the TUI's kill-running modal). The engine
-/// drops the provider (SIGKILL) and marks the session Detached, so it can be
-/// reconnected. Unknown session → 404; an agent that is not running is a
-/// successful no-op. Companion terminals are killed through the existing
+/// Detach the agent WHOLE: stop every one of its tabs' provider processes
+/// without deleting its session or worktree (the agent-level "Detach agent"
+/// action). The engine drops each provider (SIGKILL) and marks the session
+/// Detached, so it can be reconnected. This is distinct from closing a single
+/// tab. Unknown session → 404; an agent that is not running is a successful
+/// no-op. Companion terminals are killed through the existing
 /// `DELETE /api/v1/sessions/:id/terminals/:tid`.
 ///
 /// Note: unlike the git-mutation routes, this does NOT call `resolve_worktree` —
@@ -500,7 +513,7 @@ async fn kill_session(
     match state
         .engine
         .apply_wire_scoped(
-            WireCommand::KillSessionPty { session_id: id },
+            WireCommand::DetachAgent { session_id: id },
             scope_from_headers(&headers, &state.connections),
         )
         .await

@@ -56,11 +56,38 @@ pub struct TerminatingPty {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedPty {
     pub kind: PrunedPtyKind,
-    /// The session id (for an agent) or terminal id (for a companion terminal).
+    /// The tab id (for an agent — `== session_id` for the Main tab) or terminal
+    /// id (for a companion terminal).
     pub id: String,
-    /// A human-facing label: the session's branch name (agent) or the
-    /// terminal's label (companion terminal).
+    /// The owning session id (agent). For a companion terminal this is the
+    /// terminal's owning session; empty only for an orphan with no session.
+    pub session_id: String,
+    /// True when this was the agent's session-slot tab (`id == session_id`). Used
+    /// only to decide whether a clean exit cancels auto-reopen; no tab is
+    /// privileged for detach purposes (see `agent_detached`).
+    pub is_main: bool,
+    /// True when this exit detached the agent — i.e. it was the agent's LAST live
+    /// tab, so the session is now Detached. Surfaces show the workspace-wide
+    /// "Agent exited" notice for this; a tab exit that leaves siblings running
+    /// (`false`) gets a quiet, scoped "tab exited" notice instead. Always `false`
+    /// for a companion terminal.
+    pub agent_detached: bool,
+    /// A human-facing label: the agent's branch name (session-slot tab), a
+    /// "{provider} on {branch}" descriptor (extra tab), or the terminal's label
+    /// (companion terminal).
     pub label: String,
+}
+
+/// A deferred worktree removal that must wait for a WHOLE GROUP of an agent's
+/// tab PTYs (Main plus every Support tab) to reap before it fires — closing the
+/// gap where removing the worktree after only the first tab exits could delete
+/// files out from under a still-running sibling tab (a git-lock race). Each of
+/// the session's terminating tab entries is listed in `pending_ids`;
+/// `reap_terminating_ptys` removes ids as they reap (clean exit OR force-kill)
+/// and dispatches `removal` exactly once, when `pending_ids` empties.
+pub struct GroupWorktreeRemoval {
+    pub pending_ids: std::collections::HashSet<String>,
+    pub removal: DeferredWorktreeRemoval,
 }
 
 /// Outcome of [`Engine::shutdown_ptys`], so a caller can echo the result to its
@@ -153,25 +180,62 @@ impl Engine {
                 }
             })
             .collect();
-        for (session_id, exit_success) in exited_agents {
-            self.providers.remove(&session_id);
-            // Drop the activity and input stamps with the provider — without
-            // this, a long-running server leaks one map entry per exited agent.
-            self.pty_activity.remove(&session_id);
-            self.pty_input.remove(&session_id);
-            let label = self
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .map(|s| s.branch_name.clone())
-                .unwrap_or_else(|| session_id.clone());
-            if exit_success == Some(true) {
-                self.mark_session_desired_running(&session_id, false);
+        for (tab_id, exit_success) in exited_agents {
+            // Resolve the exited PTY's owning session and whether it was the Main
+            // tab. `providers` is keyed by tab id, so a Support-tab id never
+            // matches a session id directly — resolve via the tab index first, or
+            // the label falls back to a raw UUID and the session-state marks
+            // silently no-op on the wrong key.
+            let owning = self.owning_session_for_tab(&tab_id);
+            let is_main = owning.as_deref() == Some(tab_id.as_str());
+            let (session_id, label) = match &owning {
+                Some(sid) => {
+                    let branch = self
+                        .sessions
+                        .iter()
+                        .find(|s| &s.id == sid)
+                        .map(|s| s.branch_name.clone())
+                        .unwrap_or_else(|| sid.clone());
+                    if is_main {
+                        (sid.clone(), branch)
+                    } else {
+                        let provider = self
+                            .agent_tabs
+                            .get(&tab_id)
+                            .map(|t| t.provider.as_str().to_string())
+                            .unwrap_or_default();
+                        (sid.clone(), format!("{provider} on {branch}"))
+                    }
+                }
+                None => (String::new(), tab_id.clone()),
+            };
+            // Clear EVERY runtime map keyed by this tab via the single-source
+            // helper — not just providers/activity/input. In particular
+            // `running_provider_pins` (set when a live tab is retargeted) would
+            // otherwise leak and keep showing the old provider for the now-exited
+            // tab; a long-running server would also leak one entry per exited tab.
+            self.clear_tab_runtime(&tab_id);
+            // No tab is privileged: the agent only detaches once its LAST tab is
+            // gone. `clear_tab_runtime` above already dropped this tab from
+            // `providers`, so `any_tab_active` reflects the true post-exit state —
+            // if a sibling tab is still live/launching the agent stays Active.
+            // This exit detaches the agent only when it was the LAST live tab.
+            let agent_detached = !session_id.is_empty() && !self.any_tab_active(&session_id);
+            if agent_detached {
+                // A clean exit of the session-slot tab is the "user quit the
+                // agent" signal that cancels auto-reopen; an extra tab exiting (or
+                // any crash) leaves the auto-reopen intent untouched.
+                if is_main && exit_success == Some(true) {
+                    self.mark_session_desired_running(&session_id, false);
+                }
+                self.mark_session_status(&session_id, SessionStatus::Detached);
             }
-            self.mark_session_status(&session_id, SessionStatus::Detached);
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Agent,
-                id: session_id,
+                id: tab_id,
+                session_id,
+                is_main,
+                agent_detached,
                 label,
             });
         }
@@ -189,10 +253,18 @@ impl Engine {
             })
             .collect();
         for (terminal_id, label) in exited_terminals {
+            let session_id = self
+                .companion_terminals
+                .get(&terminal_id)
+                .map(|t| t.session_id.clone())
+                .unwrap_or_default();
             self.companion_terminals.remove(&terminal_id);
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Terminal,
                 id: terminal_id,
+                session_id,
+                is_main: false,
+                agent_detached: false,
                 label,
             });
         }
@@ -286,6 +358,7 @@ impl Engine {
         }
         let now = Instant::now();
         let mut dispatch = Vec::new();
+        let mut reaped_ids = Vec::new();
         let mut remaining = Vec::with_capacity(self.terminating_ptys.len());
         for mut entry in std::mem::take(&mut self.terminating_ptys) {
             let exited = entry.client.is_exited() || entry.client.try_wait().is_some();
@@ -304,13 +377,36 @@ impl Engine {
                 remaining.push(entry);
                 continue;
             }
-            // Reaped: hand back any deferred worktree removal, then drop the
-            // client (its `Drop` SIGKILL is a benign no-op now — already gone).
+            // Reaped: hand back any single-PTY deferred worktree removal, then
+            // drop the client (its `Drop` SIGKILL is a benign no-op now — already
+            // gone). Group removals are resolved below once every member reaps.
+            reaped_ids.push(entry.id.clone());
             if let Some(req) = entry.worktree_removal.take() {
                 dispatch.push(req);
             }
         }
         self.terminating_ptys = remaining;
+
+        // Group barrier: a multi-tab delete defers its worktree removal until the
+        // LAST of the session's tab PTYs has reaped. Drop reaped ids from every
+        // pending group; a group whose set is now empty dispatches its removal
+        // exactly once.
+        if !self.pending_group_removals.is_empty() {
+            for id in &reaped_ids {
+                for group in &mut self.pending_group_removals {
+                    group.pending_ids.remove(id);
+                }
+            }
+            let mut still_pending = Vec::new();
+            for group in std::mem::take(&mut self.pending_group_removals) {
+                if group.pending_ids.is_empty() {
+                    dispatch.push(group.removal);
+                } else {
+                    still_pending.push(group);
+                }
+            }
+            self.pending_group_removals = still_pending;
+        }
         dispatch
     }
 
@@ -444,8 +540,19 @@ impl Engine {
         };
         crate::logger::info(&format_shutdown_result(&report));
 
-        let ids: Vec<String> = self.providers.keys().cloned().collect();
-        for id in ids {
+        // `providers` is keyed by tab id; resolve each live tab back to its
+        // owning session and mark each session Detached exactly once. Resolving
+        // matters when a session's Main tab already exited but a Support tab is
+        // still running — its only provider key is the Support tab id, which is
+        // not a session id, so a bare `mark_session_status` would silently miss.
+        let keys: Vec<String> = self.providers.keys().cloned().collect();
+        let mut session_ids: Vec<String> = keys
+            .iter()
+            .filter_map(|id| self.owning_session_for_tab(id))
+            .collect();
+        session_ids.sort();
+        session_ids.dedup();
+        for id in session_ids {
             self.mark_session_status(&id, SessionStatus::Detached);
         }
 
@@ -462,7 +569,7 @@ mod tests {
     use super::PrunedPtyKind;
     use super::TerminatingPty;
     use super::{format_shutdown_result, format_shutdown_start};
-    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::engine::test_support::{sample_project, sample_session, sample_tab, test_engine};
     use crate::model::SessionStatus;
     use crate::pty::PtyClient;
 
@@ -1216,6 +1323,287 @@ mod tests {
             engine.pending_deletions.contains("s1"),
             "the worktree removal is dispatched immediately when there is no PTY"
         );
+    }
+
+    #[test]
+    fn prune_support_tab_exit_is_quiet_and_keeps_session_active() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+        // The session-slot tab is live (keyed by the session id) AND an extra tab
+        // of s1 (agent_tabs row + a tab-keyed provider). Only the extra tab exits,
+        // so the agent must stay Active — no tab is privileged, but a live sibling
+        // keeps the session up.
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(worktree.path()));
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+
+        // Make the extra tab's PTY exit (Ctrl-D EOF).
+        engine
+            .providers
+            .get("tab-2")
+            .unwrap()
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if !pruned.is_empty() || !engine.providers.contains_key("tab-2") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "support tab never reported exit");
+            sleep(Duration::from_millis(50));
+        };
+
+        let p = pruned
+            .iter()
+            .find(|p| p.id == "tab-2")
+            .expect("support tab pruned");
+        assert_eq!(p.kind, PrunedPtyKind::Agent);
+        assert!(!p.is_main, "an extra tab exit is not a session-slot exit");
+        assert_eq!(p.session_id, "s1", "resolves the owning session");
+        assert!(
+            p.label.contains("feat") && p.label.contains("codex"),
+            "label names the agent + provider, not a raw UUID: {}",
+            p.label
+        );
+        // The session-slot tab is still live, so the agent stays Active.
+        let status = engine
+            .sessions
+            .iter()
+            .find(|s| s.id == "s1")
+            .map(|s| s.status.clone());
+        assert_eq!(
+            status,
+            Some(crate::model::SessionStatus::Active),
+            "an extra-tab exit must not detach an agent whose session-slot tab is still live"
+        );
+    }
+
+    #[test]
+    fn prune_last_live_tab_exit_detaches_even_when_it_is_an_extra_tab() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.mark_session_status("s1", crate::model::SessionStatus::Active);
+        // Only an extra tab is live (the session-slot tab is dormant). When it
+        // exits it is the agent's LAST live tab, so the agent detaches.
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+        engine
+            .providers
+            .get("tab-2")
+            .unwrap()
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let pruned = engine.prune_exited_ptys();
+            if !pruned.is_empty() || !engine.providers.contains_key("tab-2") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "extra tab never reported exit");
+            sleep(Duration::from_millis(50));
+        }
+
+        let status = engine
+            .sessions
+            .iter()
+            .find(|s| s.id == "s1")
+            .map(|s| s.status.clone());
+        assert_eq!(
+            status,
+            Some(crate::model::SessionStatus::Detached),
+            "the last live tab exiting detaches the agent, even an extra one"
+        );
+    }
+
+    #[test]
+    fn prune_exited_support_tab_clears_the_running_provider_pin() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+        // A retarget-while-live pinned the OLD provider so the UI kept showing it.
+        // When the tab exits on its own, that pin must be cleared (else the dormant
+        // tab shows the wrong provider forever + the map leaks).
+        engine.running_provider_pins.insert(
+            "tab-2".to_string(),
+            crate::model::ProviderKind::new("claude"),
+        );
+
+        engine
+            .providers
+            .get("tab-2")
+            .unwrap()
+            .write_bytes(b"\x04")
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            engine.prune_exited_ptys();
+            if !engine.providers.contains_key("tab-2") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "support tab never reported exit");
+            sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !engine.running_provider_pins.contains_key("tab-2"),
+            "the exited tab's stale provider pin must be cleared"
+        );
+    }
+
+    #[test]
+    fn begin_delete_session_parks_a_group_barrier_over_every_live_tab() {
+        use crate::engine::BeginDeleteSessionOutcome;
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+        // Both the Main tab and the Support tab have a live PTY.
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(worktree.path()));
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+
+        let outcome = engine.begin_delete_session("s1", true);
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::AsyncStarted { .. }
+        ));
+        // Every live tab PTY (Main + Support) is now terminating, and the worktree
+        // removal is parked on ONE group barrier over both — not on any single
+        // entry (which would fire when the first, not the last, tab reaps).
+        assert_eq!(engine.terminating_ptys.len(), 2);
+        assert!(
+            engine
+                .terminating_ptys
+                .iter()
+                .all(|e| e.worktree_removal.is_none()),
+            "a multi-tab delete carries no per-entry removal"
+        );
+        assert_eq!(engine.pending_group_removals.len(), 1);
+        let group = &engine.pending_group_removals[0];
+        assert!(group.pending_ids.contains("s1") && group.pending_ids.contains("tab-2"));
+        assert_eq!(group.removal.session_id, "s1");
+    }
+
+    #[test]
+    fn group_barrier_dispatches_worktree_removal_only_after_the_last_tab_reaps() {
+        use super::{DeferredWorktreeRemoval, GroupWorktreeRemoval};
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+
+        // Two terminating tab PTYs under one group barrier. The "main" cat is
+        // SIGTERMed (it will reap); the "support" cat is left running with a far
+        // deadline so it stays until we expire it by hand — a deterministic stand-in
+        // for a sibling tab that outlives the first.
+        let main = spawn_cat(worktree.path());
+        main.terminate();
+        let support = spawn_cat(worktree.path());
+        let far = Instant::now() + Duration::from_secs(60);
+        for (id, client) in [("s1", main), ("tab-2", support)] {
+            engine.terminating_ptys.push(TerminatingPty {
+                client,
+                deadline: far,
+                kind: PrunedPtyKind::Agent,
+                id: id.to_string(),
+                label: "feat".to_string(),
+                worktree_removal: None,
+            });
+        }
+        engine.pending_group_removals.push(GroupWorktreeRemoval {
+            pending_ids: ["s1".to_string(), "tab-2".to_string()]
+                .into_iter()
+                .collect(),
+            removal: DeferredWorktreeRemoval {
+                session_id: "s1".to_string(),
+                project_path: "/tmp/p".to_string(),
+                worktree_path: worktree.path().to_string_lossy().to_string(),
+                branch_name: "feat".to_string(),
+                busy_message: "removing".to_string(),
+            },
+        });
+
+        // Reap until the SIGTERMed "main" cat is gone. The "support" cat is still
+        // alive (blocked on stdin, far deadline), so the group must NOT dispatch.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let dispatched = engine.reap_terminating_ptys();
+            assert!(
+                dispatched.is_empty(),
+                "removal must not fire while a sibling tab is still terminating"
+            );
+            if engine.terminating_ptys.len() == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "main tab never reaped");
+            sleep(Duration::from_millis(20));
+        }
+        assert_eq!(engine.pending_group_removals.len(), 1);
+        assert!(
+            engine.pending_group_removals[0]
+                .pending_ids
+                .contains("tab-2")
+        );
+
+        // Expire the survivor's deadline: the next reap force-kills it, empties the
+        // group, and dispatches the worktree removal EXACTLY ONCE.
+        engine.terminating_ptys[0].deadline = Instant::now() - Duration::from_millis(1);
+        let dispatched = engine.reap_terminating_ptys();
+        assert_eq!(
+            dispatched.len(),
+            1,
+            "removal dispatched once, only after the last tab reaped"
+        );
+        assert_eq!(dispatched[0].session_id, "s1");
+        assert!(engine.pending_group_removals.is_empty());
     }
 
     #[test]

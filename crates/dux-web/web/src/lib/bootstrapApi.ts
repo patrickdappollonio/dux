@@ -64,7 +64,16 @@ export interface Bootstrap {
    * in that colour; an http(s)/absolute-path URL is a custom favicon. Resolved
    * and applied by `applyFavicon`. Optional: older servers omit it. */
   favicon?: string
+  /** Mirrors `config.ui.agent_tabs_max` (normalized): the per-agent tab cap
+   * INCLUDING the Main tab. The tab strip disables its "+" once a session has
+   * this many tabs; the server re-enforces on create. Older servers omit it, so
+   * consumers fall back to `DEFAULT_AGENT_TABS_MAX`. */
+  agent_tabs_max?: number
 }
+
+/** Fallback per-agent tab cap when the server omits `agent_tabs_max` (older
+ * servers). Mirrors the Rust `DEFAULT_AGENT_TABS_MAX`. */
+export const DEFAULT_AGENT_TABS_MAX = 20
 
 // A failed bootstrap fetch. `status` is the HTTP status (0 for a network/
 // transport failure with no response). The boot path swallows this and keeps the

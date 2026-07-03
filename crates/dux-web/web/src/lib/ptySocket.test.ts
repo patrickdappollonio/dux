@@ -5,6 +5,7 @@ import {
   agentPtyUrl,
   getActivePtySocket,
   setActivePtySocket,
+  tabPtyUrl,
   terminalPtyUrl,
 } from "./ptySocket"
 
@@ -85,11 +86,20 @@ describe("ptySocket URL builders", () => {
     )
   })
 
+  it("builds the Support-tab PTY URL nested under its session", () => {
+    expect(tabPtyUrl("s1", "tab9")).toBe(
+      "ws://localhost:7070/ws/sessions/s1/tabs/tab9/pty",
+    )
+  })
+
   it("encodes ids and uses wss under https", () => {
     vi.stubGlobal("location", { protocol: "https:", host: "example.com" })
     expect(agentPtyUrl("a b")).toBe("wss://example.com/ws/sessions/a%20b/pty")
     expect(terminalPtyUrl("s/1", "t/2")).toBe(
       "wss://example.com/ws/sessions/s%2F1/terminals/t%2F2/pty",
+    )
+    expect(tabPtyUrl("s/1", "b/2")).toBe(
+      "wss://example.com/ws/sessions/s%2F1/tabs/b%2F2/pty",
     )
   })
 })

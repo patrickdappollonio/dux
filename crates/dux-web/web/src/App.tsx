@@ -15,6 +15,9 @@ import { CommitDialog } from "@/components/CommitDialog"
 import { EditorOverlay } from "@/components/EditorOverlay"
 import { ConfigEditorDialog } from "@/components/ConfigEditorDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
+import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
+import { AgentTabsStrip } from "@/components/AgentTabsStrip"
+import { DormantTabCard } from "@/components/DormantTabCard"
 import { KillRunningDialog } from "@/components/KillRunningDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
@@ -51,6 +54,7 @@ import {
   setPaletteOpen,
   useDux,
 } from "@/lib/store"
+import { isSupportTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { terminalTitle } from "@/lib/terminals"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
@@ -76,10 +80,21 @@ function InsetHeader() {
   // The header details, mirroring the TUI: a flat `key: value` list joined by a
   // single separator. `terminal` only appears when a companion terminal is the
   // focused target; `terminals` (the count) only when there is at least one.
+  // When an agent tab is focused, the provider crumb reflects the FOCUSED TAB
+  // (a Support tab can run a different provider than the Main tab), not the
+  // session's Main provider.
+  const focusedTabProvider =
+    selectedTarget?.kind === "agent"
+      ? session?.tabs.find((t) => t.id === selectedTarget.tabId)?.provider
+      : undefined
+
   const details: { key: string; value: string }[] = []
   if (session) {
     details.push({ key: "agent", value: session.title || session.branch_name })
-    details.push({ key: "provider", value: session.provider })
+    details.push({
+      key: "provider",
+      value: focusedTabProvider ?? session.provider,
+    })
     if (project?.name) details.push({ key: "project", value: project.name })
     details.push({ key: "branch", value: session.branch_name })
     if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
@@ -138,8 +153,14 @@ function InsetHeader() {
 }
 
 function TerminalArea() {
-  const { spine, bootstrap, selectedSessionId, selectedTarget, terminalEpoch } =
-    useDux()
+  const {
+    spine,
+    bootstrap,
+    selectedSessionId,
+    selectedTarget,
+    terminalEpoch,
+    startedDormantTabs,
+  } = useDux()
 
   // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
   // screen. It vanishes the moment a target is selected (the loading state is
@@ -156,17 +177,36 @@ function TerminalArea() {
     spine?.sessions.find((s) => s.id === selectedSessionId)?.pr ?? null
   const bannerAtBottom = bootstrap?.pr_banner_position === "bottom"
 
-  // For an agent the streamed id is the session id; for a terminal it is the
-  // terminal id. Key by that id so switching remounts the terminal cleanly.
+  // For an agent the streamed id is the FOCUSED TAB id (the Main tab's equals the
+  // session id); for a terminal it is the terminal id. Key by that id so
+  // switching tabs/terminals remounts the pane cleanly.
   const targetId =
     selectedTarget.kind === "terminal"
       ? selectedTarget.terminalId
-      : selectedTarget.sessionId
+      : selectedTarget.tabId
   // A reconnect bumps `terminalEpoch` so an already-focused agent pane remounts
   // and re-subscribes to the freshly launched provider. Terminals don't
   // reconnect, so the epoch only affects the agent key.
   const paneKey =
     selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
+
+  // Resolve the owning session + (for an agent) the focused tab so we can render
+  // the tab strip and gate the dormant card.
+  const session = spine?.sessions.find((s) => s.id === selectedTarget.sessionId)
+  const tabs = session?.tabs ?? []
+  const focusedTab =
+    selectedTarget.kind === "agent"
+      ? tabs.find((t) => t.id === selectedTarget.tabId)
+      : undefined
+  // A focused Support tab with no live process is DORMANT (reopened after a
+  // restart): render its card WITHOUT mounting the pane, because mounting opens
+  // the PTY socket, which force-launches the provider. Only the card's "Start
+  // fresh session" button (via `startedDormantTabs`) launches it.
+  const isSupportDormant = isSupportTabDormant(
+    selectedTarget,
+    focusedTab,
+    startedDormantTabs,
+  )
 
   // TerminalPane owns its own background and padding (via inline style) so the
   // padding area is seamlessly part of the terminal surface.
@@ -187,17 +227,32 @@ function TerminalArea() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {pr && !bannerAtBottom ? <PrBanner pr={pr} position="top" /> : null}
+      {selectedTarget.kind === "agent" && session && shouldShowTabStrip(tabs) ? (
+        <AgentTabsStrip
+          session={session}
+          activeTabId={selectedTarget.tabId}
+          maxTabs={bootstrap?.agent_tabs_max}
+        />
+      ) : null}
       <div className="min-h-0 flex-1 overflow-hidden">
-        <ChunkBoundary>
-          <Suspense fallback={null}>
-            <LazyTerminalPane
-              key={paneKey}
-              kind={selectedTarget.kind}
-              id={targetId}
-              sessionId={selectedTarget.sessionId}
-            />
-          </Suspense>
-        </ChunkBoundary>
+        {isSupportDormant && focusedTab ? (
+          <DormantTabCard
+            sessionId={selectedTarget.sessionId}
+            tabId={focusedTab.id}
+            provider={focusedTab.provider}
+          />
+        ) : (
+          <ChunkBoundary>
+            <Suspense fallback={null}>
+              <LazyTerminalPane
+                key={paneKey}
+                kind={selectedTarget.kind}
+                id={targetId}
+                sessionId={selectedTarget.sessionId}
+              />
+            </Suspense>
+          </ChunkBoundary>
+        )}
       </div>
       {pr && bannerAtBottom ? <PrBanner pr={pr} position="bottom" /> : null}
     </div>
@@ -217,6 +272,7 @@ function GlobalOverlays() {
       <ChangeProviderDialog />
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
+      <ConfirmCloseTabDialog />
       <KillRunningDialog />
       <ConfigEditorDialog />
       <ConfirmDiscardFileDialog />
