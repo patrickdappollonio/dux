@@ -1,3 +1,4 @@
+import { TriangleAlert } from "lucide-react"
 import { useEffect } from "react"
 
 import { InfoRow } from "@/components/InfoRow"
@@ -93,9 +94,11 @@ export function AgentInfoDialog() {
           )}
         </InfoRow>
         {drifted ? (
-          // Small muted cue next to the branch rows: the working branch no longer
-          // matches the branch the agent was created on.
-          <p className="text-xs text-muted-foreground">
+          // Warning cue next to the branch rows: the working branch no longer
+          // matches the branch the agent was created on. Amber + icon to mirror
+          // the TUI's warning-toned drift line, so both surfaces flag it equally.
+          <p className="flex items-center gap-1.5 text-xs text-amber-500">
+            <TriangleAlert className="size-3.5 shrink-0" />
             The branch changed since creation.
           </p>
         ) : null}

@@ -161,6 +161,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         current_origin: Default::default(),
         has_active_processes: Arc::new(AtomicBool::new(false)),
         in_flight: std::collections::HashSet::new(),
+        rename_expected: std::collections::HashMap::new(),
         pr_last_checked: std::collections::HashMap::new(),
         changed_files_poller_started: AtomicBool::new(false),
         branch_sync_worker_started: AtomicBool::new(false),

@@ -103,45 +103,61 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
-        // The immutable branch an agent was created on. Additive column with a ''
-        // default so old rows and inserts by an older binary still succeed.
-        let initial_branch_added = ensure_column(
-            &self.conn,
-            "agent_sessions",
-            "initial_branch",
-            "text not null default ''",
-        )?;
-        // Two ONE-TIME backfills, gated on the FIRST appearance of the
-        // `initial_branch` column (the new column shipped in this release) so
-        // they run exactly once — mirroring the gated `sort_order` backfill
-        // below. `migrate()` runs on every `open()`, which happens on every
-        // startup AND every background project-persistence / config-reload; an
-        // unconditional `title` backfill would therefore re-freeze the
-        // intentionally-NULL `title` of every auto-named agent on each open,
-        // silently pinning it so the display can no longer track the branch.
-        if initial_branch_added {
-            // Freeze each existing agent's currently-displayed name into `title`
-            // so it can never drift with the branch again. Historically `title`
-            // was left NULL on create (only later renames wrote it), so the
-            // display fell back to `branch_name` — which the branch-sync poller
-            // overwrites. Copying the current branch into any NULL title makes the
-            // displayed name durable identity. Auto pet-name agents get their pet
-            // name frozen too; that is intentional here to protect existing named
-            // agents on the one-time upgrade. The `title IS NULL` guard means only
-            // legacy rows are touched.
-            self.conn.execute(
-                "update agent_sessions set title = branch_name where title is null",
-                [],
+        // Column-add + backfills for `initial_branch` run inside a single
+        // transaction so a crash mid-migration rolls the ALTER back too and the
+        // whole step is retried cleanly on the next boot (rather than leaving a
+        // column present with a half-applied backfill).
+        {
+            let tx = self.conn.unchecked_transaction()?;
+            // The immutable branch an agent was created on. Additive column with
+            // a '' default so old rows and inserts by an older binary still
+            // succeed.
+            let initial_branch_added = ensure_column(
+                &tx,
+                "agent_sessions",
+                "initial_branch",
+                "text not null default ''",
             )?;
-            // Backfill the birth branch for pre-existing rows. The true original
-            // may already be lost to prior drift, so freeze the current branch as
-            // the recorded initial (best available). New agents record their
-            // genuine original at creation.
-            self.conn.execute(
+            // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
+            // that still lacks one. The WHERE clause is self-limiting (new rows
+            // always record a genuine `initial_branch` at creation, so they are
+            // never empty), so running it on every `migrate()` is a no-op once
+            // healed — but it self-heals rows stranded by a crash mid-migration
+            // or a downgrade→re-upgrade window. The true original may already be
+            // lost to prior drift, so freeze the current branch as the recorded
+            // initial (best available).
+            tx.execute(
                 "update agent_sessions set initial_branch = branch_name \
                  where initial_branch = '' or initial_branch is null",
                 [],
             )?;
+            // ONE-TIME backfill, gated on the FIRST appearance of the
+            // `initial_branch` column so it runs exactly once — mirroring the
+            // gated `sort_order` backfill below. `migrate()` runs on every
+            // `open()`, which happens on every startup AND every background
+            // project-persistence / config-reload; an unconditional `title`
+            // backfill would re-freeze the intentionally-NULL `title` of every
+            // auto-named agent on each open, silently pinning it so the display
+            // can no longer track the branch. `title IS NULL` is a legitimate
+            // ongoing state for auto-named agents, so this must never re-run.
+            //
+            // Migration asymmetry (intentional): legacy pet-named agents present
+            // at the moment of the one-time upgrade get their current name frozen
+            // into `title` here, so their display can never drift with the
+            // branch again. Agents auto-named AFTER the upgrade keep `title` NULL
+            // and their display continues to track `branch_name` (drift shown via
+            // `initial_branch`). A future reader seeing this split should know it
+            // is the deliberate freeze tradeoff, not an oversight.
+            if initial_branch_added {
+                let frozen = tx.execute(
+                    "update agent_sessions set title = branch_name where title is null",
+                    [],
+                )?;
+                crate::logger::info(&format!(
+                    "one-time migration: froze title for {frozen} legacy session(s)"
+                ));
+            }
+            tx.commit()?;
         }
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
@@ -1517,6 +1533,61 @@ mod tests {
     }
 
     #[test]
+    fn migrate_self_heals_a_stranded_empty_initial_branch() {
+        // A row left with initial_branch='' (e.g. stranded by a crash between the
+        // ALTER and the backfill, or a downgrade→re-upgrade window) must be
+        // self-healed by the idempotent, ungated backfill on the next migrate().
+        let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
+        // Force the stranded state directly, bypassing normal inserts.
+        store
+            .conn
+            .execute(
+                "update agent_sessions set initial_branch = '' where id = 'feat-x'",
+                [],
+            )
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
+        assert_eq!(
+            s.initial_branch, "feat-x",
+            "an empty initial_branch must be self-healed to branch_name on migrate()"
+        );
+    }
+
+    #[test]
+    fn ensure_column_returns_false_when_column_already_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("create table t (id text primary key, extra text);")
+            .unwrap();
+        assert!(
+            !ensure_column(&conn, "t", "extra", "text").unwrap(),
+            "an existing column must report Ok(false)"
+        );
+        // And adding a genuinely new column reports Ok(true).
+        assert!(ensure_column(&conn, "t", "brand_new", "text").unwrap());
+    }
+
+    #[test]
+    fn duplicate_column_error_is_classified() {
+        // Exercise the concurrent-add tolerance path: a raw ALTER on an existing
+        // column raises SQLite's "duplicate column name" error, which
+        // ensure_column swallows as Ok(false).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("create table t (id text primary key, extra text);")
+            .unwrap();
+        let err = conn
+            .execute("alter table t add column extra text", [])
+            .unwrap_err();
+        assert!(
+            is_duplicate_column_error(&err),
+            "expected a duplicate-column classification, got: {err}"
+        );
+    }
+
+    #[test]
     fn migration_never_overwrites_an_existing_non_null_title() {
         // A legacy row that already carries a user-authored title must keep it
         // through the one-time backfill (the `title IS NULL` guard protects it).
@@ -2026,9 +2097,24 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, sql_type: &str) -
     if existing.iter().any(|name| name == column) {
         return Ok(false);
     }
-    conn.execute(
+    match conn.execute(
         &format!("alter table {table} add column {column} {sql_type}"),
         [],
-    )?;
-    Ok(true)
+    ) {
+        Ok(_) => Ok(true),
+        // Tolerate a concurrent add: two connections opening at first-boot-after
+        // -upgrade can both pass the pragma check above and race on the ALTER.
+        // The loser sees SQLite's "duplicate column name" error — the column is
+        // present, so treat it as already-existing (Ok(false)) instead of
+        // hard-failing open().
+        Err(e) if is_duplicate_column_error(&e) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// True when `err` is SQLite's "duplicate column name" error, raised when an
+/// `alter table ... add column` targets a column that already exists (e.g. a
+/// concurrent connection added it first).
+fn is_duplicate_column_error(err: &rusqlite::Error) -> bool {
+    err.to_string().to_lowercase().contains("duplicate column")
 }

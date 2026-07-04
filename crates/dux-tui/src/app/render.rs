@@ -350,7 +350,7 @@ impl App {
                 // The drift note must surface even when the agent happens to be on
                 // the project's current branch, so it is gated on the drift alone —
                 // not nested inside the project-current-branch comparison.
-                let drifted = session.branch_name != session.initial_branch;
+                let drifted = branch_drifted(&session.branch_name, &session.initial_branch);
                 let differs_from_project = session.branch_name != project.current_branch;
                 if differs_from_project || drifted {
                     // The helper appends "(orig: <initial>)" only on drift and
@@ -7412,10 +7412,10 @@ pub(crate) fn format_line_stats(
 /// appends `(orig: <initial>)` so the original is visible in the tight header.
 /// Pure and unit-tested; the header renderer styles the pieces.
 pub(crate) fn top_bar_branch_suffix(current: &str, initial: &str) -> String {
-    if current == initial {
-        current.to_string()
-    } else {
+    if branch_drifted(current, initial) {
         format!("{current} (orig: {initial})")
+    } else {
+        current.to_string()
     }
 }
 
@@ -7767,6 +7767,44 @@ mod tests {
     fn confirm_close_tab_tail_only_tab_detaches_regardless_of_main() {
         assert!(confirm_close_tab_tail(true, true).contains("only tab"));
         assert!(confirm_close_tab_tail(true, false).contains("only tab"));
+    }
+
+    /// Render-level regression for the drift crumb gate: when the agent's
+    /// branch equals the project's current branch but has DRIFTED from the
+    /// branch it was created on, the header must still surface the "agent:"
+    /// crumb with "(orig: <initial>)". Exercises the real `render_header`
+    /// buffer, not just the pure `top_bar_branch_suffix` helper.
+    #[test]
+    fn header_shows_drift_crumb_when_agent_on_project_branch_but_drifted() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        // Force: current branch == project current branch, but != initial.
+        let project_branch = app.engine.projects[0].current_branch.clone();
+        {
+            let session = &mut app.engine.sessions[0];
+            session.branch_name = project_branch.clone();
+            session.initial_branch = "server-mode".to_string();
+        }
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains("orig:"),
+            "header should show the drift crumb even when the agent sits on the project branch; \
+             rendered header did not contain 'orig:'"
+        );
     }
 
     /// `always_show_tab_strip = false` (the default) must keep hiding the strip
@@ -8260,6 +8298,13 @@ mod tests {
             top_bar_branch_suffix("main", "server-mode"),
             "main (orig: server-mode)"
         );
+    }
+
+    #[test]
+    fn top_bar_branch_suffix_omits_orig_when_initial_empty() {
+        // An empty initial (legacy/never-backfilled row) must render the bare
+        // current branch, never a phantom "(orig: )".
+        assert_eq!(top_bar_branch_suffix("main", ""), "main");
     }
 
     #[test]

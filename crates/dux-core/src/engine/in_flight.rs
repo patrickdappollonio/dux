@@ -26,3 +26,26 @@ pub enum InFlightKey {
 
 /// Convenience alias so call sites can spell the storage shape once.
 pub type InFlightSet = HashSet<InFlightKey>;
+
+/// The expected branch names for an in-flight intentional rename, stashed in
+/// `Engine::rename_expected` so `BranchSyncReady` can distinguish the user's
+/// own in-progress rename (silently skip) from an unrelated external change
+/// that happened to land mid-rename (log it).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenameExpectation {
+    /// The branch the worktree was on before the rename dispatched. A
+    /// `BranchSyncReady` still reporting this value means the rename has not
+    /// landed yet — expected, so skip quietly.
+    pub old_branch: String,
+    /// The branch `git branch -m` is moving to. A `BranchSyncReady` reporting
+    /// this value is the rename completing — expected, so skip quietly.
+    pub new_branch: String,
+}
+
+impl RenameExpectation {
+    /// True when `branch` is one of the two values expected while this rename
+    /// is in flight (the still-pending old name or the target new name).
+    pub fn matches(&self, branch: &str) -> bool {
+        branch == self.old_branch || branch == self.new_branch
+    }
+}

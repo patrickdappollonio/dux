@@ -56,7 +56,8 @@ pub(crate) fn branch_drift_log_line(
     original: &str,
 ) -> String {
     format!(
-        "[{session_id}] agent \"{label}\" branch changed externally to {new} from {previous} (original was {original})"
+        "[{session_id}] agent \"{label}\" branch changed externally to {new} from {previous} \
+         (original was {original}) — if unexpected, check for git activity in the worktree outside dux"
     )
 }
 
@@ -1887,7 +1888,10 @@ impl Engine {
                         }
                         self.update_branch_sync_sessions();
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        logger::warn(&format!(
+                            "[{session_id}] agent rename to {new_branch} failed: {err}"
+                        ));
                         // Revert the title so the session doesn't stay in a mixed
                         // state where the display name changed but the branch
                         // didn't.
@@ -1908,6 +1912,7 @@ impl Engine {
                 // outcomes: the rename is over, so a subsequent `BranchSyncReady`
                 // should resume classifying real external drift for this session.
                 self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
+                self.rename_expected.remove(&session_id);
                 EventReaction::Multi(vec![
                     EventReaction::RebuildLeftItems,
                     status.into_reaction(),
@@ -1920,11 +1925,31 @@ impl Engine {
                     // the user's OWN in-progress rename and would otherwise
                     // classify it as external drift — logging a false warning and,
                     // if it lands before `BranchRenameCompleted`, reading a
-                    // corrupted `previous` (the already-updated branch). Skip any
-                    // session currently mid-rename entirely (no mutation, no warn);
-                    // `BranchRenameCompleted` clears the marker and writes the
-                    // authoritative branch. Check before the mutable borrow below.
+                    // corrupted `previous` (the already-updated branch). But the
+                    // skip is SCOPED to the rename's own branches so an *unrelated*
+                    // external change landing mid-rename isn't silently swallowed:
+                    // skip quietly only when the observed branch is the still-
+                    // pending old name or the expected new name; log an unexpected
+                    // value and still skip (no mutation mid-rename — that races
+                    // `BranchRenameCompleted`, which writes the authoritative
+                    // branch and clears the marker). Check before the mutable
+                    // borrow below.
                     if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
+                        match self.rename_expected.get(&session_id) {
+                            Some(expected) if expected.matches(&actual_branch) => {}
+                            Some(expected) => {
+                                logger::warn(&format!(
+                                    "[{session_id}] branch-sync observed unexpected branch '{actual_branch}' \
+                                     while a rename to '{}' (from '{}') is in flight; deferring until the rename completes",
+                                    expected.new_branch, expected.old_branch,
+                                ));
+                            }
+                            None => {
+                                logger::debug(&format!(
+                                    "[{session_id}] branch-sync skipped mid-rename (no expected branch recorded); actual '{actual_branch}'",
+                                ));
+                            }
+                        }
                         continue;
                     }
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
@@ -2832,9 +2857,12 @@ mod tests {
         );
         assert_eq!(
             msg,
-            "[sess-1] agent \"My Agent\" branch changed externally to agent-tabs from server-mode (original was server-mode)"
+            "[sess-1] agent \"My Agent\" branch changed externally to agent-tabs from server-mode \
+             (original was server-mode) — if unexpected, check for git activity in the worktree outside dux"
         );
         assert!(msg.contains("sess-1"));
+        // The actionable clause must be present so a reader knows what to check.
+        assert!(msg.contains("check for git activity in the worktree outside dux"));
     }
 
     #[test]
@@ -2864,6 +2892,134 @@ mod tests {
         // The session store was never upserted for s1 (no drift persisted).
         let loaded = engine.session_store.load_sessions().expect("load");
         assert!(loaded.iter().all(|s| s.id != "s1"));
+    }
+
+    #[test]
+    fn branch_sync_scoped_skip_ignores_expected_rename_branches() {
+        // The scoped in-flight guard skips silently only for the rename's own
+        // expected branches (still-pending old OR target new). Both must be
+        // skipped without mutating the session.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.initial_branch = "old-branch".into();
+        engine.sessions.push(session);
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+        engine.rename_expected.insert(
+            "s1".into(),
+            crate::engine::RenameExpectation {
+                old_branch: "old-branch".into(),
+                new_branch: "new-branch".into(),
+            },
+        );
+
+        // Observing the expected NEW branch mid-rename is skipped.
+        let r = engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "new-branch".to_string(),
+        )]));
+        assert!(matches!(r, EventReaction::Nothing));
+        // Observing the still-pending OLD branch is also skipped.
+        let r = engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "old-branch".to_string(),
+        )]));
+        assert!(matches!(r, EventReaction::Nothing));
+
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.branch_name, "old-branch",
+            "expected rename branches must never mutate the session mid-rename"
+        );
+    }
+
+    #[test]
+    fn branch_rename_completed_error_clears_marker_and_expected_and_reverts_title() {
+        // The Err arm (also the shape the panic_event synthesises) must revert
+        // the title AND clear both the in-flight marker and the expected-branch
+        // stash so drift detection is never permanently frozen.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.title = Some("renamed-optimistically".into());
+        engine.sessions.push(session);
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+        engine.rename_expected.insert(
+            "s1".into(),
+            crate::engine::RenameExpectation {
+                old_branch: "old-branch".into(),
+                new_branch: "new-branch".into(),
+            },
+        );
+
+        engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
+            session_id: "s1".into(),
+            new_branch: "new-branch".into(),
+            previous_title: Some("original-title".into()),
+            result: Err("boom".into()),
+            status: crate::engine::ResolvedFinal::error("k", "failed"),
+        });
+
+        assert!(!engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
+        assert!(!engine.rename_expected.contains_key("s1"));
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.title.as_deref(),
+            Some("original-title"),
+            "the optimistic title must be reverted on failure"
+        );
+    }
+
+    #[test]
+    fn panicking_rename_worker_still_clears_in_flight_marker() {
+        // A rename worker that panics must not permanently freeze drift
+        // detection: the panic-safe primitive's `panic_event` synthesises the
+        // completion event, whose handler clears the in-flight marker. This
+        // exercises the real spawn→panic→panic_event→handler path.
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_session("s1", "p1", "old-branch"));
+        engine.rename_expected.insert(
+            "s1".into(),
+            crate::engine::RenameExpectation {
+                old_branch: "old-branch".into(),
+                new_branch: "new-branch".into(),
+            },
+        );
+
+        engine.spawn_background_worker(
+            crate::engine::BackgroundWorkerSpec {
+                label: "branch-rename-test".into(),
+                in_flight_key: Some(InFlightKey::BranchRename("s1".into())),
+                panic_event: Some(Box::new(|reason| WorkerEvent::BranchRenameCompleted {
+                    session_id: "s1".into(),
+                    new_branch: "new-branch".into(),
+                    previous_title: None,
+                    result: Err(reason.clone()),
+                    status: crate::engine::ResolvedFinal::error("k", format!("panic: {reason}")),
+                })),
+            },
+            |_tx| panic!("simulated rename worker panic"),
+        );
+
+        // The marker is set by spawn_background_worker until the completion
+        // event arrives.
+        assert!(engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
+
+        // Drain the synthesised panic completion and process it.
+        let ev = engine
+            .worker_rx
+            .recv()
+            .expect("panic_event should post a completion");
+        engine.process_worker_event(ev);
+
+        assert!(
+            !engine.is_in_flight(&InFlightKey::BranchRename("s1".into())),
+            "a panicking rename worker must still clear the in-flight marker"
+        );
+        assert!(
+            !engine.rename_expected.contains_key("s1"),
+            "a panicking rename worker must still clear the expected-branch stash"
+        );
     }
 
     // ── ChangedFilesReady (stale-poll race / CF1 invariant) ──────────────

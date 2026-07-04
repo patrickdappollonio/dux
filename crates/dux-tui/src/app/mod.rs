@@ -810,6 +810,17 @@ pub(crate) struct AgentInfoPrompt {
     pub(crate) lines: Vec<(String, AgentInfoTone)>,
 }
 
+/// True when an agent's `current` branch has drifted from the `initial` branch
+/// it was created on. Guards against an empty `initial` (a legacy row that
+/// predates the `initial_branch` column and was never backfilled, or a
+/// transient pre-persist state) so an empty original never shows a phantom
+/// `(orig: )` drift. This is the single source of drift truth for the TUI,
+/// mirroring the web's `branchDrift()` helper; route every drift check through
+/// it rather than recomputing `current != initial` inline.
+pub(crate) fn branch_drifted(current: &str, initial: &str) -> bool {
+    !initial.is_empty() && current != initial
+}
+
 /// Build the body lines of the Agent Info modal from a session: name, provider,
 /// the current/original/forked-from branches, a drift note when the current
 /// branch differs from the branch the agent was created on, then the worktree,
@@ -839,7 +850,7 @@ pub(crate) fn agent_info_lines(session: &AgentSession) -> Vec<(String, AgentInfo
             AgentInfoTone::Neutral,
         ),
     ];
-    if session.branch_name != session.initial_branch {
+    if branch_drifted(&session.branch_name, &session.initial_branch) {
         lines.push((
             format!(
                 "Branch changed since creation (orig: {})",
@@ -1736,6 +1747,7 @@ impl App {
             has_active_processes,
             current_origin: dux_core::statusline::StatusScope::All,
             in_flight: HashSet::new(),
+            rename_expected: std::collections::HashMap::new(),
             pr_last_checked: HashMap::new(),
             changed_files_poller_started: AtomicBool::new(false),
             branch_sync_worker_started: AtomicBool::new(false),
@@ -3140,6 +3152,17 @@ impl App {
 
     pub(crate) fn open_rename_session(&mut self) -> Result<()> {
         if let Some(session) = self.selected_session().cloned() {
+            if self
+                .engine
+                .is_in_flight(&dux_core::engine::InFlightKey::BranchRename(
+                    session.id.clone(),
+                ))
+            {
+                self.set_error(
+                    "A rename is already in progress for this agent. Wait for it to finish before renaming again.",
+                );
+                return Ok(());
+            }
             let current_name = session.title.unwrap_or_else(|| session.branch_name.clone());
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
@@ -3170,6 +3193,21 @@ impl App {
             self.set_error(
                 "Agent name may only contain letters, digits, dashes, underscores, or slashes. \
                  It cannot start with \"-\" or \"/\", end with \"/\", or contain \"//\".",
+            );
+            return;
+        }
+
+        // Block overlapping renames: a second concurrent `git branch -m` on the
+        // same worktree would race the first (and could corrupt the in-flight
+        // drift-suppression bookkeeping). Mirror the CreateAgent busy-guard.
+        if self
+            .engine
+            .is_in_flight(&dux_core::engine::InFlightKey::BranchRename(
+                session_id.to_string(),
+            ))
+        {
+            self.set_error(
+                "A rename is already in progress for this agent. Wait for it to finish before renaming again.",
             );
             return;
         }
@@ -3206,7 +3244,6 @@ impl App {
             let worktree = session.worktree_path.clone();
             let sid = session.id.clone();
             let new_branch = name.clone();
-            let tx = self.engine.worker_tx.clone();
             // Declare the loading→final states together; the worker resolves the
             // matching message and carries it back on BranchRenameCompleted.
             let success_branch = new_branch.clone();
@@ -3221,24 +3258,70 @@ impl App {
                         "Branch rename failed, reverted agent name: {e}"
                     ))
                 });
+            let op_key = op.key().to_string();
             let pending = op.pending_status();
-            // Mark the rename in flight so the branch-sync poller does not observe
-            // our own in-progress rename and log it as external drift (or corrupt
-            // `previous`). `BranchRenameCompleted` clears this marker for `sid`.
-            self.engine
-                .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid.clone()));
-            std::thread::spawn(move || {
-                let result = git::rename_branch(Path::new(&worktree), &old_branch, &new_branch)
+
+            // Stash the expected branches so `BranchSyncReady` can distinguish
+            // our own in-progress rename (silently skip) from an unrelated
+            // external change landing mid-rename (log it). Cleared alongside the
+            // in-flight marker in `BranchRenameCompleted`.
+            self.engine.rename_expected.insert(
+                sid.clone(),
+                dux_core::engine::RenameExpectation {
+                    old_branch: old_branch.clone(),
+                    new_branch: new_branch.clone(),
+                },
+            );
+
+            // Clones for the panic path: if the worker thread panics, the
+            // synthesised `BranchRenameCompleted` still runs the handler, which
+            // reverts the title AND clears both the in-flight marker and
+            // `rename_expected` — so a panic can never permanently freeze drift
+            // detection for this session.
+            let panic_sid = sid.clone();
+            let panic_new_branch = new_branch.clone();
+            let panic_previous_title = previous_title.clone();
+
+            // Route through the panic-safe background-worker primitive. Its
+            // `in_flight_key` marks the rename in flight (so the branch-sync
+            // poller skips it) and its `panic_event` guarantees the completion
+            // event fires even on panic.
+            let job_worktree = worktree;
+            let job_old_branch = old_branch;
+            let job_sid = sid.clone();
+            let job_new_branch = new_branch;
+            self.engine.spawn_background_worker(
+                dux_core::engine::BackgroundWorkerSpec {
+                    label: format!("branch-rename[{job_sid}]"),
+                    in_flight_key: Some(dux_core::engine::InFlightKey::BranchRename(sid.clone())),
+                    panic_event: Some(Box::new(move |reason| WorkerEvent::BranchRenameCompleted {
+                        session_id: panic_sid,
+                        new_branch: panic_new_branch,
+                        previous_title: panic_previous_title,
+                        result: Err(reason.clone()),
+                        status: dux_core::engine::ResolvedFinal::error(
+                            op_key,
+                            format!("Branch rename failed, reverted agent name: {reason}"),
+                        ),
+                    })),
+                },
+                move |tx| {
+                    let result = git::rename_branch(
+                        Path::new(&job_worktree),
+                        &job_old_branch,
+                        &job_new_branch,
+                    )
                     .map_err(|e| e.to_string());
-                let status = op.resolve(&result);
-                let _ = tx.send(WorkerEvent::BranchRenameCompleted {
-                    session_id: sid,
-                    new_branch,
-                    previous_title,
-                    result,
-                    status,
-                });
-            });
+                    let status = op.resolve(&result);
+                    let _ = tx.send(WorkerEvent::BranchRenameCompleted {
+                        session_id: job_sid,
+                        new_branch: job_new_branch,
+                        previous_title,
+                        result,
+                        status,
+                    });
+                },
+            );
             self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
         } else {
             self.set_info(format!("Renamed agent to \"{name}\"."));
@@ -3912,6 +3995,32 @@ mod tests {
             lines
                 .iter()
                 .all(|(_, tone)| *tone == AgentInfoTone::Neutral)
+        );
+    }
+
+    #[test]
+    fn branch_drifted_guards_empty_initial() {
+        // Real drift: current differs from a non-empty initial.
+        assert!(branch_drifted("agent-tabs", "server-mode"));
+        // No drift when equal.
+        assert!(!branch_drifted("main", "main"));
+        // Empty initial (legacy/never-backfilled row) is NEVER drift, even
+        // though current != "". This is the phantom "(orig: )" guard.
+        assert!(!branch_drifted("main", ""));
+        assert!(!branch_drifted("", ""));
+    }
+
+    #[test]
+    fn agent_info_lines_omit_drift_line_when_initial_empty() {
+        let mut s = test_session("s1", "p1", 0);
+        s.branch_name = "main".into();
+        s.initial_branch = String::new();
+        let lines = agent_info_lines(&s);
+        assert!(
+            !lines
+                .iter()
+                .any(|(l, _)| l.to_lowercase().contains("changed since creation")),
+            "an empty initial_branch must not produce a phantom drift line"
         );
     }
 

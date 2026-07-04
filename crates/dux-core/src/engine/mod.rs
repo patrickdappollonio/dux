@@ -24,7 +24,7 @@ pub use events::{
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
 };
-pub use in_flight::{InFlightKey, InFlightSet};
+pub use in_flight::{InFlightKey, InFlightSet, RenameExpectation};
 pub use lifecycle::{
     DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, ShutdownReport,
     TerminatingPty, format_shutdown_result, format_shutdown_start,
@@ -181,6 +181,13 @@ pub struct Engine {
     /// worker; cleared by `clear_in_flight` when the worker's completion
     /// event arrives.
     pub in_flight: InFlightSet,
+    /// Expected branch names for in-flight intentional renames, keyed by
+    /// session id. Set alongside `InFlightKey::BranchRename` at dispatch and
+    /// cleared in `BranchRenameCompleted`. `BranchSyncReady` consults it so it
+    /// only silently skips a mid-rename session when the observed branch is the
+    /// still-pending old name or the expected new name; an *unexpected* value
+    /// while a rename is in flight is logged rather than silently swallowed.
+    pub rename_expected: HashMap<String, RenameExpectation>,
     /// Last-checked timestamps for the one-shot PR-check rate-limiter.
     /// Keyed by `session_id`; written by `process_worker_event`'s
     /// `PrStatusReady` arm and read by `spawn_pr_check_for_session` to

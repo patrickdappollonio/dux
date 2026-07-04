@@ -124,6 +124,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         has_active_processes: Arc::new(AtomicBool::new(false)),
         current_origin: dux_core::statusline::StatusScope::All,
         in_flight: InFlightSet::new(),
+        rename_expected: std::collections::HashMap::new(),
         pr_last_checked: HashMap::new(),
         changed_files_poller_started: AtomicBool::new(false),
         branch_sync_worker_started: AtomicBool::new(false),
