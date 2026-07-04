@@ -218,11 +218,32 @@ impl Engine {
     }
 }
 
+/// Outcome of a `spawn_background_worker` call. Background work is otherwise
+/// fire-and-forget, but the caller needs a signal for the rare synchronous
+/// spawn failure so it can unwind any optimistic state it set up before
+/// dispatching (no completion event will ever fire in that case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundSpawn {
+    /// The worker thread started; its completion or synthesised panic event
+    /// will follow through `worker_tx`.
+    Spawned,
+    /// Skipped because the in-flight key was already present. This is the
+    /// primitive's defensive backstop — most call sites also guard re-entry
+    /// with a user-facing check *before* calling in — so it should not be
+    /// reached on a path that already guards. No event will fire.
+    AlreadyInFlight,
+    /// `thread::Builder::spawn` failed synchronously (rare; PID / RLIMIT
+    /// exhaustion). The in-flight key (if any) was cleared so a retry can
+    /// proceed, but no completion event will fire — the caller must unwind
+    /// its own optimistic state.
+    SpawnFailed,
+}
+
 /// Specification for a single one-shot background-worker spawn. Used by
-/// `Engine::spawn_background_worker`, which has no caller-facing reaction
-/// (background work is fire-and-forget) and no busy-status delivery
-/// (background workers run silently). Panic safety still applies — see
-/// `panic_event`.
+/// `Engine::spawn_background_worker`, which returns a coarse
+/// [`BackgroundSpawn`] outcome (so a caller can unwind on synchronous spawn
+/// failure) and has no busy-status delivery (background workers run
+/// silently). Panic safety still applies — see `panic_event`.
 pub struct BackgroundWorkerSpec {
     /// Short human-readable label. Used as a thread-name suffix and as the
     /// log prefix on any panic.
@@ -243,16 +264,26 @@ impl Engine {
     /// in-flight tracking. See `BackgroundWorkerSpec` for the per-site
     /// fields.
     ///
-    /// Unlike `spawn_command_worker`, this primitive returns `()` because
-    /// background work is fire-and-forget: there is no caller-side
-    /// `EventReaction` to apply. A synchronous spawn failure is logged and
-    /// the in-flight key (if any) is cleared so a future retry can proceed.
-    pub fn spawn_background_worker<F>(&mut self, spec: BackgroundWorkerSpec, job: F)
+    /// Unlike `spawn_command_worker`, this primitive has no caller-side
+    /// `EventReaction` to apply, but it returns a coarse [`BackgroundSpawn`]
+    /// outcome so a caller can unwind optimistic state on the rare
+    /// synchronous spawn failure. A spawn failure is logged and the in-flight
+    /// key (if any) is cleared so a future retry can proceed.
+    pub fn spawn_background_worker<F>(
+        &mut self,
+        spec: BackgroundWorkerSpec,
+        job: F,
+    ) -> BackgroundSpawn
     where
         F: FnOnce(Sender<WorkerEvent>) + Send + 'static,
     {
-        // 1. In-flight guard. Background workers silently skip when the key
-        //    is already present — they have no caller to surface a warning to.
+        // 1. In-flight guard — a DEFENSIVE BACKSTOP only. The load-bearing,
+        //    user-facing re-entry guard lives at the call site (e.g.
+        //    `apply_rename_session` checks `InFlightKey::BranchRename` and
+        //    surfaces an error before calling in). This internal check exists
+        //    so a caller that forgets to guard cannot double-spawn; a path
+        //    that already guards will never trip it. Background workers have
+        //    no caller to surface a warning to, so this only logs.
         if let Some(ref key) = spec.in_flight_key
             && self.is_in_flight(key)
         {
@@ -260,7 +291,7 @@ impl Engine {
                 "spawn_background_worker[{}] skipped: {key:?} already in flight",
                 spec.label,
             ));
-            return;
+            return BackgroundSpawn::AlreadyInFlight;
         }
         if let Some(ref key) = spec.in_flight_key {
             self.mark_in_flight(key.clone());
@@ -310,7 +341,9 @@ impl Engine {
             crate::logger::error(&format!(
                 "spawn_background_worker[{label}] failed to spawn thread: {err}",
             ));
+            return BackgroundSpawn::SpawnFailed;
         }
+        BackgroundSpawn::Spawned
     }
 }
 

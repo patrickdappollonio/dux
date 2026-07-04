@@ -103,21 +103,30 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
-        // Column-add + backfills for `initial_branch` run inside a single
-        // transaction so a crash mid-migration rolls the ALTER back too and the
-        // whole step is retried cleanly on the next boot (rather than leaving a
-        // column present with a half-applied backfill).
-        {
+        // The immutable branch an agent was created on. Additive column with a
+        // '' default so old rows and inserts by an older binary still succeed.
+        //
+        // The ALTER runs in AUTOCOMMIT (on `&self.conn`), NOT inside the backfill
+        // transaction below, so the duplicate-column tolerance in `ensure_column`
+        // works: two connections opening at first-boot-after-upgrade can race the
+        // ALTER, and the loser sees SQLite's "duplicate column name" error (which
+        // `is_duplicate_column_error` swallows as `Ok(false)`). Wrapping the ALTER
+        // in a transaction instead would make the loser raise SQLITE_BUSY_SNAPSHOT,
+        // which that classifier does NOT match — hard-failing `open()`.
+        let initial_branch_added = ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "initial_branch",
+            "text not null default ''",
+        )?;
+        // Only the backfill UPDATEs run in a transaction so a crash mid-backfill
+        // rolls them back and the step is retried cleanly on the next boot (the
+        // idempotent/ungated portion below self-heals a partially-applied run).
+        // Capture the one-time freeze count and log it ONLY after the commit
+        // succeeds, so the success line can never claim a migration that a commit
+        // failure actually rolled back.
+        let frozen_titles = {
             let tx = self.conn.unchecked_transaction()?;
-            // The immutable branch an agent was created on. Additive column with
-            // a '' default so old rows and inserts by an older binary still
-            // succeed.
-            let initial_branch_added = ensure_column(
-                &tx,
-                "agent_sessions",
-                "initial_branch",
-                "text not null default ''",
-            )?;
             // IDEMPOTENT, UNGATED backfill: freeze the birth branch for any row
             // that still lacks one. The WHERE clause is self-limiting (new rows
             // always record a genuine `initial_branch` at creation, so they are
@@ -148,16 +157,21 @@ impl SessionStore {
             // and their display continues to track `branch_name` (drift shown via
             // `initial_branch`). A future reader seeing this split should know it
             // is the deliberate freeze tradeoff, not an oversight.
-            if initial_branch_added {
-                let frozen = tx.execute(
+            let frozen = if initial_branch_added {
+                Some(tx.execute(
                     "update agent_sessions set title = branch_name where title is null",
                     [],
-                )?;
-                crate::logger::info(&format!(
-                    "one-time migration: froze title for {frozen} legacy session(s)"
-                ));
-            }
+                )?)
+            } else {
+                None
+            };
             tx.commit()?;
+            frozen
+        };
+        if let Some(frozen) = frozen_titles {
+            crate::logger::info(&format!(
+                "one-time migration: froze title for {frozen} legacy session(s)"
+            ));
         }
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
@@ -178,16 +192,27 @@ impl SessionStore {
             "auto_reopen_enabled",
             "integer not null default 1",
         )?;
-        // Persisted per-project display order for agent sessions. When the
-        // column is added on an existing database, backfill positions per
-        // project from the legacy `updated_at DESC` order so the visible order
-        // is preserved exactly across the upgrade.
-        if ensure_column(
+        // Persisted per-project display order for agent sessions. The ALTER runs
+        // in AUTOCOMMIT (same duplicate-column-tolerance rationale as
+        // `initial_branch` above); the backfill numbers positions per project
+        // from the legacy `updated_at DESC` order so the visible order is
+        // preserved exactly across the upgrade, and it runs inside its own
+        // transaction (see `backfill_session_sort_order`).
+        //
+        // Retryable: run the backfill when the column was just added, OR when a
+        // prior crash stranded the table in the gap between the (autocommitted)
+        // ALTER and the backfill — detected by `session_sort_order_needs_backfill`
+        // as "some project has 2+ sessions all still at the default 0". Gating on
+        // `ensure_column` alone (the previous behavior) left a crash-stranded
+        // table pinned at sort_order=0 forever, because the next boot sees the
+        // column present and skips the backfill permanently.
+        let sort_order_added = ensure_column(
             &self.conn,
             "agent_sessions",
             "sort_order",
             "integer not null default 0",
-        )? {
+        )?;
+        if sort_order_added || self.session_sort_order_needs_backfill()? {
             self.backfill_session_sort_order()?;
         }
         self.conn.execute_batch(
@@ -844,6 +869,32 @@ impl SessionStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// True when some project has more than one session and ALL of that
+    /// project's sessions are still at `sort_order = 0` — the fingerprint of a
+    /// `sort_order` backfill that never ran (stranded by a crash between the
+    /// autocommitted ALTER and the backfill). Used to make the one-time
+    /// backfill retryable.
+    ///
+    /// This is deliberately narrower than "every row is 0": a project with a
+    /// single session legitimately sits at `sort_order = 0` (position 0), so
+    /// that state must NOT trigger a re-run on every open. Two-or-more sessions
+    /// in one project all pinned at 0 is impossible in steady state — inserts
+    /// land at `min-1` (negative) and reorders assign distinct `0..n` — so it
+    /// only ever indicates a stranded half-migration. `count(nullif(sort_order,
+    /// 0))` counts only rows whose value is neither 0 nor NULL.
+    fn session_sort_order_needs_backfill(&self) -> Result<bool> {
+        let stranded: bool = self.conn.query_row(
+            "select exists( \
+                 select 1 from agent_sessions \
+                 group by project_id \
+                 having count(*) > 1 and count(nullif(sort_order, 0)) = 0 \
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(stranded)
     }
 
     /// One-time backfill run when the `sort_order` column is first added to an
@@ -1584,6 +1635,115 @@ mod tests {
         assert!(
             is_duplicate_column_error(&err),
             "expected a duplicate-column classification, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_column_tolerates_column_added_by_another_connection() {
+        // Cross-connection duplicate-column tolerance (the real-world race the
+        // autocommit ALTER guards against): once one connection has committed
+        // the column, a SECOND connection's ensure_column must report Ok(false)
+        // and not error. This is the on-disk two-connection variant of the
+        // concurrent first-boot add.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("t.sqlite3");
+        let conn1 = Connection::open(&db).unwrap();
+        conn1
+            .execute_batch("create table t (id text primary key);")
+            .unwrap();
+        assert!(
+            ensure_column(&conn1, "t", "c", "text").unwrap(),
+            "first add"
+        );
+
+        let conn2 = Connection::open(&db).unwrap();
+        assert!(
+            !ensure_column(&conn2, "t", "c", "text").unwrap(),
+            "a second connection must tolerate the already-present column as Ok(false)"
+        );
+    }
+
+    #[test]
+    fn reopening_same_db_file_remigrates_cleanly() {
+        // F3 regression: with the initial_branch ALTER moved to autocommit,
+        // re-opening the same on-disk DB re-runs migrate() and every
+        // ensure_column hits already-present without hard-failing open().
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        {
+            let _s = SessionStore::open(&db).unwrap();
+        }
+        // A second open() must succeed (no SQLITE_BUSY_SNAPSHOT / duplicate-column
+        // hard failure on the re-run migration).
+        let _s = SessionStore::open(&db).unwrap();
+    }
+
+    #[test]
+    fn migrate_reheals_stranded_all_zero_sort_order() {
+        // F4 regression: a crash between the (autocommitted) sort_order ALTER and
+        // its backfill strands every row at 0. The previous gating (only when
+        // ensure_column just added the column) skipped the backfill forever on
+        // the next boot. Now migrate() detects the stranded fingerprint (a
+        // project with 2+ sessions all at 0) and re-runs the backfill.
+        let store = legacy_store_with_sessions(&[
+            ("p1-old", "p1", "2026-01-01T00:00:00Z"),
+            ("p1-new", "p1", "2026-03-01T00:00:00Z"),
+        ]);
+        // Simulate the stranded half-migration: column present, all rows at 0.
+        store
+            .conn
+            .execute("update agent_sessions set sort_order = 0", [])
+            .unwrap();
+        assert!(
+            store.session_sort_order_needs_backfill().unwrap(),
+            "two same-project sessions both at 0 must read as stranded"
+        );
+
+        store.migrate().unwrap();
+
+        // The stored value changed (proving the backfill re-ran, not just the
+        // load-time all-zero fallback): older session sorts to position 1.
+        let so_old: i64 = store
+            .conn
+            .query_row(
+                "select sort_order from agent_sessions where id = 'p1-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let so_new: i64 = store
+            .conn
+            .query_row(
+                "select sort_order from agent_sessions where id = 'p1-new'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((so_new, so_old), (0, 1), "updated_at DESC → new=0, old=1");
+        // And once healed, the fingerprint no longer trips (no destructive re-run).
+        assert!(!store.session_sort_order_needs_backfill().unwrap());
+    }
+
+    #[test]
+    fn single_session_per_project_at_zero_is_not_treated_as_stranded() {
+        // A project with exactly one session legitimately sits at sort_order 0.
+        // That must NOT read as a stranded backfill (which would re-run it on
+        // every open).
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .upsert_session(&test_session_in("solo-a", "pA", now, now))
+            .unwrap();
+        store
+            .upsert_session(&test_session_in("solo-b", "pB", now, now))
+            .unwrap();
+        store
+            .conn
+            .execute("update agent_sessions set sort_order = 0", [])
+            .unwrap();
+        assert!(
+            !store.session_sort_order_needs_backfill().unwrap(),
+            "single-session-per-project zeros are legitimate, not stranded"
         );
     }
 

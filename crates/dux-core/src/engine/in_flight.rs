@@ -49,3 +49,29 @@ impl RenameExpectation {
         branch == self.old_branch || branch == self.new_branch
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_expectation_matches_only_old_and_new() {
+        // The pure expected-vs-unexpected decision the branch-sync guard keys on:
+        // the still-pending old name and the target new name are expected; any
+        // other observed branch is unexpected (and gets logged/deferred).
+        let exp = RenameExpectation {
+            old_branch: "old-branch".to_string(),
+            new_branch: "new-branch".to_string(),
+        };
+        assert!(
+            exp.matches("old-branch"),
+            "still-pending old name is expected"
+        );
+        assert!(exp.matches("new-branch"), "target new name is expected");
+        assert!(
+            !exp.matches("surprise-branch"),
+            "an unrelated branch is unexpected"
+        );
+        assert!(!exp.matches(""), "empty is unexpected");
+    }
+}

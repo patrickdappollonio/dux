@@ -7520,6 +7520,50 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn open_rename_session_refuses_when_rename_in_flight() {
+        // The load-bearing user-facing overlap guard: a rename already in flight
+        // for this session must block opening a second rename prompt.
+        let mut app = test_app(default_bindings());
+        let sid = app.engine.sessions[0].id.clone();
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid));
+
+        app.open_rename_session().unwrap();
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "no rename prompt should open while one is in flight"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("already in progress"));
+    }
+
+    #[test]
+    fn apply_rename_session_refuses_when_rename_in_flight() {
+        // Applying a rename while one is already in flight must refuse without
+        // touching the title, spawning a second worker, or stashing a second
+        // expected-branch entry.
+        let mut app = test_app(default_bindings());
+        let sid = app.engine.sessions[0].id.clone();
+        let original_title = app.engine.sessions[0].title.clone();
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid.clone()));
+
+        app.apply_rename_session(&sid, "brand-new-name".to_string(), true);
+
+        assert_eq!(
+            app.engine.sessions[0].title, original_title,
+            "title must not change while a rename is in flight"
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("already in progress"));
+        assert!(
+            !app.engine.rename_expected.contains_key(&sid),
+            "no second worker's expected-branch stash should be recorded"
+        );
+    }
+
+    #[test]
     fn open_kill_running_requires_live_runtimes() {
         let mut app = test_app(default_bindings());
 

@@ -31,7 +31,8 @@ pub use lifecycle::{
 };
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
-    BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec, format_panic_payload,
+    BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
+    format_panic_payload,
 };
 pub use status_op::{Final, HandlerStatusOp, ResolvedFinal, StatusOp, status_op};
 
@@ -1522,6 +1523,30 @@ impl Engine {
                     branch_name: s.branch_name.clone(),
                 })
                 .collect();
+        }
+    }
+
+    /// Roll back the optimistic state that a rename call site set up before
+    /// dispatching the branch-rename worker, for the rare case where the
+    /// worker never started (a synchronous thread-spawn failure). Normally
+    /// `BranchRenameCompleted` clears this state and reverts the title on both
+    /// success and failure, but that event only fires if the worker actually
+    /// ran — so on a spawn failure the caller must unwind here or the Busy
+    /// hangs forever, `rename_expected` is orphaned, and the optimistic title
+    /// is never reverted (permanently deferring drift detection). Removes the
+    /// expected-branch stash, clears the in-flight marker, and restores
+    /// `previous_title`. Idempotent.
+    pub fn revert_optimistic_rename(&mut self, session_id: &str, previous_title: Option<String>) {
+        self.rename_expected.remove(session_id);
+        self.clear_in_flight(&InFlightKey::BranchRename(session_id.to_string()));
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.title = previous_title;
+            session.updated_at = Utc::now();
+            if let Err(err) = self.session_store.upsert_session(session) {
+                crate::logger::error(&format!(
+                    "failed to persist rename revert for {session_id}: {err}"
+                ));
+            }
         }
     }
 

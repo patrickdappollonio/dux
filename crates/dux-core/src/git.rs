@@ -1404,10 +1404,47 @@ pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
     format!("{start}...{end}")
 }
 
+/// Upper bound on how long a single `git branch -m` may run before the
+/// rename worker gives up and kills the child. `git branch -m` is normally
+/// instantaneous; a multi-second wait means the process is wedged (a stale
+/// `.git/index.lock`, an NFS stall, etc.). Without this bound a hung child
+/// never posts `BranchRenameCompleted`, so the session's in-flight marker and
+/// `rename_expected` stay set for the process's lifetime — permanently
+/// blocking further renames and deferring drift detection.
+const RENAME_BRANCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wait for `child` to exit, killing it and returning an error if `timeout`
+/// elapses first. Polls `try_wait` on a short interval rather than blocking on
+/// `wait`/`output`, so a wedged process cannot hang the caller forever. On
+/// timeout the child is killed and reaped before the error is returned so no
+/// zombie is left behind. `what` names the operation for the error message.
+fn wait_child_or_kill(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+    what: &str,
+) -> Result<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!(
+                "{what} timed out after {}s and was terminated",
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// Rename a git branch inside a worktree. Runs `git branch -m <old> <new>`
-/// from within the worktree directory.
+/// from within the worktree directory, bounded by [`RENAME_BRANCH_TIMEOUT`]
+/// so a wedged git invocation can't strand the rename worker forever.
 pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Result<()> {
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args([
             "-C",
             worktree_path.to_string_lossy().as_ref(),
@@ -1416,12 +1453,20 @@ pub fn rename_branch(worktree_path: &Path, old_name: &str, new_name: &str) -> Re
             old_name,
             new_name,
         ])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git branch rename failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        .stdout(Stdio::null())
+        // `git branch -m` writes only a short line to stderr on failure, well
+        // under the pipe buffer, so leaving it undrained until the child exits
+        // cannot deadlock. Read it after the wait for the error message.
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let status = wait_child_or_kill(&mut child, RENAME_BRANCH_TIMEOUT, "git branch rename")?;
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            use std::io::Read;
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        return Err(anyhow!("git branch rename failed: {}", stderr.trim()));
     }
     Ok(())
 }
@@ -2100,6 +2145,38 @@ mod tests {
 
         let branch = current_branch(&wt).unwrap();
         assert_eq!(branch, "same-name");
+    }
+
+    #[test]
+    fn wait_child_or_kill_times_out_and_kills_a_wedged_child() {
+        // A hung child must be killed once the deadline passes, and the error
+        // must say so — this is what keeps a wedged `git branch -m` from
+        // stranding the rename worker forever.
+        use std::time::{Duration, Instant};
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let start = Instant::now();
+        let err = wait_child_or_kill(&mut child, Duration::from_millis(100), "sleep").unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "must return promptly after the timeout, not wait for the child"
+        );
+        assert!(
+            err.to_string().contains("timed out"),
+            "error should report the timeout, got: {err}"
+        );
+        // The child was killed and reaped: a follow-up try_wait sees it gone.
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "the timed-out child must have been reaped, not left a zombie"
+        );
+    }
+
+    #[test]
+    fn wait_child_or_kill_returns_status_for_a_fast_child() {
+        use std::time::Duration;
+        let mut child = Command::new("true").spawn().unwrap();
+        let status = wait_child_or_kill(&mut child, Duration::from_secs(5), "true").unwrap();
+        assert!(status.success());
     }
 
     // ── branch_exists tests ────────────────────────────────────

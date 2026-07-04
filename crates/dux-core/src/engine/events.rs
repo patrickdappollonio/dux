@@ -2933,6 +2933,84 @@ mod tests {
     }
 
     #[test]
+    fn branch_sync_unexpected_branch_mid_rename_is_deferred_not_applied() {
+        // The scoped guard's UNEXPECTED path: a branch that is neither the
+        // pending old name nor the target new name appears while a rename is in
+        // flight. The guard logs the anomaly but still defers (no mutation
+        // mid-rename — that would race `BranchRenameCompleted`).
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.initial_branch = "old-branch".into();
+        engine.sessions.push(session);
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+        engine.rename_expected.insert(
+            "s1".into(),
+            crate::engine::RenameExpectation {
+                old_branch: "old-branch".into(),
+                new_branch: "new-branch".into(),
+            },
+        );
+
+        let r = engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "surprise-branch".to_string(),
+        )]));
+
+        assert!(matches!(r, EventReaction::Nothing));
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.branch_name, "old-branch",
+            "an unexpected mid-rename branch must not mutate the session"
+        );
+        // Nothing was persisted for s1 (no drift written).
+        let loaded = engine.session_store.load_sessions().expect("load");
+        assert!(loaded.iter().all(|s| s.id != "s1"));
+    }
+
+    #[test]
+    fn revert_optimistic_rename_unwinds_title_marker_and_expectation() {
+        // F1: on a synchronous worker-spawn failure no `BranchRenameCompleted`
+        // fires, so the call site must unwind the optimistic state itself.
+        // `revert_optimistic_rename` restores the title, clears the in-flight
+        // marker, and drops the expected-branch stash — otherwise the Busy would
+        // hang forever and drift detection would be frozen for the session.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.title = Some("optimistic-new-name".into());
+        engine.sessions.push(session);
+        // The optimistic state `apply_rename_session` sets up before dispatch.
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+        engine.rename_expected.insert(
+            "s1".into(),
+            crate::engine::RenameExpectation {
+                old_branch: "old-branch".into(),
+                new_branch: "new-branch".into(),
+            },
+        );
+
+        engine.revert_optimistic_rename("s1", Some("original-title".into()));
+
+        assert!(
+            !engine.is_in_flight(&InFlightKey::BranchRename("s1".into())),
+            "the in-flight marker must be cleared so future renames aren't blocked"
+        );
+        assert!(
+            !engine.rename_expected.contains_key("s1"),
+            "the expected-branch stash must be dropped so branch-sync resumes"
+        );
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.title.as_deref(),
+            Some("original-title"),
+            "the optimistic title must be reverted"
+        );
+        // The revert was persisted (reload sees the restored title).
+        let loaded = engine.session_store.load_sessions().expect("load");
+        let stored = loaded.iter().find(|s| s.id == "s1").expect("stored s1");
+        assert_eq!(stored.title.as_deref(), Some("original-title"));
+    }
+
+    #[test]
     fn branch_rename_completed_error_clears_marker_and_expected_and_reverts_title() {
         // The Err arm (also the shape the panic_event synthesises) must revert
         // the title AND clear both the in-flight marker and the expected-branch

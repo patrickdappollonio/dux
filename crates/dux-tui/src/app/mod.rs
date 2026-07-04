@@ -3281,6 +3281,11 @@ impl App {
             let panic_sid = sid.clone();
             let panic_new_branch = new_branch.clone();
             let panic_previous_title = previous_title.clone();
+            // A separate clone for the synchronous-spawn-failure revert below:
+            // if the worker thread never starts, no `BranchRenameCompleted`
+            // fires, so we must unwind the optimistic title/marker/expectation
+            // here instead.
+            let revert_previous_title = previous_title.clone();
 
             // Route through the panic-safe background-worker primitive. Its
             // `in_flight_key` marks the rename in flight (so the branch-sync
@@ -3290,7 +3295,7 @@ impl App {
             let job_old_branch = old_branch;
             let job_sid = sid.clone();
             let job_new_branch = new_branch;
-            self.engine.spawn_background_worker(
+            let outcome = self.engine.spawn_background_worker(
                 dux_core::engine::BackgroundWorkerSpec {
                     label: format!("branch-rename[{job_sid}]"),
                     in_flight_key: Some(dux_core::engine::InFlightKey::BranchRename(sid.clone())),
@@ -3322,7 +3327,26 @@ impl App {
                     });
                 },
             );
-            self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+            // Only apply the pending Busy if the worker actually started. On a
+            // synchronous spawn failure no `BranchRenameCompleted` will ever
+            // fire, so the Busy would hang forever and the optimistic title +
+            // `rename_expected` would be orphaned — unwind them and surface an
+            // error instead.
+            match outcome {
+                dux_core::engine::BackgroundSpawn::Spawned => {
+                    self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+                }
+                dux_core::engine::BackgroundSpawn::SpawnFailed
+                | dux_core::engine::BackgroundSpawn::AlreadyInFlight => {
+                    self.engine
+                        .revert_optimistic_rename(&sid, revert_previous_title);
+                    self.rebuild_left_items();
+                    self.set_error(
+                        "Could not start the branch-rename worker; reverted the agent name. \
+                         Please try again.",
+                    );
+                }
+            }
         } else {
             self.set_info(format!("Renamed agent to \"{name}\"."));
             self.engine.update_branch_sync_sessions();
