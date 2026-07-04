@@ -47,7 +47,7 @@ export function OfflineOverlay() {
       aria-modal="true"
       aria-labelledby="offline-overlay-title"
       aria-describedby="offline-overlay-desc"
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/40 p-6 backdrop-grayscale"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/40 p-6 backdrop-grayscale supports-backdrop-filter:backdrop-blur-sm"
     >
       <div className="w-full max-w-md rounded-xl border bg-card p-6 text-center text-card-foreground shadow-xl">
         <pre

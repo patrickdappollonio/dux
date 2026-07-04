@@ -70,7 +70,7 @@ export function KillRunningDialog() {
 
   return (
     <Dialog open={killRunningOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false}>
+      <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>Kill running processes</DialogTitle>
           <DialogDescription>

@@ -29,7 +29,7 @@ function DialogOverlay({
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-sm data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -41,13 +41,20 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  destructive = false,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
+  // When true, the shared backdrop also desaturates the app behind it
+  // (black-and-white) as an extra danger cue for consequential confirm dialogs.
+  // Blur stays on the base overlay for every dialog regardless.
+  destructive?: boolean
 }) {
   return (
     <DialogPortal>
-      <DialogOverlay />
+      <DialogOverlay
+        className={destructive ? "backdrop-grayscale" : undefined}
+      />
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         // max-h caps the popup to the dynamic viewport (dvh tracks the soft

@@ -50,7 +50,7 @@ export function ConfirmDiscardFileDialog() {
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false}>
+      <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>Discard changes to {path}?</DialogTitle>
         </DialogHeader>

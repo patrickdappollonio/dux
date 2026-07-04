@@ -36,7 +36,7 @@ export function DeleteSessionDialog() {
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false}>
+      <DialogContent showCloseButton={false} destructive>
         <DialogHeader>
           <DialogTitle>Delete agent?</DialogTitle>
         </DialogHeader>
