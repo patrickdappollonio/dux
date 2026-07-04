@@ -46,17 +46,22 @@ const fetchMock = vi.fn(async (url: string) => {
 })
 
 class FakeWebSocket {
+  static instances: FakeWebSocket[] = []
   onopen: (() => void) | null = null
   onclose: (() => void) | null = null
   onerror: (() => void) | null = null
   onmessage: (() => void) | null = null
   binaryType = ""
   readyState = 1
+  constructor() {
+    FakeWebSocket.instances.push(this)
+  }
   close() {}
   send() {}
 }
 
 beforeEach(() => {
+  FakeWebSocket.instances = []
   vi.stubGlobal("location", { host: "localhost:0", protocol: "http:" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -126,5 +131,28 @@ describe("offline flag (full-screen offline modal signal)", () => {
     // Server went down between serving the page and the socket opening.
     mod.eventsSocket.onConn("closed")
     expect(mod.getSnapshot().offline).toBe(true)
+  })
+})
+
+describe("manual reconnect() (the Retry button)", () => {
+  it("re-drives the events socket AND bumps terminalEpoch to remount the terminal", async () => {
+    const mod = await loadStore()
+    // The events socket gave up while the (now-capped) terminal died too.
+    mod.eventsSocket.onConn("failed")
+    expect(mod.getSnapshot().offline).toBe(true)
+    const epochBefore = mod.getSnapshot().terminalEpoch
+    const socketsBefore = FakeWebSocket.instances.length
+
+    mod.reconnect()
+
+    // A fresh events socket was opened (connect() constructs a new WebSocket)...
+    expect(FakeWebSocket.instances.length).toBe(socketsBefore + 1)
+    // ...and the focused terminal pane is remounted so its PtySocket reconnects
+    // with a fresh budget — one Retry restores spine AND terminal.
+    expect(mod.getSnapshot().terminalEpoch).toBe(epochBefore + 1)
+
+    // The reopened events socket clears the sticky offline flag.
+    mod.eventsSocket.onConn("open")
+    expect(mod.getSnapshot().offline).toBe(false)
   })
 })

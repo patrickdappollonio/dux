@@ -44,7 +44,11 @@ import {
   softNewlineAction,
   TAB,
 } from "@/lib/termkeys"
-import { handleTabGone, selectSession, useDux } from "@/lib/store"
+import {
+  handleTabGone,
+  selectSession,
+  useDux,
+} from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import { isTabGone } from "@/lib/agentTabs"
 import {
@@ -279,6 +283,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Cleared on the next (re)open. Input typed while disconnected is dropped by the
   // socket's readyState guard; this overlay is the signal that it would be.
   const [reconnecting, setReconnecting] = useState(false)
+  // True once this PTY socket has EXHAUSTED its reconnect budget and emitted
+  // `failed` (the shared cap now applies to PTY sockets too, so a dead server no
+  // longer silently reattaches behind a stuck overlay). Distinct from
+  // `reconnecting` (still retrying): this is a hard stop that surfaces an explicit
+  // Reconnect affordance. Cleared on the next connecting/open. Only meaningful
+  // when the app is NOT globally offline — the app-wide OfflineOverlay owns that
+  // case and its Retry already remounts this pane.
+  const [connectionLost, setConnectionLost] = useState(false)
 
   // The desktop right-click clipboard menu, driven in CONTROLLED mode (no
   // ContextMenuTrigger): base-ui's Trigger hardcodes a 500ms touch long-press
@@ -806,6 +818,19 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     pty.onReconnecting = () => {
       setReconnecting(true)
     }
+    // Connection-state transitions. The one we act on is `failed`: the PTY socket
+    // now shares the events socket's 3-attempt cap, so when its budget is spent it
+    // STOPS (no more silent behind-the-overlay reattach). Swap the endless
+    // "Reconnecting…" cue for an explicit "connection lost — Reconnect" affordance.
+    // Any retry (`connecting`) or a successful reopen (`open`) clears it.
+    pty.onConn = (connState) => {
+      if (connState === "failed") {
+        setReconnecting(false)
+        setConnectionLost(true)
+      } else if (connState === "connecting" || connState === "open") {
+        setConnectionLost(false)
+      }
+    }
     // An extra tab's PTY route can go away out from under this client (another
     // client closed that tab); the closed WebSocket carries no HTTP status the
     // client can read, so a 404-forever route is otherwise indistinguishable
@@ -1266,7 +1291,30 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
           per-pane "Reconnecting…" spinner would show through and double up. So
           suppress the reconnect variant while globally offline; the initial
           startup spinner (`!everReady`) is unrelated and still shows. */}
-      {!everReady || (reconnecting && !offline) ? (
+      {connectionLost && !offline ? (
+        // Hard stop: the PTY socket exhausted its reconnect budget and gave up.
+        // Surface an explicit Reconnect affordance. Reconnect imperatively on THIS
+        // pane's own socket: `pty.connect()` resets the attempt budget and reopens
+        // in place, preserving the xterm buffer and working uniformly for an agent
+        // tab OR a companion terminal. (A `terminalEpoch` bump would NOT: it only
+        // feeds the pane key for `kind === "agent"`, so it is a no-op for a
+        // companion terminal and would leave its Reconnect button dead.) The
+        // resulting `onConn("connecting")`/`"open"` clears `connectionLost`.
+        <div className="absolute inset-0 flex items-center justify-center">
+          <div className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-card-foreground">
+            <span className="text-sm text-muted-foreground">
+              Connection lost.
+            </span>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => ptyRef.current?.connect()}
+            >
+              Reconnect
+            </Button>
+          </div>
+        </div>
+      ) : !everReady || (reconnecting && !offline) ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
             <BrailleSpinner className="text-primary" />

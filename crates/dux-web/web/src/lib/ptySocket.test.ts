@@ -8,6 +8,7 @@ import {
   tabPtyUrl,
   terminalPtyUrl,
 } from "./ptySocket"
+import type { ConnState } from "./types"
 
 // A controllable WebSocket double: tests trigger open/message/close explicitly
 // and inspect the frames the socket sent. `OPEN` is static so the socket's
@@ -234,17 +235,42 @@ describe("PtySocket", () => {
     expect(reconnecting).toBe(0)
   })
 
-  it("keeps retrying with no hard attempt cap", () => {
+  it("gives up with 'failed' after exhausting reconnect attempts (matches events)", () => {
     vi.useFakeTimers()
     const sock = new PtySocket("ws://x/pty")
+    const states: ConnState[] = []
+    sock.onConn = (s) => states.push(s)
     sock.connect()
-    // Six failed opens in a row: well past the legacy DuxSocket's 4-attempt cap.
+    // The socket never opens (the server keeps rejecting): each close schedules a
+    // capped-backoff reconnect until the shared 3-attempt budget is spent, then
+    // "failed" — the same cap the events socket uses (no more infinite retry).
     for (let i = 0; i < 6; i++) {
       last().triggerClose()
       vi.advanceTimersByTime(5000)
     }
-    // A fresh socket was constructed for each retry — it never gave up.
-    expect(FakeWS.instances.length).toBeGreaterThan(6)
+    expect(states.at(-1)).toBe("failed")
+    // Once failed, the loop stops constructing sockets.
+    const count = FakeWS.instances.length
+    vi.advanceTimersByTime(60000)
+    expect(FakeWS.instances.length).toBe(count)
+  })
+
+  it("a manual connect() after 'failed' resets the budget and retries", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    const states: ConnState[] = []
+    sock.onConn = (s) => states.push(s)
+    sock.connect()
+    for (let i = 0; i < 6; i++) {
+      last().triggerClose()
+      vi.advanceTimersByTime(5000)
+    }
+    expect(states.at(-1)).toBe("failed")
+    // The pane's Reconnect affordance calls connect() again; a fresh socket opens.
+    const before = FakeWS.instances.length
+    sock.connect()
+    expect(FakeWS.instances.length).toBe(before + 1)
+    expect(states.at(-1)).toBe("connecting")
   })
 
   it("does not reconnect and fires onGone once shouldRetry says the route is gone", () => {

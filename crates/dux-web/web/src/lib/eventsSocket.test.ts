@@ -129,6 +129,35 @@ describe("EventsSocket", () => {
     expect(JSON.parse(ws.sent[0])).toEqual({ subscribe: ["x", "y"] })
   })
 
+  it("chunks the resend into per-frame-capped subscribe frames on reconnect", () => {
+    vi.useFakeTimers()
+    const sock = new EventsSocket("ws://x/ws/events")
+    sock.connect()
+    let ws = last()
+    ws.open()
+    // More than the per-frame cap (64): 130 topics. Subscribing while open sends a
+    // single (uncapped) delta frame; the CHUNKING is applied by the base's
+    // `onSocketOpen` resend, which we exercise via a reconnect below.
+    const topics = Array.from({ length: 130 }, (_, i) => `t${i}`)
+    sock.subscribe(topics)
+    // Drop the connection; the base schedules a reconnect via setTimeout.
+    ws.triggerClose()
+    vi.advanceTimersByTime(600)
+    ws = last()
+    expect(ws).not.toBe(FakeWS.instances[0])
+    // On reopen the WHOLE interest set is re-sent, split into frames of at most
+    // MAX_EVENT_TOPICS_PER_FRAME (64): 64 + 64 + 2.
+    ws.open()
+    const frames = ws.sent.map(
+      (raw) => JSON.parse(raw) as { subscribe: string[] },
+    )
+    expect(frames.map((f) => f.subscribe.length)).toEqual([64, 64, 2])
+    // No frame exceeds the cap, and the frames together cover the whole set in
+    // order (nothing dropped off the tail).
+    expect(frames.every((f) => f.subscribe.length <= 64)).toBe(true)
+    expect(frames.flatMap((f) => f.subscribe)).toEqual(topics)
+  })
+
   it("forwards resource events to onEvent", () => {
     const sock = new EventsSocket("ws://x/ws/events")
     const events: ResourceEvent[] = []

@@ -14,13 +14,14 @@
 //   - client→server Text = a resize control frame `{"rows":R,"cols":C}`.
 //   - Close = detach (the server drops the subscription/forwarder).
 //
-// Reconnect mirrors `EventsSocket`: capped exponential backoff with NO hard
-// attempt cap (a PTY whose socket dropped should keep trying until the user
-// navigates away). `close()` is the deliberate, user-initiated teardown and
-// suppresses the reconnect loop.
+// Reconnect behavior is the shared `ReconnectingSocket` base: capped exponential
+// backoff WITH the same hard 3-attempt cap the events socket uses. When the
+// budget is spent the socket emits `failed` and STOPS (rather than silently
+// reattaching behind a stuck offline overlay); the focused pane surfaces a
+// Reconnect affordance and a manual reconnect resets the budget. `close()` is the
+// deliberate, user-initiated teardown and suppresses the reconnect loop.
 
-const RECONNECT_MIN_MS = 500
-const RECONNECT_MAX_MS = 5000
+import { ReconnectingSocket } from "./reconnectingSocket"
 
 // Derive the WebSocket scheme from the page protocol so an HTTPS deployment uses
 // `wss://` (a hardcoded `ws://` would be blocked as mixed content under HTTPS).
@@ -57,12 +58,7 @@ export function tabPtyUrl(sessionId: string, tabId: string): string {
   )}/tabs/${encodeURIComponent(tabId)}/pty`
 }
 
-export class PtySocket {
-  private url: string
-  private ws: WebSocket | null = null
-  private reconnectDelay = RECONNECT_MIN_MS
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  private closedByUser = false
+export class PtySocket extends ReconnectingSocket {
   private bytesCb: (bytes: Uint8Array) => void = () => {}
   // This socket's server-assigned connection id, delivered as the first Text frame
   // (`{event:"connected", id}`) on every (re)open (the server allocates a fresh id
@@ -76,38 +72,30 @@ export class PtySocket {
   // comparison, re-issued on every reconnect.
   onConnected: (id: string) => void = () => {}
 
-  // Fired after each (re)open. The server replays scrollback as the first Binary
-  // frame on every open, so the consumer uses this to re-arm its first-frame
-  // resize handling (the reconnect repaint must be re-sized like the initial one).
-  onOpen: () => void = () => {}
-
-  // Fired when an unexpected drop schedules a reconnect (NOT on a user-initiated
-  // `close()`). Lets the consumer surface a non-blocking "Reconnecting…" state and
-  // re-arm its readiness spinner while the socket is down. Pairs with `onOpen`,
-  // which signals the socket is live again. Input typed while disconnected is
-  // still dropped by `sendInput`'s readyState guard — this is the user-facing
-  // signal that it would be, not a buffer.
-  onReconnecting: () => void = () => {}
+  // `onOpen`, `onReconnecting`, and `onConn` are inherited from ReconnectingSocket.
+  // The pane wires `onOpen` (re-arm first-frame resize; the server replays
+  // scrollback as the first Binary frame on every open), `onReconnecting` (show a
+  // non-blocking "Reconnecting…" cue while the socket retries), and `onConn` (so
+  // it can surface a "connection lost" Reconnect affordance when the shared cap is
+  // hit and the socket emits `failed`). Input typed while disconnected is still
+  // dropped by `sendInput`'s readyState guard — the cues signal that it would be,
+  // they are not a buffer.
 
   // Consulted on every unexpected close, BEFORE scheduling a reconnect. Returning
   // `false` means the underlying PTY route is gone for good (e.g. an extra tab's
   // socket 404s because another client deleted that tab while this one was
-  // retrying) rather than merely dropped — retrying forever against a route that
-  // will keep 404ing would spin silently with no escape. A close carries no HTTP
-  // status the client can read, so the consumer is expected to check its own
-  // source of truth (e.g. spine tab membership) instead. Defaults to always
-  // retry, matching every other PTY socket (agent session-slot tab, companion
-  // terminal), which never go away out from under a live client this way.
+  // retrying) rather than merely dropped — retrying against a route that will keep
+  // 404ing would spin with no escape. A close carries no HTTP status the client
+  // can read, so the consumer is expected to check its own source of truth (e.g.
+  // spine tab membership) instead. Defaults to always retry, matching every other
+  // PTY socket (agent session-slot tab, companion terminal), which never go away
+  // out from under a live client this way.
   shouldRetry: () => boolean = () => true
 
-  // Fired once, in place of `scheduleReconnect`, the first time `shouldRetry()`
+  // Fired once, in place of scheduling a reconnect, the first time `shouldRetry()`
   // says the route is gone. The socket does not close itself further (there is
   // nothing more to tear down); the consumer decides what the UI does next.
   onGone: () => void = () => {}
-
-  constructor(url: string) {
-    this.url = url
-  }
 
   // Register the raw-bytes consumer (xterm `term.write`). Last registration wins.
   onBytes(cb: (bytes: Uint8Array) => void): void {
@@ -119,81 +107,53 @@ export class PtySocket {
     return this.connId
   }
 
-  // A deliberate, user-initiated (re)entry: reset the reconnect bookkeeping so a
-  // fresh connect never inherits a stale backoff. Mirrors `EventsSocket.connect`.
-  connect(): void {
-    this.closedByUser = false
-    this.reconnectDelay = RECONNECT_MIN_MS
-    this.open()
-  }
-
-  private open(): void {
-    const ws = new WebSocket(this.url)
+  // Request arraybuffer framing so server→client Binary frames arrive as
+  // `ArrayBuffer` (raw PTY bytes) rather than Blobs.
+  protected configureSocket(ws: WebSocket): void {
     ws.binaryType = "arraybuffer"
-    this.ws = ws
+  }
 
-    ws.onopen = () => {
-      this.reconnectDelay = RECONNECT_MIN_MS
-      this.onOpen()
+  // Nothing to resend on (re)open: the server replays this PTY's scrollback as the
+  // first Binary frame after every open, so the byte feed rehydrates itself.
+  protected onSocketOpen(): void {}
+
+  protected handleMessage(event: MessageEvent): void {
+    // Binary frames carry PTY bytes (the scrollback replay arrives as an ordinary
+    // Binary frame too). The ONLY Text frame the server sends is the opening
+    // `connected` handshake carrying this socket's connection id; record it for
+    // the ownership comparison and notify the consumer.
+    if (event.data instanceof ArrayBuffer) {
+      this.bytesCb(new Uint8Array(event.data))
+      return
     }
-
-    ws.onmessage = (event) => {
-      // Binary frames carry PTY bytes (the scrollback replay arrives as an ordinary
-      // Binary frame too). The ONLY Text frame the server sends is the opening
-      // `connected` handshake carrying this socket's connection id; record it for
-      // the ownership comparison and notify the consumer.
-      if (event.data instanceof ArrayBuffer) {
-        this.bytesCb(new Uint8Array(event.data))
-        return
-      }
-      if (typeof event.data === "string") {
-        try {
-          const frame = JSON.parse(event.data) as { event?: string; id?: string }
-          if (frame.event === "connected" && typeof frame.id === "string") {
-            this.connId = frame.id
-            this.onConnected(frame.id)
-          }
-        } catch {
-          // A malformed control frame is not fatal to the byte stream; ignore it.
+    if (typeof event.data === "string") {
+      try {
+        const frame = JSON.parse(event.data) as { event?: string; id?: string }
+        if (frame.event === "connected" && typeof frame.id === "string") {
+          this.connId = frame.id
+          this.onConnected(frame.id)
         }
+      } catch {
+        // A malformed control frame is not fatal to the byte stream; ignore it.
       }
-    }
-
-    ws.onclose = () => {
-      this.ws = null
-      if (this.closedByUser) return
-      if (!this.shouldRetry()) {
-        this.onGone()
-        return
-      }
-      this.scheduleReconnect()
-    }
-
-    // `onerror` is followed by `onclose`; let the close handler drive reconnect.
-    // Warn so a flapping PTY socket leaves a console breadcrumb instead of failing
-    // silently; the visible reconnect signal is driven by `onReconnecting`.
-    ws.onerror = (event) => {
-      console.warn("[dux] PTY socket error; reconnect will follow", event)
     }
   }
 
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer !== null) return
-    // The socket dropped and we are about to retry: signal the consumer so it can
-    // show a non-blocking "Reconnecting…" state. Fired once per drop (the
-    // reconnectTimer guard above keeps a single retry in flight).
-    this.onReconnecting()
-    // No attempt cap (mirrors `EventsSocket`): a focused PTY whose socket dropped
-    // keeps retrying with capped backoff until the user navigates away (which
-    // calls `close()`). Giving up would silently freeze the terminal.
-    const delay = this.reconnectDelay
-    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS)
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null
-      if (!this.closedByUser) {
-        this.open()
-      }
-    }, delay)
+  // A gone route is a hard stop, not a transient drop: fire `onGone` once and tell
+  // the base not to schedule a reconnect. Every other PTY drop reconnects normally
+  // (the default) up to the shared attempt cap.
+  protected shouldReconnect(): boolean {
+    if (!this.shouldRetry()) {
+      this.onGone()
+      return false
+    }
+    return true
+  }
+
+  // Warn so a flapping PTY socket leaves a console breadcrumb instead of failing
+  // silently; the visible reconnect signal is driven by `onReconnecting`.
+  protected handleError(event: Event): void {
+    console.warn("[dux] PTY socket error; reconnect will follow", event)
   }
 
   // Send PTY stdin as a Binary frame. A copy is sent so the buffer is a plain
@@ -211,15 +171,6 @@ export class PtySocket {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ rows, cols }))
     }
-  }
-
-  close(): void {
-    this.closedByUser = true
-    if (this.reconnectTimer !== null) {
-      clearTimeout(this.reconnectTimer)
-      this.reconnectTimer = null
-    }
-    this.ws?.close()
   }
 }
 

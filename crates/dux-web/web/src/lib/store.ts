@@ -2433,10 +2433,14 @@ export function mobileNavigate(screen: MobileScreen): void {
 }
 
 export function reconnect(): void {
-  // The events socket gives up after MAX_RECONNECT_ATTEMPTS and signals "failed";
-  // a manual reconnect restarts it. connect() resets closedByUser/attempts/delay,
-  // so it is safe to call on an exhausted socket.
+  // Both sockets now give up after the shared MAX_RECONNECT_ATTEMPTS and signal
+  // "failed"; a manual Retry must restore EVERYTHING. connect() resets the events
+  // socket's closedByUser/attempts/delay (safe on an exhausted socket), and the
+  // `terminalEpoch` bump remounts the focused TerminalPane so its (now-capped)
+  // PtySocket reconnects with a fresh budget too. Without the bump, one Retry
+  // would revive the spine but leave the terminal dead.
   eventsSocket.connect()
+  setState({ terminalEpoch: state.terminalEpoch + 1 })
 }
 
 // Update the expanded sidebar width during a drag. Pass `persist` on release to
