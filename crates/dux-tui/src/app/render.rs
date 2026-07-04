@@ -1133,28 +1133,12 @@ impl App {
     }
 
     /// Provider label for a specific tab of a session (Main resolves to the
-    /// session's running provider; a Support tab to its pin/row provider).
+    /// session's running provider; an extra tab to its pin/row provider).
     fn tab_provider_label(&self, session: &AgentSession, tab_id: &str) -> String {
-        if tab_id == session.id {
-            self.engine
-                .running_provider_for(session)
-                .as_str()
-                .to_string()
-        } else {
-            self.engine
-                .running_provider_pins
-                .get(tab_id)
-                .cloned()
-                .or_else(|| {
-                    self.engine
-                        .agent_tabs
-                        .get(tab_id)
-                        .map(|t| t.provider.clone())
-                })
-                .unwrap_or_else(|| session.provider.clone())
-                .as_str()
-                .to_string()
-        }
+        self.engine
+            .tab_running_provider(session, tab_id)
+            .as_str()
+            .to_string()
     }
 
     /// If the selected agent has two or more tabs, draw a single-row desktop-style
@@ -1554,7 +1538,7 @@ impl App {
         if rendered_content {
             self.welcome_logo_visible = false;
         } else {
-            // A focused Support tab with no live process is "dormant" (e.g. after
+            // A focused extra tab with no live process is "dormant" (e.g. after
             // a restart): show a provider-agnostic can't-resume message instead of
             // the welcome logo, with the launch key to start it fresh.
             let dormant_support = matches!(

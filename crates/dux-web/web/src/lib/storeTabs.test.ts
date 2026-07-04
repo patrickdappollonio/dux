@@ -4,7 +4,7 @@ import type { Bootstrap } from "./bootstrapApi"
 
 // Exercises the store's agent-tab lifecycle wiring (mirrors storeTerminals.test.ts):
 // addTab POSTs the nested endpoint and focuses the returned tab; closeTab retargets
-// a focused Support tab back to Main and DELETEs; retargetTab validates + PATCHes.
+// a focused extra tab back to the session-slot tab and DELETEs; retargetTab validates + PATCHes.
 // The tabsApi wire behaviour itself is in tabsApi.test.ts.
 
 function makeBootstrap(): Bootstrap {
@@ -25,7 +25,7 @@ function makeBootstrap(): Bootstrap {
   }
 }
 
-// A session with a Main tab (id === s1) and one Support tab (b2).
+// A session with a session-slot tab (id === s1) and one extra tab (b2).
 function makeSpine() {
   return {
     projects: [{ id: "p1", name: "Repo" }],
@@ -74,10 +74,31 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       headers: { get: () => null },
     } as unknown as Response
   }
+  if (u.includes("/tabs/") && init?.method === "DELETE") {
+    // Mirror the real server: 200 + the authoritative `{ detached }` outcome,
+    // computed from whether any OTHER tab in the closed tab's session is still
+    // live (the closed tab itself never counts).
+    const match = u.match(/\/sessions\/([^/]+)\/tabs\/([^/]+)$/)
+    const sid = match?.[1]
+    const tid = match?.[2]
+    const session = (
+      spineBody as { sessions: { id: string; tabs: { id: string; has_live_process?: boolean }[] }[] }
+    ).sessions.find((s) => s.id === sid)
+    const detached = session
+      ? !session.tabs.some((t) => t.id !== tid && t.has_live_process)
+      : true
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ detached }),
+      text: async () => JSON.stringify({ detached }),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
   if (u.includes("/tabs/")) {
     return {
       ok: true,
-      status: init?.method === "DELETE" ? 204 : 200,
+      status: 200,
       text: async () => "",
       headers: { get: () => null },
     } as unknown as Response
@@ -118,8 +139,8 @@ function fireSessionsChanged() {
   })
 }
 
-// A spine with a Main tab (s1) and one Support tab (b2) whose liveness varies.
-function spineWithSupportTab(b2Live: boolean) {
+// A spine with a session-slot tab (s1) and one extra tab (b2) whose liveness varies.
+function spineWithExtraTab(b2Live: boolean) {
   return {
     projects: [{ id: "p1", name: "Repo" }],
     sessions: [
@@ -195,7 +216,24 @@ describe("store agent-tab lifecycle", () => {
     expect(mod.getSnapshot().createTabInFlight).not.toContain("s1")
   })
 
-  it("closeTab on the focused Support tab retargets to Main and DELETEs", async () => {
+  it("addTab called twice synchronously (a double-click) fires only ONE POST", async () => {
+    const mod = await loadStore()
+    // Both calls happen before either has a chance to await/resolve — the
+    // in-flight guard (`createTabInFlight`) must block the second one
+    // synchronously, not just race it.
+    mod.addTab("s1")
+    mod.addTab("s1")
+    expect(mod.getSnapshot().createTabInFlight).toEqual(["s1"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().createTabInFlight).not.toContain("s1")
+    })
+    const posts = calls.filter(
+      ([u, init]) => u === "/api/v1/sessions/s1/tabs" && init?.method === "POST",
+    )
+    expect(posts).toHaveLength(1)
+  })
+
+  it("closeTab on the focused extra tab retargets to the session-slot tab and DELETEs", async () => {
     const mod = await loadStore()
     mod.selectTab("s1", "b2")
     expect(mod.getSnapshot().selectedTarget).toEqual({
@@ -205,7 +243,7 @@ describe("store agent-tab lifecycle", () => {
     })
     mod.closeTab("s1", "b2")
     await tick()
-    // Selection snapped back to the Main tab immediately (not left on the dead id).
+    // Selection snapped back to the session-slot tab immediately (not left on the dead id).
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
@@ -222,7 +260,7 @@ describe("store agent-tab lifecycle", () => {
     // Closing the focused session-slot tab while a sibling is live must move
     // focus off it, so the pane doesn't re-subscribe the just-closed tab (which
     // would force-relaunch the provider).
-    spineBody = spineWithSupportTab(true) // b2 is live
+    spineBody = spineWithExtraTab(true) // b2 is live
     const mod = await loadStore()
     mod.selectTab("s1", "s1") // focus the session-slot tab
     mod.closeTab("s1", "s1")
@@ -242,7 +280,7 @@ describe("store agent-tab lifecycle", () => {
   it("closeTab on the focused session-slot tab with no live sibling leaves focus put", async () => {
     // No live sibling → the agent is detaching → selection stays on the
     // session-slot tab (there is nothing live to move to).
-    spineBody = spineWithSupportTab(false) // b2 is dormant
+    spineBody = spineWithExtraTab(false) // b2 is dormant
     const mod = await loadStore()
     mod.selectTab("s1", "s1")
     mod.closeTab("s1", "s1")
@@ -276,14 +314,14 @@ describe("store agent-tab lifecycle", () => {
   })
 
   it("clears the started-dormant latch once a tab is live, so a later exit re-shows the card", async () => {
-    spineBody = spineWithSupportTab(false)
+    spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
-    // User clicks "Start fresh session" on the dormant Support tab.
+    // User clicks "Start session" on the dormant extra tab.
     mod.startDormantTab("s1", "b2")
     expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
 
     // The provider comes up: the latch is no longer needed and gets cleared.
-    spineBody = spineWithSupportTab(true)
+    spineBody = spineWithExtraTab(true)
     fireSessionsChanged()
     await vi.waitFor(() => {
       expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
@@ -291,7 +329,7 @@ describe("store agent-tab lifecycle", () => {
 
     // The provider later exits: the tab is dormant again with no lingering latch,
     // so a plain refocus would show the card (not force-launch).
-    spineBody = spineWithSupportTab(false)
+    spineBody = spineWithExtraTab(false)
     fireSessionsChanged()
     await vi.waitFor(() => {
       const tab = mod
@@ -303,9 +341,9 @@ describe("store agent-tab lifecycle", () => {
   })
 
   it("clears the started-dormant latch on a tab-launch-failure status, so the retry card returns", async () => {
-    spineBody = spineWithSupportTab(false)
+    spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
-    // User clicks "Start fresh session"; the latch is set.
+    // User clicks "Start session"; the latch is set.
     mod.startDormantTab("s1", "b2")
     expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
 
@@ -316,16 +354,16 @@ describe("store agent-tab lifecycle", () => {
         event: "status",
         key: "tab-launch-b2",
         tone: "warning",
-        message: 'Support tab launch failed for "s1": boom',
+        message: 'extra tab launch failed for "s1": boom',
       }),
     })
     expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
   })
 
   it("keeps the started-dormant latch on a tab-launch-SUCCESS status, so the pane does not flash back to the card", async () => {
-    spineBody = spineWithSupportTab(false)
+    spineBody = spineWithExtraTab(false)
     const mod = await loadStore()
-    // User clicks "Start fresh session"; the latch is set and the pane mounts.
+    // User clicks "Start session"; the latch is set and the pane mounts.
     mod.startDormantTab("s1", "b2")
     expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
 
@@ -343,6 +381,15 @@ describe("store agent-tab lifecycle", () => {
       }),
     })
     expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+  })
+
+  it("handleTabGone clears the started-dormant latch for the gone tab id", async () => {
+    spineBody = spineWithExtraTab(false)
+    const mod = await loadStore()
+    mod.startDormantTab("s1", "b2")
+    expect(mod.getSnapshot().startedDormantTabs).toContain("b2")
+    mod.handleTabGone("b2")
+    expect(mod.getSnapshot().startedDormantTabs).not.toContain("b2")
   })
 
   it("normalizes a spine session that omits tabs to an empty array without throwing", async () => {

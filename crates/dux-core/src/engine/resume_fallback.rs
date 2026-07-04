@@ -239,6 +239,79 @@ mod tests {
     }
 
     #[test]
+    fn retry_uses_the_pinned_provider_not_the_tabs_own_row_provider() {
+        // G-T6: proves the capture-before-remove ordering (G24) is load-bearing.
+        // `retry_resume_fallback` captures `tab_running_provider` (which prefers
+        // `running_provider_pins`) BEFORE it clears that pin. A retargeted-while-
+        // live tab's pin differs from its persisted `agent_tabs` row provider; if
+        // the removal ever moved ahead of the capture, the rebuilt launch would
+        // silently fall back to the tab's own (stale) row provider instead of the
+        // one that was actually running. Configure the pinned provider's command
+        // as `cat` (spawns and stays alive) and the tab's own row provider as a
+        // nonexistent binary, so a wrong-provider regression is observable as a
+        // launch failure instead of `providers` gaining a live entry.
+        let (mut engine, tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        let tab = crate::model::AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            // Deliberately a nonexistent command: falls back to
+            // `provider_config`'s "command == provider name" default, which
+            // fails to spawn if this is what actually gets used.
+            provider: ProviderKind::new("dux-test-nonexistent-provider-zzz"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        // The tab is pinned to "cat" (e.g. from a live run before this exit) —
+        // that pin must win the capture, not the row's own provider above.
+        engine
+            .running_provider_pins
+            .insert("tab-1".to_string(), ProviderKind::new("cat"));
+        engine
+            .resume_fallback_candidates
+            .insert("tab-1".to_string(), Instant::now());
+
+        let outcome = engine.retry_resume_fallback("tab-1", (24, 80), "fresh".to_string());
+        assert!(matches!(outcome, ResumeFallbackOutcome::Retried { .. }));
+        // The pin is torn down as part of the retry regardless of which
+        // provider was captured.
+        assert!(!engine.running_provider_pins.contains_key("tab-1"));
+
+        // Drain the async launch job's result and feed it back through the
+        // engine exactly like the real event loop would.
+        let mut saw_ready = false;
+        for _ in 0..200 {
+            if let Ok(event) = engine.worker_rx.try_recv() {
+                match &event {
+                    crate::worker::WorkerEvent::AgentLaunchReady(_) => saw_ready = true,
+                    crate::worker::WorkerEvent::AgentLaunchFailed(data) => {
+                        panic!(
+                            "launch must have used the PINNED \"cat\" provider, not the \
+                             tab's own row provider; got a launch failure instead: {}",
+                            data.message
+                        );
+                    }
+                    _ => {}
+                }
+                engine.process_worker_event(event);
+                if saw_ready {
+                    break;
+                }
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(saw_ready, "the launch job never reported ready in time");
+        assert!(
+            engine.providers.contains_key("tab-1"),
+            "a successful relaunch with the pinned provider must populate `providers`"
+        );
+    }
+
+    #[test]
     fn retry_rebuilds_an_extra_tab_launch_keyed_by_tab_id() {
         // A resumed EXTRA tab (candidate keyed by tab id, not session id) that
         // exits with no output must retry fresh under its own tab id — not be

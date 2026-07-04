@@ -101,6 +101,7 @@ import {
   reorderProjectsInGroup,
 } from "@/lib/reorder"
 import {
+  addTab,
   createTerminal,
   openAddProject,
   openAgentEnv,
@@ -122,6 +123,7 @@ import {
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
+import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
@@ -216,6 +218,16 @@ function SessionSubItem({
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
   // Running agents shimmer their name; non-running (detached/exited) recede.
   const { shimmer, dimmed } = agentRowVisual(session.status, session.working)
+
+  // "Add tab" is reachable here at ANY tab count (including the common 1-tab
+  // case) because the in-strip "+" only renders once a session already has two
+  // or more tabs (AgentTabsStrip mounts only then) — without this menu item a
+  // fresh 1-tab session could never reach its first extra tab from the web.
+  // Mirrors the strip's own cap/in-flight disabling.
+  const { bootstrap, createTabInFlight } = useDux()
+  const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
+  const atTabCap = session.tabs.length >= tabCap
+  const addingTab = createTabInFlight.includes(session.id)
 
   // The whole row is the drag handle. The enclosing PointerSensor's 6px
   // activation distance keeps a plain click a select, not a drag. `isDragging`
@@ -380,6 +392,13 @@ function SessionSubItem({
               <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
                 <Cpu />
                 Change agent provider…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={atTabCap || addingTab}
+                onClick={() => addTab(session.id)}
+              >
+                <Plus />
+                Add tab
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               {/* Startup command + env: these are project-scoped (no per-agent

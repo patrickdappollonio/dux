@@ -327,7 +327,7 @@ pub enum WireCommand {
         session_id: String,
         provider: String,
     },
-    /// Close a extra tab (a non-Main provider tab): tear down its PTY and delete
+    /// Close an extra tab (a non-Main provider tab): tear down its PTY and delete
     /// its `agent_tabs` row. Destructive and unrecoverable (extra tabs are
     /// ephemeral). The session-slot tab is never closed through here — a Main "close" is a
     /// detach via `KillSessionPty`. `tab_id` must belong to `session_id`.
@@ -1056,8 +1056,10 @@ impl Engine {
     /// marks the session Detached so it can be reconnected later. The per-tick
     /// spine diff notices the status change and fires `sessions.changed`, so
     /// connected clients refetch and the agent shows as detached. Unknown session
-    /// is an `Err` (the REST handler maps it to 404); an agent that is not running
-    /// is an idempotent no-op.
+    /// is an `Err` (the REST handler, `delete_tab`'s session-slot branch, maps
+    /// this method's `Err` to 400 — an unknown session is already caught earlier
+    /// by `resolve_worktree`'s 404); an agent that is not running is an
+    /// idempotent no-op.
     fn kill_session_pty(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
         let session = self
             .sessions
@@ -1353,8 +1355,9 @@ impl Engine {
     ///   (matching the TUI's "already connected" early-return); force reconnect
     ///   first tears down any running provider + pins + activity + resume
     ///   candidate, then starts fresh with no resume args.
-    /// - Normal reconnect resumes the prior conversation when the provider
-    ///   supports it (`should_resume_session`); force never resumes.
+    /// - Normal reconnect resumes the prior conversation per
+    ///   `tab_resume_decision` (the same per-provider liveness check every other
+    ///   launch path uses); force never resumes.
     ///
     /// Deliberate substitution: the TUI sources the PTY size from view state
     /// (`last_pty_size`); the web has no such state, so it uses the same default
@@ -1398,11 +1401,11 @@ impl Engine {
         if force {
             // Kill the existing provider and clear all resume state so the
             // relaunch starts genuinely fresh (mirrors `force_reconnect_agent`).
-            self.providers.remove(&session.id);
-            self.running_provider_pins.remove(&session.id);
-            self.pty_activity.remove(&session.id);
-            self.pty_input.remove(&session.id);
-            self.resume_fallback_candidates.remove(&session.id);
+            // Routed through the shared `clear_tab_runtime` so the in-flight
+            // `AgentLaunch` key is cleared too — hand-rolling this list used to
+            // miss it, leaving a stale in-flight marker that made the
+            // `DispatchAgentLaunch` chokepoint report "already launching" forever.
+            self.clear_tab_runtime(&session.id);
         }
 
         // Detach any other session holding the same worktree's live PTY. The
@@ -1416,7 +1419,7 @@ impl Engine {
         let use_resume = if force {
             false
         } else {
-            self.should_resume_session(&session)
+            self.tab_resume_decision(&session, &session.id, &session.provider, true)
         };
         let mut msg = self.agent_reconnect_status_message(&session, use_resume);
         if let Some(detached) = &detached_label {
@@ -4034,6 +4037,49 @@ mod tests {
         assert!(
             !engine.is_in_flight(&crate::engine::InFlightKey::AgentLaunch("s1".to_string())),
             "kill_session_pty must clear the in-flight AgentLaunch key for the killed tab"
+        );
+    }
+
+    #[test]
+    fn apply_wire_force_reconnect_clears_in_flight_launch_key() {
+        // G3 regression: the force branch of `reconnect_session` used to
+        // hand-roll the tab-runtime clear (providers/pins/pty_activity/
+        // pty_input/resume_fallback) and missed the in-flight `AgentLaunch`
+        // key. A ForceReconnect racing a (stale) in-flight launch for that tab
+        // left the key set, so the `DispatchAgentLaunch` chokepoint refused the
+        // new launch with "already launching". Routing through
+        // `clear_tab_runtime` fixes it: the stale key is cleared before the
+        // new launch is dispatched, so it proceeds instead of being refused.
+        let (mut engine, tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat");
+        let wt = tmp.path().join("wt-s1");
+        std::fs::create_dir_all(&wt).unwrap();
+        session.worktree_path = wt.to_string_lossy().to_string();
+        engine.sessions.push(session);
+        // Simulate a stale in-flight marker left behind by a prior launch.
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
+
+        let outcome = engine
+            .apply_wire(WireCommand::ReconnectSession {
+                session_id: "s1".to_string(),
+                force: true,
+            })
+            .expect("apply force reconnect");
+
+        let status = outcome
+            .status
+            .expect("force reconnect surfaces a busy status");
+        assert_eq!(
+            status.tone, "busy",
+            "the stale in-flight key must be cleared before dispatch so the new \
+             launch proceeds instead of being refused as \"already launching\": {}",
+            status.message
+        );
+        assert!(
+            status.message.contains("Starting fresh agent \"feat\""),
+            "msg: {}",
+            status.message
         );
     }
 

@@ -28,6 +28,15 @@ export interface CreatedTab {
   provider: string
 }
 
+// The 200 body for a tab close: whether that close detached the agent (it was
+// the LAST live tab). Both the session-slot branch and the extra-tab branch of
+// `DELETE .../tabs/:tab` return this shape, so the caller never has to guess the
+// outcome from a stale local snapshot. `undefined` only for an older server that
+// still replies with a bodiless 204.
+export interface ClosedTab {
+  detached: boolean
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -54,7 +63,8 @@ async function request<T>(
     const detail = (await resp.text().catch(() => "")).trim()
     throw new TabsApiError(detail || `request failed (${resp.status})`, resp.status)
   }
-  // 204 No Content (Support close) and empty bodies have nothing to parse.
+  // 204 No Content (an older server's extra-tab close) and empty bodies have
+  // nothing to parse.
   if (resp.status === 204) return undefined as T
   const text = await resp.text().catch(() => "")
   if (!text) return undefined as T
@@ -66,7 +76,7 @@ async function request<T>(
 }
 
 export const tabsApi = {
-  // Create a Support tab. `provider` omitted → the server uses the project
+  // Create an extra tab. `provider` omitted → the server uses the project
   // default. Returns the new tab id + resolved provider.
   create: (sessionId: string, provider?: string) =>
     request<CreatedTab>(
@@ -74,10 +84,13 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs`,
       provider === undefined ? {} : { provider },
     ),
-  // Close a tab. For the Main tab (`tabId === sessionId`) the server DETACHES the
-  // agent (200, session survives); for a Support tab it destroys the tab (204).
+  // Close a tab. For the session-slot tab (`tabId === sessionId`) this stops that
+  // tab (detaching the agent only if it was the last live tab); for an extra tab
+  // it destroys the tab (same detach-if-last-live rule). Either way the 200 body
+  // carries the authoritative `{ detached }` outcome — the caller should use it
+  // rather than guessing from a pre-close snapshot.
   remove: (sessionId: string, tabId: string) =>
-    request<void>(
+    request<ClosedTab | undefined>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
     ),

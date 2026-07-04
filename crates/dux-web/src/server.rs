@@ -63,12 +63,12 @@ pub struct AppState {
     /// scratch-terminal stream. Sized and exhausted INDEPENDENTLY of the events and
     /// agent classes.
     pub ws_terminal_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Caps concurrent SUPPORT-TAB PTY WebSocket connections across all agents
+    /// Caps concurrent EXTRA-TAB PTY WebSocket connections across all agents
     /// (`[server] max_websocket_tab_connections`). Tab sockets draw from THIS pool,
-    /// not `ws_agent_semaphore`, so tabs can never starve the Main-tab (agent) pool.
+    /// not `ws_agent_semaphore`, so tabs can never starve the session-slot tab (agent) pool.
     pub ws_tab_semaphore: Arc<tokio::sync::Semaphore>,
     /// Per-agent fairness sub-quota (`[server] max_websocket_tabs_per_agent`) on
-    /// top of `ws_tab_semaphore`: the count of live Support-tab sockets keyed by
+    /// top of `ws_tab_semaphore`: the count of live extra-tab sockets keyed by
     /// owning session id. `ws_tab_pty_upgrade` refuses a new tab socket for a
     /// session already at `max_ws_tabs_per_agent` BEFORE taking a tab-pool permit,
     /// so one agent's tabs cannot monopolize the shared tab pool. A [`TabWsGuard`]
@@ -160,7 +160,7 @@ pub struct RouterParams {
     /// (`[server] max_websocket_terminal_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS`].
     pub max_websocket_terminal_connections: u32,
-    /// Cap on concurrent Support-tab PTY WebSocket connections across all agents
+    /// Cap on concurrent extra-tab PTY WebSocket connections across all agents
     /// (`[server] max_websocket_tab_connections`). Defaults to
     /// [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS`].
     pub max_websocket_tab_connections: u32,
@@ -293,13 +293,13 @@ pub fn build_app(
     }
     if params.max_websocket_tab_connections == 0 {
         dux_core::logger::warn(
-            "[server] max_websocket_tab_connections = 0: every support-tab PTY \
+            "[server] max_websocket_tab_connections = 0: every extra-tab PTY \
              WebSocket upgrade will be refused with HTTP 503 until the server restarts",
         );
     }
     if params.max_websocket_tabs_per_agent == 0 {
         dux_core::logger::warn(
-            "[server] max_websocket_tabs_per_agent = 0: every support-tab PTY \
+            "[server] max_websocket_tabs_per_agent = 0: every extra-tab PTY \
              WebSocket upgrade will be refused with HTTP 503 until the server restarts",
         );
     }
@@ -630,7 +630,7 @@ fn acquire_ws_permit(
 enum PtyTarget {
     Agent(String),
     Terminal(String),
-    /// A Support tab's provider PTY, keyed by tab id. Resolves through the same
+    /// An extra tab's provider PTY, keyed by tab id. Resolves through the same
     /// tab-keyed `providers` map as `Agent` (Main's tab id == session id), so the
     /// socket loop treats it identically once subscribed.
     Tab(String),
@@ -638,7 +638,7 @@ enum PtyTarget {
 
 impl PtyTarget {
     /// The id used to route stdin writes and resizes (the session id for an agent,
-    /// the terminal id for a companion terminal, the tab id for a Support tab). The
+    /// the terminal id for a companion terminal, the tab id for an extra tab). The
     /// engine's `pty_for` accepts any of these keyspaces.
     fn pty_id(&self) -> &str {
         match self {
@@ -976,11 +976,11 @@ impl Drop for TabWsGuard {
 }
 
 /// Upgrade handler for `GET /ws/sessions/:id/tabs/:tab/pty` — stream a Support
-/// tab's provider PTY. Support-only (the Main tab uses `/ws/sessions/:id/pty`).
-/// Validates origin, id bounds, session existence, and Support-tab ownership
+/// tab's provider PTY. Support-only (the session-slot tab uses `/ws/sessions/:id/pty`).
+/// Validates origin, id bounds, session existence, and extra-tab ownership
 /// (`:tab` belongs to `:id`), then takes a permit from the DEDICATED tab-socket
 /// pool (`ws_tab_semaphore`, sized by `max_websocket_tab_connections`) — separate
-/// from the agent-PTY pool, so tab sockets can never 503 the Main-tab streams.
+/// from the agent-PTY pool, so tab sockets can never 503 the session-slot tab streams.
 /// Each failing branch is a 404/503 BEFORE the upgrade.
 async fn ws_tab_pty_upgrade(
     ws: WebSocketUpgrade,
@@ -1002,7 +1002,7 @@ async fn ws_tab_pty_upgrade(
     if state.engine.session_worktree(id.clone()).await.is_none() {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
-    // Support-only ownership: a Main tab has no `agent_tabs` row, so `tab_session`
+    // Support-only ownership: a session-slot tab has no `agent_tabs` row, so `tab_session`
     // returns `None` and this 404s (Main streams over `/ws/sessions/:id/pty`).
     match state.engine.tab_session(tab.clone()).await {
         Some(owner) if owner == id => {}
@@ -1097,7 +1097,7 @@ async fn handle_pty_socket(
     // own); the guard deregisters on every exit path.
     let registry_id = uuid::Uuid::new_v4().to_string();
     let conn_class = match &target {
-        // Support tabs run provider CLIs, so they count as agent-PTY connections.
+        // extra tabs run provider CLIs, so they count as agent-PTY connections.
         PtyTarget::Agent(_) | PtyTarget::Tab(_) => crate::rest_common::ConnClass::AgentPty,
         PtyTarget::Terminal(_) => crate::rest_common::ConnClass::TerminalPty,
     };
@@ -1114,7 +1114,8 @@ async fn handle_pty_socket(
     // a terminal subscribe attaches to an already-created companion terminal.
     let subscription = match &target {
         // A tab subscribe resolves through the same tab-keyed `subscribe_pty`; for a
-        // dormant Support tab this launches it fresh (the "Start fresh session" path).
+        // dormant extra tab this launches it via `launch_agent`, which resolves
+        // resume vs. fresh dynamically per `tab_resume_decision` (not always fresh).
         PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone()).await,
         PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
     };

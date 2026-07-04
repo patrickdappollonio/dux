@@ -218,8 +218,8 @@ impl App {
                 && let Some((_, exit_success, is_minimal, excerpt)) =
                     exited.iter().find(|(id, _, _, _)| id == &current.id)
                 && !handled.contains(&current.id)
-                // Don't bounce out of the pane if a live Support tab is focused:
-                // the Main provider exited, but the user is driving a Support tab.
+                // Don't bounce out of the pane if a live extra tab is focused:
+                // the Main provider exited, but the user is driving an extra tab.
                 && {
                     let focused = self.focused_tab_id(&current.id);
                     focused == current.id || !self.engine.providers.contains_key(&focused)
@@ -254,8 +254,8 @@ impl App {
                     ));
                 }
             }
-            // Trigger PR status check for exited Main-tab agents only (a Support
-            // tab id is not a session id; a Support-tab exit is not an agent exit).
+            // Trigger PR status check for exited session-slot tab agents only (an extra
+            // tab id is not a session id; an extra-tab exit is not an agent exit).
             for sid in &exited {
                 let tab_id = &sid.0;
                 let is_main =
@@ -1208,10 +1208,10 @@ impl App {
                 // the "Launching…"/"Starting fresh…" busy. Falls back to an
                 // anonymous info when no op is stashed (e.g. a launch not driven
                 // through the reconnect dispatch sites).
-                // Key by tab id: the Main tab's == its session id (resolves its
-                // pending reconnect op as before), but a Support-tab launch has no
+                // Key by tab id: the session-slot tab's == its session id (resolves its
+                // pending reconnect op as before), but an extra-tab launch has no
                 // op under its tab id, so it falls through to an anonymous status
-                // instead of resolving the Main tab's op with the wrong message.
+                // instead of resolving the session-slot tab's op with the wrong message.
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
                     TuiReconnectOutcome::Ready { status_message },

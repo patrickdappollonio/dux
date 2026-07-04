@@ -42,7 +42,7 @@ import type {
 // companion terminals. Both carry a `sessionId` so session-scoped UI (the
 // breadcrumb, changed files) keeps working regardless of which is focused.
 export type SelectedTarget =
-  // An agent tab. `tabId === sessionId` for the Main tab; a Support tab carries
+  // An agent tab. `tabId === sessionId` for the session-slot tab; an extra tab carries
   // its own id. The streamed PTY and all per-tab UI resolve from `tabId`, while
   // session-scoped UI keeps using `sessionId`.
   | { kind: "agent"; sessionId: string; tabId: string }
@@ -171,10 +171,10 @@ export interface DuxState {
   // until it resolves (a double-click can't spawn two tabs). The per-agent tab
   // cap still guards the server; this is the common-case UX guard.
   createTabInFlight: string[]
-  // Support tab ids the user explicitly started from their dormant card. Lets the
+  // extra tab ids the user explicitly started from their dormant card. Lets the
   // pane mount (subscribe = launch fresh) for a tab whose server-reported
   // `has_live_process` is still false — so FOCUS alone never launches a dormant
-  // tab, only the "Start fresh session" button does.
+  // tab, only the "Start session" button does.
   startedDormantTabs: string[]
   // The unstaged file pending discard confirmation, or null. The TUI confirms
   // every discard (it's destructive); the web mirrors that.
@@ -522,16 +522,16 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   // and unwinds any optimistic reorder overlay — mirroring the old `onStatus`.
   if (ev.event === "status") {
     if (ev.tone === "error") setState({ ...clearPendingClientIntent() })
-    // A `tab-launch-<tabId>` keyed status carries BOTH outcomes of a Support-tab
+    // A `tab-launch-<tabId>` keyed status carries BOTH outcomes of an extra-tab
     // launch: a `warning` on failure and an `info` on success (both keyed the same
     // so neither is clobbered by an unrelated toast). Only the FAILURE clears that
-    // tab's "explicitly started" latch — so `isSupportTabDormant` goes true again,
+    // tab's "explicitly started" latch — so `isExtraTabDormant` goes true again,
     // the dormant retry card returns, and the pane stops auto-reconnecting the
     // failing launch. The SUCCESS path must NOT touch the latch here: the latch is
     // cleared race-free by `applySpine` in the same tick it flips `has_live_process`
     // true, and stripping it early (before the spine refetch lands) would briefly
     // re-mark the tab dormant, unmounting the just-launched pane and flashing the
-    // "Start fresh session" card back until the spine catches up.
+    // "Start session" card back until the spine catches up.
     if (ev.tone === "warning" && ev.key?.startsWith("tab-launch-")) {
       const tabId = ev.key.slice("tab-launch-".length)
       if (state.startedDormantTabs.includes(tabId)) {
@@ -874,10 +874,10 @@ function pruneSelectionIfGone(spine: Spine): void {
   if (!target) return
   const session = spine.sessions.find((s) => s.id === target.sessionId)
   if (target.kind === "agent") {
-    // The session must still exist; if a Support tab is focused, it must still be
-    // in that session's tab list (a Support tab can be closed by ANOTHER client,
-    // whose local retarget-to-Main never ran here — this is the shared-workspace
-    // heal path). A gone Support tab falls back to the Main tab rather than
+    // The session must still exist; if an extra tab is focused, it must still be
+    // in that session's tab list (an extra tab can be closed by ANOTHER client,
+    // whose local retarget-to-session-slot never ran here — this is the shared-workspace
+    // heal path). A gone extra tab falls back to the session-slot tab rather than
     // ejecting the user to the welcome screen.
     if (!session) {
       selectSession(null)
@@ -1117,8 +1117,8 @@ export function useDux(): DuxState {
 
 // Parse a deep-link hash into a target, or null when it is absent/malformed.
 function parseSelectionHash(hash: string): SelectedTarget | null {
-  // Three mutually-exclusive shapes: bare agent (`#/agent/<sid>` = Main tab), a
-  // Support tab (`#/agent/<sid>/tab/<tabId>`), or a companion terminal
+  // Three mutually-exclusive shapes: bare agent (`#/agent/<sid>` = session-slot tab), a
+  // extra tab (`#/agent/<sid>/tab/<tabId>`), or a companion terminal
   // (`#/agent/<sid>/terminal/<tid>`). The literal `tab`/`terminal` keyword
   // disambiguates, so a tab/terminal literally named "tab" can't be confused.
   const m = hash.match(/^#\/agent\/([^/]+)(?:\/(tab|terminal)\/([^/]+))?$/)
@@ -1137,9 +1137,9 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
     if (m[2] === "tab") {
       const tabId = decodeURIComponent(m[3])
       if (!tabId) return null
-      // A self-aliased `#/agent/<sid>/tab/<sid>` is the Main tab written the
-      // long way — normalize to the canonical bare Main target so there is only
-      // ever one representation of Main (a real Support tab never has
+      // A self-aliased `#/agent/<sid>/tab/<sid>` is the session-slot tab written the
+      // long way — normalize to the canonical bare session-slot target so there is only
+      // ever one representation of the session-slot tab (a real extra tab never has
       // `tabId === sessionId`).
       return { kind: "agent", sessionId, tabId }
     }
@@ -1150,7 +1150,7 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
 }
 
 // The hash for a target (or the bare path when nothing is selected). The `/tab/`
-// segment is emitted ONLY for a Support tab; the Main tab (`tabId === sessionId`)
+// segment is emitted ONLY for an extra tab; the session-slot tab (`tabId === sessionId`)
 // stays the bare `#/agent/<sid>` so existing bookmarks remain valid.
 function selectionHash(target: SelectedTarget | null): string {
   if (!target) return ""
@@ -1208,8 +1208,8 @@ function restoreDeepLink(spine: Spine): void {
     }
     // Terminal id gone — fall back to the owning agent.
   } else if (link.tabId !== link.sessionId) {
-    // A Support-tab deep link: restore it only if the tab still exists, else
-    // fall through to the Main tab.
+    // A extra-tab deep link: restore it only if the tab still exists, else
+    // fall through to the session-slot tab.
     const stillThere = session.tabs.some((t) => t.id === link.tabId)
     if (stillThere) {
       selectTab(link.sessionId, link.tabId)
@@ -1241,7 +1241,7 @@ export function selectSession(id: string | null): void {
     return
   }
   setState({
-    // Selecting a session focuses its Main tab (tabId === sessionId).
+    // Selecting a session focuses its session-slot tab (tabId === sessionId).
     selectedTarget: { kind: "agent", sessionId: id, tabId: id },
     selectedSessionId: id,
     // Re-selecting the same session keeps its loaded data; a real switch enters
@@ -1257,7 +1257,7 @@ export function selectSession(id: string | null): void {
 }
 
 // Focus a specific provider tab of a session. `tabId === sessionId` focuses the
-// Main tab (equivalent to `selectSession`). The changed files belong to the
+// session-slot tab (equivalent to `selectSession`). The changed files belong to the
 // SESSION, so the subscription/fetch key off `sessionId` regardless of tab.
 export function selectTab(sessionId: string, tabId: string): void {
   const prev = state.selectedSessionId
@@ -1339,7 +1339,7 @@ export function deleteTerminal(terminalId: string): void {
 
 // --- Agent tabs -------------------------------------------------------------
 
-// Add a Support tab to a session, then focus it. The 201 reply carries the new
+// Add an extra tab to a session, then focus it. The 201 reply carries the new
 // tab id; focus it immediately (opening its PTY socket, which launches it fresh)
 // rather than waiting for the spine refetch, mirroring `createTerminal`. The "+"
 // is disabled while a create is in flight so a double-click can't spawn two tabs.
@@ -1376,35 +1376,45 @@ export function closeCloseTab(): void {
 
 // Close a tab via REST. Closing the session-slot tab (`tabId === sessionId`) stops
 // that tab and detaches the agent only if it was the last live tab (server 200,
-// session survives); an extra tab is destroyed (204). If the closed tab was the
-// focused target, move focus off it so the pane never sits on the just-closed tab
-// and re-subscribes it (subscribing force-relaunches the provider): an extra tab
-// falls back to the session-slot tab; the session-slot tab falls back to a live
-// sibling when the agent still has one. A failure toasts.
+// session survives); an extra tab is destroyed (also 200, same `{ detached }`
+// shape). All focus/latch mutations wait for the DELETE to actually resolve —
+// closing is NOT optimistic: mutating them beforehand (as this used to) left the
+// UI navigated away from a tab that was still alive server-side whenever the
+// request failed, with only a toast and no rollback. On success, if the closed
+// tab was the focused target, move focus off it so the pane never sits on the
+// just-closed tab and re-subscribes it (subscribing force-relaunches the
+// provider): an extra tab falls back to the session-slot tab; the session-slot
+// tab falls back to a live sibling using the server's authoritative `detached`
+// flag (never a pre-close snapshot, which can go stale in a race with another
+// client closing tabs concurrently) with none when the agent fully detached. A
+// failure toasts and leaves all state untouched.
 export function closeTab(sessionId: string, tabId: string): void {
-  const target = state.selectedTarget
-  const focused =
-    target?.kind === "agent" &&
-    target.sessionId === sessionId &&
-    target.tabId === tabId
-  if (focused) {
-    if (tabId !== sessionId) {
-      selectSession(sessionId) // focus the session-slot tab
-    } else {
-      // Closing the focused session-slot tab: if other tabs are still live, focus
-      // a live sibling so the closed slot isn't re-subscribed (which would relaunch
-      // it). With no live sibling the agent is detaching — leave selection put.
+  tabsApi
+    .remove(sessionId, tabId)
+    .then((result) => {
+      setState({
+        startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
+      })
+      const target = state.selectedTarget
+      const focused =
+        target?.kind === "agent" &&
+        target.sessionId === sessionId &&
+        target.tabId === tabId
+      if (!focused) return
+      if (tabId !== sessionId) {
+        selectSession(sessionId) // focus the session-slot tab
+        return
+      }
+      // Closing the focused session-slot tab: an older server that still replies
+      // with a bodiless 204 gives no `detached` signal, so treat that as detached
+      // (the safer default: leave selection put rather than guessing a sibling).
+      const detached = result?.detached ?? true
+      if (detached) return
       const liveSibling = state.spine?.sessions
         .find((s) => s.id === sessionId)
         ?.tabs.find((t) => t.id !== tabId && t.has_live_process)
       if (liveSibling) selectTab(sessionId, liveSibling.id)
-    }
-  }
-  setState({
-    startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
-  })
-  tabsApi
-    .remove(sessionId, tabId)
+    })
     .catch((e) =>
       toast.error(e instanceof Error ? e.message : "Could not close the tab."),
     )
@@ -1431,7 +1441,7 @@ export async function retargetTab(
   }
 }
 
-// Explicitly start a dormant Support tab from its dormant card: mark it started
+// Explicitly start a dormant extra tab from its dormant card: mark it started
 // (so the pane mounts and subscribes = launches fresh) and focus it. This is the
 // ONLY path that launches a dormant tab — focusing one never does.
 export function startDormantTab(sessionId: string, tabId: string): void {
@@ -1439,6 +1449,20 @@ export function startDormantTab(sessionId: string, tabId: string): void {
     setState({ startedDormantTabs: [...state.startedDormantTabs, tabId] })
   }
   selectTab(sessionId, tabId)
+}
+
+// An extra tab's PTY socket discovered (via `isTabGone` against the current
+// spine) that this tab no longer exists — another client closed it while this
+// one was retrying the socket. The route will keep 404ing, so there is nothing
+// left to reconnect to: clear the started-dormant latch (it would otherwise
+// linger forever, since the tab is gone and `applySpine` only clears the latch
+// once a tab goes LIVE, which this one now never will) and toast so the user
+// knows why the pane stopped retrying instead of it just going quiet.
+export function handleTabGone(tabId: string): void {
+  setState({
+    startedDormantTabs: state.startedDormantTabs.filter((t) => t !== tabId),
+  })
+  toast.error("This tab was closed elsewhere.")
 }
 
 // Open the discard-confirmation dialog for an unstaged file. The TUI confirms
@@ -1633,7 +1657,7 @@ export function reconnectSession(sessionId: string, force: boolean): void {
       ),
     )
   setState({
-    // Reconnect is a Main-tab operation, so focus the Main tab.
+    // Reconnect is a session-slot-tab operation, so focus the session-slot tab.
     selectedTarget: { kind: "agent", sessionId, tabId: sessionId },
     selectedSessionId: sessionId,
     terminalEpoch: state.terminalEpoch + 1,

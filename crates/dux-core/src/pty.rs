@@ -714,10 +714,31 @@ impl PtyClient {
     pub fn subscribe(&self) -> (PtyViewerGuard, std::sync::mpsc::Receiver<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let id = self.next_sub_id.fetch_add(1, Ordering::Relaxed);
-        self.subscribers
-            .lock()
-            .expect("subscribers mutex poisoned")
-            .push((id, tx));
+        // Guard against the subscribe-after-clear window: the reader thread
+        // sets `exited` and then does a ONE-SHOT `subs.clear()` on EOF/error
+        // (see `spawn_reader` above); `prune_exited_ptys` is the only later
+        // remover, running once per tick. A subscribe landing after that
+        // one-shot clear but before the next prune tick used to attach to a
+        // client that will never see another `subs.clear()` call — the
+        // forwarder's `recv_timeout` would only ever see `Timeout`, never
+        // `Disconnected`, so its task (and the PTY socket, connection-cap
+        // permit, and per-tab subscriber-quota slot it holds) would never be
+        // reaped until the browser itself disconnected. `exited` is monotonic
+        // (set once, never reset), so checking it here — instead of pushing
+        // unconditionally — closes the window: if the PTY has already exited,
+        // don't register at all. `tx` is dropped without being stored, so `rx`
+        // observes `Disconnected` on its very next `recv`/`try_recv`, letting
+        // the caller's forwarder complete and reap immediately instead of
+        // leaking until the next prune tick (which would still miss it, since
+        // the entry was never in `subscribers` for `prune_exited_ptys` to see
+        // in the first place — the leak was in never delivering `Disconnected`
+        // at all).
+        if !self.is_exited() {
+            self.subscribers
+                .lock()
+                .expect("subscribers mutex poisoned")
+                .push((id, tx));
+        }
         let guard = PtyViewerGuard {
             id,
             subs: Arc::clone(&self.subscribers),
@@ -2245,6 +2266,56 @@ mod tests {
             reader_exited.load(Ordering::Acquire),
             "after drop, the reader thread must have exited (Drop must join it)"
         );
+    }
+
+    #[test]
+    fn subscribe_after_exit_does_not_leak_a_dead_subscriber() {
+        // G5 regression: a subscribe landing after the reader thread's
+        // one-shot `subs.clear()` (on EOF) used to attach a live subscriber to
+        // a PTY that will never clear its subscriber list again — the
+        // receiver would see only `Timeout`, never `Disconnected`, so a web
+        // forwarder blocked on it would never complete and its socket/permit/
+        // sub-quota slot would leak until the client disconnected. `subscribe`
+        // now checks `is_exited()` (monotonic, set once by the reader thread)
+        // before registering, so a post-exit subscribe never joins the list
+        // and its receiver observes `Disconnected` immediately.
+        let args = vec!["-c".to_string(), "exit 0".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 5, 40, 100).expect("spawn pty");
+
+        // Wait for the reader thread to observe EOF and set `exited`.
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        while !client.is_exited() {
+            assert!(Instant::now() < deadline, "child did not exit in time");
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Give the reader thread a moment to also finish its post-loop
+        // `subs.clear()` so this genuinely exercises the post-clear window,
+        // not just a race with it.
+        thread::sleep(std::time::Duration::from_millis(50));
+
+        let (_guard, rx) = client.subscribe();
+
+        // The subscriber must never have been registered: the shared list
+        // stays empty (nothing for a later prune to find or leak).
+        assert!(
+            client
+                .subscribers
+                .lock()
+                .expect("subscribers mutex poisoned")
+                .is_empty(),
+            "a post-exit subscribe must not be added to the subscriber list"
+        );
+        // The receiver must observe disconnection immediately (its sender was
+        // never stored), not block waiting for a `subs.clear()` that will
+        // never come again.
+        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+            other => panic!(
+                "expected an immediately-disconnected receiver for a post-exit \
+                 subscribe, got {other:?}"
+            ),
+        }
     }
 
     #[test]

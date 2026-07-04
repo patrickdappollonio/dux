@@ -108,6 +108,82 @@ async fn boot_with_tab_per_agent(tab_per_agent: u32) -> (SocketAddr, tempfile::T
     (addr, tmp)
 }
 
+/// Like `boot()`, but also configures a `"broken"` provider whose command is a
+/// nonexistent binary, so a tab created against it fails its async launch
+/// instead of coming up live. Used by the G-T2 async-launch-failure test.
+async fn boot_with_broken_provider() -> (SocketAddr, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let wt1 = root.join("wt1");
+    std::fs::create_dir_all(&wt1).unwrap();
+
+    let paths = DuxPaths {
+        root: root.clone(),
+        config_path: root.join("config.toml"),
+        sessions_db_path: root.join("sessions.sqlite3"),
+        worktrees_root: root.join("worktrees"),
+        lock_path: root.join("dux.lock"),
+    };
+    std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+    {
+        let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+        store
+            .upsert_project(&ProjectConfig {
+                id: "p1".to_string(),
+                path: root.to_string_lossy().into_owned(),
+                name: Some("p1".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: Default::default(),
+            })
+            .unwrap();
+        store
+            .upsert_session(&sample_session("s1", wt1.to_string_lossy().as_ref()))
+            .unwrap();
+    }
+    let mut engine = bootstrap_engine(&paths).unwrap();
+    engine.config.providers.commands.insert(
+        "claude".to_string(),
+        ProviderCommandConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+    engine.config.providers.commands.insert(
+        "broken".to_string(),
+        ProviderCommandConfig {
+            command: "/nonexistent/dux-test-broken-provider-binary".to_string(),
+            args: vec![],
+            resume_args: None,
+            ..Default::default()
+        },
+    );
+    let (handle, _join) = spawn_engine_thread(engine);
+    let params = RouterParams::plain_http().with_max_websocket_connections(
+        dux_core::config::DEFAULT_MAX_WEBSOCKET_EVENTS_CONNECTIONS,
+        dux_core::config::DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS,
+        dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
+        dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
+        dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
+    );
+    let app = build_app(handle, Router::<AppState>::new(), params);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (addr, tmp)
+}
+
 async fn create_support_tab(client: &reqwest::Client, addr: SocketAddr, session: &str) -> String {
     let resp = client
         .post(format!("http://{addr}/api/v1/sessions/{session}/tabs"))
@@ -258,7 +334,13 @@ async fn delete_support_tab_removes_its_row() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204);
+    // G15: an extra-tab close now returns 200 + `{ "detached": bool }` (matching
+    // the session-slot branch) instead of a bare 204, so a caller can learn
+    // whether this close detached the agent without a follow-up poll. Here it
+    // was the agent's only live tab, so it must report detached.
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["detached"], true);
 
     let session: serde_json::Value = client
         .get(format!("http://{addr}/api/v1/sessions/s1"))
@@ -275,6 +357,42 @@ async fn delete_support_tab_removes_its_row() {
         .map(|t| t["id"].as_str().unwrap())
         .collect();
     assert!(!tab_ids.contains(&tab.as_str()));
+}
+
+#[tokio::test]
+async fn delete_support_tab_with_live_sibling_does_not_detach() {
+    // G15 companion case: closing an extra tab while a sibling (here, the
+    // session-slot tab) is still live must report `detached: false`, not just
+    // default to `true` because the closed tab itself is gone.
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let tab = create_support_tab(&client, addr, "s1").await;
+    // Launch the session-slot tab too, so a live sibling remains after the
+    // extra tab closes.
+    let launch_resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/reconnect"))
+        .json(&serde_json::json!({ "force": false }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        launch_resp.status().is_success(),
+        "reconnect should launch the session-slot tab: {}",
+        launch_resp.status()
+    );
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
+
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["detached"], false,
+        "the session-slot tab is still live, so the agent must not detach"
+    );
 }
 
 #[tokio::test]
@@ -303,6 +421,98 @@ async fn patch_tab_rejects_an_unconfigured_provider() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+// G-T7: PATCH retarget only had a negative (unconfigured-provider) test; add the
+// success path. `codex` is a default-configured provider. Retargeting a tab
+// while its process is still live only PINS the previous provider for display
+// (the pane title must not lie about what's on screen until relaunch), so the
+// tab is killed (dormant, no live process) first — only then does the tab
+// view's `provider` field reflect the persisted retarget directly.
+#[tokio::test]
+async fn patch_tab_retargets_to_a_valid_provider() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let tab = create_support_tab(&client, addr, "s1").await;
+
+    // Wait for the tab's async launch to come up, then detach the whole agent
+    // (kills every tab's process but keeps the `agent_tabs` rows) so the tab is
+    // dormant before retargeting.
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &tab)).await;
+    let kill_resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(kill_resp.status(), 200);
+    wait_for_session(&client, addr, "s1", |s| !tab_has_live_process(s, &tab)).await;
+
+    let resp = client
+        .patch(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
+        .json(&serde_json::json!({ "provider": "codex" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let session: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let retargeted = session["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"].as_str() == Some(tab.as_str()))
+        .expect("retargeted tab must still be present");
+    assert_eq!(
+        retargeted["provider"], "codex",
+        "a dormant tab's retarget must be reflected directly (no live-process pin)"
+    );
+}
+
+// G21: an out-of-bound `:id` must be reported as an unknown SESSION, not an
+// unknown TAB — the two checks used to be collapsed into one tab-worded 404
+// regardless of which path segment was actually bad.
+#[tokio::test]
+async fn delete_tab_with_bad_session_id_is_unknown_session_not_unknown_tab() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let bad_id = "x".repeat(dux_web::rest_common::MAX_ID_LEN + 1);
+    let resp = client
+        .delete(format!("http://{addr}/api/v1/sessions/{bad_id}/tabs/tab-1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        body, "unknown session",
+        "an out-of-bound session id must be reported as an unknown session"
+    );
+}
+
+#[tokio::test]
+async fn patch_tab_with_bad_session_id_is_unknown_session_not_unknown_tab() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let bad_id = "x".repeat(dux_web::rest_common::MAX_ID_LEN + 1);
+    let resp = client
+        .patch(format!("http://{addr}/api/v1/sessions/{bad_id}/tabs/tab-1"))
+        .json(&serde_json::json!({ "provider": "codex" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body = resp.text().await.unwrap();
+    assert_eq!(
+        body, "unknown session",
+        "an out-of-bound session id must be reported as an unknown session"
+    );
 }
 
 // ── WebSocket route: ownership + per-agent socket cap ────────────────────────
@@ -379,5 +589,139 @@ async fn tab_pty_socket_cap_refuses_beyond_the_per_agent_limit() {
     assert!(
         reconnected,
         "after closing the first tab socket the freed slot should allow a new one"
+    );
+}
+
+// G-T3: the socket-reap behavior was only tested for a whole-agent kill
+// (`ws_transport.rs::tearing_down_agent_pty_closes_its_attached_socket`);
+// exercise the single-tab close path too: `DELETE .../tabs/:tab` on an EXTRA
+// tab must proactively close that tab's own nested PTY socket (not merely go
+// quiet), and the per-agent socket sub-quota slot it held must be released,
+// not leaked.
+#[tokio::test]
+async fn deleting_a_tab_closes_its_attached_socket_and_frees_the_sub_quota() {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    // Per-agent cap of one live tab socket, so a stuck/leaked slot from the
+    // deleted tab would be directly observable: a second tab's socket would
+    // never be able to connect.
+    let (addr, _tmp) = boot_with_tab_per_agent(1).await;
+    let client = reqwest::Client::new();
+    let tab = create_support_tab(&client, addr, "s1").await;
+
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/{tab}/pty"))
+            .await
+            .expect("connect the tab's pty socket");
+
+    // Delete just this tab (not the whole agent).
+    let del = client
+        .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{tab}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 200);
+
+    // The socket must close on its own (Close frame or stream end), not merely
+    // go quiet.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut closed = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(300), ws.next()).await {
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {
+                closed = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        closed,
+        "the deleted tab's pty socket was not proactively closed"
+    );
+
+    // The per-agent sub-quota slot the deleted tab's socket held must be
+    // released: a brand-new tab's socket must be able to connect under the
+    // same cap of 1, proving nothing was leaked.
+    let tab2 = create_support_tab(&client, addr, "s1").await;
+    let mut reconnected = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if tokio_tungstenite::connect_async(format!("ws://{addr}/ws/sessions/s1/tabs/{tab2}/pty"))
+            .await
+            .is_ok()
+        {
+            reconnected = true;
+            break;
+        }
+    }
+    assert!(
+        reconnected,
+        "deleting a tab must free its per-agent socket sub-quota slot"
+    );
+}
+
+// G-T2: every existing async-tab-launch test used `cat`, which always comes up
+// live, so the actual ASYNC launch-failure path (as opposed to the synchronous
+// 400 for an unconfigured provider) was never exercised. Use a provider whose
+// command is a nonexistent binary: the create call still 201s (the row is
+// minted synchronously; only the launch is async), but the tab must never
+// reach `has_live_process`, and the failure must be surfaced by removing the
+// dead row rather than leaving a tab that looks alive but never is.
+#[tokio::test]
+async fn tab_with_a_failing_async_launch_never_looks_live_and_is_cleaned_up() {
+    let (addr, _tmp) = boot_with_broken_provider().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{addr}/api/v1/sessions/s1/tabs"))
+        .json(&serde_json::json!({ "provider": "broken" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        201,
+        "create still 201s; only the launch is async"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let tab = body["tab_id"].as_str().unwrap().to_string();
+
+    // Poll until the row is gone (the fresh-create failure path deletes it) or
+    // time out. Throughout, it must never report a live process.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut saw_row_removed = false;
+    loop {
+        let session: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/sessions/s1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let tabs = session["tabs"].as_array().unwrap();
+        match tabs.iter().find(|t| t["id"].as_str() == Some(tab.as_str())) {
+            Some(row) => {
+                assert_ne!(
+                    row["has_live_process"], true,
+                    "a tab whose launch failed must never look live"
+                );
+            }
+            None => {
+                saw_row_removed = true;
+                break;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw_row_removed,
+        "a fresh tab whose first launch failed must be cleaned up, not left as a \
+         permanently dead-looking row"
     );
 }

@@ -156,19 +156,19 @@ pub const DEFAULT_MAX_WEBSOCKET_AGENT_CONNECTIONS: u32 = 32;
 /// Default cap on concurrent terminal-PTY WebSocket connections — see
 /// [`ServerConfig::max_websocket_terminal_connections`].
 pub const DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS: u32 = 64;
-/// Default cap on concurrent Support-tab PTY WebSocket connections across ALL
+/// Default cap on concurrent extra-tab PTY WebSocket connections across ALL
 /// agents — see [`ServerConfig::max_websocket_tab_connections`]. A pool of its
-/// own so tab sockets can never starve the agent-PTY (Main-tab) pool.
+/// own so tab sockets can never starve the agent-PTY (session-slot tab) pool.
 pub const DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS: u32 = 64;
 
-/// Default per-agent cap on concurrent live Support-tab PTY sockets, checked
+/// Default per-agent cap on concurrent live extra-tab PTY sockets, checked
 /// before a permit is taken from the shared tab pool — see
 /// [`ServerConfig::max_websocket_tabs_per_agent`]. Keeps one agent's tabs from
 /// monopolizing that pool and starving other agents' tabs.
 pub const DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT: u32 = 8;
 
 /// Default per-agent tab cap (see [`UiConfig::agent_tabs_max`]), counting the
-/// Main tab — so the default 20 allows the Main tab plus 19 Support tabs.
+/// session-slot tab — so the default 20 allows the session-slot tab plus 19 extra tabs.
 pub const DEFAULT_AGENT_TABS_MAX: u16 = 20;
 /// Hard ceiling the per-agent tab cap is clamped to, so a fat-fingered config
 /// value can't ask the app to keep unbounded live PTYs per agent.
@@ -278,22 +278,22 @@ pub struct ServerConfig {
     /// Changing this requires a server restart to take effect: the connection-cap
     /// semaphore is built at startup and a config reload cannot resize it.
     pub max_websocket_terminal_connections: u32,
-    /// Maximum number of concurrent Support-tab PTY WebSocket connections across
+    /// Maximum number of concurrent extra-tab PTY WebSocket connections across
     /// ALL agents. Tab sockets draw from THIS pool, not the agent-PTY pool, so a
     /// few agents each showing many tabs cannot 503 every other agent's Main
     /// terminal. Once this many are live, further tab-socket upgrades are rejected
     /// with HTTP 503 until a slot frees. Default 64. A value of 0 permanently
-    /// blocks all Support-tab PTY sockets until the server restarts. Changing this
+    /// blocks all extra-tab PTY sockets until the server restarts. Changing this
     /// requires a server restart to take effect.
     pub max_websocket_tab_connections: u32,
-    /// Maximum concurrent live Support-tab PTY WebSocket connections a SINGLE
+    /// Maximum concurrent live extra-tab PTY WebSocket connections a SINGLE
     /// agent may hold, checked BEFORE a permit is taken from the shared tab pool
     /// (`max_websocket_tab_connections`). This is a per-agent fairness sub-quota on
     /// top of that pool: it stops one agent showing many tabs from monopolizing the
     /// pool and starving other agents' tabs. Once an agent reaches this many live
     /// tab sockets, further tab-socket upgrades for THAT agent are rejected with
     /// HTTP 503 until one closes. Default 8. A value of 0 permanently blocks all
-    /// Support-tab PTY sockets until the server restarts.
+    /// extra-tab PTY sockets until the server restarts.
     pub max_websocket_tabs_per_agent: u32,
     /// WEB-ONLY display name for this dux instance. Drives the browser tab
     /// `<title>` and the brand wordmark in the web projects pane (the version
@@ -372,8 +372,8 @@ pub struct UiConfig {
     pub staged_pane_height_pct: u16,
     pub commit_pane_height_pct: u16,
     pub agent_scrollback_lines: usize,
-    /// Maximum number of tabs a single agent may have, counting the Main tab
-    /// (so 20 means the Main tab plus up to 19 ephemeral Support tabs). The "+"
+    /// Maximum number of tabs a single agent may have, counting the session-slot tab
+    /// (so 20 means the session-slot tab plus up to 19 ephemeral extra tabs). The "+"
     /// affordance disables at the cap. `0` means use the default (20); values
     /// above the internal ceiling are clamped with a warning. Default 20.
     pub agent_tabs_max: u16,

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { BootstrapFetchError, fetchBootstrap } from "./bootstrapApi"
+import { BootstrapFetchError, DEFAULT_AGENT_TABS_MAX, fetchBootstrap } from "./bootstrapApi"
 
 // The bootstrap client is a thin GET wrapper (mirrors changesApi): on 2xx it
 // returns the parsed JSON; on a non-2xx it throws a `BootstrapFetchError`
@@ -73,5 +73,18 @@ describe("fetchBootstrap", () => {
     const err = await fetchBootstrap().catch((e) => e)
     expect(err).toBeInstanceOf(BootstrapFetchError)
     expect(err.status).toBe(0)
+  })
+})
+
+describe("DEFAULT_AGENT_TABS_MAX", () => {
+  // This constant is a plain duplicated literal mirroring
+  // `dux_core::config::DEFAULT_AGENT_TABS_MAX` (crates/dux-core/src/config.rs) —
+  // nothing enforces the two staying equal (see G13). Pinning the value here
+  // means a change to either side without updating the other fails THIS test
+  // (a TS-side change) as a heads-up to also update config.rs, rather than the
+  // drift going unnoticed until an older-server fallback silently diverges from
+  // the server's own cap.
+  it("mirrors the Rust default of 20", () => {
+    expect(DEFAULT_AGENT_TABS_MAX).toBe(20)
   })
 })

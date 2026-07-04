@@ -86,7 +86,7 @@ describe("ptySocket URL builders", () => {
     )
   })
 
-  it("builds the Support-tab PTY URL nested under its session", () => {
+  it("builds the extra-tab PTY URL nested under its session", () => {
     expect(tabPtyUrl("s1", "tab9")).toBe(
       "ws://localhost:7070/ws/sessions/s1/tabs/tab9/pty",
     )
@@ -245,6 +245,45 @@ describe("PtySocket", () => {
     }
     // A fresh socket was constructed for each retry — it never gave up.
     expect(FakeWS.instances.length).toBeGreaterThan(6)
+  })
+
+  it("does not reconnect and fires onGone once shouldRetry says the route is gone", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    let gone = 0
+    let reconnecting = 0
+    sock.onGone = () => {
+      gone++
+    }
+    sock.onReconnecting = () => {
+      reconnecting++
+    }
+    sock.shouldRetry = () => false
+    sock.connect()
+    last().open()
+    const before = FakeWS.instances.length
+    last().triggerClose()
+    // No reconnect scheduled (no new socket even after time passes) and no
+    // "Reconnecting…" signal — this is a hard stop, not a retry.
+    vi.advanceTimersByTime(10000)
+    expect(FakeWS.instances.length).toBe(before)
+    expect(reconnecting).toBe(0)
+    expect(gone).toBe(1)
+  })
+
+  it("still reconnects normally when shouldRetry returns true (the default)", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    let gone = 0
+    sock.onGone = () => {
+      gone++
+    }
+    sock.connect()
+    last().open()
+    last().triggerClose()
+    vi.advanceTimersByTime(600)
+    expect(FakeWS.instances.length).toBe(2)
+    expect(gone).toBe(0)
   })
 
   it("does not reconnect after a user-initiated close", () => {

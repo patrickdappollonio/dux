@@ -162,10 +162,12 @@ pub enum AgentLaunchKind {
         status_message: String,
     },
     StartupAutoReopen,
-    /// A Support-tab launch (never resumes). `is_fresh` distinguishes a
+    /// An extra-tab launch. Whether it resumes is decided dynamically, per
+    /// provider, by `Engine::tab_resume_decision` — the same rule every other
+    /// launch path uses — not hardcoded to "never". `is_fresh` distinguishes a
     /// brand-new `create_tab` (whose row should be deleted if this very first
     /// spawn fails) from an explicit relaunch of an already-persisted dormant
-    /// Support tab (whose row is kept and whose real error is surfaced).
+    /// extra tab (whose row is kept and whose real error is surfaced).
     Tab {
         is_fresh: bool,
         status_message: String,
@@ -176,12 +178,12 @@ pub enum AgentLaunchKind {
 pub struct AgentLaunchRequest {
     pub session: AgentSession,
     /// The tab this launch belongs to and the key under which its PTY / runtime
-    /// state is tracked. Equals `session.id` for the Main tab; a distinct id for
-    /// a Support tab. Intentionally has no `Default` so every construction site
+    /// state is tracked. Equals `session.id` for the session-slot tab; a distinct id for
+    /// an extra tab. Intentionally has no `Default` so every construction site
     /// must set it explicitly (a missed site is a compile error).
     pub tab_id: String,
     /// The effective provider for this tab. Equals `session.provider` for the
-    /// Main tab; may differ for a Support tab that was retargeted.
+    /// session-slot tab; may differ for an extra tab that was retargeted.
     pub provider: ProviderKind,
     pub provider_config: ProviderCommandConfig,
     pub env: Vec<(String, String)>,

@@ -46,11 +46,11 @@ export function terminalPtyUrl(sessionId: string, terminalId: string): string {
   )}/terminals/${encodeURIComponent(terminalId)}/pty`
 }
 
-// A Support tab's PTY socket URL, nested under its owning session so the server
-// can enforce that the tab belongs to that session. Used ONLY for Support tabs;
-// the Main tab keeps `agentPtyUrl` (its `tab_id === session_id`, served by the
-// existing `/ws/sessions/:id/pty` route). Connecting launches the Support tab's
-// provider fresh (there is no resume for Support tabs).
+// An extra tab's PTY socket URL, nested under its owning session so the server
+// can enforce that the tab belongs to that session. Used ONLY for extra tabs;
+// the session-slot tab keeps `agentPtyUrl` (its `tab_id === session_id`, served by
+// the existing `/ws/sessions/:id/pty` route). Connecting launches the extra
+// tab's provider fresh (there is no resume for extra tabs).
 export function tabPtyUrl(sessionId: string, tabId: string): string {
   return `${wsScheme()}//${location.host}/ws/sessions/${encodeURIComponent(
     sessionId,
@@ -88,6 +88,22 @@ export class PtySocket {
   // still dropped by `sendInput`'s readyState guard — this is the user-facing
   // signal that it would be, not a buffer.
   onReconnecting: () => void = () => {}
+
+  // Consulted on every unexpected close, BEFORE scheduling a reconnect. Returning
+  // `false` means the underlying PTY route is gone for good (e.g. an extra tab's
+  // socket 404s because another client deleted that tab while this one was
+  // retrying) rather than merely dropped — retrying forever against a route that
+  // will keep 404ing would spin silently with no escape. A close carries no HTTP
+  // status the client can read, so the consumer is expected to check its own
+  // source of truth (e.g. spine tab membership) instead. Defaults to always
+  // retry, matching every other PTY socket (agent session-slot tab, companion
+  // terminal), which never go away out from under a live client this way.
+  shouldRetry: () => boolean = () => true
+
+  // Fired once, in place of `scheduleReconnect`, the first time `shouldRetry()`
+  // says the route is gone. The socket does not close itself further (there is
+  // nothing more to tear down); the consumer decides what the UI does next.
+  onGone: () => void = () => {}
 
   constructor(url: string) {
     this.url = url
@@ -145,9 +161,12 @@ export class PtySocket {
 
     ws.onclose = () => {
       this.ws = null
-      if (!this.closedByUser) {
-        this.scheduleReconnect()
+      if (this.closedByUser) return
+      if (!this.shouldRetry()) {
+        this.onGone()
+        return
       }
+      this.scheduleReconnect()
     }
 
     // `onerror` is followed by `onclose`; let the close handler drive reconnect.

@@ -570,9 +570,12 @@ impl Engine {
     /// same time.
     pub fn poll_pty_activity(&mut self) {
         let now = Instant::now();
-        for (session_id, provider) in &self.providers {
+        // `providers` (and therefore `pty_activity`) is keyed by TAB id, not
+        // session id — the session-slot tab's id equals its session id, but an
+        // extra tab's does not.
+        for (tab_id, provider) in &self.providers {
             if provider.take_received_data() {
-                self.pty_activity.insert(session_id.clone(), now);
+                self.pty_activity.insert(tab_id.clone(), now);
             }
         }
     }
@@ -617,27 +620,27 @@ impl Engine {
     /// working. Stamp this only for agent PTYs, never companion terminals, and
     /// never for programmatic writes (macros, startup commands) — those should
     /// keep showing the agent as working.
-    pub fn note_pty_input(&mut self, session_id: &str) {
-        self.pty_input
-            .insert(session_id.to_string(), Instant::now());
+    pub fn note_pty_input(&mut self, tab_id: &str) {
+        self.pty_input.insert(tab_id.to_string(), Instant::now());
     }
 
-    /// Returns `true` if the given agent received PTY data within
+    /// Returns `true` if the given tab received PTY data within
     /// [`AGENT_STREAMING_WINDOW`], indicating it is actively streaming output —
     /// unless the user forwarded keystrokes to it within
     /// [`AGENT_INPUT_SUPPRESSION_WINDOW`], in which case the recent output is
     /// assumed to be the echo of that typing and the indicator is voided.
-    pub fn is_agent_streaming(&self, session_id: &str) -> bool {
+    /// Keyed by TAB id (see `poll_pty_activity`), not session id.
+    pub fn is_agent_streaming(&self, tab_id: &str) -> bool {
         let streaming = self
             .pty_activity
-            .get(session_id)
+            .get(tab_id)
             .is_some_and(|t| t.elapsed() < AGENT_STREAMING_WINDOW);
         if !streaming {
             return false;
         }
         let typing = self
             .pty_input
-            .get(session_id)
+            .get(tab_id)
             .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW);
         !typing
     }
@@ -1746,7 +1749,7 @@ impl Engine {
                 .or_insert_with(|| previous.clone());
         }
 
-        let resume_available = self.should_resume_session(&updated);
+        let resume_available = self.tab_resume_decision(&updated, &updated.id, &provider, true);
 
         Ok(ChangeAgentProviderOutcome {
             previous,
@@ -1871,7 +1874,7 @@ impl Engine {
         Ok(tab_id)
     }
 
-    /// Close a extra tab: delete its row first (so a persistence failure leaves
+    /// Close an extra tab: delete its row first (so a persistence failure leaves
     /// in-memory state untouched), then gracefully tear down its PTY and clear all
     /// of its runtime-map entries. The session-slot tab's close is a separate path
     /// (`KillSessionPty`) — this is only for extra tabs (`tab_id != session_id`).
@@ -1913,7 +1916,7 @@ impl Engine {
 
     /// Retarget a tab's provider (effective on its next launch). For the session-slot tab
     /// (`tab_id == session_id`) this delegates to the untouched
-    /// [`Engine::change_agent_provider`]; for a extra tab it updates only that
+    /// [`Engine::change_agent_provider`]; for an extra tab it updates only that
     /// tab's row, pinning the previously-running provider if it is live.
     pub fn change_tab_provider(
         &mut self,
@@ -1957,7 +1960,7 @@ impl Engine {
                 .or_insert_with(|| previous.clone());
         }
 
-        // Resume eligibility for a extra tab retarget follows the same rule
+        // Resume eligibility for an extra tab retarget follows the same rule
         // as an actual launch: the newly-selected provider must be
         // resume-eligible for this session AND no other live/launching tab of
         // the session currently owns that provider's conversation. Compute it
@@ -3034,6 +3037,35 @@ mod tab_ops_tests {
     }
 
     #[test]
+    fn change_agent_provider_resume_available_matches_tab_resume_decision_under_collision() {
+        // G2 regression: `change_agent_provider` used to derive resume_available
+        // from `should_resume_session`, which is collision-blind. With a live
+        // same-provider extra tab, it must report `false` like
+        // `tab_resume_decision` (and like its sibling `change_tab_provider`).
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.started_providers = vec!["claude".into()];
+        session.provider = ProviderKind::new("claude");
+        engine.sessions.push(session.clone());
+        let tab = support_tab("tab-x", "s1", "claude");
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-x".into()));
+
+        let outcome = engine
+            .change_agent_provider("s1", ProviderKind::new("claude"))
+            .unwrap();
+
+        assert!(
+            engine.should_resume_session(&engine.sessions[0]),
+            "the session provider is resume-eligible on its own"
+        );
+        assert!(
+            !outcome.resume_available,
+            "a live same-provider extra tab must downgrade resume_available to false"
+        );
+    }
+
+    #[test]
     fn mark_session_provider_started_records_the_passed_provider() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
@@ -3116,7 +3148,7 @@ mod tab_ops_tests {
 
     #[test]
     fn change_tab_provider_reports_resume_available_when_eligible() {
-        // Retargeting a extra tab to a provider that has already started in
+        // Retargeting an extra tab to a provider that has already started in
         // this worktree, and is not live/launching under any other tab, must
         // report resume_available: true rather than the old hardcoded false.
         let (mut engine, _tmp) = test_engine();
@@ -3165,6 +3197,66 @@ mod tab_ops_tests {
         assert_eq!(engine.session_store.count_agent_tabs("s1").unwrap(), 0);
         assert!(!engine.agent_tabs.contains_key("tab-1"));
         assert!(!engine.pty_activity.contains_key("tab-1"));
+    }
+
+    #[test]
+    fn close_tab_detaches_the_agent_when_it_was_the_last_live_tab() {
+        // G-T5: the last-tab-detach branch of `close_tab` had no test asserting
+        // the resulting session status. Seed a real live PTY for the extra tab
+        // (and none for the session-slot tab) so the session starts Active, then
+        // assert closing that tab flips it to Detached.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session.status = SessionStatus::Active;
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = support_tab("tab-1", "s1", "codex");
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine
+            .providers
+            .insert("tab-1".to_string(), spawn_cat(worktree.path()));
+
+        engine.close_tab("s1", "tab-1").unwrap();
+
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Detached,
+            "closing the agent's only live tab must detach it"
+        );
+    }
+
+    #[test]
+    fn close_tab_with_a_live_sibling_stays_active() {
+        // G-T5 companion case: closing a tab while another tab of the SAME
+        // agent is still live must leave the session Active, not detach it.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session.status = SessionStatus::Active;
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = support_tab("tab-1", "s1", "codex");
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine
+            .providers
+            .insert("tab-1".to_string(), spawn_cat(worktree.path()));
+        // The session-slot tab (id == "s1") is the live sibling that survives.
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(worktree.path()));
+
+        engine.close_tab("s1", "tab-1").unwrap();
+
+        assert_eq!(
+            engine.sessions[0].status,
+            SessionStatus::Active,
+            "a still-live sibling tab must keep the agent Active"
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ pub enum EngineRequest {
     /// subscribing to or deleting it (the legacy `SubscribeTerminal`/`DeleteTerminal`
     /// path looks terminals up by id alone and does not check session ownership).
     TerminalSession(String, oneshot::Sender<Option<String>>),
-    /// Create a Support tab for a session running the given provider (or the
+    /// Create an extra tab for a session running the given provider (or the
     /// session's project default when `None`), replying `(tab_id, provider)`. The
     /// launch is fire-and-forget (async worker); the id returns synchronously so
     /// the REST handler can echo it and the client can attach.
@@ -81,8 +81,8 @@ pub enum EngineRequest {
         Option<String>,
         oneshot::Sender<Result<(String, String), String>>,
     ),
-    /// Resolve the owning session id of a SUPPORT tab (instant lookup), or `None`
-    /// when the tab id is unknown or is a Main tab (which has no `agent_tabs` row
+    /// Resolve the owning session id of a EXTRA tab (instant lookup), or `None`
+    /// when the tab id is unknown or is a session-slot tab (which has no `agent_tabs` row
     /// and is served by `/ws/sessions/:id/pty`). Lets the tab PTY socket and tab
     /// REST routes enforce that a `:tab` belongs to its path `:id`.
     TabSession(String, oneshot::Sender<Option<String>>),
@@ -592,7 +592,7 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
-    /// Create a Support tab for `session_id` (provider `None` → project default),
+    /// Create an extra tab for `session_id` (provider `None` → project default),
     /// replying `(tab_id, provider)`. Direct-return, mirroring `create_terminal`.
     pub async fn create_agent_tab(
         &self,
@@ -607,8 +607,8 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
-    /// The session id that owns SUPPORT tab `tab_id`, or `None` when the tab is
-    /// unknown or is a Main tab. Used by the tab PTY socket and the tab REST routes
+    /// The session id that owns EXTRA tab `tab_id`, or `None` when the tab is
+    /// unknown or is a session-slot tab. Used by the tab PTY socket and the tab REST routes
     /// to enforce that the tab belongs to the path's session before acting.
     pub async fn tab_session(&self, tab_id: String) -> Option<String> {
         let (tx, rx) = oneshot::channel();
@@ -1664,7 +1664,7 @@ fn handle_request(
             let _ = reply.send(res);
         }
         EngineRequest::TabSession(tab_id, reply) => {
-            // Support-only ownership: a Main tab has no `agent_tabs` row (`None`),
+            // Support-only ownership: a session-slot tab has no `agent_tabs` row (`None`),
             // so the tabs route 404s it — Main is served by `/ws/sessions/:id/pty`.
             let owner = engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone());
             let _ = reply.send(owner);
@@ -1888,14 +1888,14 @@ fn create_agent_tab_inner(
 /// The provider is NOT inserted here: the dispatched launch runs in a background
 /// worker and the provider appears later via the worker-event drain
 /// (`process_agent_launch_ready`). The caller's `PendingSubscribe` waits for it.
-/// This subscribe-launches path is the web "start a dormant Support tab" action.
+/// This subscribe-launches path is the web "start a dormant extra tab" action.
 fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> {
     // A launch is already running for THIS id (session or tab): just wait for it.
     // The guard keys by the subscribed id, matching the tab-keyed in-flight lock.
     if engine.is_in_flight(&InFlightKey::AgentLaunch(subscribed_id.to_string())) {
         return Ok(());
     }
-    // Main tab: the subscribed id is a session id -> resume-eligible reconnect.
+    // session-slot tab: the subscribed id is a session id -> resume-eligible reconnect.
     if let Some(session) = engine
         .sessions
         .iter()
@@ -1917,11 +1917,29 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
             (24, 80),
             AgentLaunchKind::Reconnect { status_message },
         );
-        engine
+        let reaction = engine
             .apply(Command::DispatchAgentLaunch {
                 request: Box::new(request),
             })
             .map_err(|e| e.to_string())?;
+        // The chokepoint (`Command::DispatchAgentLaunch`) refuses a launch for a
+        // closing session (or an in-flight collision) by returning
+        // `Ok(view { launched: false, .. })`, not an `Err`. Ignoring `view.launched`
+        // used to swallow that refusal silently: never logged, never surfaced to the
+        // caller, leaving `PendingSubscribe` to fail-fast later with a generic
+        // "check dux.log" message and nothing in the log to check. Surface the
+        // refusal as an `Err` here so it is logged and reported like the extra-tab
+        // branch below.
+        if let EventReaction::DispatchAgentLaunchView(view) = &reaction
+            && !view.launched
+        {
+            let message = view
+                .status
+                .as_ref()
+                .map(|s| s.message.clone())
+                .unwrap_or_else(|| "Agent launch was refused.".to_string());
+            return Err(message);
+        }
         return Ok(());
     }
     // Extra tab: resolve the owning session + the tab's own provider and launch.
@@ -1940,7 +1958,7 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         .find(|s| s.id == tab.session_id)
         .cloned()
         .ok_or_else(|| format!("unknown session {}", tab.session_id))?;
-    // Refuse to (re)launch a Support tab into a session that is mid-deletion: its
+    // Refuse to (re)launch an extra tab into a session that is mid-deletion: its
     // worktree is about to be removed, so spawning a fresh provider there would
     // race `git::remove_worktree`. Mirrors the `closing_sessions` guard in
     // `Engine::create_tab`.
@@ -1970,11 +1988,23 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
             status_message,
         },
     );
-    engine
+    let reaction = engine
         .apply(Command::DispatchAgentLaunch {
             request: Box::new(request),
         })
         .map_err(|e| e.to_string())?;
+    // Same refusal-surfacing fix as the session-slot branch above: a refused
+    // launch comes back as `Ok(view { launched: false, .. })`, not an `Err`.
+    if let EventReaction::DispatchAgentLaunchView(view) = &reaction
+        && !view.launched
+    {
+        let message = view
+            .status
+            .as_ref()
+            .map(|s| s.message.clone())
+            .unwrap_or_else(|| "Agent launch was refused.".to_string());
+        return Err(message);
+    }
     Ok(())
 }
 
@@ -2021,6 +2051,36 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn launch_agent_surfaces_closing_session_refusal_as_err() {
+        // G4 regression: the session-slot branch of `launch_agent` used to
+        // dispatch `DispatchAgentLaunch` and ignore the returned view's
+        // `launched` flag, so the chokepoint's closing-session refusal (which
+        // comes back as `Ok(view { launched: false, .. })`, not an `Err`) was
+        // silently swallowed. It must now surface as an `Err` carrying the
+        // refusal's status message.
+        let (_tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            store
+                .upsert_session(&sample_session(
+                    "s1",
+                    "p1",
+                    "feat",
+                    paths.root.to_string_lossy().as_ref(),
+                ))
+                .unwrap();
+        }
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        engine.closing_sessions.insert("s1".to_string());
+
+        let err = launch_agent(&mut engine, "s1").expect_err("closing session must refuse");
+        assert!(
+            err.contains("being deleted"),
+            "refusal message should be surfaced verbatim: {err}"
+        );
     }
 
     #[tokio::test]

@@ -81,4 +81,27 @@ describe("ConfirmCloseTabDialog", () => {
     expect(screen.getByText("Close tab?")).toBeTruthy()
     expect(screen.queryByText(/the agent detaches/)).toBeNull()
   })
+
+  // The closed tab itself is DORMANT (has_live_process: false, liveTabs counts 0
+  // among OTHER tabs) — the `liveTabs === 0` branch of `willDetach`, previously
+  // untested. Closing an already-dormant tab is still meaningful: it deletes the
+  // dormant tab's row (or, for the session-slot tab, its slot) outright.
+  it("shows no detach warning when closing an already-dormant tab that has a live sibling", () => {
+    seed("b2", [
+      tab({ id: "s1", provider: "claude", has_live_process: true }),
+      tab({ id: "b2", provider: "codex", has_live_process: false }),
+    ])
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.getByText("Close tab?")).toBeTruthy()
+    expect(screen.queryByText(/the agent detaches/)).toBeNull()
+  })
+
+  it("warns the agent detaches when closing an already-dormant tab with no live sibling", () => {
+    seed("b2", [
+      tab({ id: "s1", provider: "claude", has_live_process: false }),
+      tab({ id: "b2", provider: "codex", has_live_process: false }),
+    ])
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.getByText(/last live tab, so the agent detaches/)).toBeTruthy()
+  })
 })

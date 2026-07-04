@@ -1,16 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
 // Override only `useDux` so the mobile drawer header's wiring (`bootstrap.title`
 // to `resolveInstanceTitle` to the rendered wordmark) is exercised end to end,
-// keeping the version/subtitle line intact below it.
+// keeping the version/subtitle line intact below it. `addTab` is ALSO overridden
+// (as a spy) so the "Add tab" menu item test can assert it without a real
+// network request.
 let mockState: DuxState
+const addTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return { ...actual, useDux: () => mockState, addTab: addTabMock }
 })
 
 // jsdom lacks localStorage/fetch/matchMedia as globals; the real store boots on
@@ -52,18 +55,92 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     selectedTarget: null,
     pendingSessionOrder: null,
     pendingProjectOrder: null,
+    createTabInFlight: [],
     mobileScreen: "home",
     ...overrides,
   } as unknown as DuxState
 }
 
+// A minimal one-project/one-session spine, with the session's tab count
+// configurable so the "Add tab" reachability + cap-disable can be exercised at
+// any tab count (including the common 1-tab case, per G7).
+function makeSessionSpine(tabCount: number): DuxState["spine"] {
+  const tabs = Array.from({ length: tabCount }, (_, i) => ({
+    id: i === 0 ? "s1" : `extra-${i}`,
+    provider: "claude",
+    order: i,
+    working: false,
+    has_output: false,
+    has_live_process: true,
+  }))
+  return {
+    projects: [
+      {
+        id: "p1",
+        name: "Repo",
+        path: "/tmp/p1",
+        default_provider: "claude",
+        current_branch: "main",
+        branch_status: "leading",
+      },
+    ],
+    sessions: [
+      {
+        id: "s1",
+        project_id: "p1",
+        title: null,
+        provider: "claude",
+        branch_name: "main",
+        worktree_path: "/tmp/p1",
+        status: "active",
+        auto_reopen_enabled: false,
+        terminals: [],
+        tabs,
+        has_output: false,
+        working: false,
+      },
+    ],
+    sidebar: { groups: [{ project_id: "p1", name: "Repo", orphaned: false }], agentless_start: null },
+  } as unknown as DuxState["spine"]
+}
+
 beforeEach(() => {
   installBootStubs()
+  addTabMock.mockClear()
 })
 
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+})
+
+describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
+  // Mirrors the desktop sidebar's fix: before it, the web had no way to reach a
+  // session's first extra tab (the in-strip "+" only renders at 2+ tabs).
+  it("is present and enabled for a session with only one tab, and calls addTab", () => {
+    mockState = makeState({ spine: makeSessionSpine(1) })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    const item = screen.getByText("Add tab")
+    expect(
+      item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
+    ).not.toBe("true")
+    fireEvent.click(item)
+    expect(addTabMock).toHaveBeenCalledWith("s1")
+  })
+
+  it("disables Add tab once the session is at the per-agent tab cap", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(2),
+      bootstrap: { title: "dux", dux_version: "v1", agent_tabs_max: 2 },
+    })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    const item = screen.getByText("Add tab")
+    expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
+      "true",
+    )
+  })
 })
 
 describe("MobileShell drawer header", () => {

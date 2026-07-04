@@ -9,11 +9,14 @@ import type { DuxState } from "@/lib/store"
 // (keeping every other real store export intact) so the brand-block wiring
 // (`bootstrap.title` to `resolveInstanceTitle` to the rendered wordmark) is
 // exercised end to end. This guards against a regression that silently swaps the
-// title for another field (e.g. the version) or re-hardcodes "dux".
+// title for another field (e.g. the version) or re-hardcodes "dux". `addTab` is
+// ALSO overridden (as a spy) so the "Add tab" menu item test can assert it was
+// called without making a real network request.
 let mockState: DuxState
+const addTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return { ...actual, useDux: () => mockState, addTab: addTabMock }
 })
 
 // The real store module boots on import (it reads localStorage and fires the
@@ -61,8 +64,52 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
   } as unknown as DuxState
 }
 
+// A minimal one-project/one-session spine, with the session's tab count
+// configurable so the "Add tab" reachability + cap-disable can be exercised at
+// any tab count (including the common 1-tab case, per G7).
+function makeSessionSpine(tabCount: number): DuxState["spine"] {
+  const tabs = Array.from({ length: tabCount }, (_, i) => ({
+    id: i === 0 ? "s1" : `extra-${i}`,
+    provider: "claude",
+    order: i,
+    working: false,
+    has_output: false,
+    has_live_process: true,
+  }))
+  return {
+    projects: [
+      {
+        id: "p1",
+        name: "Repo",
+        path: "/tmp/p1",
+        default_provider: "claude",
+        current_branch: "main",
+        branch_status: "leading",
+      },
+    ],
+    sessions: [
+      {
+        id: "s1",
+        project_id: "p1",
+        title: null,
+        provider: "claude",
+        branch_name: "main",
+        worktree_path: "/tmp/p1",
+        status: "active",
+        auto_reopen_enabled: false,
+        terminals: [],
+        tabs,
+        has_output: false,
+        working: false,
+      },
+    ],
+    sidebar: { groups: [{ project_id: "p1", name: "Repo", orphaned: false }], agentless_start: null },
+  } as unknown as DuxState["spine"]
+}
+
 beforeEach(() => {
   installBootStubs()
+  addTabMock.mockClear()
 })
 
 afterEach(() => {
@@ -94,6 +141,46 @@ describe("AppSidebar brand block", () => {
       </SidebarProvider>,
     )
     expect(screen.getByText("dux")).toBeTruthy()
+  })
+})
+
+describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
+  // Before this fix the web had NO way to create a session's first extra tab:
+  // `addTab`'s only call site was the in-strip "+", which only renders once a
+  // session already has two or more tabs — so a fresh 1-tab session could never
+  // reach 2. This menu item is the affordance that closes that gap.
+  it("is present and enabled for a session with only one tab, and calls addTab", () => {
+    mockState = makeState({ spine: makeSessionSpine(1), createTabInFlight: [] })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    const item = screen.getByText("Add tab")
+    expect(
+      item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
+    ).not.toBe("true")
+    fireEvent.click(item)
+    expect(addTabMock).toHaveBeenCalledWith("s1")
+  })
+
+  it("disables Add tab once the session is at the per-agent tab cap", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(2),
+      bootstrap: { title: "dux", dux_version: "v1", agent_tabs_max: 2 },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    const item = screen.getByText("Add tab")
+    expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
+      "true",
+    )
   })
 })
 

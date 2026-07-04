@@ -711,7 +711,7 @@ impl App {
         }
     }
 
-    /// Add a fresh support tab to the selected agent, defaulting to the
+    /// Add a fresh extra tab to the selected agent, defaulting to the
     /// project's default provider, and focus it.
     pub(crate) fn new_tab_for_selected_session(&mut self) -> Result<()> {
         let Some(session) = self.selected_session() else {
@@ -796,8 +796,8 @@ impl App {
     }
 
     /// Close-tab entry point. Opens the confirmation dialog for the focused
-    /// tab: closing the Main tab detaches the agent (non-destructive); closing a
-    /// Support tab ends that session for good (destructive).
+    /// tab: closing the session-slot tab detaches the agent (non-destructive); closing a
+    /// extra tab ends that session for good (destructive).
     pub(crate) fn close_focused_tab_prompt(&mut self) {
         let Some(session) = self.selected_session() else {
             return;
@@ -2547,12 +2547,12 @@ impl App {
             ));
             return Ok(());
         }
-        // Kill existing PTY if the agent is still active.
-        self.engine.providers.remove(&session.id);
-        self.engine.running_provider_pins.remove(&session.id);
-        self.engine.pty_activity.remove(&session.id);
-        self.engine.pty_input.remove(&session.id);
-        self.engine.resume_fallback_candidates.remove(&session.id);
+        // Kill existing PTY if the agent is still active. Routed through the
+        // shared `clear_tab_runtime` so the in-flight `AgentLaunch` key is
+        // cleared too — a hand-rolled remove list here used to miss it, which
+        // left a stale in-flight marker that made the `DispatchAgentLaunch`
+        // chokepoint report "already launching" forever.
+        self.engine.clear_tab_runtime(&session.id);
 
         let detached_label =
             self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
@@ -2916,7 +2916,7 @@ impl App {
                 .tab_ids_for_session(&session.id)
                 .into_iter()
                 .any(|tab_id| tab_id != session.id && self.engine.providers.contains_key(&tab_id));
-            // Skip only when NEITHER the Main tab nor any Support tab is live.
+            // Skip only when NEITHER the session-slot tab nor any extra tab is live.
             if !main_running && !has_live_support {
                 continue;
             }
@@ -2943,8 +2943,8 @@ impl App {
                 });
             }
 
-            // Support tabs are independent live provider processes keyed by tab
-            // id. List each running one so a runaway support tab can be killed;
+            // extra tabs are independent live provider processes keyed by tab
+            // id. List each running one so a runaway extra tab can be killed;
             // killing it stops the process but keeps the (now dormant) tab.
             for tab_id in self.engine.tab_ids_for_session(&session.id) {
                 if tab_id == session.id || !self.engine.providers.contains_key(&tab_id) {
@@ -3134,14 +3134,13 @@ impl App {
         for target_id in target_ids {
             match target_id {
                 RuntimeTargetId::Agent(session_id) => {
-                    if self.engine.providers.remove(session_id).is_some() {
-                        self.engine.running_provider_pins.remove(session_id);
-                        self.engine.pty_activity.remove(session_id);
-                        self.engine.pty_input.remove(session_id);
-                        // Match the canonical teardown in Engine::kill_session_pty:
-                        // dropping the provider without clearing this would leak the
-                        // entry (it's keyed only off the now-removed provider).
-                        self.engine.resume_fallback_candidates.remove(session_id);
+                    if self.engine.providers.contains_key(session_id) {
+                        // Routed through the shared `clear_tab_runtime` (matching
+                        // the canonical teardown in `Engine::kill_session_pty`) so
+                        // the in-flight `AgentLaunch` key is cleared too — a
+                        // hand-rolled remove list used to miss it and leave a
+                        // stale in-flight marker behind.
+                        self.engine.clear_tab_runtime(session_id);
                         // No tab is privileged: stopping the session-slot tab
                         // detaches the agent only when it was the last live tab.
                         // With extra tabs still running the agent stays Active.
@@ -3160,11 +3159,11 @@ impl App {
                     // the tab becomes dormant (relaunchable). Do not touch the row
                     // here (that is `close_tab`'s job). The agent still detaches if
                     // this happened to be its LAST live tab.
-                    if self.engine.providers.remove(tab_id).is_some() {
-                        self.engine.running_provider_pins.remove(tab_id);
-                        self.engine.pty_activity.remove(tab_id);
-                        self.engine.pty_input.remove(tab_id);
-                        self.engine.resume_fallback_candidates.remove(tab_id);
+                    if self.engine.providers.contains_key(tab_id) {
+                        // See the Agent branch above: route through
+                        // `clear_tab_runtime` so the in-flight `AgentLaunch` key
+                        // is cleared too, not just the process-tied maps.
+                        self.engine.clear_tab_runtime(tab_id);
                         if let Some(session_id) = self.engine.owning_session_for_tab(tab_id)
                             && !self.engine.any_tab_active(&session_id)
                         {
@@ -5257,7 +5256,7 @@ mod tests {
         let project = make_project_at("project-1", "claude", &project_dir.path().to_string_lossy());
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        // A tab of this project's session has a launch in flight (Main tab id ==
+        // A tab of this project's session has a launch in flight (session-slot tab id ==
         // session id). Deleting the project must be refused up front, not silently
         // skip this session and then falsely claim success.
         app.engine
@@ -5419,5 +5418,100 @@ mod tests {
             app.apply_finish_delete_session_outcome("s1", outcome, removal, true);
             assert_eq!(app.status.message(), expected, "variant {removal:?}");
         }
+    }
+
+    #[test]
+    fn kill_runtime_targets_agent_clears_in_flight_launch_key() {
+        // G3 regression: the Agent branch of `kill_runtime_targets` used to
+        // hand-roll the tab-runtime clear and missed the in-flight
+        // `AgentLaunch` key, leaving a stale marker that made a later
+        // `DispatchAgentLaunch` report "already launching" forever. Now
+        // routed through the shared `clear_tab_runtime`.
+        let session = make_session("s1", "claude", "/tmp/wt");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![project]);
+        mark_active(&mut app, "s1");
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+
+        let (killed_agents, _killed_terminals) =
+            app.kill_runtime_targets(&[RuntimeTargetId::Agent("s1".to_string())]);
+
+        assert_eq!(killed_agents, 1);
+        assert!(
+            !app.engine.providers.contains_key("s1"),
+            "provider must be dropped"
+        );
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "s1".to_string()
+                )),
+            "killing the agent must clear its in-flight AgentLaunch key"
+        );
+    }
+
+    #[test]
+    fn kill_runtime_targets_tab_clears_in_flight_launch_key() {
+        // Same G3 regression as the Agent branch above, for an extra tab.
+        let session = make_session("s1", "claude", "/tmp/wt");
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![project]);
+        let tab = dux_core::model::AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::from_str("codex"),
+            sort_order: 0,
+            created_at: Utc::now(),
+        };
+        app.engine.agent_tabs.insert(tab.id.clone(), tab);
+        mark_active(&mut app, "tab-1");
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch(
+                "tab-1".to_string(),
+            ));
+
+        let (killed_agents, _killed_terminals) =
+            app.kill_runtime_targets(&[RuntimeTargetId::Tab("tab-1".to_string())]);
+
+        assert_eq!(killed_agents, 1);
+        assert!(
+            !app.engine.providers.contains_key("tab-1"),
+            "provider must be dropped"
+        );
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "tab-1".to_string()
+                )),
+            "killing the tab must clear its in-flight AgentLaunch key"
+        );
+    }
+
+    #[test]
+    fn force_reconnect_agent_clears_in_flight_launch_key() {
+        // G3 regression: `force_reconnect_agent` used to hand-roll the
+        // tab-runtime clear and missed the in-flight `AgentLaunch` key, so a
+        // stale marker from a prior launch would make the relaunch dispatch
+        // refuse with "already launching". Now routed through
+        // `clear_tab_runtime`, so the relaunch proceeds.
+        let mut session = make_session("s1", "claude", "");
+        let wt = tempdir().expect("worktree tempdir");
+        session.worktree_path = wt.path().to_string_lossy().to_string();
+        let project = make_project("project-1", "claude");
+        let mut app = test_app_with_sessions(vec![session], vec![project]);
+        app.rebuild_left_items();
+        app.selected_left = 1;
+        app.engine
+            .mark_in_flight(dux_core::engine::InFlightKey::AgentLaunch("s1".to_string()));
+
+        app.force_reconnect_agent().expect("force reconnect");
+
+        assert!(
+            app.status.message().contains("Starting fresh agent"),
+            "force reconnect should have dispatched instead of refusing as \
+             already-launching: {}",
+            app.status.message()
+        );
     }
 }

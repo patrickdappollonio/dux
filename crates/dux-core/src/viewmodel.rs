@@ -106,7 +106,7 @@ pub struct BootstrapView {
     /// Older servers omit it (the web treats a missing value as the default).
     pub favicon: String,
     /// The per-agent tab cap (`config.ui.agent_tabs_max`, normalized/clamped),
-    /// INCLUDING the Main tab. The web disables the "+" add-tab affordance once a
+    /// INCLUDING the session-slot tab. The web disables the "+" add-tab affordance once a
     /// session already has this many tabs; the server re-enforces it on create.
     /// Older servers omit it, so the web falls back to a sane default.
     pub agent_tabs_max: u16,
@@ -178,7 +178,7 @@ pub struct SessionView {
     /// Companion terminals open for this session, sorted by `id` for stability.
     pub terminals: Vec<TerminalView>,
     /// Provider tabs for this session, **Main first** (`tabs[0]`, `id ==
-    /// session id`) then Support tabs in creation order. Always non-empty. The
+    /// session id`) then extra tabs in creation order. Always non-empty. The
     /// client shows the tab strip only when `tabs.len() >= 2`; with one tab the
     /// pane looks exactly as it did before tabs existed.
     pub tabs: Vec<AgentTabView>,
@@ -221,7 +221,7 @@ pub struct TerminalView {
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
-/// the **Main tab** (the only resumable one). Support tabs (`order >= 1`) are
+/// the **session-slot tab** (the only resumable one). extra tabs (`order >= 1`) are
 /// ephemeral and always launch fresh.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentTabView {
@@ -239,7 +239,7 @@ pub struct AgentTabView {
     /// Whether this tab's PTY has emitted any output yet.
     pub has_output: bool,
     /// Whether a live PTY exists for this tab right now. `false` for a dormant
-    /// Support tab (e.g. reopened after a restart) — the web client renders the
+    /// extra tab (e.g. reopened after a restart) — the web client renders the
     /// dormant card from this flag *without* subscribing, because subscribing
     /// would force-launch the provider.
     pub has_live_process: bool,
@@ -356,7 +356,7 @@ impl Engine {
     /// out so the REST read and the change-detection that emits
     /// `projects.changed`/`sessions.changed` share one source of truth.
     pub fn spine(&self) -> SpineView {
-        // Group Support tabs by session id in ONE pass (O(total tabs)) so each
+        // Group extra tabs by session id in ONE pass (O(total tabs)) so each
         // per-session projection costs only its own tab count, instead of every
         // `project_session` re-scanning the whole `agent_tabs` map (O(S * T)).
         let mut support_by_session: std::collections::HashMap<&str, Vec<&crate::model::AgentTab>> =
@@ -418,11 +418,18 @@ impl Engine {
         // persisted `desired_running` auto-reopen intent stays agent-level and is
         // NOT churned by transient per-tab activity — that's set/cleared on the
         // delete/detach paths, not here.)
-        let tab_ids = self.tab_ids_for_session(&s.id);
-        let has_output = tab_ids
-            .iter()
+        // Derive tab ids from the already-computed `support_tabs` slice (plus the
+        // session-slot id) instead of re-scanning the whole `agent_tabs` map via
+        // `tab_ids_for_session` — that full scan is exactly what `support_tabs`
+        // was precomputed to avoid (`spine`'s single O(total tabs) grouping pass),
+        // and calling it here per-session silently re-introduced the O(S * T) cost
+        // `spine` was factored to eliminate.
+        let has_output = std::iter::once(s.id.as_str())
+            .chain(support_tabs.iter().map(|t| t.id.as_str()))
             .any(|id| self.providers.get(id).is_some_and(|p| p.has_output()));
-        let working = tab_ids.iter().any(|id| self.is_agent_streaming(id));
+        let working = std::iter::once(s.id.as_str())
+            .chain(support_tabs.iter().map(|t| t.id.as_str()))
+            .any(|id| self.is_agent_streaming(id));
         // Tabs, session-slot first, then extras in creation order.
         let mut tabs = vec![self.tab_view(&s.id, self.running_provider_for(s), 0)];
         let mut support: Vec<_> = support_tabs.to_vec();

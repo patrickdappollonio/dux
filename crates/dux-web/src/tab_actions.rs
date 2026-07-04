@@ -11,9 +11,10 @@
 //!   is not configured.
 //! - `DELETE /api/v1/sessions/:id/tabs/:tab`       — close one tab. For the
 //!   session-slot tab (`:tab == :id`, which has no row) this stops that tab via
-//!   `KillSessionPty`, detaching the agent only if it was the last live tab, and
-//!   returns 200 + `{ "detached": <bool> }`. Any other tab is closed and its row
-//!   removed, 204. A `:tab` not owned by `:id` is a 404.
+//!   `KillSessionPty`; any other tab is closed and its row removed. Either way,
+//!   closing an agent's LAST live tab detaches it, so both branches return
+//!   200 + `{ "detached": <bool> }` computed after the close. A `:tab` not
+//!   owned by `:id` is a 404.
 //! - `PATCH  /api/v1/sessions/:id/tabs/:tab`       — retarget the tab's provider
 //!   `{ "provider" }`. 200 on success; 400 when the provider is not configured.
 
@@ -53,7 +54,7 @@ struct CreatedTab {
     provider: String,
 }
 
-/// 200 body for a Main-tab detach, distinguishing it from a Support-tab close
+/// 200 body for a session-slot tab detach, distinguishing it from an extra-tab close
 /// (which is a bodiless 204).
 #[derive(Serialize)]
 struct DetachedTab {
@@ -65,7 +66,7 @@ struct RetargetBody {
     provider: String,
 }
 
-/// `POST /api/v1/sessions/:id/tabs` — create a Support tab. Direct-return through
+/// `POST /api/v1/sessions/:id/tabs` — create an extra tab. Direct-return through
 /// the dedicated engine request (mints the id synchronously; the launch is async),
 /// mirroring `create_terminal`.
 async fn create_tab(
@@ -102,7 +103,14 @@ async fn delete_tab(
     Path((id, tab)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    if !id_within_bound(&id) || !id_within_bound(&tab) {
+    // Check the session id and the tab id separately: an out-of-bound `:id` is an
+    // unknown SESSION (matches `resolve_worktree`'s 404 below), not a tab-worded
+    // error — collapsing both into `unknown_tab()` used to blame the tab even
+    // when the session id itself was the bad one.
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if !id_within_bound(&tab) {
         return unknown_tab();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
@@ -126,7 +134,7 @@ async fn delete_tab(
             // live tab; with live siblings the agent keeps running. Derive the
             // real outcome from whether ANY tab still has a live process after
             // the kill rather than hardcoding true — persisted session status
-            // is session-slot-scoped (a support-tab-only-live agent still reads
+            // is session-slot-scoped (an extra-tab-only-live agent still reads
             // "detached"), so it is not a reliable liveness signal here.
             Ok(_) => {
                 let detached = state
@@ -141,7 +149,7 @@ async fn delete_tab(
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
         };
     }
-    // Support tab: enforce ownership (never a cross-session close), then close it.
+    // extra tab: enforce ownership (never a cross-session close), then close it.
     match state.engine.tab_session(tab.clone()).await {
         Some(owner) if owner == id => {}
         _ => return unknown_tab(),
@@ -150,14 +158,30 @@ async fn delete_tab(
         .engine
         .apply_wire_scoped(
             WireCommand::CloseAgentTab {
-                session_id: id,
+                session_id: id.clone(),
                 tab_id: tab,
             },
             scope_from_headers(&headers, &state.connections),
         )
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        // `Engine::close_tab` detaches the agent the same way `KillSessionPty`
+        // does when this happened to be the session's LAST live tab. The
+        // session-slot branch above signals that via `{ "detached": bool }`;
+        // closing an extra tab used to return a bare 204 even when it detached,
+        // an asymmetry a caller could only discover by polling the session
+        // afterward. Compute the same post-close liveness check and return it
+        // here too.
+        Ok(_) => {
+            let detached = state
+                .engine
+                .session(id)
+                .await
+                .flatten()
+                .map(|s| !s.tabs.iter().any(|t| t.has_live_process))
+                .unwrap_or(true);
+            (StatusCode::OK, Json(DetachedTab { detached })).into_response()
+        }
         // A concurrent close removed the row between the ownership check and the
         // command: "gone" is 404, not a validation error (mirrors kill_session).
         Err(e) if e.contains("unknown tab") => (StatusCode::NOT_FOUND, e).into_response(),
@@ -166,22 +190,27 @@ async fn delete_tab(
 }
 
 /// `PATCH /api/v1/sessions/:id/tabs/:tab` — retarget the tab's provider (effective
-/// on its next launch). `tab == id` retargets the Main tab (delegates to the
-/// session-level change); a Support `:tab` must belong to `:id`.
+/// on its next launch). `tab == id` retargets the session-slot tab (delegates to
+/// the session-level change); an extra `:tab` must belong to `:id`.
 async fn retarget_tab(
     State(state): State<AppState>,
     Path((id, tab)): Path<(String, String)>,
     headers: HeaderMap,
     Json(body): Json<RetargetBody>,
 ) -> Response {
-    if !id_within_bound(&id) || !id_within_bound(&tab) {
+    // See `delete_tab` above: check the session id and tab id separately so a
+    // bad `:id` is reported as an unknown session, not a tab-worded error.
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if !id_within_bound(&tab) {
         return unknown_tab();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp;
     }
-    // Support tabs must belong to the path session; the Main tab (tab == id) is
-    // always valid and delegates to the session-level provider change.
+    // Extra tabs must belong to the path session; the session-slot tab (tab ==
+    // id) is always valid and delegates to the session-level provider change.
     if tab != id {
         match state.engine.tab_session(tab.clone()).await {
             Some(owner) if owner == id => {}

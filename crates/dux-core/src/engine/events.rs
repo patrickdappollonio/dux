@@ -279,8 +279,8 @@ pub struct DetachedSession {
 /// `detached_session_id`, runs view rebuilds, sets surfaces/overlays/status.
 pub struct AgentLaunchReadyOutcome {
     pub session: AgentSession,
-    /// The tab whose launch completed (== `session.id` for the Main tab). Lets a
-    /// surface route a Support-tab ready to the correct pane without re-deriving.
+    /// The tab whose launch completed (== `session.id` for the session-slot tab). Lets a
+    /// surface route an extra-tab ready to the correct pane without re-deriving.
     pub tab_id: String,
     pub pty_size: (u16, u16),
     pub detached_session_id: Option<String>,
@@ -347,7 +347,7 @@ pub enum AgentLaunchFailedOutcome {
         branch_name: String,
         message: String,
     },
-    /// A Support-tab launch failed. `tab_id` keys the failure toast to the
+    /// An extra-tab launch failed. `tab_id` keys the failure toast to the
     /// specific tab. For an `is_fresh` create the Engine has already deleted the
     /// tab's row (the create never came up); for a dormant relaunch the row is
     /// kept so the user can retry.
@@ -357,7 +357,7 @@ pub enum AgentLaunchFailedOutcome {
         branch_name: String,
         message: String,
     },
-    /// A launch failure for a Support tab whose row was deleted while the
+    /// A launch failure for an extra tab whose row was deleted while the
     /// launch was in flight (mirrors `AgentLaunchReadyView::SessionMissing` on
     /// the success path). Silent by design: the tab is already closed from the
     /// user's perspective, so there is nothing to warn about and no row left
@@ -549,7 +549,7 @@ pub struct BeginDeleteSessionView {
 /// with its session without re-deriving it from the request.
 pub struct DispatchAgentLaunchView {
     pub session_id: String,
-    /// The tab whose launch was dispatched (== `session_id` for the Main tab).
+    /// The tab whose launch was dispatched (== `session_id` for the session-slot tab).
     pub tab_id: String,
     pub launched: bool,
     pub status: Option<StatusUpdate>,
@@ -594,8 +594,8 @@ impl Engine {
             .find(|s| {
                 s.id != exclude_id
                     && s.worktree_path == worktree_path
-                    // Tab-aware: a conflicting session may have its Main tab dead
-                    // while a Support tab is still live in the shared worktree.
+                    // Tab-aware: a conflicting session may have its session-slot tab dead
+                    // while an extra tab is still live in the shared worktree.
                     // `providers` is tab-keyed, so check every tab, not just `s.id`.
                     && self
                         .tab_ids_for_session(&s.id)
@@ -607,7 +607,7 @@ impl Engine {
         let label = session_label(&conflicting);
         let provider = conflicting.provider.as_str().to_string();
         // Tear down EVERY tab of the conflicting agent (Main + Support) — a
-        // Support tab left running would keep holding the contested worktree.
+        // extra tab left running would keep holding the contested worktree.
         // Keep its `agent_tabs` rows: the session still exists, just detached.
         // This also drops the tabs' `pty_activity`/`pty_input` entries, so the
         // callers no longer need their own follow-up clear.
@@ -661,8 +661,8 @@ impl Engine {
         let session = request.session.clone();
         let pty_size = request.pty_size;
         // Runtime PTY/provider state is keyed by tab id (== session.id for the
-        // Main tab). Use it for the in-flight clear, the providers insert, and
-        // the resume-fallback candidate so a Support tab tracks under its own key.
+        // session-slot tab). Use it for the in-flight clear, the providers insert, and
+        // the resume-fallback candidate so an extra tab tracks under its own key.
         let tab_id = request.tab_id.clone();
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.clone()));
 
@@ -765,15 +765,15 @@ impl Engine {
             );
         }
 
-        // Ghost-launch guard: a Support tab whose row was deleted while its
+        // Ghost-launch guard: an extra tab whose row was deleted while its
         // launch was in flight must not resurrect a live PTY under a dead tab
         // id. Dropping `client` here (PtyClient::Drop) terminates the freshly
-        // spawned process. The Main tab (`tab_id == session.id`, which never has
+        // spawned process. The session-slot tab (`tab_id == session.id`, which never has
         // an `agent_tabs` row) is exempt — "no row" is normal for Main.
         let is_main = tab_id == session.id;
         if !is_main && !self.agent_tabs.contains_key(&tab_id) {
             logger::info(&format!(
-                "dropping launched PTY for closed support tab {tab_id} of session {}",
+                "dropping launched PTY for closed extra tab {tab_id} of session {}",
                 session.id,
             ));
             return (
@@ -795,7 +795,7 @@ impl Engine {
             self.resume_fallback_candidates
                 .insert(tab_id.clone(), Instant::now());
         }
-        // Session-level running state stays Main-scoped: a Support-tab launch
+        // Session-level running state stays Main-scoped: an extra-tab launch
         // must not flip the whole agent to Active or persist desired_running
         // (that would light the sidebar and auto-reopen the Main provider).
         if is_main {
@@ -804,7 +804,7 @@ impl Engine {
         }
         // Record the provider that actually launched (the effective per-tab
         // provider), so directory-scoped resume state stays correct even when a
-        // Support tab ran a different provider than the session default.
+        // extra tab ran a different provider than the session default.
         self.mark_session_provider_started(&session.id, &request.provider);
 
         let view = match request.kind {
@@ -819,7 +819,7 @@ impl Engine {
                 }
             }
             AgentLaunchKind::StartupAutoReopen => AgentLaunchReadyView::StartupAutoReopen,
-            // A Support-tab ready behaves like a reconnect for the view (show the
+            // An extra-tab ready behaves like a reconnect for the view (show the
             // surface + info); it is never resumed and never Main-scoped.
             AgentLaunchKind::Tab { status_message, .. } => {
                 AgentLaunchReadyView::Reconnect { status_message }
@@ -970,16 +970,17 @@ impl Engine {
     /// re-architected to invert the engine/view ordering.
     /// Clear every runtime map entry (`providers`, `running_provider_pins`,
     /// `resume_fallback_candidates`, `pty_activity`, `pty_input`, and the
-    /// in-flight `AgentLaunch` key) for ALL of a session's tabs — the Main tab
-    /// (`tab_id == session_id`) and every Support tab. Does NOT remove the
-    /// persisted `agent_tabs` records: a detach keeps them (the session lives on,
-    /// just disconnected); a delete removes them separately via `agent_tabs.retain`.
+    /// in-flight `AgentLaunch` key) for ALL of a session's tabs — the
+    /// session-slot tab (`tab_id == session_id`) and every extra tab. Does NOT
+    /// remove the persisted `agent_tabs` records: a detach keeps them (the
+    /// session lives on, just disconnected); a delete removes them separately
+    /// via `agent_tabs.retain`.
     ///
     /// This is the tab-aware replacement for the single-`session.id` map clears
-    /// every WHOLE-AGENT teardown path used before tabs existed. Main-scoped
-    /// operations (`kill_session_pty`, force-reconnect) deliberately do NOT use
-    /// it — they act on the Main provider only and must leave the user's
-    /// independent Support tabs running.
+    /// every WHOLE-AGENT teardown path used before tabs existed. Session-slot
+    /// scoped operations (`kill_session_pty`, force-reconnect) deliberately do
+    /// NOT use it — they act on the session-slot tab only via `clear_tab_runtime`
+    /// directly and must leave the user's independent extra tabs running.
     fn clear_session_tab_runtime(&mut self, session_id: &str) {
         for tab_id in self.tab_ids_for_session(session_id) {
             self.clear_tab_runtime(&tab_id);
@@ -990,10 +991,10 @@ impl Engine {
     /// `running_provider_pins`, `resume_fallback_candidates`, `pty_activity`,
     /// `pty_input`, and the in-flight `AgentLaunch` key). The SINGLE source of
     /// truth for the per-tab teardown map list: both `close_tab` (a single
-    /// Support tab) and `clear_session_tab_runtime` (a whole session, looped)
+    /// extra tab) and `clear_session_tab_runtime` (a whole session, looped)
     /// call this, so adding a new tab-keyed map is a one-line change here rather
     /// than a comment-enforced convention across two files.
-    pub(crate) fn clear_tab_runtime(&mut self, tab_id: &str) {
+    pub fn clear_tab_runtime(&mut self, tab_id: &str) {
         self.providers.remove(tab_id);
         self.running_provider_pins.remove(tab_id);
         self.resume_fallback_candidates.remove(tab_id);
@@ -1018,7 +1019,7 @@ impl Engine {
     }
 
     /// The IN-MEMORY half of a session deletion (no DB write): tear down the
-    /// runtime maps for every tab, drop the session/companion-terminals/Support-tab
+    /// runtime maps for every tab, drop the session/companion-terminals/extra-tab
     /// records, and refresh derived state. Infallible. `finish_delete_session`
     /// calls this after persisting; `Command::RemoveProject` calls it directly,
     /// because `remove_project_records` already deleted the rows transactionally —
@@ -1050,7 +1051,7 @@ impl Engine {
         );
 
         // Tear down the runtime maps for EVERY tab of this agent (Main + Support),
-        // then drop the session, its companion terminals, and its Support-tab
+        // then drop the session, its companion terminals, and its extra-tab
         // records. The graceful `begin_delete_session` already moved live tab
         // PTYs into the terminating set, so `providers.remove` here is a no-op for
         // those; this cleans up the remaining pin/activity/input/in-flight entries.
@@ -1281,8 +1282,8 @@ impl Engine {
         });
         let busy_message = worktree_removal.as_ref().map(|r| r.busy_message.clone());
 
-        // Gracefully close EVERY live tab PTY of this agent (the Main tab and any
-        // Support tabs), not just the Main provider — a Support tab left running
+        // Gracefully close EVERY live tab PTY of this agent (the session-slot tab and any
+        // extra tabs), not just the Main provider — an extra tab left running
         // would be orphaned and, for a worktree-removing delete, keep writing into
         // a worktree about to be removed.
         let live_tabs: Vec<String> = self
@@ -1290,16 +1291,32 @@ impl Engine {
             .into_iter()
             .filter(|id| self.providers.contains_key(id))
             .collect();
+        // A tab closed moments earlier (e.g. via `close_tab`) is already out of
+        // `providers` and parked in `terminating_ptys` under its own SIGTERM grace
+        // period — it is still alive (a child process) but invisible to the
+        // `live_tabs` check above. Without counting it, `git::remove_worktree`
+        // could fire while that straggler is still using the worktree as its cwd
+        // (a git-lock/corruption race). Fold it into the barrier the same way a
+        // still-live tab is, without re-issuing `begin_close_provider` for it (it
+        // already has its own terminating entry in flight).
+        let already_terminating: Vec<String> = self
+            .terminating_ptys
+            .iter()
+            .filter(|t| t.kind == crate::engine::PrunedPtyKind::Agent)
+            .filter(|t| self.owning_session_for_tab(&t.id).as_deref() == Some(session.id.as_str()))
+            .map(|t| t.id.clone())
+            .collect();
         match worktree_removal {
-            // No live tab PTY to wait for (the agent already exited): remove the
-            // worktree now — there is nothing to reap, and the reaper would never
-            // see it.
-            Some(removal) if live_tabs.is_empty() => {
+            // No live or already-terminating tab PTY to wait for (the agent
+            // already fully exited): remove the worktree now — there is nothing
+            // to reap, and the reaper would never see it.
+            Some(removal) if live_tabs.is_empty() && already_terminating.is_empty() => {
                 let _ = self.dispatch_deferred_worktree_removal(removal);
             }
-            // Exactly one live tab: carry the removal on its terminating entry;
-            // `reap_terminating_ptys` dispatches it when that PTY reaps.
-            Some(removal) if live_tabs.len() == 1 => {
+            // Exactly one live tab and no already-terminating stragglers: carry
+            // the removal on its terminating entry; `reap_terminating_ptys`
+            // dispatches it when that PTY reaps.
+            Some(removal) if live_tabs.len() == 1 && already_terminating.is_empty() => {
                 let unhandled = self.begin_close_provider(
                     &live_tabs[0],
                     session.branch_name.clone(),
@@ -1309,17 +1326,24 @@ impl Engine {
                     let _ = self.dispatch_deferred_worktree_removal(req);
                 }
             }
-            // Multiple live tabs: close each with no per-entry removal and park a
-            // GROUP barrier so the removal fires exactly once, only after the LAST
-            // tab PTY has reaped (clean exit or force-kill) — never out from under
-            // a still-running sibling tab.
+            // Multiple tabs to wait for (live and/or already-terminating): close
+            // each still-live tab with no per-entry removal and park a GROUP
+            // barrier listing every one of them — including the already-terminating
+            // stragglers — so the removal fires exactly once, only after the LAST
+            // tab PTY has reaped (clean exit or force-kill), never out from under a
+            // still-running sibling or straggler tab.
             Some(removal) => {
                 for id in &live_tabs {
                     let _ = self.begin_close_provider(id, session.branch_name.clone(), None);
                 }
+                let pending_ids: std::collections::HashSet<String> = live_tabs
+                    .iter()
+                    .cloned()
+                    .chain(already_terminating.iter().cloned())
+                    .collect();
                 self.pending_group_removals
                     .push(super::GroupWorktreeRemoval {
-                        pending_ids: live_tabs.iter().cloned().collect(),
+                        pending_ids,
                         removal,
                     });
             }
@@ -1414,7 +1438,7 @@ impl Engine {
         data: AgentLaunchFailedData,
     ) -> (AgentLaunchFailedOutcome, Option<ResolvedFinal>) {
         let AgentLaunchFailedData { request, message } = data;
-        // Clear the tab-keyed in-flight lock (== session.id for the Main tab),
+        // Clear the tab-keyed in-flight lock (== session.id for the session-slot tab),
         // mirroring the success path in `process_agent_launch_ready`.
         let tab_id = request.tab_id.clone();
         let session = request.session;
@@ -1479,25 +1503,25 @@ impl Engine {
             }
             AgentLaunchKind::Tab { is_fresh, .. } => {
                 // Ghost-launch guard, mirroring `process_agent_launch_ready`: a
-                // Support tab whose row was deleted while its launch was in
+                // extra tab whose row was deleted while its launch was in
                 // flight must not be treated as a real failure. Without this,
                 // an abort-during-launch would log an ERROR, call
                 // `delete_agent_tab` again (hitting the "map and SQLite may
                 // have diverged" WARN in storage.rs for a row that is already
                 // gone), and surface a user-facing "Tab launch failed"
-                // warning for a tab the user already closed. The Main tab
+                // warning for a tab the user already closed. The session-slot tab
                 // (`tab_id == session.id`, which never has an `agent_tabs`
                 // row) is exempt, same as the ready-path guard.
                 let is_main = tab_id == session.id;
                 if !is_main && !self.agent_tabs.contains_key(&tab_id) {
                     logger::info(&format!(
-                        "dropping launch-failed event for closed support tab {tab_id} of session {}",
+                        "dropping launch-failed event for closed extra tab {tab_id} of session {}",
                         session.id,
                     ));
                     return (AgentLaunchFailedOutcome::Silent, None);
                 }
                 logger::error(&format!(
-                    "support tab {tab_id} launch failed for agent \"{}\": {}",
+                    "extra tab {tab_id} launch failed for agent \"{}\": {}",
                     session.branch_name, message,
                 ));
                 // A brand-new tab whose very first spawn failed never had a
@@ -1515,7 +1539,7 @@ impl Engine {
                             self.agent_tabs.remove(&tab_id);
                         }
                         Err(err) => logger::error(&format!(
-                            "failed to delete failed-create support tab {tab_id}: {err}",
+                            "failed to delete failed-create extra tab {tab_id}: {err}",
                         )),
                     }
                 }
@@ -2323,8 +2347,8 @@ mod tests {
         let session = sample_session("s1", "p1", "feat");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        // A Support tab of s1 with runtime state spread across the maps, plus a
-        // Main-tab activity stamp.
+        // An extra tab of s1 with runtime state spread across the maps, plus a
+        // session-slot tab activity stamp.
         engine
             .agent_tabs
             .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
@@ -2346,7 +2370,7 @@ mod tests {
             .expect("outcome");
 
         // Every tab's runtime state is gone (Main AND Support), and the
-        // Support-tab record is dropped from the in-memory map.
+        // extra-tab record is dropped from the in-memory map.
         for key in ["s1", "tab-2"] {
             assert!(!engine.pty_activity.contains_key(key));
             assert!(!engine.pty_input.contains_key(key));
@@ -2401,7 +2425,7 @@ mod tests {
         let worktree = tmp.path().to_string_lossy().to_string();
 
         // The conflicting ("victim") session that holds the shared worktree's live
-        // PTY, plus a Support tab with runtime state.
+        // PTY, plus an extra tab with runtime state.
         let mut victim = sample_session("victim", "p1", "feat");
         victim.worktree_path = worktree.clone();
         engine.sessions.push(victim);
@@ -2427,12 +2451,12 @@ mod tests {
 
         let detached = engine.detach_conflicting_worktree_session(&worktree, "req");
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
-        // Every tab of the victim is torn down (Main provider + the Support tab's
+        // Every tab of the victim is torn down (Main provider + the extra tab's
         // runtime maps)...
         assert!(!engine.providers.contains_key("victim"));
         assert!(!engine.pty_activity.contains_key("v-tab"));
         assert!(!engine.running_provider_pins.contains_key("v-tab"));
-        // ...but its Support-tab ROW survives: the session still exists, detached.
+        // ...but its extra-tab ROW survives: the session still exists, detached.
         assert!(engine.agent_tabs.contains_key("v-tab"));
     }
 
@@ -2443,7 +2467,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("worktree dir");
         let worktree = tmp.path().to_string_lossy().to_string();
 
-        // Victim whose MAIN tab is dead (absent from `providers`) but a Support
+        // Victim whose SESSION-SLOT tab is dead (absent from `providers`) but a Support
         // tab is still live in the shared worktree.
         let mut victim = sample_session("victim", "p1", "feat");
         victim.worktree_path = worktree.clone();
@@ -2452,7 +2476,7 @@ mod tests {
             "v-tab".to_string(),
             sample_tab("v-tab", "victim", "codex", 1),
         );
-        // Provider keyed under the SUPPORT tab id, not the session/Main id.
+        // Provider keyed under the EXTRA tab id, not the session/Main id.
         engine.providers.insert(
             "v-tab".to_string(),
             PtyClient::spawn_with_env("cat", &[], tmp.path(), 24, 80, 1000, &[]).unwrap(),
@@ -2463,7 +2487,7 @@ mod tests {
         engine.sessions.push(requester);
 
         // A Main-only check would MISS this (no "victim" key in `providers`); the
-        // tab-aware detection finds it and tears the live Support tab down.
+        // tab-aware detection finds it and tears the live extra tab down.
         let detached = engine.detach_conflicting_worktree_session(&worktree, "req");
         assert_eq!(detached.map(|d| d.id), Some("victim".to_string()));
         assert!(!engine.providers.contains_key("v-tab"));
@@ -3200,7 +3224,7 @@ mod tests {
         ));
     }
 
-    /// Build failed-launch data for a Support tab: `tab_id` differs from the
+    /// Build failed-launch data for an extra tab: `tab_id` differs from the
     /// session id, mirroring a real extra-tab launch.
     fn make_tab_failed_data(
         session_id: &str,
@@ -3252,11 +3276,70 @@ mod tests {
             AgentLaunchFailedOutcome::Tab { tab_id, branch_name, message, .. }
                 if tab_id == "tab-1" && branch_name == "feat/x" && message == "boom"
         ));
+        // G-T1: a brand-new tab's very first spawn failure (`is_fresh: true`)
+        // must delete the row so it doesn't linger as a permanently-broken
+        // dormant tab, both in memory and in SQLite.
+        assert!(
+            !engine.agent_tabs.contains_key("tab-1"),
+            "a fresh tab's row must be deleted in memory on first-launch failure"
+        );
+        assert!(
+            engine
+                .session_store
+                .load_agent_tabs()
+                .expect("load tabs")
+                .iter()
+                .all(|t| t.id != "tab-1"),
+            "a fresh tab's row must be deleted in SQLite on first-launch failure"
+        );
+    }
+
+    #[test]
+    fn process_agent_launch_failed_tab_keeps_row_when_not_fresh() {
+        // G-T1: the counterpart to the fresh-delete case above. An explicit
+        // relaunch of an already-persisted dormant tab (`is_fresh: false`) must
+        // KEEP its row on failure so the user can retry, surfacing the real
+        // error instead of silently losing the tab.
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "project-1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = crate::model::AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+
+        let data = make_tab_failed_data("s1", "tab-1", "feat/x", false, "boom");
+        let (outcome, _) = engine.process_agent_launch_failed(data);
+
+        assert!(matches!(
+            outcome,
+            AgentLaunchFailedOutcome::Tab { tab_id, branch_name, message, .. }
+                if tab_id == "tab-1" && branch_name == "feat/x" && message == "boom"
+        ));
+        assert!(
+            engine.agent_tabs.contains_key("tab-1"),
+            "a not-fresh (explicit relaunch) tab's row must survive a failure so the user can retry"
+        );
+        assert!(
+            engine
+                .session_store
+                .load_agent_tabs()
+                .expect("load tabs")
+                .iter()
+                .any(|t| t.id == "tab-1"),
+            "the row must also survive in SQLite"
+        );
     }
 
     #[test]
     fn process_agent_launch_failed_tab_is_silent_for_a_ghost_tab() {
-        // F10 regression: a Support tab whose row was deleted (closed by the
+        // F10 regression: an extra tab whose row was deleted (closed by the
         // user) while its launch was in flight must not be treated as a real
         // failure — no ERROR log's worth of user-facing warning, and no
         // redundant `delete_agent_tab` call against a row that is already
@@ -3395,7 +3478,7 @@ mod tests {
         let tab = sample_tab("tab-1", "s1", "codex", 1);
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(tab.id.clone(), tab);
-        // A Support tab whose launch is in flight is marked in-flight but not yet
+        // An extra tab whose launch is in flight is marked in-flight but not yet
         // in `providers`, so it is invisible to the live-tab check. Deleting must
         // refuse rather than race the worktree removal against the spawn.
         engine.mark_in_flight(InFlightKey::AgentLaunch("tab-1".to_string()));
@@ -3678,7 +3761,7 @@ mod tests {
         let session = sample_session("s1", "p1", "feat/x");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        // The Main tab's id equals the session id; mark its launch in flight.
+        // The session-slot tab's id equals the session id; mark its launch in flight.
         engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
 
         let outcome = engine

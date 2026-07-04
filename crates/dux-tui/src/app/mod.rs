@@ -95,7 +95,7 @@ pub struct App {
     pub(crate) clipboard: Clipboard,
     pub(crate) active_terminal_id: Option<String>,
     /// Which tab is focused in the center pane, per session (session_id →
-    /// tab_id). Missing or equal-to-session-id means the Main tab. Only the
+    /// tab_id). Missing or equal-to-session-id means the session-slot tab. Only the
     /// center pane resolves the focused tab; sidebar/session labels stay
     /// Main-scoped. Pruned when a session is torn down.
     pub(crate) focused_tabs: HashMap<String, String>,
@@ -642,7 +642,7 @@ impl KillableRuntimeKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeTargetId {
     Agent(String),
-    /// A Support tab's provider process (keyed by tab id). Killing it stops the
+    /// An extra tab's provider process (keyed by tab id). Killing it stops the
     /// process but keeps the tab row, so the tab becomes dormant (unlike
     /// `Agent`, which detaches the whole session).
     Tab(String),
@@ -741,8 +741,8 @@ pub(crate) struct ChangeAgentProviderOption {
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeAgentProviderPrompt {
     pub(crate) session_id: String,
-    /// The tab being retargeted. Equals `session_id` for the Main tab (which
-    /// delegates to the session-level provider change); a Support tab id
+    /// The tab being retargeted. Equals `session_id` for the session-slot tab (which
+    /// delegates to the session-level provider change); an extra tab id
     /// otherwise. Lets `ctrl+p` retarget the focused tab, not just the agent.
     pub(crate) tab_id: String,
     pub(crate) session_label: String,
@@ -947,8 +947,8 @@ pub(crate) enum PromptState {
         foreground_cmd: Option<String>,
         confirm_selected: bool, // false = Cancel (default), true = Delete
     },
-    /// Close/detach an agent tab. Closing the Main tab (`is_main`) detaches the
-    /// agent (non-destructive, stays in Projects); closing a Support tab ends
+    /// Close/detach an agent tab. Closing the session-slot tab (`is_main`) detaches the
+    /// agent (non-destructive, stays in Projects); closing an extra tab ends
     /// that session for good (destructive), so it defaults to Cancel.
     ConfirmCloseTab {
         session_id: String,
@@ -3239,7 +3239,7 @@ impl App {
 
     // ---- Agent tabs: per-session focused tab, switching, labels ----
 
-    /// The focused tab id for a session, defaulting to the Main tab (the
+    /// The focused tab id for a session, defaulting to the session-slot tab (the
     /// session id). Clamps to Main when the stored tab no longer exists, so
     /// every seam that resolves the focused tab is safe after a tab close.
     pub(crate) fn focused_tab_id(&self, session_id: &str) -> String {
@@ -3259,21 +3259,16 @@ impl App {
     }
 
     /// The effective provider of a session's focused tab (Main resolves to the
-    /// session's running/pinned provider; a Support tab to its own, honoring a
+    /// session's running/pinned provider; an extra tab to its own, honoring a
     /// swap-while-running pin). Used for the center title, caption, and
     /// scroll-routing config lookup.
     pub(crate) fn focused_tab_provider(&self, session: &AgentSession) -> ProviderKind {
         let tab = self.focused_tab_id(&session.id);
-        if tab == session.id {
-            self.engine.running_provider_for(session)
-        } else {
-            self.engine
-                .running_provider_pins
-                .get(&tab)
-                .cloned()
-                .or_else(|| self.engine.agent_tabs.get(&tab).map(|t| t.provider.clone()))
-                .unwrap_or_else(|| session.provider.clone())
-        }
+        // The pin -> tab-row -> session.provider chain is the single source of
+        // truth `Engine::tab_running_provider` owns; the TUI's other tab-label
+        // helper (`tab_provider_label` in render.rs) also delegates to it so the
+        // two call sites can't drift.
+        self.engine.tab_running_provider(session, &tab)
     }
 
     /// Ordered tab ids for a session: Main (session id) first, then Support

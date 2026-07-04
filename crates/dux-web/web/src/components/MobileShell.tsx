@@ -65,7 +65,7 @@ import {
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { agentRowVisual } from "@/lib/agentRow"
-import { isSupportTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
@@ -76,6 +76,7 @@ import {
   reorderProjectsInGroup,
 } from "@/lib/reorder"
 import {
+  addTab,
   createTerminal,
   mobileNavigate,
   openAddProject,
@@ -97,6 +98,7 @@ import {
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
+import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import type { SelectedTarget } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
@@ -109,6 +111,14 @@ function SessionActions({ session }: { session: SessionView }) {
   function handleToggleAutoReopen() {
     toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)
   }
+
+  // "Add tab" mirrors the desktop sidebar's menu item: it is reachable at ANY
+  // tab count (including the common 1-tab case), since the in-strip "+" only
+  // renders once a session already has two or more tabs.
+  const { bootstrap, createTabInFlight } = useDux()
+  const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
+  const atTabCap = session.tabs.length >= tabCap
+  const addingTab = createTabInFlight.includes(session.id)
 
   return (
     <DropdownMenuGroup>
@@ -132,6 +142,13 @@ function SessionActions({ session }: { session: SessionView }) {
       <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
         <Cpu />
         Change agent provider…
+      </DropdownMenuItem>
+      <DropdownMenuItem
+        disabled={atTabCap || addingTab}
+        onClick={() => addTab(session.id)}
+      >
+        <Plus />
+        Add tab
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleToggleAutoReopen}>
@@ -714,7 +731,7 @@ function TerminalScreen() {
       : undefined
   // A dormant tab (see App.tsx): render its card WITHOUT mounting the
   // pane, since mounting subscribes = force-launches the provider.
-  const isSupportDormant = isSupportTabDormant(
+  const isExtraDormant = isExtraTabDormant(
     selectedTarget,
     focusedTab,
     startedDormantTabs,
@@ -784,7 +801,7 @@ function TerminalScreen() {
             shows its own readiness spinner once mounted. ChunkBoundary wraps
             Suspense so a stale-bundle import failure recovers instead of
             unmounting the tree. */}
-        {isSupportDormant && focusedTab ? (
+        {isExtraDormant && focusedTab ? (
           <DormantTabCard
             sessionId={selectedTarget.sessionId}
             tabId={focusedTab.id}

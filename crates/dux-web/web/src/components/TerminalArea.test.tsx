@@ -1,0 +1,183 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+
+import type { DuxState } from "@/lib/store"
+
+// Override only `useDux` (keeping every other real store export intact), plus
+// `startDormantTab` as a spy so we can assert the explicit "Start session"
+// action (and nothing else) is what launches a dormant tab.
+let mockState: DuxState
+const startDormantTabMock = vi.fn()
+vi.mock("@/lib/store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/store")>()
+  return { ...actual, useDux: () => mockState, startDormantTab: startDormantTabMock }
+})
+
+// A tracking WebSocket double: G-T4 exists to prove that a DORMANT tab never
+// opens a PTY socket (which would force-launch the provider) merely by being
+// focused/rendered — only the explicit "Start session" action may. Every
+// PtySocket construction goes through `new WebSocket(...)`, so counting
+// constructions here is a proxy for "was a PTY socket opened."
+class TrackingWebSocket {
+  static instances: TrackingWebSocket[] = []
+  binaryType = ""
+  readyState = 0
+  onopen: (() => void) | null = null
+  onclose: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onmessage: (() => void) | null = null
+  constructor(public url: string) {
+    TrackingWebSocket.instances.push(this)
+  }
+  send(): void {}
+  close(): void {}
+}
+
+function installBootStubs() {
+  const mem = new Map<string, string>()
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => void mem.set(k, String(v)),
+    removeItem: (k: string) => void mem.delete(k),
+    clear: () => mem.clear(),
+  })
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.reject(new Error("offline test"))),
+  )
+  // `TerminalPane` uses `useIsMobile`, which reads `matchMedia`.
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })),
+  )
+  TrackingWebSocket.instances = []
+  vi.stubGlobal("WebSocket", TrackingWebSocket)
+}
+installBootStubs()
+// `TerminalArea` lives in its own module specifically so it can be mounted here
+// without pulling in `App.tsx` -> `GlobalOverlays` -> `ConfigEditorDialog`,
+// which eagerly imports the multi-MB Monaco bundle; Monaco cannot initialize
+// under vitest (see the note in `lib/pathExt.ts`).
+const { TerminalArea } = await import("./TerminalArea")
+
+function makeState(overrides: Partial<DuxState> = {}): DuxState {
+  return {
+    spine: null,
+    bootstrap: {
+      title: "dux",
+      dux_version: "v1",
+      show_changes_pane: false,
+      available_providers: ["claude", "codex"],
+      agent_tabs_max: 20,
+    },
+    selectedTarget: null,
+    selectedSessionId: null,
+    terminalEpoch: 0,
+    startedDormantTabs: [],
+    createTabInFlight: [],
+    ...overrides,
+  } as unknown as DuxState
+}
+
+// A session with a live session-slot tab (s1) and a DORMANT extra tab (b2, no
+// live process, never explicitly started).
+function dormantSpine(): DuxState["spine"] {
+  return {
+    projects: [],
+    sessions: [
+      {
+        id: "s1",
+        project_id: "p1",
+        title: null,
+        provider: "claude",
+        branch_name: "main",
+        worktree_path: "/tmp/p1",
+        status: "active",
+        auto_reopen_enabled: false,
+        terminals: [],
+        tabs: [
+          {
+            id: "s1",
+            provider: "claude",
+            order: 0,
+            working: false,
+            has_output: false,
+            has_live_process: true,
+          },
+          {
+            id: "b2",
+            provider: "codex",
+            order: 1,
+            working: false,
+            has_output: false,
+            has_live_process: false,
+          },
+        ],
+        has_output: false,
+        working: false,
+      },
+    ],
+    sidebar: { groups: [], agentless_start: null },
+  } as unknown as DuxState["spine"]
+}
+
+beforeEach(() => {
+  installBootStubs()
+  startDormantTabMock.mockClear()
+})
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+describe("TerminalArea dormant-tab gating (G-T4)", () => {
+  it("renders the DormantTabCard and opens NO PTY socket for a focused dormant extra tab", async () => {
+    mockState = makeState({
+      spine: dormantSpine(),
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "b2" },
+    })
+    render(<TerminalArea />)
+
+    // The dormant card renders (its "Start session" button, provider-agnostic
+    // copy) rather than the terminal pane.
+    expect(await screen.findByText("Start session")).toBeTruthy()
+    expect(screen.getByText(/isn.t running/)).toBeTruthy()
+
+    // No PTY socket was opened: TerminalPane (and therefore PtySocket/WebSocket)
+    // never mounted just because the dormant tab is focused.
+    expect(TrackingWebSocket.instances).toHaveLength(0)
+
+    // Only the explicit action launches it.
+    fireEvent.click(screen.getByText("Start session"))
+    expect(startDormantTabMock).toHaveBeenCalledWith("s1", "b2")
+  })
+
+  // Control case: the LIVE session-slot tab does NOT get the dormant treatment
+  // (mirrors `isExtraTabDormant`'s own "never for the session-slot tab" case,
+  // exercised here through the actual component gate rather than only the pure
+  // helper). This does not assert a PTY socket opens — mounting a real
+  // `TerminalPane` pulls in xterm's canvas rendering, which jsdom cannot back
+  // without the (unlisted) `canvas` npm package — only that the gate takes the
+  // "not dormant" branch.
+  it("does not render the DormantTabCard for the live session-slot tab", () => {
+    mockState = makeState({
+      spine: dormantSpine(),
+      selectedSessionId: "s1",
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+    })
+    render(<TerminalArea />)
+    expect(screen.queryByText("Start session")).toBeNull()
+  })
+})

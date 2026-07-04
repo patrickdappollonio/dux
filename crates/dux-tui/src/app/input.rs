@@ -768,9 +768,9 @@ impl App {
                 }
                 Action::ReconnectAgent if !in_diff => {
                     // Delegate to the shared focused-tab logic: enter interactive
-                    // mode on a live tab, launch a dormant Support tab fresh, or
-                    // relaunch a dormant Main tab — resolving the FOCUSED tab so
-                    // this never acts on the Main tab while a Support tab is shown.
+                    // mode on a live tab, launch a dormant extra tab fresh, or
+                    // relaunch a dormant session-slot tab — resolving the FOCUSED tab so
+                    // this never acts on the session-slot tab while an extra tab is shown.
                     self.activate_center_agent()?;
                 }
                 Action::ScrollPageUp => {
@@ -1882,7 +1882,7 @@ impl App {
             && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
         {
             // Stamp the FOCUSED tab (where the bytes actually went), not the
-            // session/Main id — otherwise typing into a Support tab bumps the
+            // session/Main id — otherwise typing into an extra tab bumps the
             // wrong tab's suppression window.
             let tab_id = self.focused_tab_id(&session_id);
             self.engine.note_pty_input(&tab_id);
@@ -5716,7 +5716,7 @@ impl App {
                 "Interactive mode. Keys forwarded to agent. {exit_key} exits."
             ));
         } else if tab_id != session_id {
-            // Dormant Support tab: launch it. Resume eligibility is decided
+            // Dormant extra tab: launch it. Resume eligibility is decided
             // dynamically by `tab_resume_decision` inside the launch — this
             // tab may resume its provider's prior conversation if it is the
             // sole live/launching tab of that provider, not "never resume".
@@ -14760,12 +14760,12 @@ cyan = "#00ffff"
 
         assert!(
             !app.engine.agent_tabs.contains_key(&tab_id),
-            "closing a support tab must delete its row"
+            "closing an extra tab must delete its row"
         );
         assert_eq!(
             app.focused_tab_id(&session_id),
             session_id,
-            "focus should return to the Main tab after closing a support tab"
+            "focus should return to the session-slot tab after closing an extra tab"
         );
     }
 
@@ -14774,7 +14774,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
-        // A support tab exists; detaching the Main tab must NOT touch it.
+        // An extra tab exists; detaching the session-slot tab must NOT touch it.
         let tab_id = "tab-1".to_string();
         insert_support_tab(&mut app, &session_id, &tab_id);
         app.engine
@@ -14793,11 +14793,11 @@ cyan = "#00ffff"
 
         assert!(
             !app.engine.providers.contains_key(&session_id),
-            "detaching the Main tab stops its provider"
+            "detaching the session-slot tab stops its provider"
         );
         assert!(
             app.engine.agent_tabs.contains_key(&tab_id),
-            "detaching the Main tab must not delete support tab rows"
+            "detaching the session-slot tab must not delete extra tab rows"
         );
     }
 
@@ -14817,19 +14817,19 @@ cyan = "#00ffff"
             snapshot
                 .iter()
                 .any(|r| r.id == RuntimeTargetId::Tab(tab_id.clone())),
-            "a live support tab should be a killable runtime"
+            "a live extra tab should be a killable runtime"
         );
 
         let (agents, _terminals) =
             app.kill_runtime_targets(&[RuntimeTargetId::Tab(tab_id.clone())]);
-        assert_eq!(agents, 1, "killing the support tab counts as an agent kill");
+        assert_eq!(agents, 1, "killing the extra tab counts as an agent kill");
         assert!(
             !app.engine.providers.contains_key(&tab_id),
-            "killing a support tab stops its process"
+            "killing an extra tab stops its process"
         );
         assert!(
             app.engine.agent_tabs.contains_key(&tab_id),
-            "killing a support tab keeps its row (it becomes dormant)"
+            "killing an extra tab keeps its row (it becomes dormant)"
         );
     }
 }

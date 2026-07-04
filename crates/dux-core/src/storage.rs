@@ -178,9 +178,9 @@ impl SessionStore {
             );
             "#,
         )?;
-        // Support tabs (secondary provider tabs). Additive and backward
+        // extra tabs (secondary provider tabs). Additive and backward
         // compatible: existing databases start with zero rows and behave exactly
-        // as before. The Main tab has no row here — it is derived from the
+        // as before. The session-slot tab has no row here — it is derived from the
         // `agent_sessions` row. Rows are removed when the owning session (or its
         // project) is deleted (see `delete_session`/`remove_project_records`).
         self.conn.execute_batch(
@@ -198,7 +198,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Insert a new Support tab row.
+    /// Insert a new extra tab row.
     pub fn insert_agent_tab(&self, tab: &AgentTab) -> Result<()> {
         self.conn.execute(
             "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
@@ -214,7 +214,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Remove a single Support tab row (closing a Support tab).
+    /// Remove a single extra tab row (closing an extra tab).
     pub fn delete_agent_tab(&self, tab_id: &str) -> Result<()> {
         let affected = self
             .conn
@@ -228,7 +228,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Load every Support tab, ordered so a session's tabs come out in a stable
+    /// Load every extra tab, ordered so a session's tabs come out in a stable
     /// creation order. A cheap orphan sweep first drops any rows whose owning
     /// session no longer exists — belt-and-suspenders for tabs an older binary
     /// (which predates this table) could have left behind when deleting a session.
@@ -258,7 +258,7 @@ impl SessionStore {
         Ok(tabs)
     }
 
-    /// Retarget a Support tab's provider (effective on its next launch).
+    /// Retarget an extra tab's provider (effective on its next launch).
     pub fn update_agent_tab_provider(&self, tab_id: &str, provider: &str) -> Result<()> {
         let affected = self.conn.execute(
             "update agent_tabs set provider = ?2 where id = ?1",
@@ -273,7 +273,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// The largest `sort_order` among a session's Support tabs, if any — used to
+    /// The largest `sort_order` among a session's extra tabs, if any — used to
     /// append a new tab after the existing ones.
     pub fn max_tab_sort_order(&self, session_id: &str) -> Result<Option<i64>> {
         let value: Option<i64> = self.conn.query_row(
@@ -284,7 +284,7 @@ impl SessionStore {
         Ok(value)
     }
 
-    /// Number of Support tabs for one session (excludes the Main tab, which has
+    /// Number of extra tabs for one session (excludes the session-slot tab, which has
     /// no row). The per-agent cap counts Main as tab 1, so the create path checks
     /// `count_agent_tabs(session_id) + 1 >= max_per_agent`.
     pub fn count_agent_tabs(&self, session_id: &str) -> Result<i64> {
@@ -553,7 +553,7 @@ impl SessionStore {
              (select id from agent_sessions where project_id = ?1)",
             params![project_id],
         )?;
-        // Drop the sessions' Support tabs BEFORE the sessions themselves (the
+        // Drop the sessions' extra tabs BEFORE the sessions themselves (the
         // subquery resolves the ids while the parent rows still exist), so a
         // project removal cannot leave orphaned `agent_tabs` rows behind.
         tx.execute(
@@ -868,7 +868,7 @@ impl SessionStore {
         // Drop the per-session changed-files revision counter too, so a deleted
         // session leaves no housekeeping rows behind.
         tx.execute("delete from changes_rev where session_id = ?1", params![id])?;
-        // Drop the session's Support tabs (the Main tab has no row).
+        // Drop the session's extra tabs (the session-slot tab has no row).
         tx.execute("delete from agent_tabs where session_id = ?1", params![id])?;
         tx.execute("delete from agent_sessions where id = ?1", params![id])?;
         tx.commit()?;
@@ -987,7 +987,7 @@ fn test_session_in(
     }
 }
 
-/// Builds a Support-tab row owned by `session_id`.
+/// Builds an extra-tab row owned by `session_id`.
 #[cfg(test)]
 fn test_tab(id: &str, session_id: &str, sort_order: i64) -> crate::model::AgentTab {
     crate::model::AgentTab {

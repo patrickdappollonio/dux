@@ -44,8 +44,9 @@ import {
   softNewlineAction,
   TAB,
 } from "@/lib/termkeys"
-import { selectSession, useDux } from "@/lib/store"
+import { handleTabGone, selectSession, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
+import { isTabGone } from "@/lib/agentTabs"
 import {
   PtySocket,
   agentPtyUrl,
@@ -248,6 +249,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       : (session?.terminals.find((t) => t.id === id)?.has_output ?? false)
   const providerName =
     kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
+  // Kept current for the mount effect's PTY-gone check (an extra tab's socket
+  // must stop reconnecting once its tab is no longer in the spine — see
+  // `isTabGone`) WITHOUT being a dependency of that effect, which would tear
+  // down and recreate the socket on every spine refresh.
+  const sessionTabsRef = useRef(session?.tabs)
+  useEffect(() => {
+    sessionTabsRef.current = session?.tabs
+  }, [session?.tabs])
   // The macro popover's target. For an agent the streamed id is the FOCUSED TAB
   // id; for a terminal it is the terminal id. Mirrors the store's
   // `SelectedTarget` shape so the popover filters macros by the focused surface
@@ -796,6 +805,19 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // The socket dropped and is retrying: surface the non-blocking reconnect state.
     pty.onReconnecting = () => {
       setReconnecting(true)
+    }
+    // An extra tab's PTY route can go away out from under this client (another
+    // client closed that tab); the closed WebSocket carries no HTTP status the
+    // client can read, so a 404-forever route is otherwise indistinguishable
+    // from a transient drop and `pty` would retry it forever with no escape (see
+    // `isTabGone`). Only extra tabs need this: the session-slot tab's route
+    // never goes away (closing it just detaches, it doesn't delete a row), and a
+    // companion terminal isn't a tab at all.
+    if (kind === "agent" && id !== sessionId) {
+      pty.shouldRetry = () => !isTabGone(sessionTabsRef.current ?? [], id)
+      pty.onGone = () => {
+        handleTabGone(id)
+      }
     }
     // Fallback for a session that emits no first frame (e.g. an idle freshly
     // launched agent): size its PTY anyway. If the first frame arrives first,

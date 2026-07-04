@@ -56,7 +56,7 @@ pub struct TerminatingPty {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedPty {
     pub kind: PrunedPtyKind,
-    /// The tab id (for an agent — `== session_id` for the Main tab) or terminal
+    /// The tab id (for an agent — `== session_id` for the session-slot tab) or terminal
     /// id (for a companion terminal).
     pub id: String,
     /// The owning session id (agent). For a companion terminal this is the
@@ -75,7 +75,7 @@ pub struct PrunedPty {
 }
 
 /// A deferred worktree removal that must wait for a WHOLE GROUP of an agent's
-/// tab PTYs (Main plus every Support tab) to reap before it fires — closing the
+/// tab PTYs (Main plus every extra tab) to reap before it fires — closing the
 /// gap where removing the worktree after only the first tab exits could delete
 /// files out from under a still-running sibling tab (a git-lock race). Each of
 /// the session's terminating tab entries is listed in `pending_ids`;
@@ -178,7 +178,7 @@ impl Engine {
             .collect();
         for (tab_id, exit_success) in exited_agents {
             // Resolve the exited PTY's owning session and whether it was the Main
-            // tab. `providers` is keyed by tab id, so a Support-tab id never
+            // tab. `providers` is keyed by tab id, so an extra-tab id never
             // matches a session id directly — resolve via the tab index first, or
             // the label falls back to a raw UUID and the session-state marks
             // silently no-op on the wrong key.
@@ -536,8 +536,8 @@ impl Engine {
 
         // `providers` is keyed by tab id; resolve each live tab back to its
         // owning session and mark each session Detached exactly once. Resolving
-        // matters when a session's Main tab already exited but a Support tab is
-        // still running — its only provider key is the Support tab id, which is
+        // matters when a session's session-slot tab already exited but an extra tab is
+        // still running — its only provider key is the extra tab id, which is
         // not a session id, so a bare `mark_session_status` would silently miss.
         let keys: Vec<String> = self.providers.keys().cloned().collect();
         let mut session_ids: Vec<String> = keys
@@ -1359,14 +1359,14 @@ mod tests {
             if !pruned.is_empty() || !engine.providers.contains_key("tab-2") {
                 break pruned;
             }
-            assert!(Instant::now() < deadline, "support tab never reported exit");
+            assert!(Instant::now() < deadline, "extra tab never reported exit");
             sleep(Duration::from_millis(50));
         };
 
         let p = pruned
             .iter()
             .find(|p| p.id == "tab-2")
-            .expect("support tab pruned");
+            .expect("extra tab pruned");
         assert_eq!(p.kind, PrunedPtyKind::Agent);
         assert_eq!(p.session_id, "s1", "resolves the owning session");
         assert!(
@@ -1473,7 +1473,7 @@ mod tests {
             if !engine.providers.contains_key("tab-2") {
                 break;
             }
-            assert!(Instant::now() < deadline, "support tab never reported exit");
+            assert!(Instant::now() < deadline, "extra tab never reported exit");
             sleep(Duration::from_millis(50));
         }
         assert!(
@@ -1497,7 +1497,7 @@ mod tests {
         engine
             .agent_tabs
             .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
-        // Both the Main tab and the Support tab have a live PTY.
+        // Both the session-slot tab and the extra tab have a live PTY.
         engine
             .providers
             .insert("s1".to_string(), spawn_cat(worktree.path()));
@@ -1525,6 +1525,63 @@ mod tests {
         let group = &engine.pending_group_removals[0];
         assert!(group.pending_ids.contains("s1") && group.pending_ids.contains("tab-2"));
         assert_eq!(group.removal.session_id, "s1");
+    }
+
+    #[test]
+    fn begin_delete_session_waits_for_a_straggler_already_in_terminating_ptys() {
+        // G6 regression: `begin_delete_session` used to compute its `live_tabs`
+        // barrier purely from `providers.contains_key`, so a tab closed moments
+        // earlier via `close_tab` — already out of `providers` and parked in
+        // `terminating_ptys` under its own SIGTERM grace period, but still an
+        // alive child process — was invisible to the barrier. The worktree
+        // removal would fire as soon as `providers` looked empty, racing that
+        // still-alive straggler's use of the worktree as its cwd. It must now be
+        // folded into the group barrier alongside any still-live tab.
+        use crate::engine::BeginDeleteSessionOutcome;
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+
+        // The session-slot tab is still live; "tab-2" was closed moments earlier and is
+        // already a straggler in `terminating_ptys` (not in `providers` at all).
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(worktree.path()));
+        let far = Instant::now() + Duration::from_secs(60);
+        engine.terminating_ptys.push(TerminatingPty {
+            client: spawn_cat(worktree.path()),
+            deadline: far,
+            kind: PrunedPtyKind::Agent,
+            id: "tab-2".to_string(),
+            label: "feat".to_string(),
+            worktree_removal: None,
+        });
+
+        let outcome = engine.begin_delete_session("s1", true);
+        assert!(matches!(
+            outcome,
+            BeginDeleteSessionOutcome::AsyncStarted { .. }
+        ));
+        // "s1" gets its own new terminating entry; "tab-2" keeps its existing one
+        // (begin_delete_session must NOT re-issue a close for an already-closing
+        // straggler). Both must be listed on ONE group barrier.
+        assert_eq!(engine.terminating_ptys.len(), 2);
+        assert_eq!(engine.pending_group_removals.len(), 1);
+        let group = &engine.pending_group_removals[0];
+        assert!(
+            group.pending_ids.contains("s1") && group.pending_ids.contains("tab-2"),
+            "the group barrier must wait for the already-terminating straggler too: {:?}",
+            group.pending_ids
+        );
     }
 
     #[test]
@@ -1576,7 +1633,7 @@ mod tests {
             if engine.terminating_ptys.len() == 1 {
                 break;
             }
-            assert!(Instant::now() < deadline, "main tab never reaped");
+            assert!(Instant::now() < deadline, "session-slot tab never reaped");
             sleep(Duration::from_millis(20));
         }
         assert_eq!(engine.pending_group_removals.len(), 1);

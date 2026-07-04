@@ -121,48 +121,56 @@ function TabPill({
         )}
       />
       <span className="max-w-40 truncate">{label}</span>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <button
-              type="button"
-              aria-label="Tab actions"
-              onClick={(e) => e.stopPropagation()}
-              className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/tab:opacity-100 focus-visible:opacity-100 data-[popup-open]:opacity-100 max-md:size-11 max-md:opacity-100"
-            />
-          }
-        >
-          <Ellipsis className="size-3.5" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>
-              <Replace />
-              Change provider…
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              {providers.map((p) => {
-                const current = p === tab.provider
-                return (
-                  <DropdownMenuItem
-                    key={p}
-                    disabled={current}
-                    onClick={() => void retargetTab(session.id, tab.id, p)}
-                  >
-                    {current ? <Check /> : <Bot />}
-                    {p}
-                  </DropdownMenuItem>
-                )
-              })}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => openCloseTab(session.id, tab.id)}>
-            <X />
-            Close tab…
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {/* The ⋯ trigger consumes NO layout space at rest: the wrapper's max-width
+          collapses to zero (not opacity-only, which would still reserve the
+          fixed-size box's width) and animates open on hover, focus-within, or
+          while the menu is open (trigger `data-popup-open`, which Base UI does
+          NOT mirror onto `aria-expanded`) — mirroring ChangedFiles.tsx/Sidebar.tsx.
+          Always revealed on touch. */}
+      <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <button
+                type="button"
+                aria-label="Tab actions"
+                onClick={(e) => e.stopPropagation()}
+                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:size-11"
+              />
+            }
+          >
+            <Ellipsis className="size-3.5" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Replace />
+                Change provider…
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {providers.map((p) => {
+                  const current = p === tab.provider
+                  return (
+                    <DropdownMenuItem
+                      key={p}
+                      disabled={current}
+                      onClick={() => void retargetTab(session.id, tab.id, p)}
+                    >
+                      {current ? <Check /> : <Bot />}
+                      {p}
+                    </DropdownMenuItem>
+                  )
+                })}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => openCloseTab(session.id, tab.id)}>
+              <X />
+              Close tab…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </div>
   )
 }

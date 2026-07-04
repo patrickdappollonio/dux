@@ -58,13 +58,21 @@ describe("tabsApi", () => {
     expect(JSON.parse(lastCall(fetchMock).body ?? "null")).toEqual({})
   })
 
-  it("remove DELETEs the nested tab endpoint (encoding ids)", async () => {
-    const fetchMock = stubOkFetch(204, null)
-    await tabsApi.remove("s 1", "b/2")
+  it("remove DELETEs the nested tab endpoint (encoding ids) and resolves the authoritative detached flag", async () => {
+    const fetchMock = stubOkFetch(200, { detached: true })
+    const result = await tabsApi.remove("s 1", "b/2")
     const c = lastCall(fetchMock)
     expect(c.url).toBe("/api/v1/sessions/s%201/tabs/b%2F2")
     expect(c.method).toBe("DELETE")
     expect(c.headers["x-connection-id"]).toBe("conn-7")
+    expect(result).toEqual({ detached: true })
+  })
+
+  it("remove resolves undefined for an older server's bodiless 204", async () => {
+    const fetchMock = stubOkFetch(204, null)
+    const result = await tabsApi.remove("s1", "b2")
+    expect(lastCall(fetchMock).method).toBe("DELETE")
+    expect(result).toBeUndefined()
   })
 
   it("patch PATCHes the tab endpoint with the new provider", async () => {

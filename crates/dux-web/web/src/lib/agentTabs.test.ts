@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { isSupportTabDormant, shouldShowTabStrip, tabLabels } from "./agentTabs"
+import { isExtraTabDormant, isTabGone, shouldShowTabStrip, tabLabels } from "./agentTabs"
 import type { SelectedTarget } from "./store"
 import type { AgentTabView } from "./types"
 
@@ -20,7 +20,7 @@ function agentTarget(sessionId: string, tabId: string): SelectedTarget {
   return { kind: "agent", sessionId, tabId }
 }
 
-function supportTab(id: string, live: boolean): AgentTabView {
+function extraTab(id: string, live: boolean): AgentTabView {
   return { ...tab("codex"), id, has_live_process: live }
 }
 
@@ -33,24 +33,24 @@ describe("shouldShowTabStrip", () => {
   })
 })
 
-describe("isSupportTabDormant", () => {
-  it("is false for the Main tab even with no live process", () => {
-    const main = { ...supportTab("s1", false), id: "s1" }
-    expect(isSupportTabDormant(agentTarget("s1", "s1"), main, [])).toBe(false)
+describe("isExtraTabDormant", () => {
+  it("is false for the session-slot tab even with no live process", () => {
+    const sessionSlot = { ...extraTab("s1", false), id: "s1" }
+    expect(isExtraTabDormant(agentTarget("s1", "s1"), sessionSlot, [])).toBe(false)
   })
 
-  it("is true for a Support tab with no live process until it has been started", () => {
-    const dormant = supportTab("tab-1", false)
-    expect(isSupportTabDormant(agentTarget("s1", "tab-1"), dormant, [])).toBe(true)
+  it("is true for an extra tab with no live process until it has been started", () => {
+    const dormant = extraTab("tab-1", false)
+    expect(isExtraTabDormant(agentTarget("s1", "tab-1"), dormant, [])).toBe(true)
     // Once explicitly started, the card is suppressed for that tab id.
     expect(
-      isSupportTabDormant(agentTarget("s1", "tab-1"), dormant, ["tab-1"]),
+      isExtraTabDormant(agentTarget("s1", "tab-1"), dormant, ["tab-1"]),
     ).toBe(false)
   })
 
-  it("is false for a Support tab that has a live process", () => {
+  it("is false for an extra tab that has a live process", () => {
     expect(
-      isSupportTabDormant(agentTarget("s1", "tab-1"), supportTab("tab-1", true), []),
+      isExtraTabDormant(agentTarget("s1", "tab-1"), extraTab("tab-1", true), []),
     ).toBe(false)
   })
 
@@ -60,9 +60,22 @@ describe("isSupportTabDormant", () => {
       terminalId: "t1",
       sessionId: "s1",
     }
-    expect(isSupportTabDormant(terminal, supportTab("tab-1", false), [])).toBe(false)
-    expect(isSupportTabDormant(agentTarget("s1", "tab-1"), undefined, [])).toBe(false)
-    expect(isSupportTabDormant(null, supportTab("tab-1", false), [])).toBe(false)
+    expect(isExtraTabDormant(terminal, extraTab("tab-1", false), [])).toBe(false)
+    expect(isExtraTabDormant(agentTarget("s1", "tab-1"), undefined, [])).toBe(false)
+    expect(isExtraTabDormant(null, extraTab("tab-1", false), [])).toBe(false)
+  })
+})
+
+describe("isTabGone", () => {
+  it("is false when the tab id is still present in the spine's tab list", () => {
+    expect(isTabGone([extraTab("tab-1", false), extraTab("tab-2", true)], "tab-1")).toBe(
+      false,
+    )
+  })
+
+  it("is true when the tab id is no longer present (closed elsewhere)", () => {
+    expect(isTabGone([extraTab("tab-2", true)], "tab-1")).toBe(true)
+    expect(isTabGone([], "tab-1")).toBe(true)
   })
 })
 
