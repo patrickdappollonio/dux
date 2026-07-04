@@ -1160,7 +1160,8 @@ impl App {
         };
         let session_id = session.id.clone();
         let tab_ids = self.session_tab_ids(&session_id);
-        if tab_ids.len() < 2 || area.height < 4 || area.width < 12 {
+        let always_show = self.engine.config.ui.always_show_tab_strip;
+        if (tab_ids.len() < 2 && !always_show) || area.height < 4 || area.width < 12 {
             return area;
         }
         let focused_id = self.focused_tab_id(&session_id);
@@ -7663,6 +7664,66 @@ mod tests {
     fn confirm_close_tab_tail_only_tab_detaches_regardless_of_main() {
         assert!(confirm_close_tab_tail(true, true).contains("only tab"));
         assert!(confirm_close_tab_tail(true, false).contains("only tab"));
+    }
+
+    /// `always_show_tab_strip = false` (the default) must keep hiding the strip
+    /// when the selected session has only its session-slot tab: the returned
+    /// area is the full input area and no clickable tab regions are recorded.
+    #[test]
+    fn tab_strip_hidden_at_single_tab_by_default() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        assert!(!app.engine.config.ui.always_show_tab_strip);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, 80, 24);
+        terminal
+            .draw(|frame| {
+                let term_area = app.render_agent_tab_strip_if_needed(frame, area, true);
+                assert_eq!(
+                    term_area, area,
+                    "single tab with the preference off must not reserve a strip row"
+                );
+            })
+            .expect("render frame");
+        assert!(
+            app.agent_tab_regions.is_empty(),
+            "no clickable tab regions should be recorded when the strip is hidden"
+        );
+    }
+
+    /// `always_show_tab_strip = true` must show the strip even with a single
+    /// (session-slot-only) tab: the returned area is shrunk by the strip row
+    /// and the single tab is recorded as a clickable region.
+    #[test]
+    fn tab_strip_shown_at_single_tab_when_always_show_enabled() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.engine.config.ui.always_show_tab_strip = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, 80, 24);
+        terminal
+            .draw(|frame| {
+                let term_area = app.render_agent_tab_strip_if_needed(frame, area, true);
+                assert_eq!(
+                    term_area,
+                    Rect::new(area.x, area.y + 1, area.width, area.height - 1),
+                    "a single tab with the preference on must still reserve the strip row"
+                );
+            })
+            .expect("render frame");
+        assert_eq!(
+            app.agent_tab_regions.len(),
+            1,
+            "the sole session-slot tab should be recorded as a clickable region"
+        );
     }
 
     /// Regression test for issue #258: while the interactive agent terminal is

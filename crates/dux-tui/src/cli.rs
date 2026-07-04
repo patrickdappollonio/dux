@@ -258,6 +258,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.ui.show_changes_pane,
         current.ui.show_changes_pane,
     );
+    diff_bool(
+        &mut changes,
+        "ui.always_show_tab_strip",
+        defaults.ui.always_show_tab_strip,
+        current.ui.always_show_tab_strip,
+    );
     diff_str(
         &mut changes,
         "ui.pr_banner_position",

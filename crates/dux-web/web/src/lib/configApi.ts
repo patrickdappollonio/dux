@@ -59,6 +59,9 @@ export const configApi = {
   // Flip whether selecting text in the web terminal auto-copies it.
   toggleCopyOnSelect: () =>
     send("POST", "/api/v1/ui/toggle-copy-on-select", {}),
+  // Flip whether the agent tab strip always renders, even with one tab.
+  toggleAlwaysShowTabs: () =>
+    send("POST", "/api/v1/ui/toggle-always-show-tab-strip", {}),
   // Read the raw config.toml text for the Monaco editor. Returns the file
   // verbatim (or the plain render of the running config if none exists yet).
   readRawConfig: async (): Promise<string> => {

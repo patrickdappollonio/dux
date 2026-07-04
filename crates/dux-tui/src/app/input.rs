@@ -5996,6 +5996,24 @@ impl App {
             .save_lazy(self.engine.config.clone());
     }
 
+    /// Flip `ui.always_show_tab_strip` and persist it to `config.toml`, mirroring
+    /// `toggle_git_pane_removed`'s lazy-write pattern. Shared by the TUI and web
+    /// command palettes (the web toggles the same field via
+    /// `WireCommand::ToggleAlwaysShowTabStrip`), so both surfaces agree on the
+    /// next `config.changed`/render.
+    pub(crate) fn toggle_always_show_tab_strip(&mut self) {
+        let next = !self.engine.config.ui.always_show_tab_strip;
+        self.engine.config.ui.always_show_tab_strip = next;
+        self.engine
+            .config_writer
+            .save_lazy(self.engine.config.clone());
+        let state = if next { "enabled" } else { "disabled" };
+        let palette_key = self.bindings.label_for(Action::OpenPalette);
+        self.set_info(format!(
+            "Always-show tab strip {state}. Press {palette_key} to open the palette and toggle back."
+        ));
+    }
+
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_mouse(mouse);
@@ -12125,6 +12143,20 @@ cyan = "#00ffff"
             .unwrap();
         assert!(!app.right_hidden);
         assert!(app.engine.config.ui.show_changes_pane);
+    }
+
+    #[test]
+    fn toggle_always_show_tabs_flips_and_persists() {
+        let mut app = test_app(default_bindings());
+        assert!(!app.engine.config.ui.always_show_tab_strip);
+
+        app.execute_command("toggle-always-show-tabs".to_string())
+            .unwrap();
+        assert!(app.engine.config.ui.always_show_tab_strip);
+
+        app.execute_command("toggle-always-show-tabs".to_string())
+            .unwrap();
+        assert!(!app.engine.config.ui.always_show_tab_strip);
     }
 
     #[test]

@@ -44,6 +44,7 @@ function makeBootstrap(macros: MacroView[]): Bootstrap {
     pr_banner_position: "top",
     agent_scrollback_lines: 10000,
     show_changes_pane: true,
+    always_show_tab_strip: false,
     global_env: {},
     status_clear_seconds: 6,
   }

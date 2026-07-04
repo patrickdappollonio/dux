@@ -77,6 +77,7 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
       title: "dux",
       dux_version: "v1",
       show_changes_pane: false,
+      always_show_tab_strip: false,
       available_providers: ["claude", "codex"],
       agent_tabs_max: 20,
     },

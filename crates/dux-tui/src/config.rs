@@ -564,6 +564,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.show_changes_pane),
         },
         ConfigEntry::Field {
+            key: "always_show_tab_strip",
+            comment: Some(CommentSource::Static(
+                "# Always show the agent tab strip, even when a session has only one tab.\n# Default false shows it only once a session has two or more tabs.\n# Toggle at runtime from either surface's command palette (TUI or web).",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.always_show_tab_strip),
+        },
+        ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
                 "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",
@@ -1329,6 +1336,7 @@ mod tests {
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("copy_on_select = true"));
         assert!(rendered.contains("auto_reopen_agents = false"));
+        assert!(rendered.contains("always_show_tab_strip = false"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
         assert!(rendered.contains("[editor]"));

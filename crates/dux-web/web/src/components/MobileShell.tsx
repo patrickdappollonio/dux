@@ -813,7 +813,8 @@ function TerminalScreen() {
           and the pane's ResizeObserver refits. */}
       {session.pr ? <PrBanner pr={session.pr} /> : null}
 
-      {selectedTarget.kind === "agent" && shouldShowTabStrip(tabs) ? (
+      {selectedTarget.kind === "agent" &&
+      shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false) ? (
         <AgentTabsStrip
           session={session}
           activeTabId={selectedTarget.tabId}

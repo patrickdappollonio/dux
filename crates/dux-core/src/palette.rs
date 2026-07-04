@@ -458,6 +458,16 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         surface: PaletteSurface::Both,
     },
     PaletteCommand {
+        action: Action::ToggleAlwaysShowTabs,
+        name: "toggle-always-show-tabs",
+        description: "Toggle always showing the agent tab strip, even with a single tab",
+        // Web: WireCommand::ToggleAlwaysShowTabStrip flips ui.always_show_tab_strip
+        // via `POST /api/v1/ui/toggle-always-show-tab-strip`; the web command
+        // palette's TS handler/pin (`paletteRegistry.ts` + `paletteRegistry.test.ts`)
+        // is wired up, so this is surfaced on both the TUI and web palettes.
+        surface: PaletteSurface::Both,
+    },
+    PaletteCommand {
         action: Action::ToggleCopyOnSelect,
         name: "toggle-copy-on-select",
         description: "Toggle auto-copying selected terminal text (web only)",
@@ -547,6 +557,7 @@ mod tests {
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",
+            "toggle-always-show-tabs",
             "toggle-copy-on-select",
             "toggle-github-integration",
             "toggle-pr-banner-position",

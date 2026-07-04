@@ -37,10 +37,15 @@ export function isTabGone(tabs: AgentTabView[], tabId: string): boolean {
   return !tabs.some((t) => t.id === tabId)
 }
 
-// Whether the tab strip should render for a session: only when there are two or
-// more tabs. A single-tab agent shows today's chrome-free pane.
-export function shouldShowTabStrip(tabs: AgentTabView[]): boolean {
-  return tabs.length >= 2
+// Whether the tab strip should render for a session: when there are two or more
+// tabs, or when the operator has opted into always showing it
+// (`bootstrap.always_show_tab_strip`, `config.ui.always_show_tab_strip`). A
+// single-tab agent shows today's chrome-free pane unless that preference is on.
+export function shouldShowTabStrip(
+  tabs: AgentTabView[],
+  alwaysShow = false,
+): boolean {
+  return alwaysShow || tabs.length >= 2
 }
 
 // Display labels for a session's tabs: the provider name, disambiguated with a

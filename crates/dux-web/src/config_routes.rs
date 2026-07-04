@@ -16,6 +16,8 @@
 //! - `POST /api/v1/ui/toggle-pr-banner-position` — swap the PR banner top/bottom.
 //! - `POST /api/v1/ui/toggle-github-integration` — flip GitHub PR integration.
 //! - `POST /api/v1/ui/toggle-copy-on-select` — flip web-terminal copy-on-select.
+//! - `POST /api/v1/ui/toggle-always-show-tab-strip` — flip whether the agent tab
+//!   strip always renders, even with a single tab.
 //!
 //! On a successful config change the engine emits a `config.changed` event (via
 //! the Phase 2 forwarder in `server.rs`), so subscribed clients refetch
@@ -59,6 +61,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/ui/toggle-copy-on-select",
             post(toggle_copy_on_select),
+        )
+        .route(
+            "/api/v1/ui/toggle-always-show-tab-strip",
+            post(toggle_always_show_tab_strip),
         )
         .route(
             "/api/v1/config/raw",
@@ -184,6 +190,15 @@ async fn toggle_github_integration(State(state): State<AppState>, headers: Heade
 /// web terminal auto-copies it (`ui.copy_on_select`).
 async fn toggle_copy_on_select(State(state): State<AppState>, headers: HeaderMap) -> Response {
     dispatch(&state, &headers, WireCommand::ToggleCopyOnSelect {}).await
+}
+
+/// `POST /api/v1/ui/toggle-always-show-tab-strip`. Flip whether the agent tab
+/// strip is always shown, even with a single tab (`ui.always_show_tab_strip`).
+async fn toggle_always_show_tab_strip(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    dispatch(&state, &headers, WireCommand::ToggleAlwaysShowTabStrip {}).await
 }
 
 // ── Raw config editor (Monaco) ───────────────────────────────────────────────
@@ -398,6 +413,7 @@ mod tests {
             "/api/v1/ui/toggle-pr-banner-position",
             "/api/v1/ui/toggle-github-integration",
             "/api/v1/ui/toggle-copy-on-select",
+            "/api/v1/ui/toggle-always-show-tab-strip",
         ] {
             let (_tmp, app) = router_no_auth();
             let resp = app

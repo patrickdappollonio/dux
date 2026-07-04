@@ -2498,6 +2498,13 @@ export function toggleCopyOnSelect(): void {
   )
 }
 
+export function toggleAlwaysShowTabs(): void {
+  fireToggle(
+    configApi.toggleAlwaysShowTabs(),
+    "Could not toggle always-show-tabs.",
+  )
+}
+
 // The kill-running modal (Ctrl+K "kill-running"). Open/close just flip the gate;
 // the dialog derives its rows from the spine.
 export function openKillRunning(): void {

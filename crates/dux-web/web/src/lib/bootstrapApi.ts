@@ -47,6 +47,10 @@ export interface Bootstrap {
   agent_scrollback_lines: number
   /** Mirrors `config.ui.show_changes_pane`; the desktop Changes-pane default. */
   show_changes_pane: boolean
+  /** Mirrors `config.ui.always_show_tab_strip`: when true the agent tab strip
+   * renders even with a single tab (default false, matching today's chrome-free
+   * single-tab pane). */
+  always_show_tab_strip: boolean
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
   /** Mirrors `config.ui.status_clear_seconds`: how long an info/success toast

@@ -92,7 +92,9 @@ export function TerminalArea() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {pr && !bannerAtBottom ? <PrBanner pr={pr} position="top" /> : null}
-      {selectedTarget.kind === "agent" && session && shouldShowTabStrip(tabs) ? (
+      {selectedTarget.kind === "agent" &&
+      session &&
+      shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false) ? (
         <AgentTabsStrip
           session={session}
           activeTabId={selectedTarget.tabId}

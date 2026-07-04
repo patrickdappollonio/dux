@@ -2459,6 +2459,10 @@ impl App {
                 self.toggle_git_pane_removed();
                 Ok(())
             }
+            "toggle-always-show-tabs" => {
+                self.toggle_always_show_tab_strip();
+                Ok(())
+            }
             "help" => {
                 self.help_scroll = Some(0);
                 Ok(())

@@ -38,6 +38,13 @@ describe("shouldShowTabStrip", () => {
     expect(shouldShowTabStrip([tab("claude"), tab("codex")])).toBe(true)
     expect(shouldShowTabStrip([tab("a"), tab("b"), tab("c")])).toBe(true)
   })
+
+  it("honors the always-show preference for zero or one tab, but does not affect two or more", () => {
+    expect(shouldShowTabStrip([], true)).toBe(true)
+    expect(shouldShowTabStrip([tab("claude")], true)).toBe(true)
+    expect(shouldShowTabStrip([tab("claude")], false)).toBe(false)
+    expect(shouldShowTabStrip([tab("claude"), tab("codex")], false)).toBe(true)
+  })
 })
 
 describe("isExtraTabDormant", () => {

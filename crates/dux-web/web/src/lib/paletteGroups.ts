@@ -39,6 +39,7 @@ const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "toggle-pr-banner-position": "View",
   "toggle-remove-git-pane": "View",
   "toggle-copy-on-select": "View",
+  "toggle-always-show-tabs": "View",
   // A runtime action rather than a true "view" concern, but grouped here to
   // avoid a single-command group; revisit if more runtime commands arrive.
   "kill-running": "View",

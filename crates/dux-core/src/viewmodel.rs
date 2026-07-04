@@ -110,6 +110,12 @@ pub struct BootstrapView {
     /// session already has this many tabs; the server re-enforces it on create.
     /// Older servers omit it, so the web falls back to a sane default.
     pub agent_tabs_max: u16,
+    /// Mirrors `config.ui.always_show_tab_strip`: when true the web always
+    /// renders the agent tab strip, even when a session has only one tab.
+    /// Default false shows it only once a session has two or more tabs.
+    /// Toggling it from the web command palette persists the new value here.
+    /// Older servers omit it, so the web treats a missing value as `false`.
+    pub always_show_tab_strip: bool,
 }
 
 /// A single text macro projected for web clients, from
@@ -526,6 +532,7 @@ impl Engine {
             title: self.config.server.title.clone(),
             favicon: self.config.server.favicon.clone(),
             agent_tabs_max: self.agent_tabs_max(),
+            always_show_tab_strip: self.config.ui.always_show_tab_strip,
         }
     }
 }
@@ -1143,6 +1150,17 @@ mod tests {
     }
 
     #[test]
+    fn always_show_tab_strip_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Default ships off (strip shows only with 2+ tabs).
+        assert!(!engine.bootstrap().always_show_tab_strip);
+
+        engine.config.ui.always_show_tab_strip = true;
+        assert!(engine.bootstrap().always_show_tab_strip);
+    }
+
+    #[test]
     fn pr_banner_position_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -1176,6 +1194,7 @@ mod tests {
             "title",
             "favicon",
             "status_clear_seconds",
+            "always_show_tab_strip",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),

@@ -395,6 +395,12 @@ pub struct UiConfig {
     /// persists the new value here immediately — it is not a per-session
     /// override.
     pub show_changes_pane: bool,
+    /// Always show the agent tab strip, even when a session has only one tab.
+    /// Default false shows the strip only once a session has two or more
+    /// tabs. Toggling it from either surface's command palette (TUI or web)
+    /// persists the new value here immediately; it is a shared preference,
+    /// not a per-session override.
+    pub always_show_tab_strip: bool,
     pub pr_banner_position: String,
     pub theme: String,
 }
@@ -515,6 +521,7 @@ impl Default for UiConfig {
             copy_on_select: true,
             auto_reopen_agents: false,
             show_changes_pane: true,
+            always_show_tab_strip: false,
             pr_banner_position: "bottom".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
@@ -989,6 +996,7 @@ impl Default for Config {
                 copy_on_select: true,
                 auto_reopen_agents: false,
                 show_changes_pane: true,
+                always_show_tab_strip: false,
                 pr_banner_position: "bottom".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },

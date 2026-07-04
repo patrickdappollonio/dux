@@ -203,6 +203,11 @@ pub enum WireCommand {
     /// carries the new value so the web terminal enables or disables
     /// highlight-to-copy. Low-stakes preference, lazy write.
     ToggleCopyOnSelect {},
+    /// Flip `ui.always_show_tab_strip` and persist it, mirroring the TUI's
+    /// `toggle-always-show-tabs` palette command. The next `config.changed`
+    /// refetch carries the new value so the web shows (or stops showing) the
+    /// agent tab strip at a single tab. Low-stakes preference, lazy write.
+    ToggleAlwaysShowTabStrip {},
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
     /// worktree, the web counterpart to the TUI's kill-running modal (for one
     /// agent). Mirrors the force-reconnect teardown block but stops there (no
@@ -478,6 +483,7 @@ impl WireCommand {
                 | WireCommand::TogglePrBannerPosition {}
                 | WireCommand::ToggleCopyOnSelect {}
                 | WireCommand::ToggleGithubIntegration {}
+                | WireCommand::ToggleAlwaysShowTabStrip {}
         )
     }
 }
@@ -853,6 +859,13 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::ToggleAlwaysShowTabStrip {} => {
+                let status = self.toggle_always_show_tab_strip();
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::ToggleGithubIntegration {} => {
                 let status = self.toggle_github_integration();
                 return Ok(WireCommandOutcome {
@@ -1004,6 +1017,20 @@ impl Engine {
             "Copy-on-select enabled. Selecting terminal text now copies it to the clipboard."
         } else {
             "Copy-on-select disabled. Use Ctrl-Shift-C, the right-click menu, or Ctrl-Insert to copy."
+        };
+        WireStatus::new("info", message.to_string())
+    }
+
+    /// Flip `ui.always_show_tab_strip` and persist it, mirroring the TUI's
+    /// `toggle-always-show-tabs` palette command. Low-stakes preference, lazy write.
+    fn toggle_always_show_tab_strip(&mut self) -> WireStatus {
+        let next = !self.config.ui.always_show_tab_strip;
+        self.config.ui.always_show_tab_strip = next;
+        self.config_writer.save_lazy(self.config.clone());
+        let message = if next {
+            "Agent tab strip is now always shown, even with a single tab. Toggle it back from the command palette."
+        } else {
+            "Agent tab strip now shows only once an agent has two or more tabs. Toggle it back from the command palette."
         };
         WireStatus::new("info", message.to_string())
     }
@@ -3024,12 +3051,13 @@ impl Engine {
             | WireCommand::TogglePrBannerPosition {}
             | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
+            | WireCommand::ToggleAlwaysShowTabStrip {}
             | WireCommand::KillSessionPty { .. }
             | WireCommand::DetachAgent { .. }
             | WireCommand::CloseAgentTab { .. }
             | WireCommand::ChangeAgentTabProvider { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -3783,6 +3811,10 @@ mod tests {
                 r#"{"command":"toggle_copy_on_select","args":{}}"#,
                 WireCommand::ToggleCopyOnSelect {},
             ),
+            (
+                r#"{"command":"toggle_always_show_tab_strip","args":{}}"#,
+                WireCommand::ToggleAlwaysShowTabStrip {},
+            ),
         ] {
             let cmd: WireCommand = serde_json::from_str(json).expect("deserialize");
             assert_eq!(cmd, expected);
@@ -3881,6 +3913,33 @@ mod tests {
             "disabling must disarm PR sync and clear cached PR statuses"
         );
         assert!(engine.pr_statuses.is_empty());
+    }
+
+    #[test]
+    fn apply_wire_toggle_always_show_tab_strip_flips_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        let start = engine.config.ui.always_show_tab_strip;
+
+        engine
+            .apply_wire(WireCommand::ToggleAlwaysShowTabStrip {})
+            .expect("apply toggle");
+        assert_eq!(
+            engine.config.ui.always_show_tab_strip, !start,
+            "in-memory value must flip immediately"
+        );
+
+        engine.config_writer.flush();
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains(&format!("always_show_tab_strip = {}", !start)),
+            "flushed config must carry the flipped value, got:\n{disk}"
+        );
+
+        engine
+            .apply_wire(WireCommand::ToggleAlwaysShowTabStrip {})
+            .expect("apply toggle back");
+        assert_eq!(engine.config.ui.always_show_tab_strip, start);
     }
 
     #[test]

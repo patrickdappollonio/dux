@@ -130,6 +130,7 @@ pub enum Action {
     ChangeTheme,
     ReloadConfig,
     StartWebServer,
+    ToggleAlwaysShowTabs,
 }
 
 impl Action {
@@ -242,6 +243,7 @@ impl Action {
             Action::ChangeTheme => "change_theme",
             Action::ReloadConfig => "reload_config",
             Action::StartWebServer => "start_web_server",
+            Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
         }
     }
 
@@ -390,6 +392,9 @@ impl Action {
             Action::StartWebServer => {
                 "Tear down the TUI and serve the dux web UI over the same agents."
             }
+            Action::ToggleAlwaysShowTabs => {
+                "Toggle always showing the agent tab strip, even with a single tab."
+            }
         }
     }
 
@@ -500,7 +505,8 @@ impl Action {
             | Action::ChangeProjectDefaultProvider
             | Action::ChangeTheme
             | Action::ReloadConfig
-            | Action::StartWebServer => None,
+            | Action::StartWebServer
+            | Action::ToggleAlwaysShowTabs => None,
         }
     }
 }

@@ -1151,6 +1151,13 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::ToggleAlwaysShowTabs,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ToggleRandomizedPetNameDefault,
         default_keys: &[],
         scopes: &[],

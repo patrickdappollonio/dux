@@ -277,6 +277,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.auto_reopen_agents,
     );
     patch_table_bool(doc, "ui", "show_changes_pane", config.ui.show_changes_pane);
+    patch_table_bool(
+        doc,
+        "ui",
+        "always_show_tab_strip",
+        config.ui.always_show_tab_strip,
+    );
     patch_table_str(
         doc,
         "ui",
