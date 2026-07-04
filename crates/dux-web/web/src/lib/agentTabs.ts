@@ -2,7 +2,8 @@
 // unit-testable without mounting React. Mirrors the TUI's `tab_labels` /
 // strip-visibility logic (a shared fixture keeps the two in parity).
 
-import type { AgentTabView } from "./types"
+import type { Spine } from "./spineApi"
+import type { AgentTabView, SessionView } from "./types"
 import type { SelectedTarget } from "./store"
 
 // Whether the focused target is an extra tab that is currently DORMANT (reopened
@@ -53,4 +54,19 @@ export function tabLabels(tabs: AgentTabView[]): string[] {
     seen.set(tab.provider, n)
     return n === 1 ? tab.provider : `${tab.provider} ${n}`
   })
+}
+
+// The provider a plain (no-provider-arg) `addTab(session.id)` actually launches:
+// the session's owning project's `default_provider`, mirroring the server's own
+// resolution (`CreateTabBody.provider` omitted → project default). Falls back to
+// the session's own `provider` field only when the owning project can't be found
+// in the spine (should not happen in practice, but keeps the "+" quick-add and
+// its picker's "default" marker from silently disagreeing with what gets
+// launched).
+export function defaultProviderForSession(
+  spine: Spine | null,
+  session: SessionView,
+): string {
+  const project = spine?.projects.find((p) => p.id === session.project_id)
+  return project?.default_provider ?? session.provider
 }

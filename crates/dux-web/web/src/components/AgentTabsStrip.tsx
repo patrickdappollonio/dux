@@ -1,4 +1,4 @@
-import { Bot, Check, Ellipsis, Plus, Replace, X } from "lucide-react"
+import { Bot, Check, ChevronDown, Ellipsis, Plus, Replace, X } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
@@ -11,7 +11,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { tabLabels } from "@/lib/agentTabs"
+import { defaultProviderForSession, tabLabels } from "@/lib/agentTabs"
 import {
   addTab,
   openCloseTab,
@@ -38,12 +38,14 @@ export function AgentTabsStrip({
   activeTabId: string
   maxTabs?: number
 }) {
-  const { bootstrap, createTabInFlight } = useDux()
+  const { bootstrap, spine, createTabInFlight } = useDux()
   const providers = bootstrap?.available_providers ?? []
   const labels = tabLabels(session.tabs)
   const cap = maxTabs ?? DEFAULT_AGENT_TABS_MAX
   const atCap = session.tabs.length >= cap
   const creating = createTabInFlight.includes(session.id)
+  const defaultProvider = defaultProviderForSession(spine, session)
+  const disabled = atCap || creating
 
   return (
     <div className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1">
@@ -57,23 +59,61 @@ export function AgentTabsStrip({
           providers={providers}
         />
       ))}
-      <SimpleTooltip
-        content={
-          atCap ? `Tab limit reached (${cap})` : creating ? "Adding…" : "New tab"
-        }
-      >
-        <button
-          type="button"
-          aria-label="New tab"
-          disabled={atCap || creating}
-          onClick={() => addTab(session.id)}
-          className={cn(
-            "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:size-11",
-          )}
+      {/* Split "+" control: the main button quick-adds the project default
+          provider (today's behavior, unchanged); the adjacent caret opens a
+          menu to pick a different configured provider. Misclick-safe spacing
+          between the two halves mirrors the per-pill ⋯ menu's gap conventions. */}
+      <div className="flex shrink-0 items-center gap-0.5">
+        <SimpleTooltip
+          content={
+            atCap
+              ? `Tab limit reached (${cap})`
+              : creating
+                ? "Adding…"
+                : `New ${defaultProvider} tab`
+          }
         >
-          <Plus className="size-4" />
-        </button>
-      </SimpleTooltip>
+          <button
+            type="button"
+            aria-label="New tab"
+            disabled={disabled}
+            onClick={() => addTab(session.id)}
+            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:size-11"
+          >
+            <Plus className="size-4" />
+          </button>
+        </SimpleTooltip>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <button
+                type="button"
+                aria-label="Choose provider for new tab"
+                disabled={disabled}
+                className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:size-11"
+              />
+            }
+          >
+            <ChevronDown className="size-3.5" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {providers.map((p) => {
+              const isDefault = p === defaultProvider
+              return (
+                <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
+                  {isDefault ? <Check /> : <Bot />}
+                  {p}
+                  {isDefault ? (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      default
+                    </span>
+                  ) : null}
+                </DropdownMenuItem>
+              )
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </div>
   )
 }

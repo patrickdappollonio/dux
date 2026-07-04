@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest"
 
-import { isExtraTabDormant, isTabGone, shouldShowTabStrip, tabLabels } from "./agentTabs"
+import {
+  defaultProviderForSession,
+  isExtraTabDormant,
+  isTabGone,
+  shouldShowTabStrip,
+  tabLabels,
+} from "./agentTabs"
+import type { Spine } from "./spineApi"
 import type { SelectedTarget } from "./store"
-import type { AgentTabView } from "./types"
+import type { AgentTabView, SessionView } from "./types"
 
 // A minimal AgentTabView for the pure helpers (only `provider` matters here).
 function tab(provider: string): AgentTabView {
@@ -76,6 +83,32 @@ describe("isTabGone", () => {
   it("is true when the tab id is no longer present (closed elsewhere)", () => {
     expect(isTabGone([extraTab("tab-2", true)], "tab-1")).toBe(true)
     expect(isTabGone([], "tab-1")).toBe(true)
+  })
+})
+
+// A minimal SessionView for defaultProviderForSession (only `project_id` and
+// `provider` matter here).
+function session(projectId: string, provider: string): SessionView {
+  return { project_id: projectId, provider } as unknown as SessionView
+}
+
+function spine(projects: { id: string; default_provider: string }[]): Spine {
+  return { projects, sessions: [], sidebar: { groups: [] } } as unknown as Spine
+}
+
+describe("defaultProviderForSession", () => {
+  it("resolves the owning project's default_provider", () => {
+    const sp = spine([{ id: "p1", default_provider: "codex" }])
+    expect(defaultProviderForSession(sp, session("p1", "claude"))).toBe("codex")
+  })
+
+  it("falls back to the session's own provider when the project is missing", () => {
+    const sp = spine([{ id: "other", default_provider: "codex" }])
+    expect(defaultProviderForSession(sp, session("p1", "claude"))).toBe("claude")
+  })
+
+  it("falls back to the session's own provider when spine is null", () => {
+    expect(defaultProviderForSession(null, session("p1", "claude"))).toBe("claude")
   })
 })
 

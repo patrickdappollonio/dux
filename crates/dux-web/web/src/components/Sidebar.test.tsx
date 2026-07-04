@@ -150,25 +150,13 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
   // session already has two or more tabs — so a fresh 1-tab session could never
   // reach 2. This menu item is the affordance that closes that gap.
   it("is present and enabled for a session with only one tab, and calls addTab", () => {
-    mockState = makeState({ spine: makeSessionSpine(1), createTabInFlight: [] })
-    render(
-      <SidebarProvider>
-        <AppSidebar />
-      </SidebarProvider>,
-    )
-    fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Add tab")
-    expect(
-      item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
-    ).not.toBe("true")
-    fireEvent.click(item)
-    expect(addTabMock).toHaveBeenCalledWith("s1")
-  })
-
-  it("disables Add tab once the session is at the per-agent tab cap", () => {
     mockState = makeState({
-      spine: makeSessionSpine(2),
-      bootstrap: { title: "dux", dux_version: "v1", agent_tabs_max: 2 },
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude", "codex"],
+      },
       createTabInFlight: [],
     })
     render(
@@ -177,10 +165,57 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
       </SidebarProvider>,
     )
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Add tab")
+    const item = screen.getByText("Add tab…")
+    expect(
+      item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
+    ).not.toBe("true")
+  })
+
+  it("disables Add tab once the session is at the per-agent tab cap", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(2),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        agent_tabs_max: 2,
+        available_providers: ["claude", "codex"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    const item = screen.getByText("Add tab…")
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
       "true",
     )
+  })
+
+  it("lists the configured providers with the project default marked, and picking one calls addTab", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude", "codex", "opencode"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    fireEvent.click(screen.getByText("Add tab…"))
+    // makeSessionSpine's project default_provider is "claude".
+    expect(screen.getByText("default")).toBeTruthy()
+    expect(screen.getByText("codex")).toBeTruthy()
+    fireEvent.click(screen.getByText("codex"))
+    expect(addTabMock).toHaveBeenCalledWith("s1", "codex")
   })
 })
 

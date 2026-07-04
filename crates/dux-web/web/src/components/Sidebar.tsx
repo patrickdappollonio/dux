@@ -14,6 +14,7 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 import {
   Bot,
+  Check,
   ClipboardCopy,
   Cpu,
   Ellipsis,
@@ -39,6 +40,7 @@ import { toast } from "sonner"
 import type * as React from "react"
 import { useEffect, useRef } from "react"
 import { agentRowVisual } from "@/lib/agentRow"
+import { defaultProviderForSession } from "@/lib/agentTabs"
 import { copyToClipboard } from "@/lib/clipboard"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
@@ -60,6 +62,9 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -224,10 +229,12 @@ function SessionSubItem({
   // or more tabs (AgentTabsStrip mounts only then) — without this menu item a
   // fresh 1-tab session could never reach its first extra tab from the web.
   // Mirrors the strip's own cap/in-flight disabling.
-  const { bootstrap, createTabInFlight } = useDux()
+  const { bootstrap, spine, createTabInFlight } = useDux()
   const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const atTabCap = session.tabs.length >= tabCap
   const addingTab = createTabInFlight.includes(session.id)
+  const providers = bootstrap?.available_providers ?? []
+  const defaultProvider = defaultProviderForSession(spine, session)
 
   // The whole row is the drag handle. The enclosing PointerSensor's 6px
   // activation distance keeps a plain click a select, not a drag. `isDragging`
@@ -393,13 +400,31 @@ function SessionSubItem({
                 <Cpu />
                 Change agent provider…
               </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={atTabCap || addingTab}
-                onClick={() => addTab(session.id)}
-              >
-                <Plus />
-                Add tab
-              </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
+                  <Plus />
+                  Add tab…
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {providers.map((p) => {
+                    const isDefault = p === defaultProvider
+                    return (
+                      <DropdownMenuItem
+                        key={p}
+                        onClick={() => addTab(session.id, p)}
+                      >
+                        {isDefault ? <Check /> : <Bot />}
+                        {p}
+                        {isDefault ? (
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            default
+                          </span>
+                        ) : null}
+                      </DropdownMenuItem>
+                    )
+                  })}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
               <DropdownMenuSeparator />
               {/* Startup command + env: these are project-scoped (no per-agent
                   env in dux), surfaced here for quick per-agent access mirroring

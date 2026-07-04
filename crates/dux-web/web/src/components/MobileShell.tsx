@@ -14,6 +14,7 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 import {
   Bot,
+  Check,
   ChevronLeft,
   Cpu,
   Ellipsis,
@@ -54,6 +55,9 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -65,7 +69,11 @@ import {
 } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { agentRowVisual } from "@/lib/agentRow"
-import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
+import {
+  defaultProviderForSession,
+  isExtraTabDormant,
+  shouldShowTabStrip,
+} from "@/lib/agentTabs"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
@@ -115,10 +123,12 @@ function SessionActions({ session }: { session: SessionView }) {
   // "Add tab" mirrors the desktop sidebar's menu item: it is reachable at ANY
   // tab count (including the common 1-tab case), since the in-strip "+" only
   // renders once a session already has two or more tabs.
-  const { bootstrap, createTabInFlight } = useDux()
+  const { bootstrap, spine, createTabInFlight } = useDux()
   const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const atTabCap = session.tabs.length >= tabCap
   const addingTab = createTabInFlight.includes(session.id)
+  const providers = bootstrap?.available_providers ?? []
+  const defaultProvider = defaultProviderForSession(spine, session)
 
   return (
     <DropdownMenuGroup>
@@ -143,13 +153,28 @@ function SessionActions({ session }: { session: SessionView }) {
         <Cpu />
         Change agent provider…
       </DropdownMenuItem>
-      <DropdownMenuItem
-        disabled={atTabCap || addingTab}
-        onClick={() => addTab(session.id)}
-      >
-        <Plus />
-        Add tab
-      </DropdownMenuItem>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
+          <Plus />
+          Add tab…
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          {providers.map((p) => {
+            const isDefault = p === defaultProvider
+            return (
+              <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
+                {isDefault ? <Check /> : <Bot />}
+                {p}
+                {isDefault ? (
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    default
+                  </span>
+                ) : null}
+              </DropdownMenuItem>
+            )
+          })}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleToggleAutoReopen}>
         <RefreshCw />

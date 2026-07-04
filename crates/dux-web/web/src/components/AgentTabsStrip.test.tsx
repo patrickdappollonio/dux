@@ -1,14 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
 let mockState: DuxState
+const addTabMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return {
+    ...actual,
+    useDux: () => mockState,
+    addTab: (...args: unknown[]) => addTabMock(...args),
+  }
 })
 
 function installBootStubs() {
@@ -30,6 +35,8 @@ const { AgentTabsStrip } = await import("./AgentTabsStrip")
 function session(): SessionView {
   return {
     id: "s1",
+    project_id: "p1",
+    provider: "claude",
     tabs: [
       { id: "s1", provider: "claude", order: 0, working: false, has_output: false, has_live_process: true },
       { id: "b2", provider: "codex", order: 1, working: false, has_output: false, has_live_process: true },
@@ -39,8 +46,12 @@ function session(): SessionView {
 
 beforeEach(() => {
   installBootStubs()
+  addTabMock.mockClear()
   mockState = {
-    bootstrap: { available_providers: ["claude", "codex"] },
+    bootstrap: { available_providers: ["claude", "codex", "opencode"] },
+    spine: {
+      projects: [{ id: "p1", default_provider: "codex" }],
+    },
     createTabInFlight: [],
   } as unknown as DuxState
 })
@@ -62,5 +73,38 @@ describe("AgentTabsStrip", () => {
   it("disables the New tab button at the per-agent cap", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={2} />)
     expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", true)
+  })
+
+  it("also disables the provider-picker caret at the per-agent cap", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={2} />)
+    expect(screen.getByLabelText("Choose provider for new tab")).toHaveProperty(
+      "disabled",
+      true,
+    )
+  })
+
+  it("clicking the main + quick-adds the project default provider (no provider arg)", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getByLabelText("New tab"))
+    expect(addTabMock).toHaveBeenCalledWith("s1")
+  })
+
+  it("the caret opens a menu listing configured providers with the default marked", async () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getByLabelText("Choose provider for new tab"))
+    const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText("claude")).toBeTruthy()
+    expect(menu.getByText("codex")).toBeTruthy()
+    expect(menu.getByText("opencode")).toBeTruthy()
+    // The project default (codex, per the mocked spine) is tagged "default".
+    expect(menu.getByText("default")).toBeTruthy()
+  })
+
+  it("picking a provider from the caret menu adds a tab targeting it", async () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    fireEvent.click(screen.getByLabelText("Choose provider for new tab"))
+    const menu = within(await screen.findByRole("menu"))
+    fireEvent.click(menu.getByText("opencode"))
+    expect(addTabMock).toHaveBeenCalledWith("s1", "opencode")
   })
 })

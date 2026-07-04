@@ -118,28 +118,57 @@ describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
   // Mirrors the desktop sidebar's fix: before it, the web had no way to reach a
   // session's first extra tab (the in-strip "+" only renders at 2+ tabs).
   it("is present and enabled for a session with only one tab, and calls addTab", () => {
-    mockState = makeState({ spine: makeSessionSpine(1) })
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude", "codex"],
+      },
+    })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Add tab")
+    const item = screen.getByText("Add tab…")
     expect(
       item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
     ).not.toBe("true")
-    fireEvent.click(item)
-    expect(addTabMock).toHaveBeenCalledWith("s1")
   })
 
   it("disables Add tab once the session is at the per-agent tab cap", () => {
     mockState = makeState({
       spine: makeSessionSpine(2),
-      bootstrap: { title: "dux", dux_version: "v1", agent_tabs_max: 2 },
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        agent_tabs_max: 2,
+        available_providers: ["claude", "codex"],
+      },
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Add tab")
+    const item = screen.getByText("Add tab…")
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
       "true",
     )
+  })
+
+  it("lists the configured providers with the project default marked, and picking one calls addTab", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude", "codex", "opencode"],
+      },
+    })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    fireEvent.click(screen.getByText("Add tab…"))
+    // makeSessionSpine's project default_provider is "claude".
+    expect(screen.getByText("default")).toBeTruthy()
+    expect(screen.getByText("codex")).toBeTruthy()
+    fireEvent.click(screen.getByText("codex"))
+    expect(addTabMock).toHaveBeenCalledWith("s1", "codex")
   })
 })
 
