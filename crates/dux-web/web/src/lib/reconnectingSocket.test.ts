@@ -17,7 +17,7 @@ class FakeWS {
   binaryType = ""
   readyState = 0
   onopen: (() => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((e: { code: number }) => void) | null = null
   onerror: ((e: unknown) => void) | null = null
   onmessage: ((e: { data: unknown }) => void) | null = null
 
@@ -28,9 +28,9 @@ class FakeWS {
 
   send(): void {}
 
-  close(): void {
+  close(code = 1000): void {
     this.readyState = 3
-    this.onclose?.()
+    this.onclose?.({ code })
   }
 
   open(): void {
@@ -38,9 +38,9 @@ class FakeWS {
     this.onopen?.()
   }
 
-  triggerClose(): void {
+  triggerClose(code = 1006): void {
     this.readyState = 3
-    this.onclose?.()
+    this.onclose?.({ code })
   }
 }
 
@@ -66,7 +66,8 @@ class TestSocket extends ReconnectingSocket {
     this.messages.push(event.data)
   }
 
-  protected shouldReconnect(): boolean {
+  protected shouldReconnect(closeCode: number): boolean {
+    void closeCode
     return this.retry
   }
 

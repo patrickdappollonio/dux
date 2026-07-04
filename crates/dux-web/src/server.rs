@@ -18,7 +18,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
@@ -562,6 +562,37 @@ const FORWARDER_POLL: std::time::Duration = std::time::Duration::from_millis(250
 /// blocking task would loop forever, leaking a blocking-pool thread per focus-switch/disconnect.
 /// Breaking on `is_closed` ends the blocking reader within one poll window of the socket dropping,
 /// which in turn drops the std `Receiver` so the owning `PtyClient` prunes the stale subscriber.
+/// WebSocket close code (application-private range 4000-4999, so it can never
+/// collide with a protocol close code) the server sends on a PTY socket when the
+/// provider is not available to attach to — it failed to launch (e.g. the CLI is
+/// not on PATH) or its process has exited/crashed. It tells the client NOT to
+/// auto-retry: a re-subscribe would just relaunch the doomed provider, so the
+/// client stops and surfaces a Reconnect affordance instead of looping. Must
+/// match `PROVIDER_UNAVAILABLE_CLOSE` in `crates/dux-web/web/src/lib/ptySocket.ts`.
+const PROVIDER_GONE_CLOSE_CODE: u16 = 4001;
+
+/// The "provider unavailable, do not retry" close message (see
+/// [`PROVIDER_GONE_CLOSE_CODE`]).
+fn provider_gone_close() -> Message {
+    Message::Close(Some(CloseFrame {
+        code: PROVIDER_GONE_CLOSE_CODE,
+        reason: "provider unavailable".into(),
+    }))
+}
+
+/// The close to send when a PTY forwarder ends. During server shutdown it is a
+/// plain close so the client reconnects once the server returns; otherwise the
+/// forwarder ended because the PTY was torn down (the provider crashed/exited, or
+/// a tab/agent was closed), which is a provider-gone close so the client does not
+/// relaunch it.
+fn forwarder_end_close(shutting_down: bool) -> Message {
+    if shutting_down {
+        Message::Close(None)
+    } else {
+        provider_gone_close()
+    }
+}
+
 fn spawn_pty_forwarder(
     sink: SharedSink,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
@@ -1125,14 +1156,16 @@ async fn handle_pty_socket(
         Ok(sub) => sub,
         Err(e) => {
             // Subscribe failed after the upgrade (e.g. the agent failed to launch,
-            // or the terminal vanished in the gap). Best-effort Close, then exit.
+            // or the terminal vanished in the gap). Close with the provider-gone
+            // code so the client stops instead of reconnecting and re-launching
+            // the doomed provider forever.
             dux_core::logger::warn(&format!(
                 "PTY socket subscribe failed for {peer_ip} (pty {:?}): {e}",
                 target.pty_id()
             ));
             {
                 let mut guard = sink.lock().await;
-                let _ = guard.send(Message::Close(None)).await;
+                let _ = guard.send(provider_gone_close()).await;
             }
             console.client_disconnected(peer_ip);
             return;
@@ -1189,8 +1222,15 @@ async fn handle_pty_socket(
             // client to close and tear down our own loop the same way a
             // client-initiated Close would.
             _ = &mut pty_forwarder => {
+                // The PTY was torn down server-side. If we are shutting down the
+                // client should reconnect when the server returns (plain close);
+                // otherwise the provider crashed/exited or its tab/agent closed, so
+                // send the provider-gone code to stop the client relaunching it.
+                let shutting_down = engine
+                    .shutdown_flag()
+                    .load(std::sync::atomic::Ordering::SeqCst);
                 let mut guard = sink.lock().await;
-                let _ = guard.send(Message::Close(None)).await;
+                let _ = guard.send(forwarder_end_close(shutting_down)).await;
                 break;
             }
             next = stream.next() => match next {
@@ -2044,6 +2084,33 @@ impl Drop for ConnectionGuard {
 mod tests {
     use super::*;
     use tower::ServiceExt; // for `oneshot`
+
+    #[test]
+    fn provider_gone_close_carries_the_agreed_code() {
+        // The client (`ptySocket.ts`) keys its "stop retrying" behavior off this
+        // exact code, so it must stay 4001 and ride a real CloseFrame.
+        match provider_gone_close() {
+            Message::Close(Some(frame)) => {
+                assert_eq!(frame.code, PROVIDER_GONE_CLOSE_CODE);
+                assert_eq!(frame.code, 4001);
+            }
+            other => panic!("expected a Close frame with a code, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forwarder_end_close_is_provider_gone_unless_shutting_down() {
+        // A provider crash/exit (not shutting down) must tell the client to stop;
+        // a shutdown must be a plain close so the client reconnects on restart.
+        match forwarder_end_close(false) {
+            Message::Close(Some(frame)) => assert_eq!(frame.code, PROVIDER_GONE_CLOSE_CODE),
+            other => panic!("expected provider-gone close, got {other:?}"),
+        }
+        match forwarder_end_close(true) {
+            Message::Close(None) => {}
+            other => panic!("expected a plain close on shutdown, got {other:?}"),
+        }
+    }
 
     /// Boot a minimal headless engine handle for routing-only tests. The handle
     /// just needs to exist — the gated request 401s before it ever reaches the

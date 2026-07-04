@@ -23,6 +23,15 @@
 
 import { ReconnectingSocket } from "./reconnectingSocket"
 
+// The WebSocket close code the server sends on a PTY socket when the provider is
+// not available to attach to — it failed to launch (e.g. the CLI is not on PATH)
+// or its process has exited/crashed. It means "do not auto-retry": re-subscribing
+// would just relaunch the doomed provider, so the client stops and surfaces the
+// Reconnect affordance instead of looping. Must match `PROVIDER_GONE_CLOSE_CODE`
+// in `crates/dux-web/src/server.rs`. 4001 is in the application-private range
+// (4000-4999) so it can never collide with a protocol close code.
+export const PROVIDER_UNAVAILABLE_CLOSE = 4001
+
 // Derive the WebSocket scheme from the page protocol so an HTTPS deployment uses
 // `wss://` (a hardcoded `ws://` would be blocked as mixed content under HTTPS).
 // Read at call time (not module load) so the URL builders are safe to import in
@@ -139,10 +148,19 @@ export class PtySocket extends ReconnectingSocket {
     }
   }
 
-  // A gone route is a hard stop, not a transient drop: fire `onGone` once and tell
-  // the base not to schedule a reconnect. Every other PTY drop reconnects normally
-  // (the default) up to the shared attempt cap.
-  protected shouldReconnect(): boolean {
+  // A hard stop, not a transient drop, in two cases; otherwise reconnect normally
+  // (up to the shared attempt cap).
+  protected shouldReconnect(closeCode: number): boolean {
+    // 1. The server closed with the provider-unavailable code: the provider
+    //    failed to launch or has exited, so re-subscribing would only relaunch a
+    //    doomed provider. Surface the same stop state as hitting the cap (the pane
+    //    shows Reconnect; a manual reconnect resets the budget) and do not retry.
+    if (closeCode === PROVIDER_UNAVAILABLE_CLOSE) {
+      this.onConn("failed")
+      return false
+    }
+    // 2. The underlying route is gone (e.g. an extra tab another client deleted
+    //    while this one was retrying): fire `onGone` once and stop.
     if (!this.shouldRetry()) {
       this.onGone()
       return false

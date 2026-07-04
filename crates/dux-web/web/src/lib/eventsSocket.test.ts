@@ -13,7 +13,7 @@ class FakeWS {
   readyState = 0
   sent: string[] = []
   onopen: (() => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((e: { code: number }) => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
 
@@ -26,9 +26,9 @@ class FakeWS {
     this.sent.push(data)
   }
 
-  close(): void {
+  close(code = 1000): void {
     this.readyState = 3
-    this.onclose?.()
+    this.onclose?.({ code })
   }
 
   // Drive the lifecycle from the test.
@@ -41,9 +41,9 @@ class FakeWS {
     this.onmessage?.({ data: JSON.stringify(obj) })
   }
 
-  triggerClose(): void {
+  triggerClose(code = 1006): void {
     this.readyState = 3
-    this.onclose?.()
+    this.onclose?.({ code })
   }
 }
 

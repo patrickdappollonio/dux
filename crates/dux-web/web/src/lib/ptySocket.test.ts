@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  PROVIDER_UNAVAILABLE_CLOSE,
   PtySocket,
   agentPtyUrl,
   getActivePtySocket,
@@ -23,7 +24,7 @@ class FakeWS {
   // Sent frames: strings (resize) and ArrayBuffers (stdin), in order.
   sent: (string | ArrayBuffer)[] = []
   onopen: (() => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((e: { code: number }) => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((e: { data: string | ArrayBuffer }) => void) | null = null
 
@@ -36,9 +37,9 @@ class FakeWS {
     this.sent.push(data)
   }
 
-  close(): void {
+  close(code = 1000): void {
     this.readyState = 3
-    this.onclose?.()
+    this.onclose?.({ code })
   }
 
   // Drive the lifecycle from the test.
@@ -52,9 +53,10 @@ class FakeWS {
     this.onmessage?.({ data: new Uint8Array(bytes).buffer })
   }
 
-  triggerClose(): void {
+  // Close with a code; default 1006 (abnormal) models a transient transport drop.
+  triggerClose(code = 1006): void {
     this.readyState = 3
-    this.onclose?.()
+    this.onclose?.({ code })
   }
 }
 
@@ -253,6 +255,39 @@ describe("PtySocket", () => {
     const count = FakeWS.instances.length
     vi.advanceTimersByTime(60000)
     expect(FakeWS.instances.length).toBe(count)
+  })
+
+  it("stops without retrying when the server closes with the provider-unavailable code", () => {
+    // The provider failed to launch (missing CLI) or crashed/exited: the server
+    // closes with PROVIDER_UNAVAILABLE_CLOSE, meaning "do not retry". Re-subscribing
+    // would relaunch the doomed provider, so the socket must stop on the FIRST
+    // such close (not loop) and surface the give-up state for the Reconnect
+    // affordance — no attempt cap needed.
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    const states: ConnState[] = []
+    sock.onConn = (s) => states.push(s)
+    sock.connect()
+    last().open()
+    const before = FakeWS.instances.length
+    last().triggerClose(PROVIDER_UNAVAILABLE_CLOSE)
+    // No reconnect scheduled, ever, and the pane's give-up state is signalled.
+    vi.advanceTimersByTime(60000)
+    expect(FakeWS.instances.length).toBe(before)
+    expect(states.at(-1)).toBe("failed")
+  })
+
+  it("still retries after an ordinary transient close (not the provider-unavailable code)", () => {
+    // A plain transport drop (code 1006) is transient — the provider may still be
+    // alive server-side — so the socket reconnects to re-attach, exactly like the
+    // events socket.
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    last().triggerClose(1006)
+    vi.advanceTimersByTime(600)
+    expect(FakeWS.instances.length).toBe(2)
   })
 
   it("a manual connect() after 'failed' resets the budget and retries", () => {

@@ -95,8 +95,12 @@ export abstract class ReconnectingSocket {
       // mutate shared connection state. A late callback from a socket a newer
       // open() already replaced must be inert.
       if (this.ws !== ws) return
-      this.reconnectDelay = RECONNECT_MIN_MS
-      this.attempts = 0
+      // A successful open means the connection is usable again, so refill the
+      // retry budget: the next drop starts a fresh retry schedule. A definitive
+      // failure where the socket opens but is not usable — a PTY whose provider
+      // failed to launch or has exited — is signalled by an explicit server close
+      // code and handled in `onclose`/`shouldReconnect`, not by withholding this.
+      this.markHealthy()
       this.onSocketOpen()
       this.onConn("open")
       this.onOpen()
@@ -107,7 +111,7 @@ export abstract class ReconnectingSocket {
       this.handleMessage(event)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       // Only the live socket nulls the shared ref and drives reconnect. Without
       // this identity check an orphan's close would null the live `this.ws`,
       // silently dropping every later outbound frame.
@@ -115,7 +119,13 @@ export abstract class ReconnectingSocket {
       this.ws = null
       this.onConn("closed")
       if (this.closedByUser) return
-      if (!this.shouldReconnect()) return
+      // The close carries a code. A server may close with an app-specific code to
+      // say "do not retry" — e.g. a PTY whose provider failed to launch or has
+      // exited, where re-subscribing would just relaunch the doomed provider.
+      // shouldReconnect() inspects the code and, for such a terminal close,
+      // surfaces the stop state and returns false. Any other close (a transient
+      // transport drop, typically code 1006) retries up to the shared cap.
+      if (!this.shouldReconnect(event.code)) return
       this.scheduleReconnect()
     }
 
@@ -158,6 +168,16 @@ export abstract class ReconnectingSocket {
     this.ws?.close()
   }
 
+  // Refill the reconnect budget (attempt count + backoff) — call when the
+  // connection is confirmed usable so the next drop starts a fresh retry
+  // schedule from the minimum delay. The base calls this from `onopen` for
+  // sockets whose open proves usability; a subclass whose open does not (the PTY
+  // socket) calls it directly from its own readiness signal instead.
+  protected markHealthy(): void {
+    this.reconnectDelay = RECONNECT_MIN_MS
+    this.attempts = 0
+  }
+
   // ---- Subclass extension hooks ----------------------------------------------
 
   // Tweak the freshly-constructed WebSocket before handlers are attached (e.g.
@@ -177,10 +197,12 @@ export abstract class ReconnectingSocket {
   // (PTY bytes) from the text `connected` handshake.
   protected abstract handleMessage(event: MessageEvent): void
 
-  // Consulted on every unexpected close, before scheduling a reconnect. Returning
-  // `false` stops the loop for good (PtySocket uses it for a deleted extra tab's
-  // now-gone route). Default: always reconnect.
-  protected shouldReconnect(): boolean {
+  // Consulted on every unexpected close, before scheduling a reconnect, with the
+  // close code. Returning `false` stops the loop for good (PtySocket uses it for a
+  // deleted extra tab's now-gone route and for a server "provider unavailable"
+  // close code). Default: always reconnect, whatever the code.
+  protected shouldReconnect(closeCode: number): boolean {
+    void closeCode
     return true
   }
 
