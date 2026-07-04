@@ -60,14 +60,28 @@ export async function fetchSpine(): Promise<Spine> {
       resp.status,
     )
   }
-  // Coerce each session's `tabs` to an array at the single ingestion boundary: an
-  // older server (e.g. after a binary downgrade, seen by an already-open client)
-  // omits the field, and every downstream consumer treats `tabs` as required.
+  // Coerce optional-on-the-wire session fields to their required shapes at the
+  // single ingestion boundary. An older server (e.g. after a binary downgrade,
+  // seen by an already-open client) omits `tabs`, `initial_branch`, and
+  // `source_branch`, but every downstream consumer treats them as required: `tabs`
+  // becomes `[]` and the two branch fields become `""` (falsy, so the
+  // "Unknown"/no-drift fallbacks in the info dialog and header still apply).
   const raw = (await resp.json()) as Omit<Spine, "sessions"> & {
-    sessions: Array<Omit<SessionView, "tabs"> & { tabs?: AgentTabView[] }>
+    sessions: Array<
+      Omit<SessionView, "tabs" | "initial_branch" | "source_branch"> & {
+        tabs?: AgentTabView[]
+        initial_branch?: string
+        source_branch?: string
+      }
+    >
   }
   return {
     ...raw,
-    sessions: raw.sessions.map((s) => ({ ...s, tabs: s.tabs ?? [] })),
+    sessions: raw.sessions.map((s) => ({
+      ...s,
+      tabs: s.tabs ?? [],
+      initial_branch: s.initial_branch ?? "",
+      source_branch: s.source_branch ?? "",
+    })),
   }
 }

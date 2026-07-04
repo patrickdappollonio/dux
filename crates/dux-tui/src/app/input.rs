@@ -7224,6 +7224,81 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn open_agent_info_with_selection_opens_prompt() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.open_agent_info().unwrap();
+
+        assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
+        // Opening the read-only modal drops any interactive/fullscreen surface.
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+    }
+
+    #[test]
+    fn open_agent_info_without_selection_sets_error() {
+        let mut app = test_app(default_bindings());
+        // Point selection at the project header row (index 0), not a session.
+        app.selected_left = 0;
+        assert!(app.selected_session().is_none());
+
+        app.open_agent_info().unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("No agent session selected"));
+    }
+
+    #[test]
+    fn agent_info_prompt_esc_enter_space_dismiss() {
+        // Esc (CloseOverlay), Enter (Confirm), and Space (focused Close button)
+        // all return the read-only modal to PromptState::None.
+        for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char(' ')] {
+            let mut app = test_app(default_bindings());
+            app.open_agent_info().unwrap();
+            assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
+
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+
+            assert!(
+                matches!(app.prompt, PromptState::None),
+                "{code:?} should dismiss the Agent Info modal"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_info_prompt_mouse_close_dismisses() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.open_agent_info().unwrap();
+
+        // Render once so the overlay layout (the Close button rect) is populated.
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let OverlayMouseLayout::AgentInfo { close_button } = app.overlay_layout.active else {
+            panic!("expected AgentInfo overlay layout after render");
+        };
+        let cx = close_button.x + close_button.width / 2;
+        let cy = close_button.y + close_button.height / 2;
+
+        // A full click (Down then Up) on the Close button dismisses the modal.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), cx, cy));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), cx, cy));
+
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
     fn configure_startup_command_edit_mode_keeps_enter_in_input() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfigureStartupCommand {

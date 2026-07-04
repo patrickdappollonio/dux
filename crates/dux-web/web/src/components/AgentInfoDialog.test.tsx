@@ -6,9 +6,10 @@ import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
 let mockState: DuxState
+const closeAgentInfoSpy = vi.hoisted(() => vi.fn())
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return { ...actual, useDux: () => mockState, closeAgentInfo: closeAgentInfoSpy }
 })
 
 function installBootStubs() {
@@ -74,6 +75,7 @@ function renderDialogOpenFor(session: Partial<SessionView>) {
 
 beforeEach(() => {
   installBootStubs()
+  closeAgentInfoSpy.mockClear()
 })
 
 afterEach(() => {
@@ -106,6 +108,35 @@ describe("AgentInfoDialog", () => {
       initial_branch: "server-mode",
       source_branch: "main",
     })
+    expect(screen.queryByText(/changed since creation/i)).toBeNull()
+  })
+
+  it("closes when the target session is no longer in the spine", () => {
+    // The dialog's target points at an id absent from `spine.sessions` (the agent
+    // was removed while the dialog was open). The vanished-target effect fires
+    // `closeAgentInfo` so the modal doesn't linger pointing at a gone agent.
+    mockState = {
+      agentInfoTarget: "gone",
+      spine: {
+        projects: [{ id: "p1", name: "Repo" }],
+        sessions: [{ ...base } as unknown as SessionView],
+      },
+    } as unknown as DuxState
+    render(<AgentInfoDialog />)
+    expect(closeAgentInfoSpy).toHaveBeenCalled()
+  })
+
+  it("shows the Unknown fallback and no drift note for a legacy session", () => {
+    // An older server omits the branch fields (coerced to "" at ingestion).
+    renderDialogOpenFor({
+      title: "server-mode",
+      branch_name: "server-mode",
+      initial_branch: "",
+      source_branch: "",
+    })
+    // Both the Original branch and Forked from rows fall back to "Unknown".
+    expect(screen.getAllByText("Unknown").length).toBe(2)
+    // No drift note when the original branch is absent.
     expect(screen.queryByText(/changed since creation/i)).toBeNull()
   })
 })

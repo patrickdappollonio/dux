@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 
+import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Dialog,
@@ -8,28 +9,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { formatAddedDate } from "@/lib/projectInfo"
+import { branchDrift } from "@/lib/agentTabs"
+import { formatDisplayDate } from "@/lib/projectInfo"
 import { closeAgentInfo, useDux } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
-
-// One labelled row in the definition list. The value column is allowed to wrap
-// (paths, branch names) so long values stay readable on phones. Mirrors the
-// `InfoRow` in `ProjectInfoDialog` verbatim so the two info modals stay visually
-// identical.
-function InfoRow({
-  label,
-  children,
-}: {
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1 max-sm:grid-cols-1">
-      <dt className="text-sm text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-sm">{children}</dd>
-    </div>
-  )
-}
 
 // Friendly label for a session status. The raw value is a lowercase enum
 // ("active" | "detached" | "exited"); title-case it for display.
@@ -72,12 +55,10 @@ export function AgentInfoDialog() {
   if (session) {
     const name = session.title || session.branch_name
     const project = spine?.projects.find((p) => p.id === session.project_id)
-    // The current branch has drifted from the branch the agent was born on. Only
-    // flag it when `initial_branch` is present (older servers omit it) and truly
-    // differs.
-    const drifted =
-      !!session.initial_branch &&
-      session.initial_branch !== session.branch_name
+    // The current branch has drifted from the branch the agent was born on. The
+    // shared helper flags it only when `initial_branch` is present (older servers
+    // omit it) and truly differs.
+    const { drifted } = branchDrift(session)
     const tabCount = session.tabs.length
     body = (
       <dl className="flex flex-col gap-3">
@@ -122,8 +103,12 @@ export function AgentInfoDialog() {
           <span className="font-mono break-all">{session.worktree_path}</span>
         </InfoRow>
         <InfoRow label="Status">{statusLabel(session.status)}</InfoRow>
-        <InfoRow label="Created">{formatAddedDate(session.created_at)}</InfoRow>
-        <InfoRow label="Updated">{formatAddedDate(session.updated_at)}</InfoRow>
+        <InfoRow label="Created">
+          {formatDisplayDate(session.created_at)}
+        </InfoRow>
+        <InfoRow label="Updated">
+          {formatDisplayDate(session.updated_at)}
+        </InfoRow>
         <InfoRow label="Tabs">
           {tabCount === 1 ? "1 tab" : `${tabCount} tabs`}
         </InfoRow>

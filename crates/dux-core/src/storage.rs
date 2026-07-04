@@ -103,34 +103,46 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
-        // Freeze each existing agent's currently-displayed name into `title` so
-        // it can never drift with the branch again. Historically `title` was left
-        // NULL on create (only later renames wrote it), so the display fell back
-        // to `branch_name` — which the branch-sync poller overwrites. Copying the
-        // current branch into any NULL title makes the displayed name durable
-        // identity. Idempotent: the `title IS NULL` guard means it is a no-op once
-        // filled. Auto pet-name agents get their pet name frozen (harmless).
-        self.conn.execute(
-            "update agent_sessions set title = branch_name where title is null",
-            [],
-        )?;
         // The immutable branch an agent was created on. Additive column with a ''
         // default so old rows and inserts by an older binary still succeed.
-        ensure_column(
+        let initial_branch_added = ensure_column(
             &self.conn,
             "agent_sessions",
             "initial_branch",
             "text not null default ''",
         )?;
-        // Backfill the birth branch for pre-existing rows. The true original may
-        // already be lost to prior drift, so freeze the current branch as the
-        // recorded initial (best available). New agents record their genuine
-        // original at creation. Idempotent via the empty/NULL guard.
-        self.conn.execute(
-            "update agent_sessions set initial_branch = branch_name \
-             where initial_branch = '' or initial_branch is null",
-            [],
-        )?;
+        // Two ONE-TIME backfills, gated on the FIRST appearance of the
+        // `initial_branch` column (the new column shipped in this release) so
+        // they run exactly once — mirroring the gated `sort_order` backfill
+        // below. `migrate()` runs on every `open()`, which happens on every
+        // startup AND every background project-persistence / config-reload; an
+        // unconditional `title` backfill would therefore re-freeze the
+        // intentionally-NULL `title` of every auto-named agent on each open,
+        // silently pinning it so the display can no longer track the branch.
+        if initial_branch_added {
+            // Freeze each existing agent's currently-displayed name into `title`
+            // so it can never drift with the branch again. Historically `title`
+            // was left NULL on create (only later renames wrote it), so the
+            // display fell back to `branch_name` — which the branch-sync poller
+            // overwrites. Copying the current branch into any NULL title makes the
+            // displayed name durable identity. Auto pet-name agents get their pet
+            // name frozen too; that is intentional here to protect existing named
+            // agents on the one-time upgrade. The `title IS NULL` guard means only
+            // legacy rows are touched.
+            self.conn.execute(
+                "update agent_sessions set title = branch_name where title is null",
+                [],
+            )?;
+            // Backfill the birth branch for pre-existing rows. The true original
+            // may already be lost to prior drift, so freeze the current branch as
+            // the recorded initial (best available). New agents record their
+            // genuine original at creation.
+            self.conn.execute(
+                "update agent_sessions set initial_branch = branch_name \
+                 where initial_branch = '' or initial_branch is null",
+                [],
+            )?;
+        }
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
             &self.conn,
@@ -1475,6 +1487,80 @@ mod tests {
         let loaded = store.load_sessions().unwrap();
         let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
         assert_eq!(s.initial_branch, "feat-x");
+    }
+
+    #[test]
+    fn second_migrate_does_not_freeze_a_null_title_inserted_after_upgrade() {
+        // Regression: the title/initial_branch backfills must run EXACTLY ONCE
+        // (when the initial_branch column is first added), not on every open().
+        // A store built by legacy_store_with_sessions has already migrated once,
+        // so the initial_branch column now exists. Insert a fresh auto-named
+        // agent (title NULL — intentionally, so its display tracks the branch),
+        // then migrate() again (simulating a later startup / config reload). The
+        // second migration must NOT re-run the backfill and freeze the NULL title.
+        let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
+        let mut fresh = test_session("auto-named", Utc::now(), Utc::now());
+        fresh.project_id = "p1".into();
+        fresh.branch_name = "pet-name".into();
+        fresh.title = None;
+        store.upsert_session(&fresh).unwrap();
+
+        // A second open()/migrate() must be a no-op for the backfills.
+        store.migrate().unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let s = loaded.iter().find(|s| s.id == "auto-named").expect("row");
+        assert_eq!(
+            s.title, None,
+            "a NULL title inserted after the one-time upgrade must not be frozen"
+        );
+    }
+
+    #[test]
+    fn migration_never_overwrites_an_existing_non_null_title() {
+        // A legacy row that already carries a user-authored title must keep it
+        // through the one-time backfill (the `title IS NULL` guard protects it).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            create table agent_sessions (
+                id text primary key,
+                project_id text not null,
+                provider text not null,
+                source_branch text not null,
+                branch_name text not null,
+                worktree_path text not null,
+                title text,
+                project_path text,
+                status text not null,
+                created_at text not null,
+                updated_at text not null
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            insert into agent_sessions (
+                id, project_id, provider, source_branch, branch_name,
+                worktree_path, title, project_path, status, created_at, updated_at
+            ) values ('id1', 'p1', 'claude', 'main', 'feat-x', '/tmp/x',
+                      'My Named Agent', null, 'detached',
+                      '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+            "#,
+            [],
+        )
+        .unwrap();
+        let store = SessionStore { conn };
+        store.migrate().unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let s = loaded.iter().find(|s| s.id == "id1").expect("row");
+        assert_eq!(
+            s.title.as_deref(),
+            Some("My Named Agent"),
+            "an already-set title must never be overwritten by the backfill"
+        );
     }
 
     /// Builds a legacy `agent_sessions` table (no `sort_order` column) and seeds

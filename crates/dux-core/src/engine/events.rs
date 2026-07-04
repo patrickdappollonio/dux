@@ -27,17 +27,37 @@ use crate::worker::{
     ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats, WorkerEvent,
 };
 
-/// Log line for an intentional branch rename: the new branch, the branch it
-/// replaced, and the agent's immutable original branch (for lineage context).
-pub(crate) fn branch_rename_log_line(new: &str, previous: &str, original: &str) -> String {
-    format!("renaming branch to {new} from {previous} (original branch name was {original})")
+/// Log line for an intentional branch rename: the session identifier plus the
+/// new branch, the branch it replaced, and the agent's immutable original branch
+/// (for lineage context). Past tense — this fires AFTER the git rename
+/// succeeded (`BranchRenameCompleted { Ok }`). `label` carries the agent's
+/// display name (title, or branch when unnamed) for greppable context.
+pub(crate) fn branch_rename_log_line(
+    session_id: &str,
+    label: &str,
+    new: &str,
+    previous: &str,
+    original: &str,
+) -> String {
+    format!(
+        "[{session_id}] agent \"{label}\" renamed branch to {new} from {previous} (original branch name was {original})"
+    )
 }
 
 /// Log line for an *external* branch change picked up by the branch-sync poller
 /// (something ran `git checkout -b` in the worktree). Written at warning tone so
-/// the exact drift scenario is greppable in `dux.log`.
-pub(crate) fn branch_drift_log_line(new: &str, previous: &str, original: &str) -> String {
-    format!("agent branch changed externally to {new} from {previous} (original was {original})")
+/// the exact drift scenario is greppable in `dux.log`. Includes the session
+/// identifier and display label the code it replaced logged.
+pub(crate) fn branch_drift_log_line(
+    session_id: &str,
+    label: &str,
+    new: &str,
+    previous: &str,
+    original: &str,
+) -> String {
+    format!(
+        "[{session_id}] agent \"{label}\" branch changed externally to {new} from {previous} (original was {original})"
+    )
 }
 
 /// Status-line update returned from the Engine for the App to apply.
@@ -1848,7 +1868,10 @@ impl Engine {
                             // touched here.
                             let previous = session.branch_name.clone();
                             let original = session.initial_branch.clone();
+                            let label = session_label(session);
                             logger::info(&branch_rename_log_line(
+                                &session.id,
+                                &label,
                                 &new_branch,
                                 &previous,
                                 &original,
@@ -1881,6 +1904,10 @@ impl Engine {
                         }
                     }
                 }
+                // Clear the in-flight-rename guard set at dispatch, on BOTH
+                // outcomes: the rename is over, so a subsequent `BranchSyncReady`
+                // should resume classifying real external drift for this session.
+                self.clear_in_flight(&InFlightKey::BranchRename(session_id.clone()));
                 EventReaction::Multi(vec![
                     EventReaction::RebuildLeftItems,
                     status.into_reaction(),
@@ -1889,6 +1916,17 @@ impl Engine {
             WorkerEvent::BranchSyncReady(updates) => {
                 let mut changed = false;
                 for (session_id, actual_branch) in updates {
+                    // In-flight-rename guard: the branch-sync poller can observe
+                    // the user's OWN in-progress rename and would otherwise
+                    // classify it as external drift — logging a false warning and,
+                    // if it lands before `BranchRenameCompleted`, reading a
+                    // corrupted `previous` (the already-updated branch). Skip any
+                    // session currently mid-rename entirely (no mutation, no warn);
+                    // `BranchRenameCompleted` clears the marker and writes the
+                    // authoritative branch. Check before the mutable borrow below.
+                    if self.is_in_flight(&InFlightKey::BranchRename(session_id.clone())) {
+                        continue;
+                    }
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
                         && session.branch_name != actual_branch
                     {
@@ -1899,7 +1937,14 @@ impl Engine {
                         // name-vs-branch scenario is greppable in the log.
                         let previous = session.branch_name.clone();
                         let original = session.initial_branch.clone();
-                        logger::warn(&branch_drift_log_line(&actual_branch, &previous, &original));
+                        let label = session_label(session);
+                        logger::warn(&branch_drift_log_line(
+                            &session.id,
+                            &label,
+                            &actual_branch,
+                            &previous,
+                            &original,
+                        ));
                         session.branch_name = actual_branch;
                         session.updated_at = Utc::now();
                         if let Err(err) = self.session_store.upsert_session(session) {
@@ -2763,21 +2808,62 @@ mod tests {
     }
 
     #[test]
-    fn rename_log_line_includes_new_previous_and_original() {
-        let msg = branch_rename_log_line("XYZ", "ABC", "DEF");
+    fn rename_log_line_includes_session_id_new_previous_and_original() {
+        let msg = branch_rename_log_line("sess-1", "My Agent", "XYZ", "ABC", "DEF");
+        // Past tense (fires after the git rename succeeded) and carries the
+        // session identifier + label the code it replaced logged.
         assert_eq!(
             msg,
-            "renaming branch to XYZ from ABC (original branch name was DEF)"
+            "[sess-1] agent \"My Agent\" renamed branch to XYZ from ABC (original branch name was DEF)"
         );
+        assert!(msg.contains("sess-1"));
+        assert!(msg.contains("renamed"));
+        assert!(!msg.contains("renaming"));
     }
 
     #[test]
-    fn drift_log_line_includes_new_previous_and_original() {
-        let msg = branch_drift_log_line("agent-tabs", "server-mode", "server-mode");
+    fn drift_log_line_includes_session_id_new_previous_and_original() {
+        let msg = branch_drift_log_line(
+            "sess-1",
+            "My Agent",
+            "agent-tabs",
+            "server-mode",
+            "server-mode",
+        );
         assert_eq!(
             msg,
-            "agent branch changed externally to agent-tabs from server-mode (original was server-mode)"
+            "[sess-1] agent \"My Agent\" branch changed externally to agent-tabs from server-mode (original was server-mode)"
         );
+        assert!(msg.contains("sess-1"));
+    }
+
+    #[test]
+    fn branch_sync_skips_session_with_rename_in_flight() {
+        // F-D: a session whose own rename is mid-flight must not be treated as
+        // external drift by the branch-sync poller — no mutation, no warn.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "server-mode");
+        session.initial_branch = "server-mode".into();
+        engine.sessions.push(session);
+        // Simulate the dispatch marker set by `apply_rename_session`.
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+
+        // The poller observes the (about-to-be) renamed branch first.
+        let reaction = engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "agent-tabs".to_string(),
+        )]));
+
+        // Nothing changed: the guard skipped the session entirely.
+        assert!(matches!(reaction, EventReaction::Nothing));
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(
+            s.branch_name, "server-mode",
+            "the mid-rename session's branch must not be mutated by branch-sync"
+        );
+        // The session store was never upserted for s1 (no drift persisted).
+        let loaded = engine.session_store.load_sessions().expect("load");
+        assert!(loaded.iter().all(|s| s.id != "s1"));
     }
 
     // ── ChangedFilesReady (stale-poll race / CF1 invariant) ──────────────

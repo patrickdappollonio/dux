@@ -1,6 +1,6 @@
-// Pure helpers backing the read-only "Project info…" modal. Kept React-free so
-// they're trivially unit-testable. Both compute purely from the ViewModel — no
-// wire commands, no git reads.
+// Pure helpers backing the read-only info modals (project and agent). Kept
+// React-free so they're trivially unit-testable. All compute purely from the
+// ViewModel — no wire commands, no git reads.
 
 import type { SessionView } from "./types"
 
@@ -26,11 +26,12 @@ export function projectLiveCounts(
   return { agents, terminals }
 }
 
-// Format an RFC 3339 / ISO 8601 timestamp as a human-readable "added" date
-// (e.g. "Feb 3, 2026"). Returns "Unknown" for an empty string (a project with
-// no store row yet) or an unparseable value, so the modal never renders a raw
-// ISO string or "Invalid Date".
-export function formatAddedDate(iso: string): string {
+// Format an RFC 3339 / ISO 8601 timestamp as a human-readable date
+// (e.g. "Feb 3, 2026"). A shared date formatter for the info modals (project
+// "Added", agent "Created"/"Updated"). Returns "Unknown" for an empty string (a
+// record with no store row yet) or an unparseable value, so the modal never
+// renders a raw ISO string or "Invalid Date".
+export function formatDisplayDate(iso: string): string {
   if (iso.trim() === "") return "Unknown"
   const ms = Date.parse(iso)
   if (Number.isNaN(ms)) return "Unknown"

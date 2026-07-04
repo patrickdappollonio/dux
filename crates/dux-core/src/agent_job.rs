@@ -811,11 +811,11 @@ mod tests {
         }
     }
 
-    /// Drive `run_create_agent_job` for a `NewProject` request and return the
-    /// `AgentSession` the job constructed (extracted from the terminal
-    /// `AgentLaunchReady` event).
-    fn create_session_for(custom_name: Option<String>) -> AgentSession {
-        let repo = init_test_repo();
+    /// Drive `run_create_agent_job` for an arbitrary request against `repo` and
+    /// return the `AgentSession` the job constructed (extracted from the terminal
+    /// `AgentLaunchReady` event). Panics with the failure message if the job
+    /// emits `CreateAgentFailed` instead.
+    fn drive_create_job(repo: &Path, request: CreateAgentRequest) -> AgentSession {
         let paths_root = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             root: paths_root.path().to_path_buf(),
@@ -826,13 +826,7 @@ mod tests {
         };
         std::fs::create_dir_all(&paths.worktrees_root).unwrap();
 
-        let project = test_project(repo.path());
-        let request = CreateAgentRequest::NewProject {
-            project,
-            custom_name,
-            use_existing_branch: false,
-            pull_before_create: false,
-        };
+        let _ = repo; // repo is referenced by the request; kept alive by caller.
         let (tx, rx) = mpsc::channel();
         run_create_agent_job(
             request,
@@ -851,6 +845,128 @@ mod tests {
             }
         }
         session.expect("the job should emit an AgentLaunchReady with the session")
+    }
+
+    /// Drive `run_create_agent_job` for a `NewProject` request and return the
+    /// `AgentSession` the job constructed.
+    fn create_session_for(custom_name: Option<String>) -> AgentSession {
+        let repo = init_test_repo();
+        let project = test_project(repo.path());
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name,
+            use_existing_branch: false,
+            pull_before_create: false,
+        };
+        drive_create_job(repo.path(), request)
+    }
+
+    /// Create a branch `name` (pointing at HEAD) in `repo` so an "attach to
+    /// existing branch" path can find it.
+    fn create_branch(repo: &Path, name: &str) {
+        let out = Command::new("git")
+            .args(["branch", name])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git branch {name} failed");
+    }
+
+    /// A minimal `AgentSession` rooted at `worktree` (a real git worktree so
+    /// `head_commit`/`mirror_worktree_contents` succeed), for the fork arms.
+    fn fork_source_session(worktree: &Path) -> AgentSession {
+        AgentSession {
+            id: "src-1".to_string(),
+            project_id: "proj-1".to_string(),
+            project_path: None,
+            provider: ProviderKind::new("cat"),
+            source_branch: "main".to_string(),
+            branch_name: "src-branch".to_string(),
+            initial_branch: "src-branch".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Detached,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn pull_request_arm_sets_title_and_initial_branch_from_typed_name() {
+        let repo = init_test_repo();
+        // Attach to an existing local branch so the arm avoids the network fetch.
+        create_branch(repo.path(), "pr-agent");
+        let request = CreateAgentRequest::PullRequest {
+            project: test_project(repo.path()),
+            host: "github.com".to_string(),
+            owner_repo: "owner/repo".to_string(),
+            number: 42,
+            title: "Fix the bug".to_string(),
+            state: "OPEN".to_string(),
+            head_branch: "pr-head".to_string(),
+            custom_name: Some("pr-agent".to_string()),
+            use_existing_branch: true,
+        };
+        let session = drive_create_job(repo.path(), request);
+        // The typed name is durable identity (title) and names the branch; the
+        // birth branch is recorded immutably and equals the created branch.
+        assert_eq!(session.title.as_deref(), Some("pr-agent"));
+        assert_eq!(session.branch_name, "pr-agent");
+        assert_eq!(session.initial_branch, "pr-agent");
+    }
+
+    #[test]
+    fn fork_session_arm_sets_title_and_initial_branch_from_typed_name() {
+        let repo = init_test_repo();
+        // The source worktree is the repo itself (a git dir with a HEAD commit).
+        let source = fork_source_session(repo.path());
+        let request = CreateAgentRequest::ForkSession {
+            project: test_project(repo.path()),
+            source_session: Box::new(source),
+            source_label: "src agent".to_string(),
+            custom_name: Some("forked-agent".to_string()),
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(session.title.as_deref(), Some("forked-agent"));
+        assert_eq!(session.branch_name, "forked-agent");
+        assert_eq!(session.initial_branch, "forked-agent");
+    }
+
+    #[test]
+    fn fork_external_worktree_arm_sets_title_and_initial_branch_from_typed_name() {
+        let repo = init_test_repo();
+        let request = CreateAgentRequest::ForkExternalWorktree {
+            project: test_project(repo.path()),
+            source_worktree_path: repo.path().to_path_buf(),
+            source_label: "ext worktree".to_string(),
+            source_branch: "main".to_string(),
+            custom_name: Some("external-agent".to_string()),
+        };
+        let session = drive_create_job(repo.path(), request);
+        assert_eq!(session.title.as_deref(), Some("external-agent"));
+        assert_eq!(session.branch_name, "external-agent");
+        assert_eq!(session.initial_branch, "external-agent");
+    }
+
+    #[test]
+    fn fork_external_worktree_arm_without_name_keeps_title_none() {
+        let repo = init_test_repo();
+        let request = CreateAgentRequest::ForkExternalWorktree {
+            project: test_project(repo.path()),
+            source_worktree_path: repo.path().to_path_buf(),
+            source_label: "ext worktree".to_string(),
+            source_branch: "main".to_string(),
+            custom_name: None,
+        };
+        let session = drive_create_job(repo.path(), request);
+        // No typed name: title stays None, but the auto-derived branch is still
+        // recorded as the immutable initial branch.
+        assert_eq!(session.title, None);
+        assert_eq!(session.initial_branch, session.branch_name);
+        assert!(!session.branch_name.is_empty());
     }
 
     #[test]

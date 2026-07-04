@@ -11,6 +11,11 @@ use std::collections::HashSet;
 pub enum InFlightKey {
     CreateAgent,
     AgentLaunch(String),
+    /// An intentional git branch rename is in flight for this session id (the
+    /// worker running `git::rename_branch` that later posts
+    /// `BranchRenameCompleted`). While set, the branch-sync poller must NOT
+    /// classify this session's in-progress rename as external drift.
+    BranchRename(String),
     Pull(String),
     ResourceStats,
     /// Creating an initial commit for the repo at this path, then registering

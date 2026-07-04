@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  branchDrift,
   defaultProviderForSession,
   isExtraTabDormant,
   isTabGone,
@@ -30,6 +31,26 @@ function agentTarget(sessionId: string, tabId: string): SelectedTarget {
 function extraTab(id: string, live: boolean): AgentTabView {
   return { ...tab("codex"), id, has_live_process: live }
 }
+
+describe("branchDrift", () => {
+  it("flags drift when the current branch differs from the original", () => {
+    expect(
+      branchDrift({ branch_name: "agent-tabs", initial_branch: "server-mode" }),
+    ).toEqual({ drifted: true, initial: "server-mode" })
+  })
+
+  it("does not flag drift when current matches the original", () => {
+    expect(
+      branchDrift({ branch_name: "server-mode", initial_branch: "server-mode" }),
+    ).toEqual({ drifted: false, initial: "server-mode" })
+  })
+
+  it("does not flag drift when the original branch is missing (older server)", () => {
+    expect(
+      branchDrift({ branch_name: "server-mode", initial_branch: "" }),
+    ).toEqual({ drifted: false, initial: "" })
+  })
+})
 
 describe("shouldShowTabStrip", () => {
   it("is false for zero or one tab, true for two or more", () => {

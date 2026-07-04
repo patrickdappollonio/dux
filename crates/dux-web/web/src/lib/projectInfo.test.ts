@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { formatAddedDate, projectLiveCounts } from "./projectInfo"
+import { formatDisplayDate, projectLiveCounts } from "./projectInfo"
 import type { SessionView } from "./types"
 
 // Minimal fixture: projectLiveCounts only reads project_id and terminals.
@@ -56,19 +56,19 @@ describe("projectLiveCounts", () => {
   })
 })
 
-describe("formatAddedDate", () => {
+describe("formatDisplayDate", () => {
   it("returns Unknown for an empty string (no store row yet)", () => {
-    expect(formatAddedDate("")).toBe("Unknown")
-    expect(formatAddedDate("   ")).toBe("Unknown")
+    expect(formatDisplayDate("")).toBe("Unknown")
+    expect(formatDisplayDate("   ")).toBe("Unknown")
   })
 
   it("returns Unknown for an unparseable value", () => {
-    expect(formatAddedDate("not-a-date")).toBe("Unknown")
+    expect(formatDisplayDate("not-a-date")).toBe("Unknown")
   })
 
   it("formats a valid RFC 3339 timestamp as a human-readable date", () => {
     // Midday UTC avoids date-boundary shifts across the runner's timezone.
-    const formatted = formatAddedDate("2026-02-03T12:00:00+00:00")
+    const formatted = formatDisplayDate("2026-02-03T12:00:00+00:00")
     expect(formatted).not.toBe("Unknown")
     expect(formatted).toContain("2026")
     // Matches what toLocaleDateString produces for the same instant/options,

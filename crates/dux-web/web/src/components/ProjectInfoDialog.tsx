@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 
+import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Dialog,
@@ -9,26 +10,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { projectBranchDisplay } from "@/lib/projectBranch"
-import { formatAddedDate, projectLiveCounts } from "@/lib/projectInfo"
+import { formatDisplayDate, projectLiveCounts } from "@/lib/projectInfo"
 import { closeProjectInfo, useDux } from "@/lib/store"
 import type { ProjectView } from "@/lib/types"
-
-// One labelled row in the definition list. The value column is allowed to wrap
-// (paths, branch names) so long values stay readable on phones.
-function InfoRow({
-  label,
-  children,
-}: {
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1 max-sm:grid-cols-1">
-      <dt className="text-sm text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 text-sm">{children}</dd>
-    </div>
-  )
-}
 
 // Read-only "Project info…" modal. Pure presentation of existing ViewModel data:
 // no wire commands, no git reads. Works identically on desktop and mobile.
@@ -92,7 +76,7 @@ export function ProjectInfoDialog() {
             <span className="text-muted-foreground">Not detected</span>
           )}
         </InfoRow>
-        <InfoRow label="Added">{formatAddedDate(project.created_at)}</InfoRow>
+        <InfoRow label="Added">{formatDisplayDate(project.created_at)}</InfoRow>
         <InfoRow label="Default provider">
           {project.default_provider}
           {providerExplicit ? (

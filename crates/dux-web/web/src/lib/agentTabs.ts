@@ -61,6 +61,23 @@ export function tabLabels(tabs: AgentTabView[]): string[] {
   })
 }
 
+// Whether a session's current branch has drifted from the immutable branch the
+// agent was created on. `drifted` is true only when `initial_branch` is present
+// (an older server omits it, coerced to `""` at ingestion) and truly differs from
+// the current `branch_name`. `initial` is passed through so callers that surface
+// the original branch don't re-read it. Shared by the header drift crumb and the
+// agent info dialog so the two never disagree.
+export function branchDrift(
+  session: Pick<SessionView, "branch_name" | "initial_branch">,
+): { drifted: boolean; initial: string } {
+  return {
+    drifted:
+      !!session.initial_branch &&
+      session.initial_branch !== session.branch_name,
+    initial: session.initial_branch,
+  }
+}
+
 // The provider a plain (no-provider-arg) `addTab(session.id)` actually launches:
 // the session's owning project's `default_provider`, mirroring the server's own
 // resolution (`CreateTabBody.provider` omitted → project default). Falls back to

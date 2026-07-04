@@ -32,13 +32,50 @@ describe("fetchSpine", () => {
     vi.stubGlobal("fetch", fetchMock)
 
     const result = await fetchSpine()
-    // A session that omits `tabs` (an older server) is coerced to `tabs: []`.
+    // A session that omits `tabs`/`initial_branch`/`source_branch` (an older
+    // server) is coerced to `tabs: []` and empty-string branch fields.
     expect(result).toEqual({
       ...body,
-      sessions: [{ id: "s1", project_id: "p1", tabs: [] }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          tabs: [],
+          initial_branch: "",
+          source_branch: "",
+        },
+      ],
     })
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/spine", {
       credentials: "same-origin",
+    })
+  })
+
+  it("coerces missing initial_branch/source_branch to empty strings at ingestion", async () => {
+    const body = {
+      projects: [],
+      // A session from an older server omits the two branch fields (and tabs).
+      sessions: [{ id: "s1", project_id: "p1" }],
+      sidebar: { groups: [], agentless_start: null },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => "",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+
+    const result = await fetchSpine()
+    expect(result.sessions[0]).toMatchObject({
+      id: "s1",
+      project_id: "p1",
+      tabs: [],
+      initial_branch: "",
+      source_branch: "",
     })
   })
 

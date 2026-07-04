@@ -791,43 +791,78 @@ pub(crate) struct ChangeProjectDefaultProviderPrompt {
     pub(crate) focus: ChangeDefaultProviderFocus,
 }
 
+/// Semantic tone of an Agent Info body line, computed once at build time so the
+/// renderer styles by the tag rather than re-parsing the prose. Only the drift
+/// note carries [`AgentInfoTone::Warning`]; everything else is neutral.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentInfoTone {
+    Neutral,
+    Warning,
+}
+
 /// Read-only Agent Info modal state: a display label plus the prebuilt body
-/// lines (name, provider, branch lineage, worktree, created, status). Built once
-/// on open by [`agent_info_lines`]; the renderer only styles and frames them.
+/// lines (name, provider, branch lineage, worktree, created, status), each
+/// tagged with its [`AgentInfoTone`]. Built once on open by [`agent_info_lines`];
+/// the renderer only styles (by tag) and frames them.
 #[derive(Clone, Debug)]
 pub(crate) struct AgentInfoPrompt {
     pub(crate) session_label: String,
-    pub(crate) lines: Vec<String>,
+    pub(crate) lines: Vec<(String, AgentInfoTone)>,
 }
 
 /// Build the body lines of the Agent Info modal from a session: name, provider,
 /// the current/original/forked-from branches, a drift note when the current
 /// branch differs from the branch the agent was created on, then the worktree,
-/// creation time, and status. Pure and unit-tested; the renderer styles them.
-pub(crate) fn agent_info_lines(session: &AgentSession) -> Vec<String> {
+/// creation time, and status. Each line carries its semantic tone so the
+/// renderer never has to substring-match prose. Pure and unit-tested.
+pub(crate) fn agent_info_lines(session: &AgentSession) -> Vec<(String, AgentInfoTone)> {
     let name = session
         .title
         .clone()
         .unwrap_or_else(|| session.branch_name.clone());
     let mut lines = vec![
-        format!("Name:         {name}"),
-        format!("Provider:     {}", session.provider.as_str()),
-        format!("Current:      {}", session.branch_name),
-        format!("Original:     {}", session.initial_branch),
-        format!("Forked from:  {}", session.source_branch),
+        (format!("Name:         {name}"), AgentInfoTone::Neutral),
+        (
+            format!("Provider:     {}", session.provider.as_str()),
+            AgentInfoTone::Neutral,
+        ),
+        (
+            format!("Current:      {}", session.branch_name),
+            AgentInfoTone::Neutral,
+        ),
+        (
+            format!("Original:     {}", session.initial_branch),
+            AgentInfoTone::Neutral,
+        ),
+        (
+            format!("Forked from:  {}", session.source_branch),
+            AgentInfoTone::Neutral,
+        ),
     ];
     if session.branch_name != session.initial_branch {
-        lines.push(format!(
-            "Branch changed since creation (orig: {})",
-            session.initial_branch
+        lines.push((
+            format!(
+                "Branch changed since creation (orig: {})",
+                session.initial_branch
+            ),
+            AgentInfoTone::Warning,
         ));
     }
-    lines.push(format!("Worktree:     {}", session.worktree_path));
-    lines.push(format!(
-        "Created:      {}",
-        session.created_at.format("%Y-%m-%d %H:%M")
+    lines.push((
+        format!("Worktree:     {}", session.worktree_path),
+        AgentInfoTone::Neutral,
     ));
-    lines.push(format!("Status:       {}", session.status.as_str()));
+    lines.push((
+        format!(
+            "Created:      {}",
+            session.created_at.format("%Y-%m-%d %H:%M")
+        ),
+        AgentInfoTone::Neutral,
+    ));
+    lines.push((
+        format!("Status:       {}", session.status.as_str()),
+        AgentInfoTone::Neutral,
+    ));
     lines
 }
 
@@ -3187,6 +3222,11 @@ impl App {
                     ))
                 });
             let pending = op.pending_status();
+            // Mark the rename in flight so the branch-sync poller does not observe
+            // our own in-progress rename and log it as external drift (or corrupt
+            // `previous`). `BranchRenameCompleted` clears this marker for `sid`.
+            self.engine
+                .mark_in_flight(dux_core::engine::InFlightKey::BranchRename(sid.clone()));
             std::thread::spawn(move || {
                 let result = git::rename_branch(Path::new(&worktree), &old_branch, &new_branch)
                     .map_err(|e| e.to_string());
@@ -3837,13 +3877,22 @@ mod tests {
         s.source_branch = "main".into();
 
         let lines = agent_info_lines(&s);
-        assert!(lines.iter().any(|l| l.contains("agent-tabs"))); // current branch
-        assert!(lines.iter().any(|l| l.contains("server-mode"))); // original
-        assert!(lines.iter().any(|l| l.contains("main"))); // forked from
+        assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
+        assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
+        assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
+        // The drift note is present AND tagged Warning (structured tone, not
+        // substring-matched by the renderer).
+        let drift = lines
+            .iter()
+            .find(|(l, _)| l.to_lowercase().contains("changed since creation"))
+            .expect("drift line present");
+        assert_eq!(drift.1, AgentInfoTone::Warning);
+        // Every other line is Neutral.
         assert!(
             lines
                 .iter()
-                .any(|l| l.to_lowercase().contains("changed since creation"))
+                .filter(|(l, _)| !l.to_lowercase().contains("changed since creation"))
+                .all(|(_, tone)| *tone == AgentInfoTone::Neutral)
         );
     }
 
@@ -3856,7 +3905,13 @@ mod tests {
         assert!(
             !lines
                 .iter()
-                .any(|l| l.to_lowercase().contains("changed since creation"))
+                .any(|(l, _)| l.to_lowercase().contains("changed since creation"))
+        );
+        // With no drift, every line is Neutral — no Warning tone anywhere.
+        assert!(
+            lines
+                .iter()
+                .all(|(_, tone)| *tone == AgentInfoTone::Neutral)
         );
     }
 

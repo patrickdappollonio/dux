@@ -1,6 +1,7 @@
 import { Fragment } from "react"
 
 import { Button } from "@/components/ui/button"
+import { branchDrift } from "@/lib/agentTabs"
 import { paletteShortcutKeys } from "@/lib/platform"
 import { setPaletteOpen, useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
@@ -63,14 +64,11 @@ export function InsetHeader() {
     // the TUI shows a compact form only). Guarded on `initial_branch` being
     // present so an older server that omits the field never renders "originally
     // undefined".
+    const drift = branchDrift(session)
     details.push({
       key: "branch",
       value: session.branch_name,
-      muted:
-        session.initial_branch &&
-        session.initial_branch !== session.branch_name
-          ? `originally ${session.initial_branch}`
-          : undefined,
+      muted: drift.drifted ? `originally ${drift.initial}` : undefined,
     })
     if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
     if (session.terminals.length > 0) {

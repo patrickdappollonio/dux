@@ -341,25 +341,33 @@ impl App {
                 project.current_branch.clone(),
                 Style::default().fg(self.theme.branch_fg).bg(bg),
             ));
-            if let Some(session) = self.selected_session()
-                && session.branch_name != project.current_branch
-            {
-                // Render the agent's branch through the shared drift helper: it
-                // appends "(orig: <initial>)" only when the current branch has
-                // drifted from the branch the agent was created on. The helper
-                // owns the "branch: " prefix; here we keep the themed "agent: "
-                // label, so strip it and style the value ourselves.
-                let segment = top_bar_branch_segment(&session.branch_name, &session.initial_branch);
-                let value = segment.strip_prefix("branch: ").unwrap_or(&segment);
-                spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
-                spans.push(Span::styled(
-                    "agent: ",
-                    Style::default().fg(label_fg).bg(bg),
-                ));
-                spans.push(Span::styled(
-                    value.to_string(),
-                    Style::default().fg(self.theme.branch_fg).bg(bg),
-                ));
+            if let Some(session) = self.selected_session() {
+                // Two independent reasons to show the agent crumb:
+                //  - the agent sits on a different branch than the project's
+                //    current branch, or
+                //  - the agent's branch has DRIFTED from the branch it was
+                //    created on (`initial_branch`).
+                // The drift note must surface even when the agent happens to be on
+                // the project's current branch, so it is gated on the drift alone —
+                // not nested inside the project-current-branch comparison.
+                let drifted = session.branch_name != session.initial_branch;
+                let differs_from_project = session.branch_name != project.current_branch;
+                if differs_from_project || drifted {
+                    // The helper appends "(orig: <initial>)" only on drift and
+                    // returns the bare value (no label); we keep the themed
+                    // "agent: " label and style the value ourselves.
+                    let value =
+                        top_bar_branch_suffix(&session.branch_name, &session.initial_branch);
+                    spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
+                    spans.push(Span::styled(
+                        "agent: ",
+                        Style::default().fg(label_fg).bg(bg),
+                    ));
+                    spans.push(Span::styled(
+                        value,
+                        Style::default().fg(self.theme.branch_fg).bg(bg),
+                    ));
+                }
             }
             spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
             let has_project_override = self
@@ -4731,14 +4739,14 @@ impl App {
                     )),
                     Line::from(""),
                 ];
-                for line in &prompt.lines {
-                    // The drift note is the one line that carries a warning tone;
-                    // everything else is neutral body text. All colors come from
-                    // the theme.
-                    let style = if line.to_lowercase().contains("changed since creation") {
-                        Style::default().fg(self.theme.warning_fg)
-                    } else {
-                        Style::default().fg(self.theme.text_fg)
+                for (line, tone) in &prompt.lines {
+                    // Style by the precomputed semantic tone (tag), never by
+                    // re-parsing the prose. The drift note is the one line tagged
+                    // Warning; everything else is neutral body text. All colors
+                    // come from the theme.
+                    let style = match tone {
+                        AgentInfoTone::Warning => Style::default().fg(self.theme.warning_fg),
+                        AgentInfoTone::Neutral => Style::default().fg(self.theme.text_fg),
                     };
                     body_lines.push(Line::from(Span::styled(format!(" {line}"), style)));
                 }
@@ -7398,15 +7406,16 @@ pub(crate) fn format_line_stats(
     spans
 }
 
-/// Compact top-bar segment for an agent's branch. Shows just `branch: <current>`
-/// normally; when the current branch has drifted from the branch the agent was
-/// created on, it appends `(orig: <initial>)` so the original is visible in the
-/// tight header. Pure and unit-tested; the header renderer styles the pieces.
-pub(crate) fn top_bar_branch_segment(current: &str, initial: &str) -> String {
+/// Compact top-bar branch value for an agent (no label prefix — the caller owns
+/// the themed "agent: " label). Returns just `<current>` normally; when the
+/// current branch has drifted from the branch the agent was created on, it
+/// appends `(orig: <initial>)` so the original is visible in the tight header.
+/// Pure and unit-tested; the header renderer styles the pieces.
+pub(crate) fn top_bar_branch_suffix(current: &str, initial: &str) -> String {
     if current == initial {
-        format!("branch: {current}")
+        current.to_string()
     } else {
-        format!("branch: {current} (orig: {initial})")
+        format!("{current} (orig: {initial})")
     }
 }
 
@@ -8230,13 +8239,26 @@ mod tests {
     }
 
     #[test]
-    fn top_bar_branch_segment_shows_original_only_on_drift() {
-        // No drift: just the current branch.
-        assert_eq!(top_bar_branch_segment("main", "main"), "branch: main");
+    fn top_bar_branch_suffix_shows_original_only_on_drift() {
+        // No drift: just the bare current branch (no "branch: " label prefix —
+        // the caller owns the label).
+        assert_eq!(top_bar_branch_suffix("main", "main"), "main");
         // Drift: the original branch is appended.
         assert_eq!(
-            top_bar_branch_segment("agent-tabs", "server-mode"),
-            "branch: agent-tabs (orig: server-mode)"
+            top_bar_branch_suffix("agent-tabs", "server-mode"),
+            "agent-tabs (orig: server-mode)"
+        );
+    }
+
+    #[test]
+    fn top_bar_branch_suffix_annotates_drift_even_on_project_current_branch() {
+        // F-E regression: when the agent's branch equals the project's current
+        // branch but has drifted from its initial branch, the suffix helper still
+        // annotates the drift. (The header gate now shows the crumb on drift
+        // alone, so this value reaches the screen.)
+        assert_eq!(
+            top_bar_branch_suffix("main", "server-mode"),
+            "main (orig: server-mode)"
         );
     }
 
