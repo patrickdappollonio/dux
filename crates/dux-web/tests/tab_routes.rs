@@ -20,6 +20,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
         provider: dux_core::model::ProviderKind::new("claude"),
         source_branch: "main".to_string(),
         branch_name: format!("{id}-branch"),
+        initial_branch: format!("{id}-branch"),
         worktree_path: worktree.to_string(),
         title: None,
         started_providers: Vec::new(),

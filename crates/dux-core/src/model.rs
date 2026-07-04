@@ -136,6 +136,12 @@ pub struct AgentSession {
     pub provider: ProviderKind,
     pub source_branch: String,
     pub branch_name: String,
+    /// The branch this agent was created on. Immutable identity: unlike
+    /// `branch_name` (which the branch-sync poller and intentional renames keep
+    /// in step with the worktree's actual current branch), `initial_branch` is
+    /// set once at creation and never mutated afterward. Surfaced so the UI can
+    /// show branch lineage and flag drift when `branch_name != initial_branch`.
+    pub initial_branch: String,
     pub worktree_path: String,
     pub title: Option<String>,
     pub started_providers: Vec<String>,

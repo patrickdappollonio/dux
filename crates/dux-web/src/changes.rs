@@ -795,6 +795,7 @@ mod tests {
             provider: dux_core::model::ProviderKind::new("claude"),
             source_branch: "main".to_string(),
             branch_name: "feat".to_string(),
+            initial_branch: "feat".to_string(),
             worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),

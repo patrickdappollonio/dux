@@ -131,6 +131,7 @@ pub(crate) fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentS
         provider: ProviderKind::new("claude"),
         source_branch: "main".to_string(),
         branch_name: branch.to_string(),
+        initial_branch: branch.to_string(),
         worktree_path: format!("/tmp/{id}-worktree"),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),

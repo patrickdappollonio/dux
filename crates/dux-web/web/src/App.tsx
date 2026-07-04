@@ -1,8 +1,8 @@
 import type * as React from "react"
-import { Fragment } from "react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { AgentEnvDialog } from "@/components/AgentEnvDialog"
+import { AgentInfoDialog } from "@/components/AgentInfoDialog"
 import { AgentStartupCommandDialog } from "@/components/AgentStartupCommandDialog"
 import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
 import { AppSidebar } from "@/components/Sidebar"
@@ -28,9 +28,9 @@ import { OfflineOverlay } from "@/components/OfflineOverlay"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
+import { InsetHeader } from "@/components/InsetHeader"
 import { StatusBar } from "@/components/StatusBar"
 import { TerminalArea } from "@/components/TerminalArea"
-import { Button } from "@/components/ui/button"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -43,108 +43,11 @@ import {
 import { Toaster } from "@/components/ui/sonner"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
-import { paletteShortcutKeys } from "@/lib/platform"
 import {
   changesPaneVisible,
-  setPaletteOpen,
   useDux,
 } from "@/lib/store"
-import { terminalTitle } from "@/lib/terminals"
 import { keyboardLikelyOpen } from "@/lib/viewport"
-
-function InsetHeader() {
-  const { spine, selectedSessionId, selectedTarget } = useDux()
-  const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  const project = session
-    ? spine?.projects.find((p) => p.id === session.project_id)
-    : undefined
-  // When a companion terminal is focused, surface it as a third crumb. The crumb
-  // text is the foreground command when one is running (disambiguated with the
-  // terminal's number if a sibling runs the same app), otherwise the stable
-  // "Terminal N" label.
-  const terminal =
-    selectedTarget?.kind === "terminal"
-      ? session?.terminals.find((t) => t.id === selectedTarget.terminalId)
-      : undefined
-  const terminalLabel =
-    terminal && session
-      ? terminalTitle(terminal, session.terminals)
-      : undefined
-
-  // The header details, mirroring the TUI: a flat `key: value` list joined by a
-  // single separator. `terminal` only appears when a companion terminal is the
-  // focused target; `terminals` (the count) only when there is at least one.
-  // When an agent tab is focused, the provider crumb reflects the FOCUSED TAB
-  // (an extra tab can run a different provider than the session-slot tab), not
-  // the session-slot tab's own provider.
-  const focusedTabProvider =
-    selectedTarget?.kind === "agent"
-      ? session?.tabs.find((t) => t.id === selectedTarget.tabId)?.provider
-      : undefined
-
-  const details: { key: string; value: string }[] = []
-  if (session) {
-    details.push({ key: "agent", value: session.title || session.branch_name })
-    details.push({
-      key: "provider",
-      value: focusedTabProvider ?? session.provider,
-    })
-    if (project?.name) details.push({ key: "project", value: project.name })
-    details.push({ key: "branch", value: session.branch_name })
-    if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
-    if (session.terminals.length > 0) {
-      details.push({ key: "terminals", value: String(session.terminals.length) })
-    }
-  }
-
-  return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
-      {/* Left region shares one shrink budget so the details row clips instead of
-          pushing the right-hand controls off the edge. One font (sans) throughout
-          — mixing mono values with sans labels made `items-center` misalign them
-          (mono/sans glyphs center differently). Distinguish key vs value by
-          color/weight, not font. See the mono/sans alignment memory. */}
-      <div className="flex min-w-0 flex-1 items-center gap-x-2 overflow-hidden text-sm">
-        {details.map((d, i) => (
-          <Fragment key={d.key}>
-            {i > 0 && (
-              // A thin, vertically centered divider (items-center keeps it on the
-              // text's midline — a literal "|" glyph rode high).
-              <span
-                aria-hidden
-                className="h-3 w-px shrink-0 bg-border"
-              />
-            )}
-            <span className="shrink-0 whitespace-nowrap">
-              <span className="text-muted-foreground">{d.key}: </span>
-              <span className="font-medium text-foreground">{d.value}</span>
-            </span>
-          </Fragment>
-        ))}
-      </div>
-
-      <div className="flex shrink-0 items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setPaletteOpen(true)}
-        >
-          {/* Render each key as its own flex child so the keys share the button's
-              sans font for consistent vertical alignment. The keycaps are
-              decorative (the button already reads "Commands…"), so they're hidden
-              from assistive tech. The label gets extra leading margin so the
-              keycaps sit as a distinct group, set apart from the word. */}
-          {paletteShortcutKeys().map((key) => (
-            <span key={key} aria-hidden className="text-muted-foreground">
-              {key}
-            </span>
-          ))}
-          <span className="ms-2">Commands…</span>
-        </Button>
-      </div>
-    </header>
-  )
-}
 
 // The palette, all dialogs, and the toaster live above the shell so they stay
 // mounted in both the desktop and mobile layouts. Shared JSX — never duplicated.
@@ -166,6 +69,7 @@ function GlobalOverlays() {
       <GlobalEnvDialog />
       <MacrosDialog />
       <ProjectInfoDialog />
+      <AgentInfoDialog />
       <ProjectSettingsDialog />
       <AgentStartupCommandDialog />
       <AgentEnvDialog />

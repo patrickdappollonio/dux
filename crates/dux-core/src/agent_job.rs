@@ -82,6 +82,11 @@ pub fn run_create_agent_job(
                 }
             }
 
+            // A user-typed name becomes the agent's durable `title` (identity),
+            // not just the branch name. An auto-generated pet name (custom_name
+            // is None) leaves `title` empty so the display keeps tracking the
+            // branch — there is nothing user-authored to protect.
+            let title = custom_name.clone();
             // Resolve the branch name early so we can check for an
             // existing branch before calling git worktree add.  When no
             // custom name was provided, a random pet name is generated.
@@ -211,7 +216,7 @@ pub fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
-                None,
+                title,
                 false,
             )
         }
@@ -227,6 +232,10 @@ pub fn run_create_agent_job(
             use_existing_branch,
         } => {
             let repo_path = PathBuf::from(&project.path);
+            // A typed name is the agent's durable title; falling back to the PR
+            // head branch means no user-authored name, so leave title empty.
+            // (Named `agent_title` to avoid shadowing the PR `title` above.)
+            let agent_title = custom_name.clone();
             let resolved_name = custom_name.unwrap_or_else(|| head_branch.clone());
             let attach_existing =
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
@@ -307,7 +316,7 @@ pub fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
-                None,
+                agent_title,
                 false,
             )
         }
@@ -395,7 +404,9 @@ pub fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
-                None,
+                // A fork always requires a chosen name; persist it as the
+                // agent's durable title.
+                Some(custom_name),
                 false,
             )
         }
@@ -517,7 +528,9 @@ pub fn run_create_agent_job(
                 branch_name,
                 worktree_path,
                 true,
-                None,
+                // A typed name becomes the agent's durable title; None leaves the
+                // display tracking the branch (an auto-derived worktree name).
+                custom_name,
                 false,
             )
         }
@@ -547,6 +560,10 @@ pub fn run_create_agent_job(
         project_path: Some(project.path.clone()),
         provider,
         source_branch,
+        // The agent is born on `branch_name`; record that as its immutable
+        // original branch. The branch-sync poller and intentional renames update
+        // `branch_name` later but must never touch `initial_branch`.
+        initial_branch: branch_name.clone(),
         branch_name,
         worktree_path: worktree_path.to_string_lossy().to_string(),
         title,
@@ -743,4 +760,116 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
     let _ = worker_tx.send(WorkerEvent::AgentLaunchReady(Box::new(
         AgentLaunchReadyData { request, client },
     )));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::process::Command;
+    use std::sync::mpsc;
+
+    use super::*;
+    use crate::model::{Project, ProjectBranchStatus, ProviderKind};
+
+    /// Initialize a throwaway git repo with a single commit on `main`.
+    fn init_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["commit", "--allow-empty", "-m", "init"]);
+        dir
+    }
+
+    fn test_project(repo: &Path) -> Project {
+        Project {
+            id: "proj-1".to_string(),
+            name: "repo".to_string(),
+            path: repo.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            // `provider_config` falls back to the provider name as the command,
+            // so a provider literally named "cat" spawns `cat` — a harmless PTY
+            // process that stays alive on stdin, available on any Unix PATH.
+            default_provider: ProviderKind::new("cat"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Leading,
+            path_missing: false,
+            created_at: None,
+        }
+    }
+
+    /// Drive `run_create_agent_job` for a `NewProject` request and return the
+    /// `AgentSession` the job constructed (extracted from the terminal
+    /// `AgentLaunchReady` event).
+    fn create_session_for(custom_name: Option<String>) -> AgentSession {
+        let repo = init_test_repo();
+        let paths_root = tempfile::tempdir().unwrap();
+        let paths = DuxPaths {
+            root: paths_root.path().to_path_buf(),
+            config_path: paths_root.path().join("config.toml"),
+            sessions_db_path: paths_root.path().join("sessions.sqlite3"),
+            worktrees_root: paths_root.path().join("worktrees"),
+            lock_path: paths_root.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+
+        let project = test_project(repo.path());
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name,
+            use_existing_branch: false,
+            pull_before_create: false,
+        };
+        let (tx, rx) = mpsc::channel();
+        run_create_agent_job(
+            request,
+            paths,
+            Config::default(),
+            tx,
+            (80, 24),
+            "op-1".to_string(),
+        );
+        let mut session = None;
+        while let Ok(event) = rx.try_recv() {
+            if let WorkerEvent::AgentLaunchReady(data) = event {
+                session = Some(data.request.session.clone());
+            } else if let WorkerEvent::CreateAgentFailed { message, .. } = event {
+                panic!("create job failed: {message}");
+            }
+        }
+        session.expect("the job should emit an AgentLaunchReady with the session")
+    }
+
+    #[test]
+    fn a_named_new_agent_stores_the_typed_name_as_title() {
+        let session = create_session_for(Some("server-mode".to_string()));
+        // The typed name is durable identity (title), and it also names the branch.
+        assert_eq!(session.title.as_deref(), Some("server-mode"));
+        assert_eq!(session.branch_name, "server-mode");
+        // The birth branch is recorded immutably and equals the created branch.
+        assert_eq!(session.initial_branch, "server-mode");
+    }
+
+    #[test]
+    fn an_auto_named_agent_keeps_title_none() {
+        let session = create_session_for(None);
+        // An auto pet-name leaves title empty so the display keeps tracking the
+        // branch, but the pet name still becomes the immutable initial branch.
+        assert_eq!(session.title, None);
+        assert_eq!(session.initial_branch, session.branch_name);
+        assert!(!session.branch_name.is_empty());
+    }
 }

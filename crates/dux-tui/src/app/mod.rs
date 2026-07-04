@@ -791,6 +791,46 @@ pub(crate) struct ChangeProjectDefaultProviderPrompt {
     pub(crate) focus: ChangeDefaultProviderFocus,
 }
 
+/// Read-only Agent Info modal state: a display label plus the prebuilt body
+/// lines (name, provider, branch lineage, worktree, created, status). Built once
+/// on open by [`agent_info_lines`]; the renderer only styles and frames them.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentInfoPrompt {
+    pub(crate) session_label: String,
+    pub(crate) lines: Vec<String>,
+}
+
+/// Build the body lines of the Agent Info modal from a session: name, provider,
+/// the current/original/forked-from branches, a drift note when the current
+/// branch differs from the branch the agent was created on, then the worktree,
+/// creation time, and status. Pure and unit-tested; the renderer styles them.
+pub(crate) fn agent_info_lines(session: &AgentSession) -> Vec<String> {
+    let name = session
+        .title
+        .clone()
+        .unwrap_or_else(|| session.branch_name.clone());
+    let mut lines = vec![
+        format!("Name:         {name}"),
+        format!("Provider:     {}", session.provider.as_str()),
+        format!("Current:      {}", session.branch_name),
+        format!("Original:     {}", session.initial_branch),
+        format!("Forked from:  {}", session.source_branch),
+    ];
+    if session.branch_name != session.initial_branch {
+        lines.push(format!(
+            "Branch changed since creation (orig: {})",
+            session.initial_branch
+        ));
+    }
+    lines.push(format!("Worktree:     {}", session.worktree_path));
+    lines.push(format!(
+        "Created:      {}",
+        session.created_at.format("%Y-%m-%d %H:%M")
+    ));
+    lines.push(format!("Status:       {}", session.status.as_str()));
+    lines
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ChangeThemePrompt {
     pub(crate) options: Vec<crate::theme::ThemeListing>,
@@ -900,6 +940,7 @@ pub(crate) enum PromptState {
         return_prompt: Box<PromptState>,
     },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
+    AgentInfo(AgentInfoPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
     ChangeTheme(ChangeThemePrompt),
@@ -1298,6 +1339,9 @@ pub(crate) enum OverlayMouseLayout {
     },
     AddProjectFailed {
         ok_button: Rect,
+    },
+    AgentInfo {
+        close_button: Rect,
     },
     ChangeAgentProvider {
         list: Rect,
@@ -2429,6 +2473,7 @@ impl App {
             "remove-project" => self.remove_selected_project(),
             "delete-agent" => self.confirm_delete_selected_session(),
             "rename-agent" => self.open_rename_session(),
+            "agent-info" => self.open_agent_info(),
             "kill-running" => self.open_kill_running(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "force-reconnect-agent" => self.force_reconnect_agent(),
@@ -3036,6 +3081,26 @@ impl App {
                 .map(|(index, _)| (RightSection::Staged, index)),
         );
         matches
+    }
+
+    /// Open the read-only Agent Info modal for the focused agent. Routed through
+    /// `PromptState` so `Esc` closes it uniformly with every other prompt.
+    pub(crate) fn open_agent_info(&mut self) -> Result<()> {
+        if let Some(session) = self.selected_session().cloned() {
+            let label = session
+                .title
+                .clone()
+                .unwrap_or_else(|| session.branch_name.clone());
+            self.input_target = InputTarget::None;
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
+                session_label: label,
+                lines: agent_info_lines(&session),
+            });
+        } else {
+            self.set_error("No agent session selected. Select an agent to see its info.");
+        }
+        Ok(())
     }
 
     pub(crate) fn open_rename_session(&mut self) -> Result<()> {
@@ -3751,6 +3816,7 @@ mod tests {
             provider: ProviderKind::from_str("codex"),
             source_branch: "main".to_string(),
             branch_name: id.to_string(),
+            initial_branch: id.to_string(),
             worktree_path: format!("/tmp/worktrees/{id}"),
             title: None,
             started_providers: Vec::new(),
@@ -3760,6 +3826,38 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn agent_info_lines_include_lineage_and_drift() {
+        let mut s = test_session("s1", "p1", 0);
+        s.title = Some("server-mode".into());
+        s.branch_name = "agent-tabs".into();
+        s.initial_branch = "server-mode".into();
+        s.source_branch = "main".into();
+
+        let lines = agent_info_lines(&s);
+        assert!(lines.iter().any(|l| l.contains("agent-tabs"))); // current branch
+        assert!(lines.iter().any(|l| l.contains("server-mode"))); // original
+        assert!(lines.iter().any(|l| l.contains("main"))); // forked from
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.to_lowercase().contains("changed since creation"))
+        );
+    }
+
+    #[test]
+    fn agent_info_lines_omit_drift_line_when_no_drift() {
+        let mut s = test_session("s1", "p1", 0);
+        s.branch_name = "main".into();
+        s.initial_branch = "main".into();
+        let lines = agent_info_lines(&s);
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.to_lowercase().contains("changed since creation"))
+        );
     }
 
     #[test]

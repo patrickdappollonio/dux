@@ -103,6 +103,7 @@ pub(crate) enum ButtonPressedTarget {
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
     AddProjectFailedOk,
+    AgentInfoClose,
     StartupCommandLogsClose,
 }
 

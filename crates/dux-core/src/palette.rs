@@ -369,6 +369,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         surface: PaletteSurface::Tui,
     },
     PaletteCommand {
+        action: Action::OpenAgentInfo,
+        name: "agent-info",
+        description: "Show the selected agent's details and branch lineage",
+        // Per-session: the web exposes "Agent info…" from the session ⋯ menu.
+        surface: PaletteSurface::Tui,
+    },
+    PaletteCommand {
         action: Action::DeleteProject,
         name: "delete-project",
         description: "Remove the selected project and its sessions",

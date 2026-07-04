@@ -31,6 +31,7 @@ fn sample_session(
         provider: dux_core::model::ProviderKind::new("claude"),
         source_branch: "main".to_string(),
         branch_name: branch.to_string(),
+        initial_branch: branch.to_string(),
         worktree_path: worktree.to_string(),
         title: Some(format!("{id}-title")),
         started_providers: Vec::new(),

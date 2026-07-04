@@ -1,0 +1,147 @@
+import { useEffect } from "react"
+
+import { SimpleTooltip } from "@/components/SimpleTooltip"
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { formatAddedDate } from "@/lib/projectInfo"
+import { closeAgentInfo, useDux } from "@/lib/store"
+import type { SessionView } from "@/lib/types"
+
+// One labelled row in the definition list. The value column is allowed to wrap
+// (paths, branch names) so long values stay readable on phones. Mirrors the
+// `InfoRow` in `ProjectInfoDialog` verbatim so the two info modals stay visually
+// identical.
+function InfoRow({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1 max-sm:grid-cols-1">
+      <dt className="text-sm text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 text-sm">{children}</dd>
+    </div>
+  )
+}
+
+// Friendly label for a session status. The raw value is a lowercase enum
+// ("active" | "detached" | "exited"); title-case it for display.
+function statusLabel(status: SessionView["status"]): string {
+  return status.charAt(0).toUpperCase() + status.slice(1)
+}
+
+// Read-only "Agent info…" modal. Pure presentation of existing ViewModel data:
+// no wire commands, no git reads. Mirrors `ProjectInfoDialog` (Dialog primitives,
+// the `InfoRow` definition list, and the vanished-target guard) so the two info
+// surfaces stay consistent. Works identically on desktop and mobile.
+export function AgentInfoDialog() {
+  const { agentInfoTarget, spine } = useDux()
+
+  // Derive the session from the ViewModel so an agent removed while the dialog is
+  // open closes it gracefully via the effect below, mirroring the project info
+  // dialog's vanished-target handling.
+  let session: SessionView | undefined
+  if (agentInfoTarget && spine) {
+    session = spine.sessions.find((s) => s.id === agentInfoTarget)
+  }
+
+  // If the target was set but no longer exists in the ViewModel, the agent was
+  // removed. Drop the modal so it doesn't linger pointing at a gone agent.
+  useEffect(() => {
+    if (agentInfoTarget && !session) {
+      closeAgentInfo()
+    }
+  }, [agentInfoTarget, session])
+
+  const isOpen = agentInfoTarget !== null && session !== undefined
+
+  function handleOpenChange(open: boolean) {
+    if (!open) closeAgentInfo()
+  }
+
+  // Compute the body only when a session resolves so the hooks above still run
+  // unconditionally on every render.
+  let body: React.ReactNode = null
+  if (session) {
+    const name = session.title || session.branch_name
+    const project = spine?.projects.find((p) => p.id === session.project_id)
+    // The current branch has drifted from the branch the agent was born on. Only
+    // flag it when `initial_branch` is present (older servers omit it) and truly
+    // differs.
+    const drifted =
+      !!session.initial_branch &&
+      session.initial_branch !== session.branch_name
+    const tabCount = session.tabs.length
+    body = (
+      <dl className="flex flex-col gap-3">
+        <InfoRow label="Name">{name}</InfoRow>
+        <InfoRow label="Provider">{session.provider}</InfoRow>
+        {project?.name ? (
+          <InfoRow label="Project">{project.name}</InfoRow>
+        ) : null}
+        <InfoRow label="Current branch">
+          <span className="font-mono break-all">{session.branch_name}</span>
+        </InfoRow>
+        <InfoRow label="Original branch">
+          {session.initial_branch ? (
+            <SimpleTooltip content="The branch this agent was created on (immutable).">
+              <span className="font-mono break-all">
+                {session.initial_branch}
+              </span>
+            </SimpleTooltip>
+          ) : (
+            <span className="text-muted-foreground">Unknown</span>
+          )}
+        </InfoRow>
+        <InfoRow label="Forked from">
+          {session.source_branch ? (
+            <SimpleTooltip content="The leading branch this agent was forked from at creation.">
+              <span className="font-mono break-all">
+                {session.source_branch}
+              </span>
+            </SimpleTooltip>
+          ) : (
+            <span className="text-muted-foreground">Unknown</span>
+          )}
+        </InfoRow>
+        {drifted ? (
+          // Small muted cue next to the branch rows: the working branch no longer
+          // matches the branch the agent was created on.
+          <p className="text-xs text-muted-foreground">
+            The branch changed since creation.
+          </p>
+        ) : null}
+        <InfoRow label="Worktree">
+          <span className="font-mono break-all">{session.worktree_path}</span>
+        </InfoRow>
+        <InfoRow label="Status">{statusLabel(session.status)}</InfoRow>
+        <InfoRow label="Created">{formatAddedDate(session.created_at)}</InfoRow>
+        <InfoRow label="Updated">{formatAddedDate(session.updated_at)}</InfoRow>
+        <InfoRow label="Tabs">
+          {tabCount === 1 ? "1 tab" : `${tabCount} tabs`}
+        </InfoRow>
+      </dl>
+    )
+  }
+
+  return (
+    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {session ? session.title || session.branch_name : "Agent info"}
+          </DialogTitle>
+        </DialogHeader>
+        {body}
+        <DialogFooter showCloseButton />
+      </DialogContent>
+    </Dialog>
+  )
+}

@@ -472,6 +472,7 @@ mod tests {
             provider: ProviderKind::new("codex"),
             source_branch: "main".to_string(),
             branch_name: "existing".to_string(),
+            initial_branch: "existing".to_string(),
             worktree_path: existing.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),

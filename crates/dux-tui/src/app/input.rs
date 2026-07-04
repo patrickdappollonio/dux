@@ -114,6 +114,7 @@ enum PromptMouseTarget {
     ConfigReloadFailedClose,
     ConfigReloadFailedApply,
     AddProjectFailedOk,
+    AgentInfoClose,
     StartupCommandLogItem(usize),
     StartupCommandLogsClose,
     StartupCommandInput,
@@ -212,6 +213,7 @@ impl ButtonPressedTarget {
                 Some(ButtonPressedTarget::ConfigReloadFailedApply)
             }
             PromptMouseTarget::AddProjectFailedOk => Some(ButtonPressedTarget::AddProjectFailedOk),
+            PromptMouseTarget::AgentInfoClose => Some(ButtonPressedTarget::AgentInfoClose),
             PromptMouseTarget::StartupCommandLogsClose => {
                 Some(ButtonPressedTarget::StartupCommandLogsClose)
             }
@@ -668,6 +670,7 @@ impl App {
                 Action::ShowTerminal => self.show_or_open_first_terminal()?,
                 Action::DeleteSession => self.confirm_delete_selected_session()?,
                 Action::RenameSession => self.open_rename_session()?,
+                Action::OpenAgentInfo => self.open_agent_info()?,
                 Action::EditMacros => self.open_edit_macros(),
                 Action::CopyPath => self.copy_selected_path()?,
                 Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
@@ -763,6 +766,7 @@ impl App {
                 Action::SelectTab9 if !in_diff => self.focus_tab_index(8),
                 Action::DeleteSession if !in_diff => self.confirm_delete_selected_session()?,
                 Action::RenameSession if !in_diff => self.open_rename_session()?,
+                Action::OpenAgentInfo if !in_diff => self.open_agent_info()?,
                 Action::OpenCurrentPullRequest if !in_diff && self.current_pr_info().is_some() => {
                     self.open_current_pr_in_browser()?
                 }
@@ -2845,6 +2849,17 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::AgentInfo(_)) {
+            // Read-only modal: Enter, Esc, or Space (the focused Close button) all
+            // dismiss it. Routed through PromptState so Esc behaves uniformly.
+            let action = self.bindings.lookup(&key, BindingScope::Dialog);
+            let is_space = key.code == KeyCode::Char(' ');
+            if matches!(action, Some(Action::Confirm | Action::CloseOverlay)) || is_space {
+                self.prompt = PromptState::None;
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmKillRunning(confirm_prompt) = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
@@ -3929,6 +3944,13 @@ impl App {
             OverlayMouseLayout::AddProjectFailed { ok_button } => {
                 if contains_point(ok_button, column, row) {
                     Some(PromptMouseTarget::AddProjectFailedOk)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::AgentInfo { close_button } => {
+                if contains_point(close_button, column, row) {
+                    Some(PromptMouseTarget::AgentInfoClose)
                 } else {
                     None
                 }
@@ -5458,6 +5480,7 @@ impl App {
             | PromptMouseTarget::ConfigReloadFailedClose
             | PromptMouseTarget::ConfigReloadFailedApply
             | PromptMouseTarget::AddProjectFailedOk
+            | PromptMouseTarget::AgentInfoClose
             | PromptMouseTarget::StartupCommandLogsClose => {
                 debug_assert!(
                     false,
@@ -5587,6 +5610,10 @@ impl App {
             }
             ButtonPressedTarget::ConfigReloadFailedApply => self.resolve_config_reload_failed(true),
             ButtonPressedTarget::AddProjectFailedOk => self.resolve_add_project_failed(),
+            ButtonPressedTarget::AgentInfoClose => {
+                self.prompt = PromptState::None;
+                false
+            }
             ButtonPressedTarget::StartupCommandLogsClose => {
                 self.prompt = PromptState::None;
                 false
@@ -7668,6 +7695,7 @@ not_a_real_action = ["x"]
             provider: ProviderKind::from_str("claude"),
             source_branch: "main".to_string(),
             branch_name: "beta-agent".to_string(),
+            initial_branch: "beta-agent".to_string(),
             worktree_path: app
                 .engine
                 .paths
@@ -7730,6 +7758,7 @@ not_a_real_action = ["x"]
                 provider: ProviderKind::from_str("codex"),
                 source_branch: "main".to_string(),
                 branch_name: name.to_string(),
+                initial_branch: name.to_string(),
                 worktree_path: app
                     .engine
                     .paths
@@ -8303,6 +8332,7 @@ not_a_real_action = ["x"]
             provider: ProviderKind::from_str("codex"),
             source_branch: "main".to_string(),
             branch_name: "main".to_string(),
+            initial_branch: "main".to_string(),
             worktree_path: worktree.to_string_lossy().to_string(),
             title: Some("imported".to_string()),
             started_providers: vec!["codex".to_string()],
@@ -9258,6 +9288,7 @@ not_a_real_action = ["x"]
             provider: ProviderKind::from_str("codex"),
             source_branch: "main".to_string(),
             branch_name: "agent-branch-2".to_string(),
+            initial_branch: "agent-branch-2".to_string(),
             worktree_path: app
                 .engine
                 .paths

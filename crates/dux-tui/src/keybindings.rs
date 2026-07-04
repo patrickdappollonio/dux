@@ -1071,6 +1071,19 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         ],
     },
     BindingDef {
+        action: Action::OpenAgentInfo,
+        // Ctrl-i for "info" (Ctrl-p is already change-provider). Note: some
+        // terminals conflate Ctrl-i with Tab; the command palette ("agent-info")
+        // is the portable fallback.
+        default_keys: &[key!(ctrl - i)],
+        scopes: &[BindingScope::Left, BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Show agent info (branch lineage, worktree, status)",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::DeleteProject,
         default_keys: &[],
         scopes: &[],

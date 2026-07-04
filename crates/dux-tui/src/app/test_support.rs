@@ -107,6 +107,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         provider: ProviderKind::from_str("codex"),
         source_branch: "main".to_string(),
         branch_name: "agent-branch".to_string(),
+        initial_branch: "agent-branch".to_string(),
         worktree_path: paths.worktrees_root.to_string_lossy().to_string(),
         title: None,
         started_providers: Vec::new(),

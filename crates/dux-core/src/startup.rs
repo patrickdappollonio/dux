@@ -404,6 +404,7 @@ mod tests {
             provider: ProviderKind::from_str("codex"),
             source_branch: "main".to_string(),
             branch_name: "feature/setup".to_string(),
+            initial_branch: "feature/setup".to_string(),
             worktree_path: worktree.to_string_lossy().to_string(),
             title: None,
             started_providers: Vec::new(),

@@ -21,6 +21,7 @@ import {
   FolderOpen,
   GitFork,
   GitPullRequest,
+  Info,
   Pencil,
   Play,
   Plug,
@@ -88,6 +89,7 @@ import {
   createTerminal,
   mobileNavigate,
   openAddProject,
+  openAgentInfo,
   openAgentEnv,
   openAgentStartupCommand,
   openChangeProvider,
@@ -152,6 +154,10 @@ function SessionActions({ session }: { session: SessionView }) {
       <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
         <Cpu />
         Change agent provider…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
+        <Info />
+        Agent info…
       </DropdownMenuItem>
       <DropdownMenuSub>
         <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>

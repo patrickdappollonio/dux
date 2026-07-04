@@ -27,6 +27,19 @@ use crate::worker::{
     ProjectWorktreeEntry, PullTarget, ResolvedPullRequest, ResourceStats, WorkerEvent,
 };
 
+/// Log line for an intentional branch rename: the new branch, the branch it
+/// replaced, and the agent's immutable original branch (for lineage context).
+pub(crate) fn branch_rename_log_line(new: &str, previous: &str, original: &str) -> String {
+    format!("renaming branch to {new} from {previous} (original branch name was {original})")
+}
+
+/// Log line for an *external* branch change picked up by the branch-sync poller
+/// (something ran `git checkout -b` in the worktree). Written at warning tone so
+/// the exact drift scenario is greppable in `dux.log`.
+pub(crate) fn branch_drift_log_line(new: &str, previous: &str, original: &str) -> String {
+    format!("agent branch changed externally to {new} from {previous} (original was {original})")
+}
+
 /// Status-line update returned from the Engine for the App to apply.
 #[derive(Clone, Debug)]
 pub struct StatusUpdate {
@@ -1830,6 +1843,16 @@ impl Engine {
                     Ok(()) => {
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
                         {
+                            // Log lineage before mutating: new, previous, and the
+                            // immutable original branch. `initial_branch` is never
+                            // touched here.
+                            let previous = session.branch_name.clone();
+                            let original = session.initial_branch.clone();
+                            logger::info(&branch_rename_log_line(
+                                &new_branch,
+                                &previous,
+                                &original,
+                            ));
                             session.branch_name = new_branch.clone();
                             session.updated_at = Utc::now();
                             if let Err(err) = self.session_store.upsert_session(session) {
@@ -1869,10 +1892,14 @@ impl Engine {
                     if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id)
                         && session.branch_name != actual_branch
                     {
-                        logger::info(&format!(
-                            "branch sync: session {} branch changed {} -> {}",
-                            session_id, session.branch_name, actual_branch,
-                        ));
+                        // External drift: the worktree's current branch changed
+                        // out from under us. Update the current branch label
+                        // (correct — the label should track reality) but never
+                        // `title` or `initial_branch`. Warn so the exact
+                        // name-vs-branch scenario is greppable in the log.
+                        let previous = session.branch_name.clone();
+                        let original = session.initial_branch.clone();
+                        logger::warn(&branch_drift_log_line(&actual_branch, &previous, &original));
                         session.branch_name = actual_branch;
                         session.updated_at = Utc::now();
                         if let Err(err) = self.session_store.upsert_session(session) {
@@ -2712,6 +2739,45 @@ mod tests {
         // Session store should not contain "s1" since no upsert happened.
         let loaded = engine.session_store.load_sessions().expect("load");
         assert!(loaded.iter().all(|s| s.id != "s1"));
+    }
+
+    #[test]
+    fn branch_sync_updates_current_branch_but_not_title_or_initial_branch() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "server-mode");
+        session.title = Some("server-mode".into());
+        session.initial_branch = "server-mode".into();
+        engine.sessions.push(session);
+
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![(
+            "s1".to_string(),
+            "agent-tabs".to_string(),
+        )]));
+
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        // The current branch follows git...
+        assert_eq!(s.branch_name, "agent-tabs");
+        // ...but the human name and the original branch are durable/immutable.
+        assert_eq!(s.title.as_deref(), Some("server-mode"));
+        assert_eq!(s.initial_branch, "server-mode");
+    }
+
+    #[test]
+    fn rename_log_line_includes_new_previous_and_original() {
+        let msg = branch_rename_log_line("XYZ", "ABC", "DEF");
+        assert_eq!(
+            msg,
+            "renaming branch to XYZ from ABC (original branch name was DEF)"
+        );
+    }
+
+    #[test]
+    fn drift_log_line_includes_new_previous_and_original() {
+        let msg = branch_drift_log_line("agent-tabs", "server-mode", "server-mode");
+        assert_eq!(
+            msg,
+            "agent branch changed externally to agent-tabs from server-mode (original was server-mode)"
+        );
     }
 
     // ── ChangedFilesReady (stale-poll race / CF1 invariant) ──────────────

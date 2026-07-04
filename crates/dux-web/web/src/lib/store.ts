@@ -199,6 +199,9 @@ export interface DuxState {
   // The project whose read-only info modal is open, or null (closed). Pure
   // presentation of existing ViewModel data — no wire command, no git read.
   projectInfoTarget: string | null
+  // The agent (session id) whose read-only info modal is open, or null (closed).
+  // Like `projectInfoTarget`, pure presentation of existing ViewModel data.
+  agentInfoTarget: string | null
   addProjectOpen: boolean
   browsePath: string
   browseEntries: DirEntryView[]
@@ -420,6 +423,7 @@ let state: DuxState = {
   startupLogsLoading: false,
   startupLogsError: null,
   projectInfoTarget: null,
+  agentInfoTarget: null,
   addProjectOpen: false,
   browsePath: "",
   browseEntries: [],
@@ -1802,6 +1806,14 @@ export function openProjectInfo(projectId: string): void {
 
 export function closeProjectInfo(): void {
   setState({ projectInfoTarget: null })
+}
+
+export function openAgentInfo(sessionId: string): void {
+  setState({ agentInfoTarget: sessionId })
+}
+
+export function closeAgentInfo(): void {
+  setState({ agentInfoTarget: null })
 }
 
 // Browse a directory for the add-project picker over REST (replaces the retired

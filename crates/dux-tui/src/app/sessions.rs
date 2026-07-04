@@ -3543,6 +3543,7 @@ mod tests {
             provider: ProviderKind::from_str(provider),
             source_branch: "main".to_string(),
             branch_name: format!("branch-{id}"),
+            initial_branch: format!("branch-{id}"),
             worktree_path: worktree.to_string(),
             title: None,
             started_providers: Vec::new(),

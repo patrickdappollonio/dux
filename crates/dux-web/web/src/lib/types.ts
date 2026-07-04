@@ -86,6 +86,13 @@ export interface SessionView {
   title: string | null
   provider: string
   branch_name: string
+  /** The branch the agent was created on, immutable. Unlike `branch_name` (which
+   * the branch-sync poller updates to follow the worktree's current git branch),
+   * this never changes after creation, so the UI can flag when the current branch
+   * has drifted from the original. */
+  initial_branch: string
+  /** The branch this agent was forked from (the leading branch at creation). */
+  source_branch: string
   worktree_path: string
   status: SessionStatus
   auto_reopen_enabled: boolean

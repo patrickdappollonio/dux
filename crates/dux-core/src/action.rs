@@ -131,6 +131,9 @@ pub enum Action {
     ReloadConfig,
     StartWebServer,
     ToggleAlwaysShowTabs,
+    /// Open the read-only Agent Info modal for the focused agent (name, provider,
+    /// branch lineage, worktree, status).
+    OpenAgentInfo,
 }
 
 impl Action {
@@ -244,6 +247,7 @@ impl Action {
             Action::ReloadConfig => "reload_config",
             Action::StartWebServer => "start_web_server",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
+            Action::OpenAgentInfo => "open_agent_info",
         }
     }
 
@@ -395,6 +399,9 @@ impl Action {
             Action::ToggleAlwaysShowTabs => {
                 "Toggle always showing the agent tab strip, even with a single tab."
             }
+            Action::OpenAgentInfo => {
+                "Show the selected agent's details: provider, branch lineage, worktree, and status."
+            }
         }
     }
 
@@ -506,7 +513,8 @@ impl Action {
             | Action::ChangeTheme
             | Action::ReloadConfig
             | Action::StartWebServer
-            | Action::ToggleAlwaysShowTabs => None,
+            | Action::ToggleAlwaysShowTabs
+            | Action::OpenAgentInfo => None,
         }
     }
 }

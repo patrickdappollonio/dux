@@ -51,6 +51,7 @@ impl SessionStore {
                 provider text not null,
                 source_branch text not null,
                 branch_name text not null,
+                initial_branch text not null default '',
                 worktree_path text not null,
                 title text,
                 project_path text,
@@ -102,6 +103,34 @@ impl SessionStore {
             "text not null default ''",
         )?;
         ensure_column(&self.conn, "agent_sessions", "title", "text")?;
+        // Freeze each existing agent's currently-displayed name into `title` so
+        // it can never drift with the branch again. Historically `title` was left
+        // NULL on create (only later renames wrote it), so the display fell back
+        // to `branch_name` — which the branch-sync poller overwrites. Copying the
+        // current branch into any NULL title makes the displayed name durable
+        // identity. Idempotent: the `title IS NULL` guard means it is a no-op once
+        // filled. Auto pet-name agents get their pet name frozen (harmless).
+        self.conn.execute(
+            "update agent_sessions set title = branch_name where title is null",
+            [],
+        )?;
+        // The immutable branch an agent was created on. Additive column with a ''
+        // default so old rows and inserts by an older binary still succeed.
+        ensure_column(
+            &self.conn,
+            "agent_sessions",
+            "initial_branch",
+            "text not null default ''",
+        )?;
+        // Backfill the birth branch for pre-existing rows. The true original may
+        // already be lost to prior drift, so freeze the current branch as the
+        // recorded initial (best available). New agents record their genuine
+        // original at creation. Idempotent via the empty/NULL guard.
+        self.conn.execute(
+            "update agent_sessions set initial_branch = branch_name \
+             where initial_branch = '' or initial_branch is null",
+            [],
+        )?;
         ensure_column(&self.conn, "agent_sessions", "project_path", "text")?;
         ensure_column(
             &self.conn,
@@ -679,7 +708,8 @@ impl SessionStore {
                 desired_running=?9,
                 auto_reopen_enabled=?10,
                 status=?11,
-                updated_at=?12
+                updated_at=?12,
+                initial_branch=?13
             where id = ?1
             "#,
             params![
@@ -695,6 +725,7 @@ impl SessionStore {
                 session.auto_reopen_enabled,
                 session.status.as_str(),
                 session.updated_at.to_rfc3339(),
+                session.initial_branch,
             ],
         )?;
         if updated > 0 {
@@ -712,9 +743,9 @@ impl SessionStore {
         self.conn.execute(
             r#"
             insert into agent_sessions
-                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at)
+                (id, project_id, project_path, provider, source_branch, branch_name, worktree_path, title, started_providers, desired_running, auto_reopen_enabled, status, sort_order, created_at, updated_at, initial_branch)
             values
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 session.id,
@@ -732,6 +763,7 @@ impl SessionStore {
                 new_sort_order,
                 session.created_at.to_rfc3339(),
                 session.updated_at.to_rfc3339(),
+                session.initial_branch,
             ],
         )?;
         Ok(())
@@ -822,7 +854,7 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch
             from agent_sessions
             order by sort_order asc, updated_at desc
             "#,
@@ -846,6 +878,7 @@ impl SessionStore {
                 status: SessionStatus::from_str(row.get::<_, String>(11)?.as_str()),
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
+                initial_branch: row.get(14)?,
             })
         })?;
 
@@ -961,6 +994,7 @@ fn test_session(
         provider: crate::model::ProviderKind::new("claude"),
         source_branch: "main".to_string(),
         branch_name: format!("branch-{id}"),
+        initial_branch: format!("branch-{id}"),
         worktree_path: format!("/tmp/{id}"),
         title: None,
         started_providers: Vec::new(),
@@ -1405,6 +1439,42 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].desired_running);
         assert!(loaded[0].auto_reopen_enabled);
+    }
+
+    #[test]
+    fn initial_branch_round_trips_through_storage() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut s = test_session("id1", now, now);
+        s.branch_name = "renamed".into();
+        s.initial_branch = "born-on".into();
+        store.upsert_session(&s).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        let got = loaded.iter().find(|s| s.id == "id1").expect("stored id1");
+        assert_eq!(got.initial_branch, "born-on");
+        assert_eq!(got.branch_name, "renamed");
+    }
+
+    #[test]
+    fn migration_backfills_null_titles_from_branch_name() {
+        // A legacy row inserted the old way (title NULL) gets its title frozen to
+        // the current branch on open, so the displayed name can never drift.
+        let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
+        let loaded = store.load_sessions().unwrap();
+        let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
+        // legacy_store_with_sessions sets branch_name == id.
+        assert_eq!(s.title.as_deref(), Some("feat-x"));
+    }
+
+    #[test]
+    fn migration_backfills_initial_branch_from_branch_name() {
+        // A legacy row predating the initial_branch column has it backfilled to
+        // the current branch (the best available birth branch).
+        let store = legacy_store_with_sessions(&[("feat-x", "p1", "2026-01-01T00:00:00Z")]);
+        let loaded = store.load_sessions().unwrap();
+        let s = loaded.iter().find(|s| s.id == "feat-x").expect("row");
+        assert_eq!(s.initial_branch, "feat-x");
     }
 
     /// Builds a legacy `agent_sessions` table (no `sort_order` column) and seeds

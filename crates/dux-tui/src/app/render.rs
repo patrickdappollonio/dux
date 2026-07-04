@@ -344,13 +344,20 @@ impl App {
             if let Some(session) = self.selected_session()
                 && session.branch_name != project.current_branch
             {
+                // Render the agent's branch through the shared drift helper: it
+                // appends "(orig: <initial>)" only when the current branch has
+                // drifted from the branch the agent was created on. The helper
+                // owns the "branch: " prefix; here we keep the themed "agent: "
+                // label, so strip it and style the value ourselves.
+                let segment = top_bar_branch_segment(&session.branch_name, &session.initial_branch);
+                let value = segment.strip_prefix("branch: ").unwrap_or(&segment);
                 spans.push(Span::styled(" ╱ ", Style::default().fg(sep_fg).bg(bg)));
                 spans.push(Span::styled(
                     "agent: ",
                     Style::default().fg(label_fg).bg(bg),
                 ));
                 spans.push(Span::styled(
-                    session.branch_name.clone(),
+                    value.to_string(),
                     Style::default().fg(self.theme.branch_fg).bg(bg),
                 ));
             }
@@ -4710,6 +4717,81 @@ impl App {
                 self.overlay_layout.active =
                     OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
             }
+            PromptState::AgentInfo(prompt) => {
+                self.render_dim_overlay(frame);
+                let dialog_width = 72.min(frame.area().width.max(1));
+                let inner_width = dialog_width.saturating_sub(2);
+                let mut body_lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!(" {}", prompt.session_label),
+                        Style::default()
+                            .fg(self.theme.text_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                ];
+                for line in &prompt.lines {
+                    // The drift note is the one line that carries a warning tone;
+                    // everything else is neutral body text. All colors come from
+                    // the theme.
+                    let style = if line.to_lowercase().contains("changed since creation") {
+                        Style::default().fg(self.theme.warning_fg)
+                    } else {
+                        Style::default().fg(self.theme.text_fg)
+                    };
+                    body_lines.push(Line::from(Span::styled(format!(" {line}"), style)));
+                }
+                let body_height = wrapped_line_count(&body_lines, inner_width, false);
+                let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let mut bottom = vec![Span::raw(" ")];
+                bottom.extend(self.theme.key_badge_default(&close_key));
+                bottom.push(Span::styled(
+                    " close",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                let outer = self
+                    .themed_overlay_block("Agent Info")
+                    .title_bottom(Line::from(bottom));
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(body_height), Constraint::Length(3)])
+                    .areas(inner);
+
+                Paragraph::new(body_lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = shared_button_width(&["Close"]);
+                let close_area = Rect {
+                    x: buttons_area.x + buttons_area.width.saturating_sub(btn_width) / 2,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                // A read-only modal still gets a focused Close button that Space
+                // activates (universal accessibility convention).
+                Button::new("Close")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::AgentInfoClose,
+                        self.pressed_button,
+                        true,
+                        true,
+                    ))
+                    .render(frame, close_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::AgentInfo {
+                    close_button: close_area,
+                };
+            }
             PromptState::ConfirmDeleteAgent {
                 branch_name,
                 focus,
@@ -7316,6 +7398,18 @@ pub(crate) fn format_line_stats(
     spans
 }
 
+/// Compact top-bar segment for an agent's branch. Shows just `branch: <current>`
+/// normally; when the current branch has drifted from the branch the agent was
+/// created on, it appends `(orig: <initial>)` so the original is visible in the
+/// tight header. Pure and unit-tested; the header renderer styles the pieces.
+pub(crate) fn top_bar_branch_segment(current: &str, initial: &str) -> String {
+    if current == initial {
+        format!("branch: {current}")
+    } else {
+        format!("branch: {current} (orig: {initial})")
+    }
+}
+
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -8133,6 +8227,17 @@ mod tests {
         assert_eq!(line.spans[1].content.as_ref(), "ma");
         assert_eq!(line.spans[2].content.as_ref(), "c");
         assert_eq!(line.spans[3].content.as_ref(), "ro");
+    }
+
+    #[test]
+    fn top_bar_branch_segment_shows_original_only_on_drift() {
+        // No drift: just the current branch.
+        assert_eq!(top_bar_branch_segment("main", "main"), "branch: main");
+        // Drift: the original branch is appended.
+        assert_eq!(
+            top_bar_branch_segment("agent-tabs", "server-mode"),
+            "branch: agent-tabs (orig: server-mode)"
+        );
     }
 
     #[test]

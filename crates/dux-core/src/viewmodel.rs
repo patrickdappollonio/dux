@@ -175,6 +175,12 @@ pub struct SessionView {
     pub title: Option<String>,
     pub provider: String,
     pub branch_name: String,
+    /// The branch this agent was created on, immutable. Distinct from
+    /// `branch_name` (the current branch, which tracks the worktree). When they
+    /// differ the current branch has drifted since creation.
+    pub initial_branch: String,
+    /// The branch this agent was forked from (its fork point / leading branch).
+    pub source_branch: String,
     pub worktree_path: String,
     /// "active" | "detached" | "exited"
     pub status: String,
@@ -315,6 +321,8 @@ impl SessionView {
             title: s.title.clone(),
             provider: s.provider.as_str().to_string(),
             branch_name: s.branch_name.clone(),
+            initial_branch: s.initial_branch.clone(),
+            source_branch: s.source_branch.clone(),
             worktree_path: s.worktree_path.clone(),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
@@ -564,6 +572,21 @@ mod tests {
         assert_eq!(spine.sessions[0].id, "s1");
         assert_eq!(spine.sessions[0].branch_name, "feature");
         assert_eq!(spine.sessions[0].status, "detached");
+    }
+
+    #[test]
+    fn session_view_exposes_initial_and_source_branch() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut s = sample_session("s1", "p1", "cur");
+        s.initial_branch = "orig".into();
+        s.source_branch = "main".into();
+        engine.sessions.push(s);
+
+        let view = &engine.spine().sessions[0];
+        assert_eq!(view.branch_name, "cur");
+        assert_eq!(view.initial_branch, "orig");
+        assert_eq!(view.source_branch, "main");
     }
 
     #[test]

@@ -23,6 +23,7 @@ import {
   FolderOpen,
   GitFork,
   GitPullRequest,
+  Info,
   Pencil,
   Play,
   Plug,
@@ -115,6 +116,7 @@ import {
   openEditor,
   openDelete,
   openDeleteTerminal,
+  openAgentInfo,
   openForkAgent,
   openRename,
   openStartupLogs,
@@ -399,6 +401,10 @@ function SessionSubItem({
               <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
                 <Cpu />
                 Change agent provider…
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
+                <Info />
+                Agent info…
               </DropdownMenuItem>
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>

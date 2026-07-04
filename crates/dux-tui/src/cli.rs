@@ -899,6 +899,7 @@ mod tests {
                     provider: ProviderKind::new("claude"),
                     source_branch: "main".to_string(),
                     branch_name: format!("branch-{id}"),
+                    initial_branch: format!("branch-{id}"),
                     worktree_path: worktree.to_string_lossy().to_string(),
                     title: None,
                     started_providers: Vec::new(),
