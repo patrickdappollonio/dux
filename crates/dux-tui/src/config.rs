@@ -25,7 +25,8 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
     let deprecations_changed = apply_config_deprecations(&mut doc)?;
     let retired_changed = prune_retired_providers(&mut doc);
-    if deprecations_changed || retired_changed {
+    let retired_keys_changed = prune_retired_key_actions(&mut doc);
+    if deprecations_changed || retired_changed || retired_keys_changed {
         // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
         dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
@@ -197,6 +198,42 @@ fn prune_retired_providers(doc: &mut DocumentMut) -> bool {
             .is_some_and(|table| table_matches_provider_config(table, &stock));
         if matches {
             providers.remove(name);
+            changed = true;
+        }
+    }
+    changed
+}
+
+// ---------------------------------------------------------------------------
+// Retired keybinding actions
+//
+// An action that once shipped (and could be bound in `[keys]`) but has since
+// been removed from the app. `validate_keys` rejects any `[keys]` entry whose
+// action is not in `BINDING_DEFS`, so a stale binding left in an existing config
+// would abort startup with `[keys] unknown action: "..."`. To let those configs
+// keep working, a binding for a retired action is pruned from the document on
+// load (and the pruned config is rewritten), exactly like a retired provider
+// block. This is the config migration that removes the key for good.
+// ---------------------------------------------------------------------------
+
+/// Actions that were removed from dux but may still appear in an older user's
+/// `[keys]` section. A binding for any of these is silently dropped on load so
+/// the stale key cannot fail `validate_keys`.
+const RETIRED_KEY_ACTIONS: &[&str] = &[
+    // Removed together with the AI-generated commit-message feature.
+    "generate_commit_message",
+];
+
+/// Remove `[keys]` entries for retired actions so an old config that still binds
+/// them does not fail `validate_keys` with "unknown action". Returns whether the
+/// document changed.
+fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
+    let Some(keys) = doc.get_mut("keys").and_then(Item::as_table_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for action in RETIRED_KEY_ACTIONS {
+        if keys.remove(action).is_some() {
             changed = true;
         }
     }
@@ -2107,6 +2144,49 @@ oneshot_output = "stdout"
         assert!(
             doc["providers"].get("gemini").is_some(),
             "a customized gemini block must be preserved"
+        );
+    }
+
+    #[test]
+    fn prune_retired_key_actions_drops_generate_commit_message() {
+        // A binding for the retired action would abort startup at validate_keys...
+        let mut keys = KeysConfig::default();
+        keys.bindings.insert(
+            "generate_commit_message".to_string(),
+            vec!["ctrl-g".to_string()],
+        );
+        assert!(
+            validate_keys(&keys).is_err(),
+            "precondition: the retired action fails validate_keys"
+        );
+
+        // ...so the load-time migration prunes it from an existing config.
+        let mut doc: DocumentMut =
+            "[keys]\ngenerate_commit_message = [\"ctrl-g\"]\nquit = [\"ctrl-q\"]\n"
+                .parse()
+                .expect("parse doc");
+
+        let changed = prune_retired_key_actions(&mut doc);
+
+        assert!(changed, "the retired action binding should be pruned");
+        assert!(
+            doc["keys"].get("generate_commit_message").is_none(),
+            "the retired action must be removed from [keys]"
+        );
+        assert!(
+            doc["keys"].get("quit").is_some(),
+            "a live binding must be preserved"
+        );
+    }
+
+    #[test]
+    fn prune_retired_key_actions_noop_without_keys_table() {
+        let mut doc: DocumentMut = "[server]\nhost = \"127.0.0.1\"\n"
+            .parse()
+            .expect("parse doc");
+        assert!(
+            !prune_retired_key_actions(&mut doc),
+            "no [keys] table means nothing to prune"
         );
     }
 
