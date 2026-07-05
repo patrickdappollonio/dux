@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
+import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -94,8 +95,9 @@ vi.mock("@/lib/store", async (importOriginal) => {
 installStubs()
 const { TerminalPane } = await import("./TerminalPane")
 
-function makeState(offline = false): DuxState {
+function makeState(offline = false, conn: ConnState = "open"): DuxState {
   return {
+    conn,
     spine: {
       projects: [],
       sessions: [
@@ -183,6 +185,9 @@ beforeEach(() => {
   FakePtySocket.instances = []
   mockState = makeState()
   installStubs()
+  // The `pty.owner` epoch high-water marks are module-global; reset so a handover
+  // in one test is never dropped as "stale" by a prior test's epoch.
+  resetPtyOwnerEpochs()
 })
 
 afterEach(() => {
@@ -236,5 +241,48 @@ describe.each([
     // hides the per-pane affordance so the two never double up.
     expect(screen.queryByText("Connection lost.")).toBeNull()
     expect(screen.queryByText("Reconnect")).toBeNull()
+  })
+})
+
+// The take-over placeholder's device naming: a `pty.owner` handover carrying the
+// other device's raw User-Agent must render "Open on {parsed label}", our own claim
+// echo must restore the owner view, and a non-open events socket must drop the
+// specific name back to the generic copy (the stale-name-on-reconnect fix).
+describe("TerminalPane take-over device naming", () => {
+  const chromeMac =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+  it("names the other device in the modal when a handover carries a device UA", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // A foreign device claims the PTY (owner id is not ours) with its UA attached.
+    act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
+    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+  })
+
+  it("clears the label and restores the owner view on our own claim echo", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // Learn our own connection id so an echo with that id reads as ours.
+    act(() => last().onConnected("conn-self"))
+    act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
+    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    // Our own claim echoes back -> we are the owner again; the placeholder (and its
+    // device name) disappears entirely.
+    act(() => notifyPtyOwner("s1", "conn-self", undefined, chromeMac))
+    expect(screen.queryByText(/Open on/)).toBeNull()
+    expect(screen.queryByText("Active on another device")).toBeNull()
+  })
+
+  it("drops the specific name to the generic copy when events socket is not open", () => {
+    const { rerender } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
+    expect(screen.getByText("Open on Chrome on macOS")).toBeTruthy()
+    // The events socket drops (conn !== "open"): the specific-but-now-possibly-stale
+    // device name is cleared, falling back to the always-correct generic copy.
+    mockState = makeState(false, "closed")
+    act(() => rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />))
+    expect(screen.queryByText("Open on Chrome on macOS")).toBeNull()
+    expect(screen.getByText("Active on another device")).toBeTruthy()
   })
 })

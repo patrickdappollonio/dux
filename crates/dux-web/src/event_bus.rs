@@ -63,6 +63,12 @@ pub enum Event {
         /// clients keep only the highest epoch seen per pty and ignore any older
         /// arrival, converging on the latest claim. `None` for every other event.
         epoch: Option<u64>,
+        /// The claiming connection's raw `User-Agent` for a `pty.owner` handover,
+        /// captured server-side at that connection's PTY upgrade (the other device
+        /// is only known to the server). A client viewing the PTY parses it into a
+        /// human label ("Chrome on macOS") for the take-over placeholder. `None` for
+        /// every other event, and `None` when the claimer sent no `User-Agent`.
+        device: Option<String>,
     },
 }
 
@@ -220,6 +226,7 @@ mod tests {
             rev: Some(7),
             owner: None,
             epoch: None,
+            device: None,
         });
         let ev = rx.recv().await.unwrap();
         assert_eq!(
@@ -230,6 +237,7 @@ mod tests {
                 rev: Some(7),
                 owner: None,
                 epoch: None,
+                device: None,
             }
         );
     }

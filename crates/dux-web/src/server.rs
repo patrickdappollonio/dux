@@ -111,6 +111,23 @@ pub struct AppState {
 /// paste, so legitimate input is never truncated.
 const MAX_WS_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
+/// Upper bound (in characters) on a captured `User-Agent` before it is stamped on a
+/// `pty.owner` handover. The raw header is attacker-controllable and re-broadcast to
+/// every connected client on each ownership flip, so an unbounded value is an
+/// amplification vector and would blow up the take-over modal title. Truncation is
+/// char-safe (never byte slicing) to stay UTF-8 correct.
+const MAX_CAPTURED_USER_AGENT_CHARS: usize = 200;
+
+/// Read and length-bound the request `User-Agent` for the `pty.owner` handover.
+/// Returns `None` when the header is absent or not valid UTF-8; otherwise truncates
+/// to [`MAX_CAPTURED_USER_AGENT_CHARS`] using char-safe truncation.
+fn captured_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(MAX_CAPTURED_USER_AGENT_CHARS).collect())
+}
+
 /// Build the router. dux is trusted-local with no login gate, so every route is
 /// plain. The single-argument entry the test harnesses and any caller use.
 pub fn router(engine: EngineHandle) -> Router {
@@ -874,6 +891,9 @@ async fn ws_session_pty_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
+    // Capture the claiming connection's User-Agent before the upgrade so the eventual
+    // `pty.owner` handover can name this device to other viewers.
+    let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
             handle_pty_socket(
@@ -886,6 +906,7 @@ async fn ws_session_pty_upgrade(
                 pty_size_owners,
                 bus,
                 connections,
+                user_agent,
             )
         })
         .into_response()
@@ -943,6 +964,7 @@ async fn ws_terminal_pty_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
+    let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| {
             handle_pty_socket(
@@ -955,6 +977,7 @@ async fn ws_terminal_pty_upgrade(
                 pty_size_owners,
                 bus,
                 connections,
+                user_agent,
             )
         })
         .into_response()
@@ -1078,6 +1101,7 @@ async fn ws_tab_pty_upgrade(
     let bus = Arc::clone(&state.event_bus);
     let connections = Arc::clone(&state.connections);
     let peer_ip = peer.ip();
+    let user_agent = captured_user_agent(&headers);
     ws.max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| async move {
             // Hold the per-agent sub-quota guard for the socket's lifetime; it
@@ -1093,6 +1117,7 @@ async fn ws_tab_pty_upgrade(
                 pty_size_owners,
                 bus,
                 connections,
+                user_agent,
             )
             .await
         })
@@ -1120,6 +1145,11 @@ async fn handle_pty_socket(
     pty_size_owners: Arc<PtySizeOwners>,
     bus: Arc<EventBus>,
     connections: Arc<crate::rest_common::ConnectionRegistry>,
+    // The claiming connection's raw `User-Agent`, captured at the upgrade before the
+    // socket split. This connection IS the claimer at both `pty.owner` emit sites, so
+    // the value is a plain local (no per-conn map needed); it rides the handover so a
+    // client on another device can name this one ("Chrome on macOS").
+    user_agent: Option<String>,
 ) {
     console.client_connected(peer_ip);
     // Register this PTY socket as a live connection (its class depends on which PTY
@@ -1193,6 +1223,7 @@ async fn handle_pty_socket(
             rev: None,
             owner: None,
             epoch: None,
+            device: None,
         },
     )
     .await;
@@ -1254,7 +1285,12 @@ async fn handle_pty_socket(
                     // `epoch` is `Some` exactly when this write newly claimed an
                     // unowned PTY, so emit one handover stamped with that epoch.
                     if let Some(epoch) = claim.epoch {
-                        bus.emit(pty_owner_event(pty_id, conn_id, epoch));
+                        bus.emit(pty_owner_event(
+                            pty_id,
+                            conn_id,
+                            epoch,
+                            user_agent.as_deref(),
+                        ));
                     }
                     engine.write_pty(pty_id.to_string(), bytes.to_vec());
                 } else {
@@ -1272,7 +1308,12 @@ async fn handle_pty_socket(
             Message::Text(text) => {
                 if let Ok(frame) = serde_json::from_str::<PtyResizeFrame>(text.as_str()) {
                     if let Some(epoch) = pty_size_owners.claim(target.pty_id(), conn_id) {
-                        bus.emit(pty_owner_event(target.pty_id(), conn_id, epoch));
+                        bus.emit(pty_owner_event(
+                            target.pty_id(),
+                            conn_id,
+                            epoch,
+                            user_agent.as_deref(),
+                        ));
                     }
                     engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
                 }
@@ -1304,13 +1345,17 @@ async fn handle_pty_socket(
 /// it orders concurrent handovers so a client can ignore an out-of-order broadcast
 /// and keep only the latest claim, since this event is emitted AFTER the lock
 /// releases and the runtime may reorder two near-simultaneous broadcasts.
-fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64) -> Event {
+/// `device` is the claimer's raw `User-Agent` (captured at its PTY upgrade), which
+/// the client parses into a human label ("Chrome on macOS") for the take-over
+/// placeholder; it is `None` when the claimer sent no `User-Agent`.
+fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64, device: Option<&str>) -> Event {
     Event::Resource {
         event: "pty.owner".to_string(),
         id: Some(pty_id.to_string()),
         rev: None,
         owner: Some(owner_conn_id.to_string()),
         epoch: Some(epoch),
+        device: device.map(str::to_owned),
     }
 }
 
@@ -1324,6 +1369,7 @@ fn config_changed_event() -> Event {
         rev: None,
         owner: None,
         epoch: None,
+        device: None,
     }
 }
 
@@ -1360,6 +1406,7 @@ fn projects_changed_event() -> Event {
         rev: None,
         owner: None,
         epoch: None,
+        device: None,
     }
 }
 
@@ -1374,6 +1421,7 @@ fn sessions_changed_event() -> Event {
         rev: None,
         owner: None,
         epoch: None,
+        device: None,
     }
 }
 
@@ -1445,6 +1493,12 @@ struct WireEvent {
     /// stale owner. Omitted from the wire for every other event.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch: Option<u64>,
+    /// The claiming connection's raw `User-Agent` on a `pty.owner` handover (see
+    /// [`pty_owner_event`]), captured server-side. The client parses it into a
+    /// human label for the take-over placeholder. Omitted from the wire for every
+    /// other event and when the claimer sent no `User-Agent`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    device: Option<String>,
 }
 
 /// Outbound `/ws/events` status event: the one event carrying an inline payload
@@ -1575,6 +1629,7 @@ async fn handle_events_socket(
             rev: None,
             owner: None,
             epoch: None,
+            device: None,
         },
     )
     .await;
@@ -1628,6 +1683,7 @@ async fn handle_events_socket(
                     rev,
                     owner,
                     epoch,
+                    device,
                 }) => {
                     // Forward a resource event only if this connection holds the
                     // topic it is delivered on. `session.changes` rides the fine
@@ -1656,6 +1712,7 @@ async fn handle_events_socket(
                             rev,
                             owner,
                             epoch,
+                            device,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1678,6 +1735,7 @@ async fn handle_events_socket(
                                 rev: changes.peek_rev(sid),
                                 owner: None,
                                 epoch: None,
+                                device: None,
                             };
                             if send_event(&sink, &frame).await.is_err() {
                                 sink_dead = true;
@@ -1700,6 +1758,7 @@ async fn handle_events_socket(
                             rev: None,
                             owner: None,
                             epoch: None,
+                            device: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1715,6 +1774,7 @@ async fn handle_events_socket(
                             rev: None,
                             owner: None,
                             epoch: None,
+                            device: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1727,6 +1787,7 @@ async fn handle_events_socket(
                             rev: None,
                             owner: None,
                             epoch: None,
+                            device: None,
                         };
                         if send_event(&sink, &frame).await.is_err() {
                             break;
@@ -1967,6 +2028,7 @@ fn catchup_frames(new_fine: &[String], changes: &ChangesService) -> Vec<WireEven
                 rev: changes.peek_rev(sid),
                 owner: None,
                 epoch: None,
+                device: None,
             })
         })
         .collect()
@@ -2084,6 +2146,32 @@ impl Drop for ConnectionGuard {
 mod tests {
     use super::*;
     use tower::ServiceExt; // for `oneshot`
+
+    #[test]
+    fn captured_user_agent_truncates_long_and_preserves_short() {
+        // A short UA is threaded through unchanged.
+        let mut short = HeaderMap::new();
+        short.insert(
+            axum::http::header::USER_AGENT,
+            "Mozilla/5.0 Chrome/120".parse().unwrap(),
+        );
+        assert_eq!(
+            captured_user_agent(&short).as_deref(),
+            Some("Mozilla/5.0 Chrome/120"),
+        );
+
+        // A pathologically long UA is capped to the char bound (char-safe, so the
+        // result length is measured in chars, never bytes).
+        let mut long = HeaderMap::new();
+        let huge = "A".repeat(5000);
+        long.insert(axum::http::header::USER_AGENT, huge.parse().unwrap());
+        let got = captured_user_agent(&long).expect("header present");
+        // Char-count (not byte-count) equals the cap: truncation is char-safe.
+        assert_eq!(got.chars().count(), MAX_CAPTURED_USER_AGENT_CHARS);
+
+        // An absent header yields None.
+        assert_eq!(captured_user_agent(&HeaderMap::new()), None);
+    }
 
     #[test]
     fn provider_gone_close_carries_the_agreed_code() {
@@ -3021,6 +3109,7 @@ mod tests {
                 rev: None,
                 owner: None,
                 epoch: None,
+                device: None,
             }
         );
 
@@ -3038,6 +3127,7 @@ mod tests {
                 rev: None,
                 owner: None,
                 epoch: None,
+                device: None,
             }
         );
     }
@@ -3284,6 +3374,7 @@ mod tests {
             rev: None,
             owner: None,
             epoch: None,
+            device: None,
         };
         assert_eq!(
             serde_json::to_string(&ev).unwrap(),
@@ -3297,19 +3388,21 @@ mod tests {
     /// so the client can compare the owner id and dedup by epoch.
     #[test]
     fn pty_owner_event_carries_owner_and_epoch_and_serializes() {
-        let ev = pty_owner_event("session-1", 42, 7);
+        let ev = pty_owner_event("session-1", 42, 7, None);
         let Event::Resource {
             event,
             id,
             rev,
             owner,
             epoch,
+            device,
         } = ev;
         assert_eq!(event, "pty.owner");
         assert_eq!(id.as_deref(), Some("session-1"));
         assert_eq!(rev, None);
         assert_eq!(owner.as_deref(), Some("42"), "the claimer id is carried");
         assert_eq!(epoch, Some(7), "the ownership epoch is carried");
+        assert_eq!(device, None, "no User-Agent means no device");
 
         let frame = WireEvent {
             event,
@@ -3317,11 +3410,45 @@ mod tests {
             rev,
             owner,
             epoch,
+            device,
         };
         assert_eq!(
             serde_json::to_string(&frame).unwrap(),
             r#"{"event":"pty.owner","id":"session-1","owner":"42","epoch":7}"#,
-            "the wire frame includes both owner and epoch (rev is omitted)"
+            "the wire frame includes owner and epoch and omits device when absent (rev is omitted)"
+        );
+    }
+
+    /// When the claiming connection sent a `User-Agent`, `pty_owner_event` carries it
+    /// as `device` and the wire frame serializes it (so the client can name the
+    /// other device); `None` omits the field entirely.
+    #[test]
+    fn pty_owner_event_carries_device_when_present() {
+        let ua = "Mozilla/5.0 (Macintosh) Chrome/120.0";
+        let ev = pty_owner_event("session-1", 42, 7, Some(ua));
+        let Event::Resource { device, .. } = ev.clone();
+        assert_eq!(device.as_deref(), Some(ua), "the User-Agent is carried");
+
+        let Event::Resource {
+            event,
+            id,
+            rev,
+            owner,
+            epoch,
+            device,
+        } = ev;
+        let frame = WireEvent {
+            event,
+            id,
+            rev,
+            owner,
+            epoch,
+            device,
+        };
+        assert_eq!(
+            serde_json::to_string(&frame).unwrap(),
+            r#"{"event":"pty.owner","id":"session-1","owner":"42","epoch":7,"device":"Mozilla/5.0 (Macintosh) Chrome/120.0"}"#,
+            "the wire frame includes the device string when present"
         );
     }
 

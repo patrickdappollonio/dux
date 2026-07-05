@@ -53,7 +53,11 @@ export function isOwnerAfterHandover(
 // `ownerId` to its own PTY-socket connection id. Kept here (not in the store) so
 // the terminal view depends on a small leaf module rather than the store, matching
 // the `setActivePtySocket` singleton pattern in `ptySocket.ts`.
-type PtyOwnerListener = (ptyId: string, ownerId: string | undefined) => void
+type PtyOwnerListener = (
+  ptyId: string,
+  ownerId: string | undefined,
+  device?: string,
+) => void
 const ptyOwnerListeners = new Set<PtyOwnerListener>()
 
 export function onPtyOwner(cb: PtyOwnerListener): () => void {
@@ -86,6 +90,7 @@ export function notifyPtyOwner(
   ptyId: string,
   ownerId: string | undefined,
   epoch?: number,
+  device?: string,
 ): void {
   // Epoch-ordered dedup: ignore a handover that is not strictly newer than the
   // newest already applied for this pty, so a reordered (older) broadcast cannot
@@ -99,5 +104,5 @@ export function notifyPtyOwner(
   }
   // Snapshot so a listener that unsubscribes during dispatch can't perturb the
   // live iteration.
-  for (const cb of [...ptyOwnerListeners]) cb(ptyId, ownerId)
+  for (const cb of [...ptyOwnerListeners]) cb(ptyId, ownerId, device)
 }

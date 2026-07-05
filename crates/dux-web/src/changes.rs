@@ -651,6 +651,7 @@ impl ChangesService {
                 rev: Some(rev),
                 owner: None,
                 epoch: None,
+                device: None,
             });
         }
     }

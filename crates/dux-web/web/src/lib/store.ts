@@ -582,7 +582,8 @@ eventsSocket.onEvent = (ev: EventsServerMessage) => {
   if (ev.event === "pty.owner") {
     // Pass the ownership epoch so the fan-out can ignore an out-of-order (older)
     // handover and converge on the latest claim regardless of arrival order.
-    if (typeof ev.id === "string") notifyPtyOwner(ev.id, ev.owner, ev.epoch)
+    if (typeof ev.id === "string")
+      notifyPtyOwner(ev.id, ev.owner, ev.epoch, ev.device)
     return
   }
   if (ev.event !== "session.changes") return

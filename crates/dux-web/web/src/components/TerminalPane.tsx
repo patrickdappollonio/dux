@@ -64,6 +64,7 @@ import {
   isOwnerAfterHandover,
   onPtyOwner,
 } from "@/lib/ptyOwnership"
+import { deviceLabel } from "@/lib/deviceLabel"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
@@ -210,7 +211,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     setAlt(next.alt)
   }
 
-  const { spine, bootstrap, offline } = useDux()
+  const { spine, bootstrap, offline, conn } = useDux()
   // Size xterm's scrollback to the configured `agent_scrollback_lines` (now from
   // the bootstrap document) so the reconnect repaint's replayed history isn't
   // trimmed by xterm's 1000-line default. Read via a ref (not an effect dep) so
@@ -322,6 +323,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // placeholder). `isOwnerRef` mirrors the state so the stable mount-effect closures
   // (onData, the resize senders) read it live rather than capturing a stale value.
   const [isOwner, setIsOwner] = useState(isForeground)
+  // The other device's raw `User-Agent`, captured from the `pty.owner` handover that
+  // demoted us to the read-only placeholder. Parsed into a human label ("Chrome on
+  // macOS") for the take-over modal, and cleared the moment we regain ownership.
+  const [takeoverDevice, setTakeoverDevice] = useState<string | null>(null)
   // Mirror of `isOwner` for the stable mount-effect closures (onData, the resize
   // senders) to read synchronously. Kept in sync only at the mutation points
   // (a take-over and the handover handler), never written during render.
@@ -336,6 +341,20 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // it, an optimistic claim sent while our id is null carries no recognisable
   // owner and would be immediately revoked by its own `pty.owner` echo.
   const pendingClaimRef = useRef(false)
+
+  // Drop the specific device name whenever the events socket is not open. A
+  // `pty.owner` handover is only delivered live over `/ws/events`; there is NO
+  // replay on reconnect, so if ownership changes while our events socket is down we
+  // would otherwise keep naming a now-wrong device. The generic "Active on another
+  // device" copy is never wrong, so we fall back to it across any outage; a real
+  // handover after reconnect repopulates the name. Clearing on the render-phase
+  // transition (React's "adjust state when input changes" pattern) rather than an
+  // effect avoids the extra commit-then-clear render pass.
+  const [prevConn, setPrevConn] = useState(conn)
+  if (conn !== prevConn) {
+    setPrevConn(conn)
+    if (conn !== "open") setTakeoverDevice(null)
+  }
 
   // Mirror the TUI's exit behavior: when the agent we were attached to stops
   // running (it produced output in this pane, then its session left `active`
@@ -940,13 +959,16 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Keyed by `id` (the pty id: session id for an agent, terminal id for a companion)
   // so a focus switch re-subscribes for the new target.
   useEffect(() => {
-    return onPtyOwner((ptyId, ownerId) => {
+    return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       // Flip the ref synchronously so an in-flight keystroke is gated by the new
       // state at once, then re-render into the owner view or take-over placeholder.
       isOwnerRef.current = mine
       setIsOwner(mine)
+      // Remember which device took over (for the placeholder's copy) while we are
+      // demoted; clear it the moment we are the owner again.
+      setTakeoverDevice(mine ? null : (device ?? null))
     })
   }, [id])
 
@@ -1004,6 +1026,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   function takeOver() {
     isOwnerRef.current = true
     setIsOwner(true)
+    // Clear the other device's name as we optimistically claim ownership, honoring
+    // the invariant that `takeoverDevice` only names a device we do NOT own.
+    setTakeoverDevice(null)
     const term = termRef.current
     const pty = ptyRef.current
     if (term && pty) {
@@ -1170,6 +1195,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // viewport-pinned root, and fullscreen. The overlays (fullscreen button,
   // readiness card) are absolutely positioned inside these bounds, so
   // clipping never affects them.
+  // Human label for the device that took over ("Chrome on macOS"), or null when the
+  // other device's `User-Agent` was absent/unrecognized (the modal then shows a
+  // generic fallback). Parsing lives in the pure, tested `deviceLabel` helper.
+  const takeoverLabel = deviceLabel(takeoverDevice)
   const pane = (
     <div
       // On desktop the pane IS the fullscreen target; on mobile the outer column
@@ -1339,7 +1368,11 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
           <Card className="w-full max-w-sm text-center">
             <CardHeader className="items-center gap-3">
               <MonitorSmartphone className="size-8 text-muted-foreground" />
-              <CardTitle>This session is active on another device.</CardTitle>
+              <CardTitle>
+                {takeoverLabel
+                  ? `Open on ${takeoverLabel}`
+                  : "Active on another device"}
+              </CardTitle>
               <CardDescription>
                 Only one device can type at a time. Take over to drive this{" "}
                 {kind === "agent" ? "agent" : "terminal"} from here.

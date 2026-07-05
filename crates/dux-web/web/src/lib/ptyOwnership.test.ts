@@ -92,6 +92,18 @@ describe("pty.owner fan-out", () => {
     ])
   })
 
+  it("passes the device (4th) argument through to listeners", () => {
+    // The take-over modal names the other device from this `device` arg (the raw
+    // User-Agent the server stamps on the handover), so it must survive the fan-out.
+    const seen: Array<string | undefined> = []
+    track(onPtyOwner((_id, _owner, device) => seen.push(device)))
+
+    notifyPtyOwner("session-1", "conn-other", 1, "Mozilla/5.0 Chrome/120")
+    notifyPtyOwner("session-1", "conn-self", 2) // no device -> undefined
+
+    expect(seen).toEqual(["Mozilla/5.0 Chrome/120", undefined])
+  })
+
   it("isolates listeners: a listener only reacts to its own pty id", () => {
     const a: Array<string | undefined> = []
     const b: Array<string | undefined> = []

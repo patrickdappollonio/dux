@@ -272,6 +272,11 @@ export interface EventsServerMessage {
    *  the highest epoch seen per pty and ignores any older arrival, so a reordered
    *  broadcast cannot resurrect a stale owner. */
   epoch?: number
+  /** The claiming connection's raw `User-Agent` on a `pty.owner` handover,
+   *  captured server-side (the other device is only known to the server). The
+   *  client parses it into a human label ("Chrome on macOS") for the take-over
+   *  placeholder. Absent for every other event and when the claimer sent none. */
+  device?: string
   /** Status correlation key (`status`/`status_cleared`); null/absent = the
    *  anonymous slot. */
   key?: string | null
