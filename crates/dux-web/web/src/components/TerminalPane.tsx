@@ -3,12 +3,9 @@ import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import {
-  ClipboardCopy,
-  ClipboardPaste,
   Maximize2,
   Minimize2,
   MonitorSmartphone,
-  TextSelect,
 } from "lucide-react"
 import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
@@ -23,11 +20,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-} from "@/components/ui/context-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
@@ -116,10 +108,6 @@ function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
   term?.clearSelection()
   pty?.sendInput(LF_BYTES)
 }
-
-// A minimal virtual anchor (floating-ui shape) so the controlled context menu
-// can position itself at the cursor without a real trigger element.
-type CursorAnchor = { getBoundingClientRect: () => DOMRect }
 
 // Copy the terminal's current selection to the clipboard and toast the result.
 // `copyToClipboard` writes via the async Clipboard API in a secure context and
@@ -293,23 +281,12 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // case and its Retry already remounts this pane.
   const [connectionLost, setConnectionLost] = useState(false)
 
-  // The desktop right-click clipboard menu, driven in CONTROLLED mode (no
-  // ContextMenuTrigger): base-ui's Trigger hardcodes a 500ms touch long-press
-  // with no opt-out, which would collide with the terminal's own long-press-to-
-  // select gesture. We bind our own `onContextMenu` instead, so the menu only
-  // opens on a real right-click (pointer) and touch keeps its native selection.
-  // `menuAnchor` is a virtual element at the cursor so the menu positions there.
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [menuAnchor, setMenuAnchor] = useState<CursorAnchor | null>(null)
-  // Snapshot whether a selection exists when the menu opens, so "Copy" can be
-  // disabled with no selection (the selection can't change while the menu is up).
-  const [menuHasSelection, setMenuHasSelection] = useState(false)
   // The pointer type of the most recent press on the host. Android Chrome fires
   // `contextmenu` on a touch LONG-PRESS, which would hijack the terminal's native
-  // long-press-to-select; we only open our menu for a mouse/pen right-click, so
-  // touch long-press still hands off to native selection. This per-interaction
+  // long-press-to-select; right-click paste only fires for a mouse/pen press, so
+  // a touch long-press still hands off to native selection. This per-interaction
   // signal is exact where an `isMobile` width check is not (a touchscreen laptop
-  // with a mouse must still get the right-click menu).
+  // with a mouse must still get right-click paste).
   const pointerTypeRef = useRef("")
 
   // Per-PTY ownership. A PTY is shared across every connected device, but only
@@ -598,6 +575,21 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       copyTermSelection(term)
     }
     container.addEventListener("mouseup", onMouseUp)
+
+    // Kill xterm's right-click paste. On a mouse right-click xterm's own handler
+    // stuffs the current selection into its hidden input textarea (its
+    // native-Copy preparation); left there it leaks back into the PTY as a paste.
+    // We drive our own clipboard menu, so wipe the textarea on `contextmenu`
+    // (which fires right after that handler, before any input event could send
+    // it). It only touches xterm's hidden input — the selection MODEL that our
+    // menu's Copy reads is untouched, so the highlight and Copy stay intact.
+    // Skip touch (a long-press uses the native selection gesture, not xterm's
+    // mouse right-click handler, so nothing was stuffed).
+    const onContextMenuPasteGuard = () => {
+      if (pointerTypeRef.current === "touch") return
+      if (term.textarea) term.textarea.value = ""
+    }
+    container.addEventListener("contextmenu", onContextMenuPasteGuard)
 
     // Touch gestures over the terminal, mapped to the natural mobile model:
     //   - a one-finger DRAG scrolls the scrollback,
@@ -928,6 +920,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       clearTimeout(resyncTimer)
       clearTimeout(longPressTimer)
       container.removeEventListener("mouseup", onMouseUp)
+      container.removeEventListener("contextmenu", onContextMenuPasteGuard)
       container.removeEventListener("touchstart", onTouchStart)
       container.removeEventListener("touchmove", onTouchMove)
       container.removeEventListener("touchend", endTouch)
@@ -1047,23 +1040,14 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     term?.focus()
   }
 
-  // Copy the menu's selection. The menu only opens when there is a selection (the
-  // item is disabled otherwise), but re-read defensively.
-  function onMenuCopy() {
-    const term = termRef.current
-    if (term) copyTermSelection(term)
-  }
-  // Paste from the browser clipboard. Gated on ownership (a read-only viewer
-  // can't drive input). Needs a secure context for `readText`; pasteIntoTerm
-  // toasts a "use Ctrl+V" hint when the clipboard can't be read (plain-HTTP).
-  function onMenuPaste() {
+  // Right-click pastes the browser clipboard (classic terminal: selecting copies
+  // via copy-on-select, right-click pastes). Gated on ownership (a read-only
+  // viewer can't drive input). Needs a secure context for `readText`;
+  // pasteIntoTerm toasts a "use Ctrl+V" hint when the clipboard can't be read
+  // (plain-HTTP).
+  function onRightClickPaste() {
     const term = termRef.current
     if (term && isOwnerRef.current) pasteIntoTerm(term)
-  }
-  function onMenuSelectAll() {
-    const term = termRef.current
-    term?.selectAll()
-    term?.focus()
   }
 
   // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
@@ -1225,44 +1209,18 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
           pointerTypeRef.current = e.pointerType
         }}
         onContextMenu={(e) => {
-          // Touch long-press: let the OS show its native text-selection menu
-          // instead of ours, preserving the long-press-to-select gesture.
+          // Touch long-press: leave the OS's native text-selection gesture alone.
           if (pointerTypeRef.current === "touch") return
+          // Mouse/pen right-click pastes the clipboard (classic terminal model,
+          // no menu). preventDefault suppresses the native browser menu; the
+          // contextmenu textarea-wipe (mount effect) kills xterm's own right-click
+          // selection-stuffing so only the clipboard is pasted.
           e.preventDefault()
-          const x = e.clientX
-          const y = e.clientY
-          setMenuAnchor({ getBoundingClientRect: () => new DOMRect(x, y, 0, 0) })
-          setMenuHasSelection(Boolean(termRef.current?.getSelection()))
-          setMenuOpen(true)
+          onRightClickPaste()
         }}
       >
         <div ref={containerRef} className="h-full w-full" />
       </div>
-      {/* Controlled clipboard context menu, anchored at the cursor. No
-          ContextMenuTrigger: base-ui's trigger hardcodes a touch long-press that
-          would fight the terminal's own long-press-to-select. */}
-      <ContextMenu open={menuOpen} onOpenChange={setMenuOpen}>
-        <ContextMenuContent
-          anchor={menuAnchor ?? undefined}
-          align="start"
-          side="bottom"
-          sideOffset={2}
-          className="min-w-40"
-        >
-          <ContextMenuItem disabled={!menuHasSelection} onClick={onMenuCopy}>
-            <ClipboardCopy />
-            Copy
-          </ContextMenuItem>
-          <ContextMenuItem disabled={!isOwner} onClick={onMenuPaste}>
-            <ClipboardPaste />
-            Paste
-          </ContextMenuItem>
-          <ContextMenuItem onClick={onMenuSelectAll}>
-            <TextSelect />
-            Select all
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
       {/* Pane chrome buttons. Grouped in ONE absolutely-positioned overlay (a
           sibling of the xterm host, NOT inside the unpadded containerRef xterm
           opens into) so they never change the terminal's box measurement — see
