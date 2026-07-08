@@ -29,7 +29,6 @@ import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
 import { InsetHeader } from "@/components/InsetHeader"
-import { StatusBar } from "@/components/StatusBar"
 import { TerminalArea } from "@/components/TerminalArea"
 import {
   ResizableHandle,
@@ -130,7 +129,6 @@ function DesktopShell() {
             ) : null}
           </ResizablePanelGroup>
         </div>
-        <StatusBar />
       </SidebarInset>
 
       <GlobalOverlays />
@@ -187,7 +185,6 @@ function MobileApp() {
       <div className="min-h-0 flex-1">
         <MobileShell />
       </div>
-      <StatusBar />
       <GlobalOverlays />
     </div>
   )

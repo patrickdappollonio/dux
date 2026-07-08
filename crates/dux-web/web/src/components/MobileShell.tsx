@@ -42,7 +42,7 @@ import { Suspense } from "react"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
-import { PrBanner } from "@/components/PrBanner"
+import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { DormantTabCard } from "@/components/DormantTabCard"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
@@ -627,7 +627,12 @@ function HomeScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="flex shrink-0 items-center gap-2 border-b px-3 py-3">
-        <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
+        <span className="relative shrink-0">
+          <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
+          {/* Connection health badge on the logo corner — the mobile twin of the
+              desktop sidebar's dot, now that the status bar is gone. */}
+          <ConnDot className="absolute -right-0.5 -bottom-0.5 ring-2 ring-background" />
+        </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
           <span className="truncate font-semibold">{instanceTitle}</span>
           <span className="text-sm text-muted-foreground">agent sessions</span>
@@ -715,7 +720,7 @@ function HomeScreen() {
   )
 }
 
-// The focused-terminal spoke: a slim top bar (back · project·branch · changes
+// The focused-terminal spoke: a slim top bar (back · branch · PR · changes
 // count · ⋯ actions) over the full-screen shared terminal.
 function TerminalScreen() {
   const {
@@ -728,9 +733,6 @@ function TerminalScreen() {
     startedDormantTabs,
   } = useDux()
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  const project = session
-    ? spine?.projects.find((p) => p.id === session.project_id)
-    : undefined
   // Only count changes when the loaded slice belongs to this client's selection,
   // so the badge never briefly shows another session's count.
   const changeCount =
@@ -770,25 +772,47 @@ function TerminalScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+      {/* A single slim bar (h-11) instead of the old h-12 header + separate PR
+          banner. To reclaim the phone's scarce vertical space for the PTY, the
+          project name is dropped (the branch identifies the agent) and the PR is
+          folded into a compact state-tinted icon chip rather than its own full
+          strip. Controls are 40px touch targets in a 44px bar. */}
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <Button
           variant="ghost"
           size="icon"
-          className="size-11 shrink-0"
+          className="size-10 shrink-0"
           aria-label="Back"
           onClick={() => history.back()}
         >
           <ChevronLeft />
         </Button>
-        <div className="flex min-w-0 flex-1 items-center gap-1 text-sm">
-          <span className="truncate">{project?.name ?? "dux"}</span>
-          <span className="text-muted-foreground">·</span>
+        <div className="min-w-0 flex-1 text-sm">
           <span className="truncate font-mono">{session.branch_name}</span>
         </div>
+        {session.pr ? (
+          <SimpleTooltip
+            content={`#${session.pr.number} · ${prStateLabel(session.pr.state)} · ${session.pr.title}`}
+          >
+            <a
+              href={session.pr.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+              className={cn(
+                "inline-flex size-10 shrink-0 items-center justify-center rounded-md transition-colors",
+                prIconClass(session.pr.state),
+                prIconHoverClass(session.pr.state)
+              )}
+            >
+              <GitPullRequest className="size-4" />
+            </a>
+          </SimpleTooltip>
+        ) : null}
         <Button
           variant="outline"
           size="sm"
-          className="min-h-11 shrink-0"
+          className="min-h-10 shrink-0"
           aria-label={`${changeCount} changed files`}
           onClick={() => mobileNavigate("changes")}
         >
@@ -800,7 +824,7 @@ function TerminalScreen() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="size-11 shrink-0"
+                className="size-10 shrink-0"
                 aria-label="Session actions"
               />
             }
@@ -812,12 +836,6 @@ function TerminalScreen() {
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
-
-      {/* Mobile always pins the PR banner to the top (the config's bottom
-          placement would fight the accessory bar + soft keyboard). It is part
-          of the flex column, so its fixed height shrinks the terminal naturally
-          and the pane's ResizeObserver refits. */}
-      {session.pr ? <PrBanner pr={session.pr} /> : null}
 
       {selectedTarget.kind === "agent" &&
       shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false) ? (

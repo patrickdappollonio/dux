@@ -56,9 +56,33 @@ function keyDown(handler: () => void) {
   }
 }
 
-// One key cell. flex-1 makes the cells evenly fill the row; h-11 (44px) meets
-// the touch-target minimum. Text labels are font-mono so Esc/Tab/Ctrl/Alt read
-// like keycaps; arrow cells pass an icon child instead.
+// The soft-newline key's glyph. A bare "⇧↵" text label rendered unevenly across
+// fonts/platforms, so we draw it: a filled shift up-arrow next to a return arrow,
+// stroked in currentColor to match the lucide icons on the neighboring keys.
+function ShiftEnterIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {/* shift: an up arrow (closed outline) */}
+      <path d="M6 3 L2 8 H4 V13 H8 V8 H10 Z" />
+      {/* return: shaft dropping down and hooking left, with an arrowhead */}
+      <path d="M22 5 V12 H13" />
+      <path d="M16 9 L13 12 L16 15" />
+    </svg>
+  )
+}
+
+// One key cell. flex-1 makes the cells evenly fill the row; h-10 (40px) is a
+// comfortable thumb target while keeping the two-row bar from eating the phone's
+// scarce vertical space. Text labels are font-mono so Esc/Tab/Ctrl/Alt read like
+// keycaps; arrow and newline cells pass an icon child instead.
 function KeyButton({
   label,
   ariaLabel,
@@ -79,7 +103,7 @@ function KeyButton({
       aria-pressed={pressed}
       onPointerDown={onPointerDown}
       className={cn(
-        "h-11 min-w-0 flex-1 font-mono",
+        "h-10 min-w-0 flex-1 font-mono",
         // Latched modifiers get an accent fill so the active state is
         // unmistakable on a glance — accent tokens, never raw colors.
         pressed && "bg-primary text-primary-foreground hover:bg-primary/80",
@@ -104,9 +128,9 @@ export function AccessoryBar({
   // Two flex rows stacked: modifier/special keys on top, navigation (arrows +
   // page scroll) below; gap-1.5 between the rows so a fat-finger tap on the top
   // row doesn't catch the row directly beneath it. Safe-area insets are NOT
-  // applied here: in normal layout the status bar sits below this bar (so it
-  // isn't the screen's bottom edge), and in fullscreen the enclosing column pads
-  // its own bottom — both handled by ancestors (see App.tsx mobile root and
+  // applied here: in normal layout the mobile root pads its own bottom (clearing
+  // the home indicator), and in fullscreen the enclosing column pads its own
+  // bottom; both are handled by ancestors (see App.tsx mobile root and
   // TerminalPane's fullscreen column).
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1">
@@ -124,11 +148,9 @@ export function AccessoryBar({
           pressed={alt}
           onPointerDown={keyDown(onToggleAlt)}
         />
-        <KeyButton
-          label="⇧↵"
-          ariaLabel="Insert newline"
-          onPointerDown={keyDown(onNewline)}
-        />
+        <KeyButton ariaLabel="Insert newline" onPointerDown={keyDown(onNewline)}>
+          <ShiftEnterIcon />
+        </KeyButton>
       </div>
       {/* Row two — navigation. The four cursor arrows (sent to the program, keep
           focus) and PgUp/PgDn (scroll the xterm viewport, blur to dismiss the

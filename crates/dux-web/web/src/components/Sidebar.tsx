@@ -45,6 +45,7 @@ import { defaultProviderForSession } from "@/lib/agentTabs"
 import { copyToClipboard } from "@/lib/clipboard"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
+import { ConnDot } from "@/components/ConnDot"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
@@ -885,7 +886,17 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg">
-              <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
+              <span className="relative shrink-0">
+                <img
+                  src="/dux-logo.png"
+                  alt="dux"
+                  className="size-8 rounded-lg"
+                />
+                {/* Connection health as a ring-separated badge on the logo
+                    corner. It rides the logo (not an inline dot) so it stays
+                    visible when the sidebar collapses to icon-only. */}
+                <ConnDot className="absolute -right-0.5 -bottom-0.5 ring-2 ring-sidebar" />
+              </span>
               <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
                 <span className="truncate font-semibold">{instanceTitle}</span>
                 <span className="text-sm text-sidebar-foreground/70">
