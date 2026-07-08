@@ -2,16 +2,11 @@ import { useEffect, useRef, useState } from "react"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
-import {
-  Maximize2,
-  Minimize2,
-  MonitorSmartphone,
-} from "lucide-react"
+import { MonitorSmartphone } from "lucide-react"
 import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
 import { MacroPopover } from "@/components/MacroPopover"
-import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -21,8 +16,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
-import { dragScrollLines, keyboardLikelyOpen } from "@/lib/viewport"
+import { dragScrollLines } from "@/lib/viewport"
 import { copyToClipboard } from "@/lib/clipboard"
 import { isApplePlatform } from "@/lib/platform"
 import {
@@ -72,27 +66,6 @@ interface TerminalPaneProps {
   // target, so it is passed explicitly (the spine may not yet list a just-created
   // terminal when this pane first mounts).
   sessionId: string
-}
-
-// The Keyboard Lock API (Chromium-only): while the pane is fullscreen it lets
-// the page receive browser-reserved shortcuts like Ctrl+T / Ctrl+W so they
-// reach the agent instead of opening tabs. Elsewhere these helpers no-op and
-// fullscreen still works — just without the reserved keys.
-type KeyboardLockNavigator = Navigator & {
-  keyboard?: {
-    lock?: (keys?: string[]) => Promise<void>
-    unlock?: () => void
-  }
-}
-
-function lockKeyboard(): void {
-  const keyboard = (navigator as KeyboardLockNavigator).keyboard
-  void keyboard?.lock?.().catch(() => {})
-}
-
-function unlockKeyboard(): void {
-  const keyboard = (navigator as KeyboardLockNavigator).keyboard
-  keyboard?.unlock?.()
 }
 
 // A soft newline (LF / Ctrl-J) written straight to the PTY, plus the view side
@@ -163,24 +136,12 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // The unpadded element xterm opens into; its border-box equals its content
   // box, so FitAddon's measurement is exact.
   const containerRef = useRef<HTMLDivElement>(null)
-  // The element handed to the Fullscreen API. On desktop it is the pane itself;
-  // on mobile it is the OUTER column (pane + accessory bar) so the bar stays
-  // visible in fullscreen — fullscreening the pane alone would crop it out.
-  const fullscreenRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   // The dedicated PTY socket for the focused target. Created in the wiring effect
   // and read by the accessory-bar key handlers (defined at component scope) so
   // they send stdin to the same socket xterm's `onData` does.
   const ptyRef = useRef<PtySocket | null>(null)
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const isMobile = useIsMobile()
-  // Visual-viewport height so a FULLSCREEN terminal can keep its content above
-  // the soft keyboard. The non-fullscreen mobile layout is pinned to this by the
-  // MobileApp root, but a fullscreen terminal escapes that root into the
-  // fullscreen layer (sized to the full layout viewport by the browser), so it
-  // has to track the keyboard itself — see the inner column in the mobile return.
-  // null off-API; the hook runs on every platform but is only read on mobile.
-  const viewportHeight = useVisualViewportHeight()
 
   // Sticky (one-shot latched) soft-keyboard modifiers for the mobile accessory
   // bar. The state drives the latch's visual highlight; the ref mirrors it so
@@ -965,51 +926,6 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     })
   }, [id])
 
-  // Track fullscreen state for this pane and release the keyboard lock the
-  // moment fullscreen ends, however it ends (button, held Esc, tab switch).
-  useEffect(() => {
-    let scrollTimer: ReturnType<typeof setTimeout> | undefined
-    function handleFullscreenChange() {
-      const active = document.fullscreenElement === fullscreenRef.current
-      setIsFullscreen(active)
-      if (!active) {
-        unlockKeyboard()
-      }
-      // Entering or leaving fullscreen reflows the pane to a new size; xterm
-      // does not re-anchor to the latest output on its own, so the agent's input
-      // line can end up scrolled off-screen. Pull the viewport back to the
-      // bottom once the resize has settled so the prompt is visible without the
-      // user having to fight the slim mobile scrollbar. Tracked + cleared so a
-      // rapid toggle (or an unmount) can't leave a stale timer firing.
-      clearTimeout(scrollTimer)
-      scrollTimer = setTimeout(() => termRef.current?.scrollToBottom(), 50)
-    }
-    document.addEventListener("fullscreenchange", handleFullscreenChange)
-    return () => {
-      clearTimeout(scrollTimer)
-      document.removeEventListener("fullscreenchange", handleFullscreenChange)
-      unlockKeyboard()
-    }
-  }, [])
-
-  async function toggleFullscreen() {
-    const target = fullscreenRef.current
-    if (!target) return
-    if (document.fullscreenElement === target) {
-      await document.exitFullscreen().catch(() => {})
-    } else {
-      try {
-        await target.requestFullscreen()
-        // Only meaningful while fullscreen; held-Esc exits, single Esc presses
-        // flow to the agent.
-        lockKeyboard()
-      } catch {
-        // Fullscreen request denied — leave the pane embedded.
-      }
-    }
-    termRef.current?.focus()
-  }
-
   // Reclaim ownership from another device. Sending our current size IS the claim
   // server-side (most-recent claim wins), so the PTY snaps back to this viewport
   // and our input is forwarded again. Flip the ref synchronously (so the resize
@@ -1175,21 +1091,15 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // larger) size; if that one-frame overflow escapes to a scrollable ancestor
   // it flashes scrollbars and oscillates the layout (scrollbar shrinks the box
   // → ResizeObserver → refit → scrollbar gone → grow → repeat). Clipping at
-  // the pane covers every host: the desktop ResizablePanel, the mobile
-  // viewport-pinned root, and fullscreen. The overlays (fullscreen button,
-  // readiness card) are absolutely positioned inside these bounds, so
-  // clipping never affects them.
+  // the pane covers every host: the desktop ResizablePanel and the mobile
+  // viewport-pinned root. The overlays (macro popover, readiness card) are
+  // absolutely positioned inside these bounds, so clipping never affects them.
   // Human label for the device that took over ("Chrome on macOS"), or null when the
   // other device's `User-Agent` was absent/unrecognized (the modal then shows a
   // generic fallback). Parsing lives in the pure, tested `deviceLabel` helper.
   const takeoverLabel = deviceLabel(takeoverDevice)
   const pane = (
     <div
-      // On desktop the pane IS the fullscreen target; on mobile the outer column
-      // below owns that ref so the accessory bar is included in fullscreen.
-      // Crossing the mobile breakpoint swaps the whole app subtree (App.tsx), so
-      // this instance never sees isMobile flip mid-life — the ref never churns.
-      ref={isMobile ? null : fullscreenRef}
       className={
         isMobile
           ? "group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
@@ -1221,17 +1131,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       >
         <div ref={containerRef} className="h-full w-full" />
       </div>
-      {/* Pane chrome buttons. Grouped in ONE absolutely-positioned overlay (a
-          sibling of the xterm host, NOT inside the unpadded containerRef xterm
-          opens into) so they never change the terminal's box measurement — see
-          the hostRef comment. Both buttons carry a visible icon + text label and
-          stay always visible (no hover reveal) so they read at a glance on every
-          surface, touch included. Widening them is layout-safe: the overlay is a
-          positioned sibling of the measured host, so the terminal box is
-          unaffected. The right offset reserves the xterm scrollbar gutter so the
-          buttons never overlap the scrollbar: 0.5rem MUST match the host's `p-2`
-          padding below, then the shared --xterm-scrollbar-width (fallback keeps
-          the offset valid if the var is ever missing), then a small gap. */}
+      {/* Pane chrome. An absolutely-positioned overlay (a sibling of the xterm
+          host, NOT inside the unpadded containerRef xterm opens into) so it never
+          changes the terminal's box measurement — see the hostRef comment. The
+          right offset reserves the xterm scrollbar gutter so the button never
+          overlaps the scrollbar: 0.5rem MUST match the host's `p-2` padding below,
+          then the shared --xterm-scrollbar-width (fallback keeps the offset valid
+          if the var is ever missing), then a small gap. */}
       <div className="absolute top-3 right-[calc(0.5rem+var(--xterm-scrollbar-width,8px)+0.25rem)] z-10 flex gap-2">
         {/* The popover trigger renders a secondary labeled Button (see
             MacroPopover); it must remain reachable on touch, so it does not
@@ -1243,27 +1149,6 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
           target={macroTarget}
           finalFocus={() => termRef.current?.textarea ?? null}
         />
-        {/* Fullscreen toggle: embedded mode already forwards every key the
-            browser will give a page; fullscreen + keyboard lock additionally
-            captures reserved shortcuts (Ctrl+T, Ctrl+W, …) on Chromium. The
-            label is the affordance; the tooltip carries the non-obvious
-            keyboard-lock behavior that the label alone cannot. */}
-        <SimpleTooltip
-          content={
-            isFullscreen
-              ? "Exit fullscreen — holding Esc also exits"
-              : "Fullscreen — captures browser-reserved shortcuts like Ctrl+T"
-          }
-        >
-          <Button
-            variant="secondary"
-            onClick={() => void toggleFullscreen()}
-            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-          >
-            {isFullscreen ? <Minimize2 /> : <Maximize2 />}
-            {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-          </Button>
-        </SimpleTooltip>
       </div>
       {/* Readiness / reconnect overlay. Non-blocking (pointer-events-none) so it
           never steals input. Shows while the PTY is still starting up (before its
@@ -1351,74 +1236,28 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Desktop: render the pane exactly as before — no extra wrapper, no bar.
   if (!isMobile) return pane
 
-  // In fullscreen the column lives in the fullscreen layer, which the browser
-  // forces to the full layout-viewport height (`:fullscreen { height:100%
-  // !important }`) — so we CAN'T shrink the fullscreen element itself for the
-  // keyboard. The soft keyboard shrinks only the VISUAL viewport, so without
-  // this the bottom rows (the prompt) and the accessory bar sit behind the
-  // keyboard, unreachable even by scrolling. The fix caps an INNER wrapper (not
-  // the fullscreen element) at the visual-viewport height. Only engage when the
-  // keyboard is actually up; the `&&` short-circuit avoids reading innerHeight
-  // when there's no viewport. The non-fullscreen path is already handled by the
-  // MobileApp root, so this is fullscreen-only.
-  const constrainToKeyboard =
-    isFullscreen &&
-    viewportHeight !== null &&
-    keyboardLikelyOpen(viewportHeight, window.innerHeight)
-
   // Mobile: a column root so the terminal host (flex-1 min-h-0) and the
-  // accessory bar (shrink-0) stack. The ResizeObserver on the host already
-  // refits + debounce-resizes the PTY when this column reflows, so no extra
-  // resize wiring is needed.
+  // accessory bar (shrink-0) stack. The MobileApp root pins the whole shell to
+  // the visual viewport (and interactive-widget=resizes-content shrinks the
+  // layout viewport for the soft keyboard), so this column just fills its parent
+  // and the accessory bar sits on the keyboard — no per-pane keyboard sizing.
+  // The ResizeObserver on the host refits + debounce-resizes the PTY when this
+  // column reflows, so no extra resize wiring is needed. (The web UI has no
+  // fullscreen mode — see the CLAUDE.md web tenet.)
   return (
-    <div
-      // The mobile fullscreen target: the column wraps the pane AND the bar so
-      // both fill the screen in fullscreen. bg-background paints the fullscreen
-      // backdrop (incl. the strip behind the keyboard when the inner column is
-      // capped below) so it matches the theme rather than going black.
-      ref={fullscreenRef}
-      className="flex h-full w-full flex-col bg-background"
-    >
-      {/* Inner column owns the keyboard/safe-area sizing. In fullscreen it caps
-          at the visual-viewport height when the keyboard is up (max-height is NOT
-          subject to the UA :fullscreen override, since this is a child, not the
-          fullscreen element), keeping the bar + prompt above the keyboard. The
-          safe-area insets live HERE so they fall inside the capped (border-box)
-          height; the bottom inset drops above an open keyboard so no dead strip
-          sits between the bar and the keyboard (mirrors MobileApp). Outside
-          fullscreen the MobileApp root handles insets, so no inline style. */}
-      <div
-        className="flex min-h-0 w-full flex-1 flex-col"
-        style={
-          isFullscreen
-            ? {
-                maxHeight:
-                  constrainToKeyboard && viewportHeight !== null
-                    ? viewportHeight
-                    : undefined,
-                paddingTop: "env(safe-area-inset-top)",
-                paddingBottom: constrainToKeyboard
-                  ? 0
-                  : "env(safe-area-inset-bottom)",
-                paddingLeft: "env(safe-area-inset-left)",
-                paddingRight: "env(safe-area-inset-right)",
-              }
-            : undefined
-        }
-      >
-        {pane}
-        <AccessoryBar
-          onEsc={() => sendSeq(ESC)}
-          onTab={() => sendSeq(TAB)}
-          onNewline={sendNewline}
-          onArrow={onArrow}
-          onScroll={onScroll}
-          ctrl={ctrl}
-          alt={alt}
-          onToggleCtrl={toggleCtrl}
-          onToggleAlt={toggleAlt}
-        />
-      </div>
+    <div className="flex h-full w-full flex-col bg-background">
+      {pane}
+      <AccessoryBar
+        onEsc={() => sendSeq(ESC)}
+        onTab={() => sendSeq(TAB)}
+        onNewline={sendNewline}
+        onArrow={onArrow}
+        onScroll={onScroll}
+        ctrl={ctrl}
+        alt={alt}
+        onToggleCtrl={toggleCtrl}
+        onToggleAlt={toggleAlt}
+      />
     </div>
   )
 }

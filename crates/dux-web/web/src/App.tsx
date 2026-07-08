@@ -166,9 +166,8 @@ function MobileApp() {
   return (
     // Safe-area padding lives on this single mobile root so EVERY screen
     // (terminal/home/changes) clears the notch, home indicator, and rounded
-    // corners — except the fullscreen terminal column, which escapes this root
-    // into the fullscreen layer and pads itself (see TerminalPane). Top/side
-    // insets always apply; the bottom inset drops only above an open keyboard.
+    // corners. Top/side insets always apply; the bottom inset drops only above an
+    // open keyboard.
     <div
       className="flex min-h-0 flex-col overflow-hidden"
       style={{

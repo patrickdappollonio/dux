@@ -28,8 +28,7 @@ import type { SelectedTarget } from "@/lib/store"
 // LAYOUT SAFETY: the trigger button is rendered by `TerminalPane` as an
 // absolutely-positioned sibling of the xterm host (NOT inside the unpadded
 // `containerRef` xterm opens into), so it never changes the terminal's box
-// measurement — the same placement the fullscreen button uses. See the hostRef
-// comment in `TerminalPane`.
+// measurement. See the hostRef comment in `TerminalPane`.
 export function MacroPopover({
   target,
   finalFocus,
@@ -62,7 +61,7 @@ export function MacroPopover({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       {/* Ellipsis on the label signals the button opens a menu of choices
-          (unlike the fullscreen button, which acts immediately). */}
+          (rather than acting immediately). */}
       <PopoverTrigger
         render={<Button variant="secondary" aria-label="Run a macro" />}
       >

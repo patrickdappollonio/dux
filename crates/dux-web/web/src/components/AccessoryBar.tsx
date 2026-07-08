@@ -128,10 +128,8 @@ export function AccessoryBar({
   // Two flex rows stacked: modifier/special keys on top, navigation (arrows +
   // page scroll) below; gap-1.5 between the rows so a fat-finger tap on the top
   // row doesn't catch the row directly beneath it. Safe-area insets are NOT
-  // applied here: in normal layout the mobile root pads its own bottom (clearing
-  // the home indicator), and in fullscreen the enclosing column pads its own
-  // bottom; both are handled by ancestors (see App.tsx mobile root and
-  // TerminalPane's fullscreen column).
+  // applied here: the mobile root pads its own bottom (clearing the home
+  // indicator), handled by an ancestor (see App.tsx mobile root).
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1">
       {/* Row one — modifier / special keys sent to the program. */}
