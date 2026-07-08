@@ -18,6 +18,7 @@ import {
   openGlobalEnv,
   openKillRunning,
   openMacrosDialog,
+  openRenameInstance,
   sortAgents,
   toggleAlwaysShowTabs,
   toggleChangesPane,
@@ -46,6 +47,7 @@ export const PALETTE_HANDLERS: Record<string, () => void> = {
         ),
       )
   },
+  "rename-instance": () => openRenameInstance(),
   "sort-agents-by-created": () => sortAgents("created"),
   "sort-agents-by-name": () => sortAgents("name"),
   "sort-agents-by-updated": () => sortAgents("updated"),

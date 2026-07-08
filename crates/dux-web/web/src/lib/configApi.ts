@@ -62,6 +62,15 @@ export const configApi = {
   // Flip whether the agent tab strip always renders, even with one tab.
   toggleAlwaysShowTabs: () =>
     send("POST", "/api/v1/ui/toggle-always-show-tab-strip", {}),
+  // Persist the instance identity (browser tab title + favicon colour). Either
+  // field may be omitted; the server validates the favicon against the curated
+  // colour set, caps/normalizes the title, persists to config.toml, and emits
+  // `config.changed` so every client re-applies title + favicon.
+  setInstanceIdentity: (body: {
+    title?: string
+    favicon?: string
+  }): Promise<void> =>
+    send("POST", "/api/v1/config/instance-identity", body),
   // Read the raw config.toml text for the Monaco editor. Returns the file
   // verbatim (or the plain render of the running config if none exists yet).
   readRawConfig: async (): Promise<string> => {

@@ -67,6 +67,10 @@ pub fn routes() -> Router<AppState> {
             post(toggle_always_show_tab_strip),
         )
         .route(
+            "/api/v1/config/instance-identity",
+            post(set_instance_identity),
+        )
+        .route(
             "/api/v1/config/raw",
             // A config.toml is a few KB; 256 KB is generous. The cap stops a
             // client from streaming a multi-MB body that the engine thread would
@@ -201,6 +205,40 @@ async fn toggle_always_show_tab_strip(
     dispatch(&state, &headers, WireCommand::ToggleAlwaysShowTabStrip {}).await
 }
 
+// ── Instance identity (rename dialog) ────────────────────────────────────────
+
+/// The rename-instance body. Both fields are `#[serde(default)]` so a single-field
+/// body (`{"favicon":"amber"}`) or an empty body (`{}`) both deserialize — the
+/// handler only touches the fields that are present, and an empty body is a no-op.
+#[derive(Deserialize, Default)]
+struct InstanceIdentityBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    favicon: Option<String>,
+}
+
+/// `POST /api/v1/config/instance-identity`. Persist this dux instance's browser
+/// tab title (`config.server.title`) and favicon color (`config.server.favicon`).
+/// Bare `200` on success; plain-text `400` on rejection (an unknown favicon color)
+/// via the shared `dispatch`. The engine validates + normalizes and fires
+/// `config.changed` so every tab refetches its title + favicon.
+async fn set_instance_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<InstanceIdentityBody>,
+) -> Response {
+    dispatch(
+        &state,
+        &headers,
+        WireCommand::SetInstanceIdentity {
+            title: body.title,
+            favicon: body.favicon,
+        },
+    )
+    .await
+}
+
 // ── Raw config editor (Monaco) ───────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -328,6 +366,147 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Read the raw `config.toml` text back through `GET /api/v1/config/raw` so a
+    /// persistence assertion sees what actually landed on disk / in the running
+    /// config, not just the POST's status code.
+    async fn read_raw_config_text(app: &Router) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/config/raw")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v["content"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn instance_identity_accepts_a_single_field_body() {
+        // `#[serde(default)]` on both fields: a favicon-only body deserializes.
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/config/instance-identity",
+                r#"{"favicon":"amber"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn instance_identity_persists_a_valid_post() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/config/instance-identity",
+                r#"{"title":"dux prod","favicon":"amber"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains("title = \"dux prod\""),
+            "title should persist: {raw}"
+        );
+        assert!(
+            raw.contains("favicon = \"amber\""),
+            "favicon should persist: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_identity_empty_body_resets_to_default() {
+        // The dialog's "Reset to default" button POSTs empty strings for both
+        // fields. Empty title normalizes back to "dux" and empty favicon back to
+        // "" (the default full-colour duck). First set a non-default identity, then
+        // reset, and confirm the re-read config reflects the defaults.
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/config/instance-identity",
+                r#"{"title":"x","favicon":"amber"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/config/instance-identity",
+                r#"{"title":"","favicon":""}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains("title = \"dux\""),
+            "empty title should reset to \"dux\": {raw}"
+        );
+        assert!(
+            raw.contains("favicon = \"\""),
+            "empty favicon should reset to the default (empty): {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_identity_rejects_bad_favicon_and_leaves_config_unchanged() {
+        let (_tmp, app) = router_no_auth();
+        let before = read_raw_config_text(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "POST",
+                "/api/v1/config/instance-identity",
+                r#"{"favicon":"mauve"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let after = read_raw_config_text(&app).await;
+        assert_eq!(before, after, "a rejected favicon must not mutate config");
+        assert!(!after.contains("mauve"));
+    }
+
+    #[tokio::test]
+    async fn instance_identity_empty_body_is_a_noop() {
+        let (_tmp, app) = router_no_auth();
+        let before = read_raw_config_text(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_req("POST", "/api/v1/config/instance-identity", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = read_raw_config_text(&app).await;
+        assert_eq!(before, after, "an empty body must not mutate config");
     }
 
     #[tokio::test]

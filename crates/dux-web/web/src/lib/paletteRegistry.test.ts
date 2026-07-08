@@ -26,6 +26,7 @@ const EXPECTED_WEB_COMMANDS = [
   "edit-macros",
   "kill-running",
   "reload-config",
+  "rename-instance",
   "sort-agents-by-created",
   "sort-agents-by-name",
   "sort-agents-by-updated",

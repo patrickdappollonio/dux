@@ -286,6 +286,10 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
+  // The rename-instance dialog (the Ctrl+K "rename-instance" command). Gates the
+  // modal that sets the browser tab title + favicon colour; the dialog seeds its
+  // fields from the bootstrap document, so it needs no state beyond this flag.
+  renameInstanceOpen: boolean
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
@@ -449,6 +453,7 @@ let state: DuxState = {
   configEditorContent: "",
   configEditorLoading: false,
   configEditorError: null,
+  renameInstanceOpen: false,
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
@@ -757,9 +762,11 @@ function applyBootstrap(b: Bootstrap): void {
   if (typeof document !== "undefined") {
     document.title = resolveInstanceTitle(b.title)
   }
-  // Swap the favicon to the configured one (bundled logo, a recoloured dux-logo
-  // outline, or a custom URL). Self-guards on the DOM, so it is a no-op under the
-  // store's Node test environment. Runs on first load and every config.changed.
+  // Swap the favicon to the configured one: the bundled full-colour duck when
+  // unset, a recoloured duck silhouette for a curated tint colour, or the default
+  // duck (with a one-time notice) for anything else. Self-guards on the DOM, so it
+  // is a no-op under the store's Node test environment. Runs on first load and
+  // every config.changed; `applyFavicon` no-ops when the resolved icon is unchanged.
   applyFavicon(b.favicon)
 }
 
@@ -2530,6 +2537,34 @@ export function openKillRunning(): void {
 
 export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
+}
+
+// The rename-instance dialog (Ctrl+K "rename-instance"). Open/close just flip the
+// gate; the dialog seeds its title + favicon fields from the bootstrap document.
+export function openRenameInstance(): void {
+  setState({ renameInstanceOpen: true })
+}
+
+export function closeRenameInstance(): void {
+  setState({ renameInstanceOpen: false })
+}
+
+// Persist the instance identity (browser tab title + favicon colour). Fire-and-
+// forget: the server validates + writes config.toml and emits `config.changed`,
+// so `applyBootstrap` re-applies the tab title, wordmark, and favicon on every
+// client. We do NOT hand-apply here — config is the single source of truth. A
+// success toast is the engine's routed status; here we only surface a failure.
+export function setInstanceIdentity(body: {
+  title?: string
+  favicon?: string
+}): void {
+  configApi
+    .setInstanceIdentity(body)
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not rename this instance.",
+      ),
+    )
 }
 
 // Force-kill one agent's PTY. The agent detaches (it is NOT deleted) and can be

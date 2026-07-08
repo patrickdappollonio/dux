@@ -355,6 +355,16 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         surface: PaletteSurface::Web,
     },
     PaletteCommand {
+        action: Action::RenameWebInstance,
+        name: "rename-instance",
+        description: "Rename this dux instance and pick a favicon color",
+        // Web-only: opens the rename-instance dialog (browser tab title + favicon
+        // color), which POSTs to /api/v1/config/instance-identity. The TUI sets
+        // config.server.title/favicon through `dux config`, so it does not list
+        // this.
+        surface: PaletteSurface::Web,
+    },
+    PaletteCommand {
         action: Action::NewTerminal,
         name: "new-terminal",
         description: "Spawn a new companion terminal for the selected agent",
@@ -561,6 +571,7 @@ mod tests {
             "edit-macros",
             "kill-running",
             "reload-config",
+            "rename-instance",
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",

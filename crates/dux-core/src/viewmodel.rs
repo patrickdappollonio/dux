@@ -99,11 +99,11 @@ pub struct BootstrapView {
     /// empty/whitespace value to "dux". Older servers omit it (the web treats a
     /// missing value as "dux").
     pub title: String,
-    /// Mirrors `config.server.favicon`: empty means the bundled dux logo; a
-    /// colour (hex or a known name) selects the dux-logo outline in that colour;
-    /// a URL beginning with http(s):// or / is a custom favicon. The web resolves
-    /// and applies it; an unrecognized value falls back to the bundled logo.
-    /// Older servers omit it (the web treats a missing value as the default).
+    /// Mirrors `config.server.favicon`: empty means the original full-color yellow
+    /// duck; one of the curated tint colors (violet, blue, sky, cyan, teal, green,
+    /// amber, orange, red, pink, rose) recolors a flat duck silhouette. The web
+    /// resolves and applies it; an unrecognized value falls back to the default
+    /// duck. Older servers omit it (the web treats a missing value as the default).
     pub favicon: String,
     /// The per-agent tab cap (`config.ui.agent_tabs_max`, normalized/clamped),
     /// INCLUDING the session-slot tab. The web disables the "+" add-tab affordance once a

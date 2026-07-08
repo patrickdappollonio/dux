@@ -90,3 +90,25 @@ The shell used to run startup commands is itself configurable under
 the full treatment (per-project and global `env`, the `DUX_*` variables dux
 injects, and the startup shell), see
 [Startup commands & environment variables](/docs/startup-commands).
+
+## Naming a web instance (title + favicon)
+
+When you run several dux servers, it helps to tell their browser tabs apart. Two
+web-only settings under `[server]` do that:
+
+```toml
+[server]
+title   = "dux (prod)"   # the browser tab title and the in-app wordmark
+favicon = "blue"         # recolors the duck favicon for this instance
+```
+
+`title` drives both the browser `<title>` and the brand wordmark. `favicon` is
+empty by default (the original yellow duck); set it to one of the curated tint
+colors — `violet`, `blue`, `sky`, `cyan`, `teal`, `green`, `amber`, `orange`,
+`red`, `pink`, or `rose` — to recolor the duck so each instance is
+distinguishable at a glance.
+
+You don't have to edit the file: from the web UI, open the command palette
+(`Ctrl/Cmd+K`) and run **Rename this instance** to set the title and pick a
+favicon color. The change is written to `[server]` in `config.toml` and applies
+to every open tab immediately, so it sticks across restarts.

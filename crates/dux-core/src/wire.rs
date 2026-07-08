@@ -180,6 +180,21 @@ pub enum WireCommand {
     SetChangesPaneVisible {
         visible: bool,
     },
+    /// Persist this dux instance's identity to `config.toml`: the browser tab
+    /// `<title>` (`config.server.title`) and the favicon color
+    /// (`config.server.favicon`). Sent by the web's rename-instance dialog. Each
+    /// field is optional so a single-field body (just a title, or just a color)
+    /// only touches that field; an empty body (both `None`) is a no-op (no write,
+    /// no `config.changed`). The title is normalized (control + bidi/format chars
+    /// neutralized, whitespace collapsed, capped, empty resets to "dux"); the
+    /// favicon must be a curated color name (or empty to reset) or the command is
+    /// rejected. The write is eager so the endpoint can report a synchronous
+    /// success/failure, and a non-empty body mutates config-static state so the web
+    /// fires `config.changed` and every tab refetches its title + favicon.
+    SetInstanceIdentity {
+        title: Option<String>,
+        favicon: Option<String>,
+    },
     /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
     /// mirroring the TUI's `toggle-randomized-pet-name-default` palette command.
     /// The server is the source of truth, so this is a parameterless toggle: the
@@ -460,6 +475,87 @@ pub enum WireCommand {
     },
 }
 
+/// The curated favicon TINT color names accepted by `config.server.favicon` and
+/// the rename-instance dialog. The default (an empty value) is the original
+/// full-color yellow duck; these names recolor a flat duck silhouette instead, so
+/// `yellow` is intentionally NOT a tint. This is the CANONICAL list; the web
+/// frontend mirrors it. Keep the two in sync.
+pub const CURATED_FAVICON_COLORS: &[&str] = &[
+    "violet", "blue", "sky", "cyan", "teal", "green", "amber", "orange", "red", "pink", "rose",
+];
+
+/// Normalize a favicon value for `config.server.favicon`.
+///
+/// Trims and lowercases the input. An empty (or whitespace-only) value resets the
+/// favicon to the default (the empty string, which the web renders as the brand
+/// yellow duck). A curated color name is accepted as-is. Any other value is
+/// invalid and yields `None` so the caller can reject it.
+pub fn normalize_instance_favicon(raw: &str) -> Option<String> {
+    let normalized = raw.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Some(String::new());
+    }
+    if CURATED_FAVICON_COLORS.contains(&normalized.as_str()) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+/// True for a character that must not survive into a title: a Unicode control
+/// code (category Cc, via `char::is_control`) OR a bidi/format character (a subset
+/// of category Cf) that can visually reorder or hide text. `char::is_control`
+/// alone misses the Cf class, so a right-to-left override (U+202E) or zero-width
+/// joiner would otherwise pass through and spoof the rendered tab title / wordmark
+/// and the on-disk `config.toml` (a Trojan-Source-style display attack). We
+/// neutralize the specific format characters that matter for spoofing.
+fn is_unsafe_title_char(ch: char) -> bool {
+    ch.is_control()
+        || matches!(ch,
+            // Zero-width + directional marks, bidi embeddings/overrides, bidi
+            // isolates, and the byte-order mark / zero-width no-break space.
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}')
+}
+
+/// Normalize a title for `config.server.title`.
+///
+/// Replaces every unsafe character (Unicode control codes and bidi/format
+/// characters — see [`is_unsafe_title_char`]) with a space, collapses runs of
+/// whitespace to a single space, and trims. Caps the result to at most 200
+/// characters (counted by `char`, never bytes, so multi-byte glyphs can't be
+/// sliced mid-codepoint). An empty result resets to the default `"dux"` (which is
+/// also the reset value the dialog sends as an empty title).
+pub fn normalize_instance_title(raw: &str) -> String {
+    let mut collapsed = String::new();
+    let mut pending_space = false;
+    for ch in raw.chars() {
+        let ch = if is_unsafe_title_char(ch) { ' ' } else { ch };
+        if ch == ' ' {
+            // Defer emitting whitespace so runs collapse and leading space drops.
+            if !collapsed.is_empty() {
+                pending_space = true;
+            }
+        } else {
+            if pending_space {
+                collapsed.push(' ');
+                pending_space = false;
+            }
+            collapsed.push(ch);
+        }
+    }
+    let capped: String = collapsed.chars().take(200).collect();
+    let trimmed = capped.trim();
+    if trimmed.is_empty() {
+        "dux".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl WireCommand {
     /// True for the commands that mutate config-static state surfaced in the
     /// bootstrap document — the macro set, the workspace-wide env map, the
@@ -474,6 +570,13 @@ impl WireCommand {
     /// listed: it re-reads the whole file and already signals through the engine
     /// actor's reload path.
     pub fn mutates_config_static(&self) -> bool {
+        // An empty-body `SetInstanceIdentity` (both fields absent) never touches
+        // config, so it must NOT trigger a `config.changed` fan-out. A body that
+        // carries at least one field may mutate config (the handler still skips the
+        // write when the values are unchanged, matching the sibling toggles).
+        if let WireCommand::SetInstanceIdentity { title, favicon } = self {
+            return title.is_some() || favicon.is_some();
+        }
         matches!(
             self,
             WireCommand::UpdateMacros { .. }
@@ -838,6 +941,13 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::SetInstanceIdentity { title, favicon } => {
+                let status = self.set_instance_identity(title, favicon)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::ToggleRandomizedPetNameDefault {} => {
                 let status = self.toggle_randomized_pet_name_default();
                 return Ok(WireCommandOutcome {
@@ -971,6 +1081,56 @@ impl Engine {
             "Changes pane hidden. Reopen it from the command palette or the Changes menu."
         };
         WireStatus::new("info", message.to_string())
+    }
+
+    /// Persist this dux instance's identity — the browser tab title
+    /// (`config.server.title`) and favicon color (`config.server.favicon`) — to
+    /// `config.toml`, mirroring `toggle_github_integration`'s "persist a candidate
+    /// first" pattern so the endpoint gets a synchronous success/failure before it
+    /// replies `200`.
+    ///
+    /// Each field is optional. An empty body (both `None`) is a no-op — no write,
+    /// no `config.changed`. A `Some` title is normalized (see
+    /// [`normalize_instance_title`]); a `Some` favicon must be a curated color
+    /// name or empty (see [`normalize_instance_favicon`]) or the command is
+    /// rejected with an error, which the dispatch layer turns into a plain-text
+    /// `400`. The write is eager and idempotent (unchanged values skip the disk
+    /// write), and the command mutates config-static state so the web fires
+    /// `config.changed` for connected clients to refetch their title + favicon.
+    fn set_instance_identity(
+        &mut self,
+        title: Option<String>,
+        favicon: Option<String>,
+    ) -> anyhow::Result<WireStatus> {
+        // Empty body: nothing to touch. Skip the disk write and the fan-out.
+        if title.is_none() && favicon.is_none() {
+            return Ok(WireStatus::new("info", "Nothing to update."));
+        }
+        let mut candidate = self.config.clone();
+        if let Some(raw) = title {
+            candidate.server.title = normalize_instance_title(&raw);
+        }
+        if let Some(raw) = favicon {
+            candidate.server.favicon = normalize_instance_favicon(&raw)
+                .ok_or_else(|| anyhow::anyhow!("unknown favicon color \"{}\"", raw))?;
+        }
+        // Idempotent: skip the write (and the fan-out) when nothing changed.
+        if candidate.server.title == self.config.server.title
+            && candidate.server.favicon == self.config.server.favicon
+        {
+            return Ok(WireStatus::new("info", "Instance identity unchanged."));
+        }
+        // Persist eagerly so a disk failure is surfaced before the endpoint
+        // replies; only commit to the running config once the write succeeds.
+        self.config_writer
+            .save_eager(candidate.clone())
+            .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
+        self.config.server.title = candidate.server.title;
+        self.config.server.favicon = candidate.server.favicon;
+        Ok(WireStatus::new(
+            "info",
+            "Instance name and favicon updated.",
+        ))
     }
 
     /// Flip `defaults.enable_randomized_pet_name_by_default` and persist it,
@@ -3047,6 +3207,7 @@ impl Engine {
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::SetChangesPaneVisible { .. }
+            | WireCommand::SetInstanceIdentity { .. }
             | WireCommand::ToggleRandomizedPetNameDefault {}
             | WireCommand::TogglePrBannerPosition {}
             | WireCommand::ToggleCopyOnSelect {}
@@ -3057,7 +3218,7 @@ impl Engine {
             | WireCommand::CloseAgentTab { .. }
             | WireCommand::ChangeAgentTabProvider { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -7357,11 +7518,143 @@ mod tests {
             .mutates_config_static()
         );
         assert!(WireCommand::SetChangesPaneVisible { visible: true }.mutates_config_static());
+        // A SetInstanceIdentity carrying at least one field may mutate config.
+        assert!(
+            WireCommand::SetInstanceIdentity {
+                title: Some("dux".into()),
+                favicon: Some("amber".into()),
+            }
+            .mutates_config_static()
+        );
+        assert!(
+            WireCommand::SetInstanceIdentity {
+                title: Some("dux".into()),
+                favicon: None,
+            }
+            .mutates_config_static()
+        );
+        // An empty-body SetInstanceIdentity is a true no-op: it must NOT signal a
+        // config.changed fan-out (no disk write happens either).
+        assert!(
+            !WireCommand::SetInstanceIdentity {
+                title: None,
+                favicon: None,
+            }
+            .mutates_config_static()
+        );
         // ReloadConfig re-reads the whole file and already signals through the
         // reload path; it must NOT double-fire here.
         assert!(!WireCommand::ReloadConfig {}.mutates_config_static());
         // A non-config command never signals a bootstrap refetch.
         assert!(!WireCommand::WatchChangedFiles { session_id: None }.mutates_config_static());
+    }
+
+    /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in
+    /// `CURATED_FAVICON_COLORS` and in the TS `FAVICON_COLORS` map that drives the
+    /// rename-instance dialog and the tinted-duck SVG. A recolor/rename dialog that
+    /// offered a color the server rejects (or vice versa) would degrade silently, so
+    /// this parses the TS map's keys out of `favicon.ts` and asserts the two sets
+    /// are identical. Skips (rather than fails) when the web tree isn't present, e.g.
+    /// a published crate build outside the workspace. Copies the file-reading and
+    /// relative-path approach from `palette::tests::web_pin_matches_the_typescript_pin`.
+    #[test]
+    fn curated_favicon_colors_match_the_typescript_list() {
+        let ts_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dux-web/web/src/lib/favicon.ts");
+        let Ok(source) = std::fs::read_to_string(&ts_path) else {
+            eprintln!("skipping: {} not present", ts_path.display());
+            return;
+        };
+        // Isolate the `FAVICON_COLORS` object body, then read the `name: "#hex",`
+        // key off each line (the identifier before the first colon).
+        let body = source
+            .split("export const FAVICON_COLORS: Record<string, string> = {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("FAVICON_COLORS object not found in favicon.ts");
+        let mut ts_names: Vec<String> = body
+            .lines()
+            .filter_map(|line| line.trim().split(':').next())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect();
+        ts_names.sort();
+        let mut rust_names: Vec<String> = CURATED_FAVICON_COLORS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        rust_names.sort();
+        assert_eq!(
+            rust_names, ts_names,
+            "the curated favicon colors drifted between Rust CURATED_FAVICON_COLORS \
+             (wire.rs) and the TS FAVICON_COLORS map (favicon.ts). Update BOTH lists \
+             together so the dialog and the server agree on the accepted colors."
+        );
+    }
+
+    #[test]
+    fn normalize_instance_favicon_accepts_curated_names() {
+        assert_eq!(normalize_instance_favicon("amber"), Some("amber".into()));
+        // Trimmed and lowercased.
+        assert_eq!(
+            normalize_instance_favicon("  VIOLET  "),
+            Some("violet".into())
+        );
+        // Every curated name round-trips.
+        for name in CURATED_FAVICON_COLORS {
+            assert_eq!(normalize_instance_favicon(name), Some((*name).to_string()));
+        }
+    }
+
+    #[test]
+    fn normalize_instance_favicon_empty_resets_to_default() {
+        assert_eq!(normalize_instance_favicon(""), Some(String::new()));
+        assert_eq!(normalize_instance_favicon("   "), Some(String::new()));
+    }
+
+    #[test]
+    fn normalize_instance_favicon_rejects_unknown() {
+        // Dropped legacy names, hex, and URLs are all invalid now. `yellow` is the
+        // default (empty), not a tint, so it is rejected as an explicit value.
+        assert_eq!(normalize_instance_favicon("mauve"), None);
+        assert_eq!(normalize_instance_favicon("yellow"), None);
+        assert_eq!(normalize_instance_favicon("purple"), None);
+        assert_eq!(normalize_instance_favicon("#863bff"), None);
+        assert_eq!(normalize_instance_favicon("https://x/y.png"), None);
+    }
+
+    #[test]
+    fn normalize_instance_title_strips_controls_and_collapses_whitespace() {
+        assert_eq!(
+            normalize_instance_title("  dux\t\n  prod \r\n "),
+            "dux prod"
+        );
+        // A bare control character becomes nothing meaningful → default.
+        assert_eq!(normalize_instance_title("\u{0007}\u{0000}"), "dux");
+        // Bidi/format characters (Cf) are neutralized too, not just controls (Cc),
+        // so a right-to-left override can't spoof the rendered title.
+        assert_eq!(
+            normalize_instance_title("invoice\u{202E}cod.exe"),
+            "invoice cod.exe"
+        );
+        assert_eq!(normalize_instance_title("a\u{200D}\u{FEFF}b"), "a b");
+    }
+
+    #[test]
+    fn normalize_instance_title_empty_resets_to_dux() {
+        assert_eq!(normalize_instance_title(""), "dux");
+        assert_eq!(normalize_instance_title("     "), "dux");
+    }
+
+    #[test]
+    fn normalize_instance_title_caps_length_by_chars_not_bytes() {
+        // Multi-byte glyphs: 300 of them must cap to 200 chars, never panic on a
+        // byte boundary inside a codepoint.
+        let input: String = "é".repeat(300);
+        let out = normalize_instance_title(&input);
+        assert_eq!(out.chars().count(), 200);
+        assert!(out.chars().all(|c| c == 'é'));
     }
 
     #[test]

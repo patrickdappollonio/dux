@@ -103,6 +103,11 @@ pub enum Action {
     /// still needs an `Action` + a palette-only binding so it can join the shared
     /// palette registry. See `PaletteSurface::Web`.
     EditConfig,
+    /// Web-only: open the rename-instance dialog (browser tab title + favicon
+    /// color). Has no TUI behavior (the TUI sets `config.server.title`/`favicon`
+    /// via `dux config`), but it still needs an `Action` + a palette-only binding
+    /// so it can join the shared palette registry. See `PaletteSurface::Web`.
+    RenameWebInstance,
     NewTerminal,
     RenameSession,
     DeleteProject,
@@ -218,6 +223,7 @@ impl Action {
             Action::ToggleMarked => "toggle_marked",
             Action::KillRunning => "kill_running",
             Action::EditConfig => "edit_config",
+            Action::RenameWebInstance => "rename_web_instance",
             Action::NewTerminal => "new_terminal",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
@@ -351,6 +357,9 @@ impl Action {
                 "Open the kill-running modal for agents and companion terminals."
             }
             Action::EditConfig => "Edit config.toml in an editor.",
+            Action::RenameWebInstance => {
+                "Rename this dux instance (browser tab title + favicon color)."
+            }
             Action::RenameSession => "Rename the selected agent session.",
             Action::DeleteProject => "Remove the selected project and its sessions.",
             Action::RemoveProject => "Remove project from app (keeps files on disk).",
@@ -485,6 +494,7 @@ impl Action {
             | Action::ToggleMarked => Some("Overlays"),
             Action::KillRunning
             | Action::EditConfig
+            | Action::RenameWebInstance
             | Action::NewTerminal
             | Action::RenameSession
             | Action::DeleteProject

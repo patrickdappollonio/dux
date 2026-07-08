@@ -92,7 +92,7 @@ function iconHref(): string | null {
 }
 
 describe("store applies the configured favicon", () => {
-  it("renders a recoloured dux-logo outline for a colour", async () => {
+  it("renders a tinted duck for a curated colour", async () => {
     bootstrapBody = makeBootstrap({ favicon: "violet" })
     await loadStore()
     const href = iconHref() ?? ""
@@ -100,13 +100,13 @@ describe("store applies the configured favicon", () => {
     // Verify the colour survives the whole store→applyFavicon path, not just the
     // data-URI format.
     const decoded = decodeURIComponent(href.replace("data:image/svg+xml,", ""))
-    expect(decoded).toContain('stroke="#863bff"')
+    expect(decoded).toContain('fill="#863bff"')
   })
 
   it("keeps the bundled favicon when none is configured", async () => {
     bootstrapBody = makeBootstrap({ favicon: "" })
     await loadStore()
-    expect(iconHref()).toBe("/favicon.svg")
+    expect(iconHref()).toBe("/favicon.png")
   })
 
   it("reads the favicon field, not the title", async () => {
@@ -114,18 +114,21 @@ describe("store applies the configured favicon", () => {
     // resolve to a colour. Guards against applyFavicon being wired to b.title.
     bootstrapBody = makeBootstrap({ favicon: "", title: "violet" })
     await loadStore()
-    expect(iconHref()).toBe("/favicon.svg")
+    expect(iconHref()).toBe("/favicon.png")
   })
 
   it("updates the favicon live on a config.changed", async () => {
     bootstrapBody = makeBootstrap({ favicon: "" })
     const mod = await loadStore()
-    expect(iconHref()).toBe("/favicon.svg")
+    expect(iconHref()).toBe("/favicon.png")
 
-    bootstrapBody = makeBootstrap({ favicon: "https://x.test/a.png" })
+    // A curated colour applied over the config.changed path swaps the bundled png
+    // for the tinted-duck data URI.
+    bootstrapBody = makeBootstrap({ favicon: "amber" })
     mod.eventsSocket.onEvent({ event: "config.changed" })
     await vi.waitFor(() => {
-      expect(iconHref()).toBe("https://x.test/a.png")
+      const href = iconHref() ?? ""
+      expect(href.startsWith("data:image/svg+xml,")).toBe(true)
     })
   })
 })

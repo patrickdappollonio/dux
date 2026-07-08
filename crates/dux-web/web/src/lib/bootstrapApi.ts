@@ -64,9 +64,11 @@ export interface Bootstrap {
    * to "dux" via `resolveInstanceTitle`. */
   title?: string
   /** The operator-chosen favicon for this dux instance (`config.server.favicon`).
-   * Empty/missing keeps the bundled logo; a colour selects the dux-logo outline
-   * in that colour; an http(s)/absolute-path URL is a custom favicon. Resolved
-   * and applied by `applyFavicon`. Optional: older servers omit it. */
+   * Empty/missing shows the bundled full-colour duck (`/favicon.png`); a curated
+   * tint colour name recolours the duck silhouette in that colour; anything else
+   * (a legacy hex or URL, a dropped colour name) degrades to the default duck with
+   * a one-time notice. Resolved and applied by `applyFavicon`. Optional: older
+   * servers omit it. */
   favicon?: string
   /** Mirrors `config.ui.agent_tabs_max` (normalized): the per-agent tab cap
    * INCLUDING the session-slot tab. The tab strip disables its "+" once a session has

@@ -796,15 +796,12 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "favicon",
             comment: Some(CommentSource::Static(
-                "# Favicon for THIS dux instance, so several dux tabs are easy to tell\n\
-                 # apart. Empty (the default) keeps the bundled dux logo. Otherwise:\n\
-                 #   - a COLOUR renders the dux logo OUTLINE in that colour. Use a hex\n\
-                 #     value like \"#863bff\" or a name: violet, purple, blue, sky,\n\
-                 #     cyan, teal, green, lime, amber, orange, red, pink, rose, slate,\n\
-                 #     gray, white, black.\n\
-                 #   - a custom favicon URL beginning with \"http://\", \"https://\", or\n\
-                 #     \"/\" is used as-is.\n\
-                 # An unrecognized value falls back to the bundled logo.",
+                "# Favicon color for THIS dux instance, so several dux tabs are easy to\n\
+                 # tell apart. Empty (the default) keeps the original full-color yellow\n\
+                 # duck. Otherwise one of the curated tint colors, which recolors a flat\n\
+                 # duck silhouette in the browser tab: violet, blue, sky, cyan, teal,\n\
+                 # green, amber, orange, red, pink, rose.\n\
+                 # An unrecognized value falls back to the default duck.",
             )),
             value_fn: |c| FieldValue::Str(c.server.favicon.clone()),
         },
@@ -1401,6 +1398,11 @@ mod tests {
         // Assert the active key (not a commented-out line) so a regression that
         // emits favicon only as a comment is caught.
         assert!(rendered.lines().any(|l| l.trim() == "favicon = \"\""));
+        // The favicon comment documents the curated tint set (recolors a flat duck
+        // silhouette), not the removed hex/URL inputs.
+        assert!(rendered.contains("curated tint colors"));
+        assert!(rendered.contains("duck silhouette in the browser tab"));
+        assert!(!rendered.contains("863bff"));
         assert!(!rendered.contains("[auth]"));
         assert!(!rendered.contains("[server.acme]"));
         assert!(rendered.contains("[keys]"));

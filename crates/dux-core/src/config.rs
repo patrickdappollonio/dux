@@ -301,13 +301,11 @@ pub struct ServerConfig {
     /// "dux #1" or "dux (prod)") to tell several dux tabs apart at a glance.
     /// Default "dux". An empty/whitespace value falls back to "dux" in the UI.
     pub title: String,
-    /// WEB-ONLY favicon for this dux instance, so several dux tabs are easy to
-    /// tell apart. Empty (default) keeps the bundled dux logo. Otherwise one of:
-    /// a COLOUR (a hex value like "#863bff", or a name: violet, purple, blue,
-    /// sky, cyan, teal, green, lime, amber, orange, red, pink, rose, slate, gray,
-    /// white, black), which renders the dux logo OUTLINE in that colour; or a
-    /// custom favicon URL beginning with "http://", "https://", or "/".
-    /// Unrecognized values fall back to the bundled logo.
+    /// WEB-ONLY favicon color for this dux instance, so several dux tabs are easy
+    /// to tell apart. Empty (default) keeps the original full-color yellow duck.
+    /// Otherwise one of the curated tint colors, which recolors a flat duck
+    /// silhouette in the browser tab: violet, blue, sky, cyan, teal, green, amber,
+    /// orange, red, pink, rose. Unrecognized values fall back to the default duck.
     pub favicon: String,
     /// Seconds the web server (`dux server`, or the server flipped from the TUI)
     /// waits for agents and companion terminals to exit after SIGTERM on
