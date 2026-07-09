@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import {
   attachWorktree,
@@ -211,16 +212,24 @@ function AttachWorktreeBody({ projectId }: { projectId: string }) {
 // `openAttachWorktree` / `attachWorktreeTarget` (lib/store.ts) to find the
 // wiring behind those user-facing labels.
 export function AttachWorktreeDialog() {
-  const { attachWorktreeTarget } = useDux()
+  const { attachWorktreeTarget, spine } = useDux()
+  const project = spine?.projects.find((p) => p.id === attachWorktreeTarget)
+  // Closes the dialog when the project vanishes from the ViewModel:
+  // attaching a worktree to a deleted project is moot. See the hook.
+  const open = useVanishedTargetGuard(
+    attachWorktreeTarget !== null,
+    project !== undefined,
+    closeAttachWorktree,
+  )
 
   return (
     <Dialog
-      open={attachWorktreeTarget !== null}
+      open={open}
       onOpenChange={(o) => {
         if (!o) closeAttachWorktree()
       }}
     >
-      {attachWorktreeTarget !== null && (
+      {open && attachWorktreeTarget !== null && (
         <AttachWorktreeBody projectId={attachWorktreeTarget} />
       )}
     </Dialog>

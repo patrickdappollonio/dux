@@ -15,6 +15,7 @@ import { EditorOverlay } from "@/components/EditorOverlay"
 import { ConfigEditorDialog } from "@/components/ConfigEditorDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
+import { ConfirmForceReconnectDialog } from "@/components/ConfirmForceReconnectDialog"
 import { KillRunningDialog } from "@/components/KillRunningDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
@@ -28,7 +29,7 @@ import { OfflineOverlay } from "@/components/OfflineOverlay"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
-import { RenameInstanceDialog } from "@/components/RenameInstanceDialog"
+import { CustomizeWebappDialog } from "@/components/CustomizeWebappDialog"
 import { InsetHeader } from "@/components/InsetHeader"
 import { TerminalArea } from "@/components/TerminalArea"
 import {
@@ -63,9 +64,10 @@ function GlobalOverlays() {
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
       <ConfirmCloseTabDialog />
+      <ConfirmForceReconnectDialog />
       <KillRunningDialog />
       <ConfigEditorDialog />
-      <RenameInstanceDialog />
+      <CustomizeWebappDialog />
       <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
       <MacrosDialog />

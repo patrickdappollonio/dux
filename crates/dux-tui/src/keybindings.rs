@@ -1040,7 +1040,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
-    // Web-only palette command (rename-instance dialog): joins the registry by
+    // Web-only palette command (customize-webapp dialog): joins the registry by
     // Action but its surface is `Web`, so the TUI never lists or dispatches it.
     BindingDef {
         action: Action::RenameWebInstance,
@@ -2194,7 +2194,7 @@ mod tests {
         // but now allowing intentional exceptions. Web-only commands are also
         // intentionally absent from the TUI listing.
         const KNOWN_WEB_ONLY: &[&str] =
-            &["edit-config", "rename-instance", "toggle-copy-on-select"];
+            &["customize-webapp", "edit-config", "toggle-copy-on-select"];
         for cmd in palette::PALETTE_COMMANDS {
             if cmd.surface == PaletteSurface::Web {
                 assert!(

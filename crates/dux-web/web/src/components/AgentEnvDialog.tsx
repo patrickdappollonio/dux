@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { envToText, parseEnv } from "@/lib/env"
 import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
 import type { ProjectView, SessionView } from "@/lib/types"
@@ -69,7 +70,13 @@ export function AgentEnvDialog() {
   const { spine, agentEnvTarget } = useDux()
   const session = spine?.sessions.find((s) => s.id === agentEnvTarget)
   const project = spine?.projects.find((p) => p.id === session?.project_id)
-  const open = agentEnvTarget !== null
+  // Closes the dialog when the agent or its project vanishes from the
+  // ViewModel; see the hook.
+  const open = useVanishedTargetGuard(
+    agentEnvTarget !== null,
+    session !== undefined && project !== undefined,
+    closeAgentEnv,
+  )
 
   return (
     <Dialog

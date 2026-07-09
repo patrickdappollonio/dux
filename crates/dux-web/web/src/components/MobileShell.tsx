@@ -24,7 +24,6 @@ import {
   Info,
   Pencil,
   Play,
-  Plug,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -91,6 +90,7 @@ import {
   openAddProject,
   openAgentInfo,
   openAgentEnv,
+  openForceReconnect,
   openAgentStartupCommand,
   openChangeProvider,
   openDelete,
@@ -98,7 +98,6 @@ import {
   openForkAgent,
   openRename,
   openStartupLogs,
-  reconnectSession,
   reorderProjects,
   reorderSessions,
   rerunStartupCommand,
@@ -122,7 +121,7 @@ function SessionActions({ session }: { session: SessionView }) {
     toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)
   }
 
-  // "Add tab" mirrors the desktop sidebar's menu item: it is reachable at ANY
+  // "New agent tab" mirrors the desktop sidebar's menu item: it is reachable at ANY
   // tab count (including the common 1-tab case), since the in-strip "+" only
   // renders once a session already has two or more tabs.
   const { bootstrap, spine, createTabInFlight } = useDux()
@@ -134,35 +133,12 @@ function SessionActions({ session }: { session: SessionView }) {
 
   return (
     <DropdownMenuGroup>
-      <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
-        <Plug />
-        Reconnect
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => reconnectSession(session.id, true)}>
-        <RotateCcw />
-        Force reconnect (fresh)
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openRename(session.id)}>
-        <Pencil />
-        Rename agent…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
-        <GitFork />
-        Fork agent…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
-        <Cpu />
-        Change agent provider…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
-        <Info />
-        Agent info…
-      </DropdownMenuItem>
+      {/* The most common action leads the menu (matching the desktop sidebar):
+          spawn another provider tab in this agent's worktree. */}
       <DropdownMenuSub>
         <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
           <Plus />
-          Add tab…
+          New agent tab…
         </DropdownMenuSubTrigger>
         <DropdownMenuSubContent>
           {providers.map((p) => {
@@ -181,6 +157,30 @@ function SessionActions({ session }: { session: SessionView }) {
           })}
         </DropdownMenuSubContent>
       </DropdownMenuSub>
+      <DropdownMenuSeparator />
+      {/* Connection lifecycle: force-recreate is confirmed (it abandons the
+          current conversation for a fresh session). */}
+      <DropdownMenuItem onClick={() => openForceReconnect(session.id)}>
+        <RotateCcw />
+        Force recreate agent…
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openRename(session.id)}>
+        <Pencil />
+        Rename agent…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
+        <GitFork />
+        Fork agent…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
+        <Cpu />
+        Change agent provider…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
+        <Info />
+        Agent info…
+      </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={handleToggleAutoReopen}>
         <RefreshCw />

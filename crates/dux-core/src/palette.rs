@@ -272,7 +272,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ReconnectAgent,
         name: "reconnect-agent",
         description: "Restart the CLI for the selected agent",
-        // Per-session: web exposes "Reconnect" from the session actions group.
+        // TUI-only: plain (resume) reconnect has no web surface; the web's
+        // agent menu deliberately offers only the confirmed force variant.
         surface: PaletteSurface::Tui,
     },
     PaletteCommand {
@@ -356,12 +357,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: Action::RenameWebInstance,
-        name: "rename-instance",
-        description: "Rename this dux instance and pick a favicon color",
-        // Web-only: opens the rename-instance dialog (browser tab title + favicon
-        // color), which POSTs to /api/v1/config/instance-identity. The TUI sets
-        // config.server.title/favicon through `dux config`, so it does not list
-        // this.
+        name: "customize-webapp",
+        description: "Rename this dux instance, pick a favicon color, and show or hide the Changes pane",
+        // Web-only: opens the customize-webapp dialog (browser tab title + favicon
+        // color + Changes pane visibility), which POSTs to
+        // /api/v1/config/instance-identity. The TUI sets config.server.title/favicon
+        // through `dux config`, so it does not list this.
         surface: PaletteSurface::Web,
     },
     PaletteCommand {
@@ -515,7 +516,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ForceReconnectAgent,
         name: "force-reconnect-agent",
         description: "Force-reconnect the agent with a fresh session (no --continue)",
-        // Per-session: web exposes "Force reconnect (fresh)" in session actions.
+        // Per-session: web exposes "Force recreate agent…" in the agent menu,
+        // gated by a confirmation dialog.
         surface: PaletteSurface::Tui,
     },
 ];
@@ -567,11 +569,11 @@ mod tests {
         let expected = [
             "add-project",
             "configure-global-env",
+            "customize-webapp",
             "edit-config",
             "edit-macros",
             "kill-running",
             "reload-config",
-            "rename-instance",
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",

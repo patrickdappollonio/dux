@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a tab. Closing ALWAYS confirms (matching the TUI):
@@ -33,7 +34,13 @@ export function ConfirmCloseTabDialog() {
     ? liveTabs <= 1
     : liveTabs === 0
 
-  const isOpen = closeTabTarget !== null
+  // Closes the dialog when the tab (or its whole session) vanishes from the
+  // ViewModel; see the hook.
+  const isOpen = useVanishedTargetGuard(
+    closeTabTarget !== null,
+    tab !== undefined,
+    closeCloseTab,
+  )
 
   function handleConfirm() {
     if (!closeTabTarget) return

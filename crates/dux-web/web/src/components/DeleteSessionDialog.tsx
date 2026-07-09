@@ -8,15 +8,26 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDelete, deleteSession, useDux } from "@/lib/store"
 
 export function DeleteSessionDialog() {
   const { deleteTarget, spine } = useDux()
   const [deleteWorktree, setDeleteWorktree] = useState(false)
 
-  const isOpen = deleteTarget !== null
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const name = session?.title || session?.branch_name
+  // The component stays mounted across opens, so a vanish-close must also
+  // reset the checkbox, otherwise the NEXT delete confirm opens pre-checked
+  // with "also delete the worktree". Wrap the hook's close callback to do both.
+  const isOpen = useVanishedTargetGuard(
+    deleteTarget !== null,
+    session !== undefined,
+    () => {
+      setDeleteWorktree(false)
+      closeDelete()
+    },
+  )
 
   function handleConfirm() {
     if (!deleteTarget) return

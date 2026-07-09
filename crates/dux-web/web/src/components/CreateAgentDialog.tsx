@@ -38,6 +38,9 @@ export function CreateAgentDialog() {
     createAgentPrInput,
     spine,
   } = useDux()
+  // Deliberately skips useVanishedTargetGuard: this target carries its own
+  // draft/mode data, with entities used only for cosmetic labels, so a
+  // vanish-close would discard a typed draft to enforce a label.
   const open = createAgentTarget !== null
   const isFork = createAgentTarget?.kind === "fork"
   const isPr = createAgentTarget?.kind === "pr"

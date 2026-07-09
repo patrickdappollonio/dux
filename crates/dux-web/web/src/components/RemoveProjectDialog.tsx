@@ -12,10 +12,13 @@ import { closeRemoveProject, removeProject, useDux } from "@/lib/store"
 export function RemoveProjectDialog() {
   const { removeProjectTarget, spine } = useDux()
 
+  // Deliberately skips useVanishedTargetGuard: this dialog opens for ghost
+  // projects with no live project record, so a vanish guard would dismiss the
+  // exact case it exists for.
   const isOpen = removeProjectTarget !== null
   const project = spine?.projects.find((p) => p.id === removeProjectTarget)
-  // For an orphaned ("ghost") project there is no project record — fall back to
-  // the short-id name the sidebar shows for its group.
+  // For an orphaned ("ghost") project there is no project record, so fall back
+  // to the short-id name the sidebar shows for its group.
   const orphanName = spine?.sidebar.groups.find(
     (g) => g.project_id === removeProjectTarget,
   )?.name

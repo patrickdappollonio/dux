@@ -174,6 +174,51 @@ describe("Changes-pane visibility", () => {
     expect(mod.getSnapshot().changesPaneOverride).toBe(false)
   })
 
+  // The customize-webapp dialog gates its close on these resolved booleans, so
+  // the real implementations (not just component-level mocks) must resolve
+  // true on success and false (never reject) on failure.
+  it("setChangesPaneVisibility resolves true on success and false on failure, rolling back", async () => {
+    const mod = await loadStore()
+    await expect(mod.setChangesPaneVisibility(false)).resolves.toBe(true)
+    expect(mod.getSnapshot().changesPaneOverride).toBe(false)
+
+    // The PUT fails: the promise resolves false and the optimistic override
+    // rolls back so the pane doesn't strand in the toggled state.
+    fetchMock.mockImplementationOnce(
+      async () =>
+        ({
+          ok: false,
+          status: 500,
+          json: async () => null,
+          text: async () => "disk full",
+          headers: { get: () => null },
+        }) as unknown as Response,
+    )
+    await expect(mod.setChangesPaneVisibility(true)).resolves.toBe(false)
+    expect(mod.getSnapshot().changesPaneOverride).toBe(null)
+  })
+
+  it("setInstanceIdentity resolves true on success and false on failure", async () => {
+    const mod = await loadStore()
+    await expect(
+      mod.setInstanceIdentity({ title: "prod dux", favicon: "blue" }),
+    ).resolves.toBe(true)
+
+    fetchMock.mockImplementationOnce(
+      async () =>
+        ({
+          ok: false,
+          status: 400,
+          json: async () => null,
+          text: async () => "bad favicon",
+          headers: { get: () => null },
+        }) as unknown as Response,
+    )
+    await expect(
+      mod.setInstanceIdentity({ title: "prod dux", favicon: "nope" }),
+    ).resolves.toBe(false)
+  })
+
   it("the toggle-remove-git-pane palette command runs the toggle", async () => {
     await loadStore() // boot the store so the palette handler module resolves
     const { PALETTE_HANDLERS } = await import("./paletteRegistry")

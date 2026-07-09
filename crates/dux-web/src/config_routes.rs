@@ -205,9 +205,9 @@ async fn toggle_always_show_tab_strip(
     dispatch(&state, &headers, WireCommand::ToggleAlwaysShowTabStrip {}).await
 }
 
-// ── Instance identity (rename dialog) ────────────────────────────────────────
+// ── Instance identity (customize-webapp dialog) ──────────────────────────────
 
-/// The rename-instance body. Both fields are `#[serde(default)]` so a single-field
+/// The instance identity body. Both fields are `#[serde(default)]` so a single-field
 /// body (`{"favicon":"amber"}`) or an empty body (`{}`) both deserialize — the
 /// handler only touches the fields that are present, and an empty body is a no-op.
 #[derive(Deserialize, Default)]

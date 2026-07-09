@@ -1,5 +1,3 @@
-import { useEffect } from "react"
-
 import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
@@ -9,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import { formatDisplayDate, projectLiveCounts } from "@/lib/projectInfo"
 import { closeProjectInfo, useDux } from "@/lib/store"
@@ -20,22 +19,18 @@ export function ProjectInfoDialog() {
   const { projectInfoTarget, spine } = useDux()
 
   // Derive the project from the ViewModel so a project removed while the dialog
-  // is open closes it gracefully via the effect below, mirroring the terminal
-  // confirmation dialog's vanished-target handling.
+  // is open closes it gracefully, mirroring the terminal confirmation dialog.
   let project: ProjectView | undefined
   if (projectInfoTarget && spine) {
     project = spine.projects.find((p) => p.id === projectInfoTarget)
   }
 
-  // If the target was set but no longer exists in the ViewModel, the project was
-  // removed. Drop the modal so it doesn't linger pointing at a gone project.
-  useEffect(() => {
-    if (projectInfoTarget && !project) {
-      closeProjectInfo()
-    }
-  }, [projectInfoTarget, project])
-
-  const isOpen = projectInfoTarget !== null && project !== undefined
+  // Closes the dialog when the project vanishes from the ViewModel; see the hook.
+  const isOpen = useVanishedTargetGuard(
+    projectInfoTarget !== null,
+    project !== undefined,
+    closeProjectInfo,
+  )
 
   function handleOpenChange(open: boolean) {
     if (!open) closeProjectInfo()

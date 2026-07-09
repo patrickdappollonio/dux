@@ -202,6 +202,10 @@ export interface DuxState {
   // The agent (session id) whose read-only info modal is open, or null (closed).
   // Like `projectInfoTarget`, pure presentation of existing ViewModel data.
   agentInfoTarget: string | null
+  // The agent (session id) whose force-recreate confirmation is open, or null
+  // (closed). Confirmed via ConfirmForceReconnectDialog because a forced
+  // reconnect abandons the provider's current conversation for a fresh one.
+  forceReconnectTarget: string | null
   addProjectOpen: boolean
   browsePath: string
   browseEntries: DirEntryView[]
@@ -286,10 +290,11 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
-  // The rename-instance dialog (the Ctrl+K "rename-instance" command). Gates the
-  // modal that sets the browser tab title + favicon colour; the dialog seeds its
-  // fields from the bootstrap document, so it needs no state beyond this flag.
-  renameInstanceOpen: boolean
+  // The customize-webapp dialog (the Ctrl+K "customize-webapp" command). Gates the
+  // modal that sets the browser tab title + favicon colour + Changes pane
+  // visibility; the dialog seeds its fields from the bootstrap document, so it
+  // needs no state beyond this flag.
+  customizeWebappOpen: boolean
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
@@ -428,6 +433,7 @@ let state: DuxState = {
   startupLogsError: null,
   projectInfoTarget: null,
   agentInfoTarget: null,
+  forceReconnectTarget: null,
   addProjectOpen: false,
   browsePath: "",
   browseEntries: [],
@@ -453,7 +459,7 @@ let state: DuxState = {
   configEditorContent: "",
   configEditorLoading: false,
   configEditorError: null,
-  renameInstanceOpen: false,
+  customizeWebappOpen: false,
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
@@ -1655,7 +1661,11 @@ export function toggleSessionAutoReopen(
 
 // Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
 // session with no resume args (the TUI's force-reconnect); the default resumes
-// the prior conversation when the provider supports it. Focus the session and
+// the prior conversation when the provider supports it. The web UI deliberately
+// exposes only the forced variant (the confirmed "Force recreate agent…" menu
+// item), so no web surface currently calls `force: false`; the parameter stays
+// because the wire contract supports resume and the TUI still exposes plain
+// reconnect as a separate action. Focus the session and
 // bump `terminalEpoch` so the pane remounts and re-subscribes — the reconnect
 // swaps in a new server-side provider, and the previously-attached forwarder is
 // dead, so even an already-focused pane must re-issue `subscribe`. The server
@@ -1822,6 +1832,17 @@ export function openAgentInfo(sessionId: string): void {
 
 export function closeAgentInfo(): void {
   setState({ agentInfoTarget: null })
+}
+
+// The force-recreate confirmation ("Force recreate agent…" in the agent ⋯
+// menus). Open/close only move the target; the dialog itself calls
+// `reconnectSession(id, true)` on confirm.
+export function openForceReconnect(sessionId: string): void {
+  setState({ forceReconnectTarget: sessionId })
+}
+
+export function closeForceReconnect(): void {
+  setState({ forceReconnectTarget: null })
 }
 
 // Browse a directory for the add-project picker over REST (replaces the retired
@@ -2467,17 +2488,19 @@ export function changesPaneVisible(s: DuxState): boolean {
   return s.changesPaneOverride ?? s.bootstrap?.show_changes_pane ?? true
 }
 
-// Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
-// Changes actions menu) and persist the choice. The override is set
-// optimistically for an instant response; the server writes
+// Set the Changes pane's visibility and persist it (config.ui.show_changes_pane).
+// The override is set optimistically for an instant response; the server writes
 // config.ui.show_changes_pane and emits `config.changed`, the refetched bootstrap
 // document carries the confirmed value, and `applyBootstrap` drops the override
-// so config is the single source of truth across every connected client.
-export function toggleChangesPane(): void {
-  const next = !changesPaneVisible(state)
+// so config is the single source of truth across every connected client. Rolls
+// the optimistic override back with a toast on error. Resolves to whether the
+// persist succeeded so a caller (the customize-webapp dialog) can gate on it;
+// fire-and-forget callers ignore the returned promise.
+export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
   setState({ changesPaneOverride: next })
-  configApi
+  return configApi
     .setChangesPaneVisible(next)
+    .then(() => true)
     .catch((e) => {
       // Roll the optimistic override back so the pane doesn't strand in the
       // toggled state when the persist fails.
@@ -2485,7 +2508,14 @@ export function toggleChangesPane(): void {
       toast.error(
         e instanceof Error ? e.message : "Could not toggle the Changes pane.",
       )
+      return false
     })
+}
+
+// Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
+// Changes actions menu).
+export function toggleChangesPane(): void {
+  setChangesPaneVisibility(!changesPaneVisible(state))
 }
 
 // The three Ctrl+K preference toggles (random pet-name default, PR banner
@@ -2539,32 +2569,37 @@ export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
 }
 
-// The rename-instance dialog (Ctrl+K "rename-instance"). Open/close just flip the
-// gate; the dialog seeds its title + favicon fields from the bootstrap document.
-export function openRenameInstance(): void {
-  setState({ renameInstanceOpen: true })
+// The customize-webapp dialog (Ctrl+K "customize-webapp"). Open/close just flip the
+// gate; the dialog seeds its title, favicon, and Changes pane fields from the
+// bootstrap document.
+export function openCustomizeWebapp(): void {
+  setState({ customizeWebappOpen: true })
 }
 
-export function closeRenameInstance(): void {
-  setState({ renameInstanceOpen: false })
+export function closeCustomizeWebapp(): void {
+  setState({ customizeWebappOpen: false })
 }
 
-// Persist the instance identity (browser tab title + favicon colour). Fire-and-
-// forget: the server validates + writes config.toml and emits `config.changed`,
-// so `applyBootstrap` re-applies the tab title, wordmark, and favicon on every
+// Persist the instance identity (browser tab title + favicon colour). The
+// server validates + writes config.toml and emits `config.changed`, so
+// `applyBootstrap` re-applies the tab title, wordmark, and favicon on every
 // client. We do NOT hand-apply here — config is the single source of truth. A
 // success toast is the engine's routed status; here we only surface a failure.
+// Resolves to whether the persist succeeded so the customize-webapp dialog can
+// gate its close on it; fire-and-forget callers ignore the returned promise.
 export function setInstanceIdentity(body: {
   title?: string
   favicon?: string
-}): void {
-  configApi
+}): Promise<boolean> {
+  return configApi
     .setInstanceIdentity(body)
-    .catch((e) =>
+    .then(() => true)
+    .catch((e) => {
       toast.error(
         e instanceof Error ? e.message : "Could not rename this instance.",
-      ),
-    )
+      )
+      return false
+    })
 }
 
 // Force-kill one agent's PTY. The agent detaches (it is NOT deleted) and can be

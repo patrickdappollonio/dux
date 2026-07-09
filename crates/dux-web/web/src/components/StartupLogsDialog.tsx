@@ -16,6 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeStartupLogs,
   selectStartupLog,
@@ -108,16 +109,25 @@ function StartupLogsBody({ sessionId }: { sessionId: string }) {
 }
 
 export function StartupLogsDialog() {
-  const { startupLogsTarget } = useDux()
+  const { startupLogsTarget, spine } = useDux()
+  const session = spine?.sessions.find((s) => s.id === startupLogsTarget)
+  // Closes the dialog when the agent vanishes from the ViewModel: the logs
+  // belong to the agent's worktree, and a deleted agent's logs are gone. See
+  // the hook.
+  const open = useVanishedTargetGuard(
+    startupLogsTarget !== null,
+    session !== undefined,
+    closeStartupLogs,
+  )
 
   return (
     <Dialog
-      open={startupLogsTarget !== null}
+      open={open}
       onOpenChange={(o) => {
         if (!o) closeStartupLogs()
       }}
     >
-      {startupLogsTarget !== null && (
+      {open && startupLogsTarget !== null && (
         <StartupLogsBody sessionId={startupLogsTarget} />
       )}
     </Dialog>

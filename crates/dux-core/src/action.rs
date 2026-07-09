@@ -103,10 +103,11 @@ pub enum Action {
     /// still needs an `Action` + a palette-only binding so it can join the shared
     /// palette registry. See `PaletteSurface::Web`.
     EditConfig,
-    /// Web-only: open the rename-instance dialog (browser tab title + favicon
-    /// color). Has no TUI behavior (the TUI sets `config.server.title`/`favicon`
-    /// via `dux config`), but it still needs an `Action` + a palette-only binding
-    /// so it can join the shared palette registry. See `PaletteSurface::Web`.
+    /// Web-only: open the customize-webapp dialog (browser tab title + favicon
+    /// color + Changes pane visibility). Has no TUI behavior (the TUI sets
+    /// `config.server.title`/`favicon` via `dux config`), but it still needs an
+    /// `Action` + a palette-only binding so it can join the shared palette
+    /// registry. See `PaletteSurface::Web`.
     RenameWebInstance,
     NewTerminal,
     RenameSession,
