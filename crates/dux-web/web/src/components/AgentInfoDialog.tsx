@@ -121,7 +121,9 @@ export function AgentInfoDialog() {
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent>
+      {/* Wider than the sm:max-w-sm default: the branch and worktree rows carry
+          full paths that deserve room before wrapping. */}
+      <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
             {session ? session.title || session.branch_name : "Agent info"}

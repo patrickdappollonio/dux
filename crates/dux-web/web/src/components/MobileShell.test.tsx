@@ -128,7 +128,7 @@ describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Add tab…")
+    const item = screen.getByText("New agent tab…")
     expect(
       item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
     ).not.toBe("true")
@@ -146,7 +146,7 @@ describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    const item = screen.getByText("Add tab…")
+    const item = screen.getByText("New agent tab…")
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
       "true",
     )
@@ -163,7 +163,7 @@ describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
     })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText("Add tab…"))
+    fireEvent.click(screen.getByText("New agent tab…"))
     // makeSessionSpine's project default_provider is "claude".
     expect(screen.getByText("default")).toBeTruthy()
     expect(screen.getByText("codex")).toBeTruthy()

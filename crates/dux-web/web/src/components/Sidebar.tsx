@@ -26,7 +26,6 @@ import {
   Info,
   Pencil,
   Play,
-  Plug,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -118,10 +117,10 @@ import {
   openDelete,
   openDeleteTerminal,
   openAgentInfo,
+  openForceReconnect,
   openForkAgent,
   openRename,
   openStartupLogs,
-  reconnectSession,
   reorderProjects,
   reorderSessions,
   rerunStartupCommand,
@@ -227,7 +226,7 @@ function SessionSubItem({
   // Running agents shimmer their name; non-running (detached/exited) recede.
   const { shimmer, dimmed } = agentRowVisual(session.status, session.working)
 
-  // "Add tab" is reachable here at ANY tab count (including the common 1-tab
+  // "New agent tab" is reachable here at ANY tab count (including the common 1-tab
   // case) because the in-strip "+" only renders once a session already has two
   // or more tabs (AgentTabsStrip mounts only then) — without this menu item a
   // fresh 1-tab session could never reach its first extra tab from the web.
@@ -373,15 +372,40 @@ function SessionSubItem({
           </div>
           <DropdownMenuContent side="right" align="start">
             <DropdownMenuGroup>
-              {/* Connection lifecycle: reconnect actions plus the auto-reopen
-                  toggle, which is just the automatic form of reopening. */}
-              <DropdownMenuItem onClick={() => reconnectSession(session.id, false)}>
-                <Plug />
-                Reconnect
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => reconnectSession(session.id, true)}>
+              {/* The most common action leads the menu: spawn another provider
+                  tab in this agent's worktree. */}
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
+                  <Plus />
+                  New agent tab…
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {providers.map((p) => {
+                    const isDefault = p === defaultProvider
+                    return (
+                      <DropdownMenuItem
+                        key={p}
+                        onClick={() => addTab(session.id, p)}
+                      >
+                        {isDefault ? <Check /> : <Bot />}
+                        {p}
+                        {isDefault ? (
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            default
+                          </span>
+                        ) : null}
+                      </DropdownMenuItem>
+                    )
+                  })}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+              <DropdownMenuSeparator />
+              {/* Connection lifecycle: the force-recreate action (confirmed,
+                  since it abandons the current conversation for a fresh
+                  session) plus the auto-reopen toggle. */}
+              <DropdownMenuItem onClick={() => openForceReconnect(session.id)}>
                 <RotateCcw />
-                Force reconnect (fresh)
+                Force recreate agent…
               </DropdownMenuItem>
               <DropdownMenuItem onClick={handleToggleAutoReopen}>
                 <RefreshCw />
@@ -407,31 +431,6 @@ function SessionSubItem({
                 <Info />
                 Agent info…
               </DropdownMenuItem>
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
-                  <Plus />
-                  Add tab…
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  {providers.map((p) => {
-                    const isDefault = p === defaultProvider
-                    return (
-                      <DropdownMenuItem
-                        key={p}
-                        onClick={() => addTab(session.id, p)}
-                      >
-                        {isDefault ? <Check /> : <Bot />}
-                        {p}
-                        {isDefault ? (
-                          <span className="ml-auto text-xs text-muted-foreground">
-                            default
-                          </span>
-                        ) : null}
-                      </DropdownMenuItem>
-                    )
-                  })}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
               <DropdownMenuSeparator />
               {/* Startup command + env: these are project-scoped (no per-agent
                   env in dux), surfaced here for quick per-agent access mirroring

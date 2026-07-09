@@ -15,6 +15,7 @@ import { EditorOverlay } from "@/components/EditorOverlay"
 import { ConfigEditorDialog } from "@/components/ConfigEditorDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
+import { ConfirmForceReconnectDialog } from "@/components/ConfirmForceReconnectDialog"
 import { KillRunningDialog } from "@/components/KillRunningDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
@@ -63,6 +64,7 @@ function GlobalOverlays() {
       <DeleteSessionDialog />
       <ConfirmDeleteTerminalDialog />
       <ConfirmCloseTabDialog />
+      <ConfirmForceReconnectDialog />
       <KillRunningDialog />
       <ConfigEditorDialog />
       <RenameInstanceDialog />

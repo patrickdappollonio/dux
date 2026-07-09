@@ -356,7 +356,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: Action::RenameWebInstance,
-        name: "rename-instance",
+        name: "customize-instance",
         description: "Rename this dux instance and pick a favicon color",
         // Web-only: opens the rename-instance dialog (browser tab title + favicon
         // color), which POSTs to /api/v1/config/instance-identity. The TUI sets
@@ -567,11 +567,11 @@ mod tests {
         let expected = [
             "add-project",
             "configure-global-env",
+            "customize-instance",
             "edit-config",
             "edit-macros",
             "kill-running",
             "reload-config",
-            "rename-instance",
             "sort-agents-by-created",
             "sort-agents-by-name",
             "sort-agents-by-updated",

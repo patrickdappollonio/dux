@@ -31,7 +31,7 @@ const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "edit-config": "Configuration",
   "edit-macros": "Configuration",
   "reload-config": "Configuration",
-  "rename-instance": "Configuration",
+  "customize-instance": "Configuration",
   "toggle-github-integration": "Configuration",
   "toggle-randomized-pet-name-default": "Configuration",
   "sort-agents-by-created": "View",

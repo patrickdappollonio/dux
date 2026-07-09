@@ -202,6 +202,10 @@ export interface DuxState {
   // The agent (session id) whose read-only info modal is open, or null (closed).
   // Like `projectInfoTarget`, pure presentation of existing ViewModel data.
   agentInfoTarget: string | null
+  // The agent (session id) whose force-recreate confirmation is open, or null
+  // (closed). Confirmed via ConfirmForceReconnectDialog because a forced
+  // reconnect abandons the provider's current conversation for a fresh one.
+  forceReconnectTarget: string | null
   addProjectOpen: boolean
   browsePath: string
   browseEntries: DirEntryView[]
@@ -286,7 +290,7 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
-  // The rename-instance dialog (the Ctrl+K "rename-instance" command). Gates the
+  // The rename-instance dialog (the Ctrl+K "customize-instance" command). Gates the
   // modal that sets the browser tab title + favicon colour; the dialog seeds its
   // fields from the bootstrap document, so it needs no state beyond this flag.
   renameInstanceOpen: boolean
@@ -428,6 +432,7 @@ let state: DuxState = {
   startupLogsError: null,
   projectInfoTarget: null,
   agentInfoTarget: null,
+  forceReconnectTarget: null,
   addProjectOpen: false,
   browsePath: "",
   browseEntries: [],
@@ -1824,6 +1829,17 @@ export function closeAgentInfo(): void {
   setState({ agentInfoTarget: null })
 }
 
+// The force-recreate confirmation ("Force recreate agent…" in the agent ⋯
+// menus). Open/close only move the target; the dialog itself calls
+// `reconnectSession(id, true)` on confirm.
+export function openForceReconnect(sessionId: string): void {
+  setState({ forceReconnectTarget: sessionId })
+}
+
+export function closeForceReconnect(): void {
+  setState({ forceReconnectTarget: null })
+}
+
 // Browse a directory for the add-project picker over REST (replaces the retired
 // `/ws` `browse_dir` → `dir_entries` round-trip). A null path resolves the
 // server's configured default start directory. The reply is ignored once the
@@ -2539,7 +2555,7 @@ export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
 }
 
-// The rename-instance dialog (Ctrl+K "rename-instance"). Open/close just flip the
+// The rename-instance dialog (Ctrl+K "customize-instance"). Open/close just flip the
 // gate; the dialog seeds its title + favicon fields from the bootstrap document.
 export function openRenameInstance(): void {
   setState({ renameInstanceOpen: true })
