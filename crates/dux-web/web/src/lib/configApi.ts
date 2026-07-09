@@ -24,6 +24,10 @@ async function send(method: string, path: string, body: unknown): Promise<void> 
       credentials: "same-origin",
       headers,
       body: JSON.stringify(body),
+      // A hung server must not wedge callers that await these writes (the
+      // customize-webapp dialog disables its whole form while one is
+      // pending): give up after 15s and surface the failure instead.
+      signal: AbortSignal.timeout(15_000),
     })
   } catch {
     throw new Error("Could not reach the server.")

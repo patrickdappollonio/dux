@@ -272,7 +272,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ReconnectAgent,
         name: "reconnect-agent",
         description: "Restart the CLI for the selected agent",
-        // Per-session: web exposes "Reconnect" from the session actions group.
+        // TUI-only: plain (resume) reconnect has no web surface; the web's
+        // agent menu deliberately offers only the confirmed force variant.
         surface: PaletteSurface::Tui,
     },
     PaletteCommand {
@@ -515,7 +516,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ForceReconnectAgent,
         name: "force-reconnect-agent",
         description: "Force-reconnect the agent with a fresh session (no --continue)",
-        // Per-session: web exposes "Force reconnect (fresh)" in session actions.
+        // Per-session: web exposes "Force recreate agent…" in the agent menu,
+        // gated by a confirmation dialog.
         surface: PaletteSurface::Tui,
     },
 ];

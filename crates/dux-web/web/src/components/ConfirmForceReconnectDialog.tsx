@@ -61,8 +61,8 @@ export function ConfirmForceReconnectDialog() {
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
-          {/* Cancel is the default focus, matching the TUI. shadcn/radix buttons
-              activate on Space/Enter natively. */}
+          {/* Cancel is the default focus, matching the TUI. shadcn/base-ui
+              buttons activate on Space/Enter natively. */}
           <Button variant="outline" autoFocus onClick={closeForceReconnect}>
             Cancel
           </Button>

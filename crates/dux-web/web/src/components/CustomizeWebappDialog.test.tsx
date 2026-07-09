@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import type { DuxState } from "@/lib/store"
@@ -62,9 +62,12 @@ function seed(bootstrap: {
 
 beforeEach(() => {
   installBootStubs()
-  setInstanceIdentity.mockClear()
+  // The two persist spies resolve true (success) by default so save()/reset()
+  // reach their close; individual tests override with false to pin the
+  // stays-open-on-failure behavior.
+  setInstanceIdentity.mockClear().mockResolvedValue(true)
   closeCustomizeWebapp.mockClear()
-  setChangesPaneVisibility.mockClear()
+  setChangesPaneVisibility.mockClear().mockResolvedValue(true)
 })
 
 afterEach(() => {
@@ -73,7 +76,7 @@ afterEach(() => {
 })
 
 describe("CustomizeWebappDialog", () => {
-  it("posts the edited title and the picked tint colour on Save", () => {
+  it("posts the edited title and the picked tint colour on Save", async () => {
     seed({ title: "old instance", favicon: "" })
     render(<CustomizeWebappDialog />)
 
@@ -87,7 +90,8 @@ describe("CustomizeWebappDialog", () => {
       title: "prod dux",
       favicon: "blue",
     })
-    expect(closeCustomizeWebapp).toHaveBeenCalled()
+    // The close now waits for the persist promises to settle.
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
   })
 
   it("posts empty strings (reset-to-default) on Reset to default", () => {
@@ -180,5 +184,91 @@ describe("CustomizeWebappDialog", () => {
 
     expect(setChangesPaneVisibility).toHaveBeenCalledTimes(1)
     expect(setChangesPaneVisibility).toHaveBeenCalledWith(true)
+  })
+
+  it("stays open when a persist fails so the user can retry", async () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    setChangesPaneVisibility.mockResolvedValue(false)
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByRole("checkbox"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    // Both writes fired, but the failed one keeps the dialog open. The Save
+    // button re-enabling proves save()'s promise chain fully settled (its
+    // `finally` ran), so the no-close assertion is not a premature negative.
+    await waitFor(() => expect(setChangesPaneVisibility).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    )
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+  })
+
+  it("an untouched checkbox tracks a concurrent client's toggle and never writes it back", async () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    const { rerender } = render(<CustomizeWebappDialog />)
+    expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe(
+      "true",
+    )
+
+    // Another connected client hides the pane while this dialog is open: the
+    // refetched bootstrap flows into the store, and the untouched checkbox
+    // must follow it instead of freezing at its open-time value.
+    seed({ title: "old instance", favicon: "", show_changes_pane: false })
+    rerender(<CustomizeWebappDialog />)
+    expect(screen.getByRole("checkbox").getAttribute("aria-checked")).toBe(
+      "false",
+    )
+
+    // Saving without touching the checkbox must not write the pane setting at
+    // all — the stale open-time value would clobber the other client's change.
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setChangesPaneVisibility).not.toHaveBeenCalled()
+  })
+
+  it("Escape closes the dialog when no persist is in flight", () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+    expect(closeCustomizeWebapp).toHaveBeenCalled()
+  })
+
+  it("ignores Escape while a persist is in flight, then closes when it settles", async () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    let resolveWrite!: (v: boolean) => void
+    setInstanceIdentity.mockReturnValue(
+      new Promise<boolean>((r) => {
+        resolveWrite = r
+      }),
+    )
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    // Escape (like backdrop clicks and the header X, which also route through
+    // onOpenChange) must be inert while the write is pending.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+
+    resolveWrite(true)
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+  })
+
+  it("a double-click on Save fires the persists once", async () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    render(<CustomizeWebappDialog />)
+
+    const saveButton = screen.getByRole("button", { name: "Save" })
+    // Two synchronous clicks land before React re-renders the disabled state;
+    // the in-flight ref must gate the second one.
+    fireEvent.click(saveButton)
+    fireEvent.click(saveButton)
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setInstanceIdentity).toHaveBeenCalledTimes(1)
   })
 })

@@ -5,12 +5,13 @@ import { cleanup, render, screen } from "@testing-library/react"
 import type { DuxState } from "@/lib/store"
 import type { AgentTabView } from "@/lib/types"
 
-// Override only `useDux` so the dialog reads our seeded spine + close target,
-// while the real store exports stay intact.
+// Override `useDux` so the dialog reads our seeded spine + close target, and
+// spy `closeCloseTab` so the vanished-target guard is observable; the other
+// real store exports stay intact.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return { ...actual, useDux: () => mockState, closeCloseTab: vi.fn() }
 })
 
 function installBootStubs() {
@@ -28,6 +29,8 @@ function installBootStubs() {
 }
 installBootStubs()
 const { ConfirmCloseTabDialog } = await import("./ConfirmCloseTabDialog")
+const store = await import("@/lib/store")
+const closeCloseTab = vi.mocked(store.closeCloseTab)
 
 function tab(overrides: Partial<AgentTabView>): AgentTabView {
   return {
@@ -53,6 +56,7 @@ function seed(tabId: string, tabs: AgentTabView[]) {
 
 beforeEach(() => {
   installBootStubs()
+  closeCloseTab.mockClear()
 })
 
 afterEach(() => {
@@ -103,5 +107,22 @@ describe("ConfirmCloseTabDialog", () => {
     ])
     render(<ConfirmCloseTabDialog />)
     expect(screen.getByText(/last live tab, so the agent detaches/)).toBeTruthy()
+  })
+
+  // The vanished-target guard: the tab (or its session) disappearing from the
+  // ViewModel while the dialog is open must close it instead of leaving a
+  // stale confirm pointed at a gone target.
+  it("closes itself when the target tab is gone from the ViewModel", () => {
+    seed("gone-tab", [tab({ id: "s1", provider: "claude" })])
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.queryByText("Close tab?")).toBeNull()
+    expect(closeCloseTab).toHaveBeenCalled()
+  })
+
+  it("stays open (and does not self-close) while the target tab still exists", () => {
+    seed("s1", [tab({ id: "s1", provider: "claude" })])
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.getByText("Close tab?")).toBeTruthy()
+    expect(closeCloseTab).not.toHaveBeenCalled()
   })
 })

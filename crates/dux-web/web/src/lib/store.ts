@@ -1661,7 +1661,11 @@ export function toggleSessionAutoReopen(
 
 // Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
 // session with no resume args (the TUI's force-reconnect); the default resumes
-// the prior conversation when the provider supports it. Focus the session and
+// the prior conversation when the provider supports it. The web UI deliberately
+// exposes only the forced variant (the confirmed "Force recreate agent…" menu
+// item), so no web surface currently calls `force: false`; the parameter stays
+// because the wire contract supports resume and the TUI still exposes plain
+// reconnect as a separate action. Focus the session and
 // bump `terminalEpoch` so the pane remounts and re-subscribes — the reconnect
 // swaps in a new server-side provider, and the previously-attached forwarder is
 // dead, so even an already-focused pane must re-issue `subscribe`. The server
@@ -2489,17 +2493,23 @@ export function changesPaneVisible(s: DuxState): boolean {
 // config.ui.show_changes_pane and emits `config.changed`, the refetched bootstrap
 // document carries the confirmed value, and `applyBootstrap` drops the override
 // so config is the single source of truth across every connected client. Rolls
-// the optimistic override back with a toast on error.
-export function setChangesPaneVisibility(next: boolean): void {
+// the optimistic override back with a toast on error. Resolves to whether the
+// persist succeeded so a caller (the customize-webapp dialog) can gate on it;
+// fire-and-forget callers ignore the returned promise.
+export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
   setState({ changesPaneOverride: next })
-  configApi.setChangesPaneVisible(next).catch((e) => {
-    // Roll the optimistic override back so the pane doesn't strand in the
-    // toggled state when the persist fails.
-    setState({ changesPaneOverride: null })
-    toast.error(
-      e instanceof Error ? e.message : "Could not toggle the Changes pane.",
-    )
-  })
+  return configApi
+    .setChangesPaneVisible(next)
+    .then(() => true)
+    .catch((e) => {
+      // Roll the optimistic override back so the pane doesn't strand in the
+      // toggled state when the persist fails.
+      setState({ changesPaneOverride: null })
+      toast.error(
+        e instanceof Error ? e.message : "Could not toggle the Changes pane.",
+      )
+      return false
+    })
 }
 
 // Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
@@ -2570,22 +2580,26 @@ export function closeCustomizeWebapp(): void {
   setState({ customizeWebappOpen: false })
 }
 
-// Persist the instance identity (browser tab title + favicon colour). Fire-and-
-// forget: the server validates + writes config.toml and emits `config.changed`,
-// so `applyBootstrap` re-applies the tab title, wordmark, and favicon on every
+// Persist the instance identity (browser tab title + favicon colour). The
+// server validates + writes config.toml and emits `config.changed`, so
+// `applyBootstrap` re-applies the tab title, wordmark, and favicon on every
 // client. We do NOT hand-apply here — config is the single source of truth. A
 // success toast is the engine's routed status; here we only surface a failure.
+// Resolves to whether the persist succeeded so the customize-webapp dialog can
+// gate its close on it; fire-and-forget callers ignore the returned promise.
 export function setInstanceIdentity(body: {
   title?: string
   favicon?: string
-}): void {
-  configApi
+}): Promise<boolean> {
+  return configApi
     .setInstanceIdentity(body)
-    .catch((e) =>
+    .then(() => true)
+    .catch((e) => {
       toast.error(
         e instanceof Error ? e.message : "Could not rename this instance.",
-      ),
-    )
+      )
+      return false
+    })
 }
 
 // Force-kill one agent's PTY. The agent detaches (it is NOT deleted) and can be
