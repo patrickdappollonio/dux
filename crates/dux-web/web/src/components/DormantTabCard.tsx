@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button"
+import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
 import { startDormantTab } from "@/lib/store"
 
 // The center-pane surface for a DORMANT tab: a tab reopened after a restart whose
@@ -36,7 +37,15 @@ export function DormantTabCard({
           dux doesn&rsquo;t restore a tab&rsquo;s conversation after a restart, but
           your CLI likely still has it: start it here (it may pick up where it left
           off), or use the provider&rsquo;s own command to browse and choose a
-          previous conversation.
+          previous conversation.{" "}
+          <a
+            href={DOCS_AGENT_TABS_RESUME}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary underline underline-offset-2"
+          >
+            How resume works →
+          </a>
         </p>
       </div>
       <Button onClick={() => startDormantTab(sessionId, tabId)}>

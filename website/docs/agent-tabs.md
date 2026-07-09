@@ -40,12 +40,47 @@ directory. dux plays it safe and excludes Copilot from resume entirely, so a
 Copilot tab always starts fresh, no matter what else is running.
 
 So dux hands the resume slot to a tab **only when it's the sole tab of its provider
-coming up** — when no other tab running the *same* provider is already live or
+coming up**, when no other tab running the *same* provider is already live or
 launching. A tab that starts alongside a live same-provider sibling always starts
 fresh; a different-provider sibling doesn't block it. In practice that means: reopen
 an agent that was fully stopped and each provider picks up where it left off (a
 Claude tab and a Codex tab both resume, that's two resumes); add a *second* Claude
 tab on top of a running one and it's a clean slate.
+
+### "Resume" reopens the *newest* conversation, not a particular tab
+
+This is the part that surprises people, so it's worth being blunt: dux doesn't track
+which conversation belonged to which tab. When it hands a tab the resume slot, all it
+does is pass the provider's own continue flag, and that flag always grabs the
+**most-recent** conversation in the worktree.
+
+Walk it through. You have a Claude tab mid-conversation. You close it, then open a new
+Claude tab. The new tab comes up alone for Claude, so dux passes `--continue`, and
+Claude reopens the latest conversation in that folder, which is the one you were just
+in. It *looks* like dux resumed your closed tab. It didn't: it started a fresh tab that
+happened to reattach to the newest conversation. The distinction matters the moment
+you want an *older* one, because dux can't target it for you. Reach for it with the
+provider's own "resume a past session" or history command from a fresh tab.
+
+### Why not just track each tab's conversation?
+
+This is a deliberate choice, not a missing feature. To resume a *specific* tab, dux
+would need each provider's conversation id and a way to reopen that exact one, and
+there are only two ways to get there:
+
+- **Read a session id out of each agent.** There's no shared standard for this. Every
+  CLI names and stores its conversation identity differently, if it exposes one at all,
+  and the formats aren't normalized. Following every provider reliably across versions
+  is a fragile game dux would rather not stake correctness on.
+- **Hook into the agents.** The stable path is a *hook*: dux watching or intercepting
+  what the agent does to capture that handle. But a hook fires on the agent's own
+  actions and, by its nature, reaches into the agent's data.
+
+dux's stance is to **not hijack an agent's data unless it's absolutely necessary**, so
+it takes neither path today. "Resume the newest conversation, no per-tab tracking" is
+the honest consequence of that choice. It's also a tradeoff, not a dead end. Hook-based
+per-tab resume isn't especially hard to build, and if the community decides the tighter
+integration is worth the extra intrusion, the door is open.
 
 ## Switching between tabs
 
@@ -68,15 +103,23 @@ There's also a separate **Detach agent** action that stops every one of the
 agent's tabs at once and parks it in Projects, reopenable. And deleting the whole
 agent, of course, takes every tab with it.
 
+### Closing a tab is one-way
+
+Closing a tab throws away the tab itself: its slot in the strip, its position, and
+whatever provider you'd retargeted it to. There's no undo; to get a tab back you make
+a new one. What's *not* thrown away is the conversation. dux never stored it in the
+first place (see [how resume works](#how-resume-works) above), so it's still sitting in
+your provider's own per-directory history. So "dux can't reopen this exact tab" is
+true, and "your conversation is gone" is not. Start a fresh tab and use the provider's
+history command to dig the previous one back up.
+
 ## What happens on restart
 
 When dux restarts, tabs come back **dormant**: the pills are there, no processes
 are running, and each tab shows a "start fresh" prompt instead of an old session.
 Press it (or click *Start fresh session* on the web) and a brand-new session spins
-up. (Each tab that comes up alone for its provider may resume automatically, per
-the rule above.)
+up. A tab that comes up alone for its provider may resume automatically, per the rule
+above, which again means the newest conversation in the worktree, not a specific tab's.
 
-Why not just resume every tab? Same reason as above, dux can't. But the
-conversation you had usually isn't gone: most provider CLIs keep their own
-per-directory history. Start a fresh session in the tab and use the provider's own
-"previous conversations" command to dig the old one back up.
+To pick a *particular* past conversation, start a fresh session and use the provider's
+own "previous conversations" command.

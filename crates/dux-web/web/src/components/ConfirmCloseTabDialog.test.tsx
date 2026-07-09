@@ -125,4 +125,17 @@ describe("ConfirmCloseTabDialog", () => {
     expect(screen.getByText("Close tab?")).toBeTruthy()
     expect(closeCloseTab).not.toHaveBeenCalled()
   })
+
+  it("links to the docs, safely, in a new tab", () => {
+    seed("s1", [tab({ id: "s1", provider: "claude" })])
+    render(<ConfirmCloseTabDialog />)
+    const link = screen.getByRole("link", { name: /how closing a tab works/i })
+    expect(link.getAttribute("href")).toBe(
+      "https://getdux.app/docs/agent-tabs#closing-a-tab-is-one-way",
+    )
+    expect(link.getAttribute("target")).toBe("_blank")
+    // noopener/noreferrer: don't hand the docs tab a window.opener back into dux.
+    expect(link.getAttribute("rel")).toContain("noopener")
+    expect(link.getAttribute("rel")).toContain("noreferrer")
+  })
 })

@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { DOCS_AGENT_TABS_CLOSING } from "@/lib/docs"
 import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a tab. Closing ALWAYS confirms (matching the TUI):
@@ -61,7 +62,15 @@ export function ConfirmCloseTabDialog() {
             {`This ends ${sessionLabel} in this tab. dux can't reopen this exact conversation — a recent one can be recovered from a fresh tab via your provider's own history command.`}
             {willDetach
               ? " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
-              : ""}
+              : ""}{" "}
+            <a
+              href={DOCS_AGENT_TABS_CLOSING}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline underline-offset-2"
+            >
+              How closing a tab works →
+            </a>
           </DialogDescription>
         </DialogHeader>
         {/* Misclick-safe spacing between the body and the buttons. */}
