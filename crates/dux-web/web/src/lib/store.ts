@@ -331,6 +331,11 @@ export interface DuxState {
     projectId: string
     armedAt: number
   } | null
+  // Explicit project expand/collapse choices, keyed by project id. A project not
+  // present here falls back to its default (open when it has agents). The sidebar
+  // reads this so a collapse survives re-renders, and creating an agent under a
+  // collapsed project can force it open (see `focusNewlyCreatedSession`).
+  projectOpen: Record<string, boolean>
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -466,6 +471,7 @@ let state: DuxState = {
   pendingSessionOrder: null,
   pendingProjectOrder: null,
   pendingCreateFocus: null,
+  projectOpen: {},
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
@@ -965,7 +971,19 @@ function focusNewlyCreatedSession(spine: Spine): void {
   if (!created) return
   // Consume the token before selecting so a later spine can't re-fire.
   setState({ pendingCreateFocus: null })
+  // Force the owning project open so the new agent is actually visible — a
+  // project the user had collapsed would otherwise hide the row we just
+  // selected.
+  setProjectOpen(created.project_id, true)
   selectSession(created.id)
+}
+
+// Record an explicit expand/collapse choice for a project. The sidebar reads
+// `projectOpen[id]`, falling back to the default (open when it has agents) when
+// absent.
+export function setProjectOpen(projectId: string, open: boolean): void {
+  if (state.projectOpen[projectId] === open) return
+  setState({ projectOpen: { ...state.projectOpen, [projectId]: open } })
 }
 
 eventsSocket.onConn = (conn) => {

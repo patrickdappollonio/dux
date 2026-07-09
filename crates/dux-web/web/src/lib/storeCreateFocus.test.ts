@@ -226,6 +226,23 @@ describe("auto-focus the agent this client created", () => {
     expect(mod.getSnapshot().selectedSessionId).toBe("a2")
   })
 
+  it("forces the owning project open so the new agent is visible", async () => {
+    const mod = await loadStore()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    // The user had collapsed p1 (a project that already has agents).
+    mod.setProjectOpen("p1", false)
+    expect(mod.getSnapshot().projectOpen.p1).toBe(false)
+    mod.openCreateAgent("p1")
+    mod.submitNameDialog("my-agent")
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    // Creating under the collapsed project re-opens it so the selected row shows.
+    expect(mod.getSnapshot().projectOpen.p1).toBe(true)
+  })
+
   it("focuses an agent created from a PR", async () => {
     const mod = await loadStore()
     await pushSpine(mod, [{ id: "s1", project_id: "p1" }])

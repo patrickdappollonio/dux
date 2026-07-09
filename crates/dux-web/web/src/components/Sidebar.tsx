@@ -126,6 +126,7 @@ import {
   rerunStartupCommand,
   selectSession,
   selectTerminal,
+  setProjectOpen,
   setSidebarWidth,
   toggleSessionAutoReopen,
   useDux,
@@ -497,7 +498,7 @@ function SessionSubItem({
       {session.terminals.length > 0 ? (
         // mr-0/pr-0 drop the nested list's right inset (the left side is the
         // tree indent) so terminal rows reach the same right edge as the rest.
-        <SidebarMenuSub className="mr-0 pr-0">
+        <SidebarMenuSub className="mr-0 border-l-0 pr-0 dux-tree">
           {session.terminals.map((terminal) => (
             <TerminalSubItem
               key={terminal.id}
@@ -557,7 +558,7 @@ function SessionList({
       >
         {/* mr-0/pr-0 drop the nested list's right inset (the left side is the
             tree indent) so agent rows use the sidebar's full width. */}
-        <SidebarMenuSub className="mr-0 pr-0">
+        <SidebarMenuSub className="mr-0 border-l-0 pr-0 dux-tree">
           {sessions.map((session) => (
             <SessionSubItem
               key={session.id}
@@ -595,9 +596,18 @@ function ProjectItem({
     opacity: isDragging ? 0.6 : undefined,
   }
 
+  // Controlled open state, so a collapse survives re-renders and creating an
+  // agent under a collapsed project can force it open. Absent from the store =>
+  // default: open when the project has agents, collapsed when it's empty.
+  const { projectOpen } = useDux()
+  const open = projectOpen?.[id] ?? sessions.length > 0
+
   return (
-    // Agent-less projects start collapsed — there's nothing inside to show.
-    <Collapsible defaultOpen={sessions.length > 0} className="group/collapsible">
+    <Collapsible
+      open={open}
+      onOpenChange={(next) => setProjectOpen(id, next)}
+      className="group/collapsible"
+    >
       <SidebarMenuItem ref={setNodeRef} style={style}>
         {/* The header is its own flex line with a scoped group: the in-flow ⋯ is
             a sibling of the project button, so on reveal it expands its max-width

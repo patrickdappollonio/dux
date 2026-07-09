@@ -284,3 +284,37 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     @apply font-sans;
     }
 }
+
+/* Projects sidebar: render the nested rows as an actual tree instead of just an
+   indented list. The parent SidebarMenuSub drops its flat left border
+   (`border-l-0`) and each row draws its own guide: a vertical segment that
+   bridges the inter-row gap down to the next sibling, plus a short horizontal
+   tick into the row. The LAST child stops its vertical at the row centre, so the
+   branch terminates in an elbow (└) rather than a line running off the bottom.
+   Applied to both nesting levels (agents under a project, terminals under an
+   agent). Geometry is tuned to the h-7 (28px) sub-row and the sub-list's 0.625rem
+   (px-2.5) left inset and 0.25rem (gap-1) row gap. */
+.dux-tree > li {
+  position: relative;
+}
+.dux-tree > li::before {
+  content: "";
+  position: absolute;
+  left: -0.625rem;
+  top: 0;
+  /* Extend past the row into the gap so the guide meets the next sibling. */
+  height: calc(100% + 0.25rem);
+  border-left: 1px solid var(--sidebar-border);
+}
+.dux-tree > li:last-child::before {
+  /* Elbow: stop the vertical at the row's connector centre. */
+  height: 0.875rem;
+}
+.dux-tree > li::after {
+  content: "";
+  position: absolute;
+  left: -0.625rem;
+  top: 0.875rem;
+  width: 0.75rem;
+  border-top: 1px solid var(--sidebar-border);
+}
