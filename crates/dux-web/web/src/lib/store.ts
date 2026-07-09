@@ -290,10 +290,11 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
-  // The rename-instance dialog (the Ctrl+K "customize-instance" command). Gates the
-  // modal that sets the browser tab title + favicon colour; the dialog seeds its
-  // fields from the bootstrap document, so it needs no state beyond this flag.
-  renameInstanceOpen: boolean
+  // The customize-webapp dialog (the Ctrl+K "customize-webapp" command). Gates the
+  // modal that sets the browser tab title + favicon colour + Changes pane
+  // visibility; the dialog seeds its fields from the bootstrap document, so it
+  // needs no state beyond this flag.
+  customizeWebappOpen: boolean
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
@@ -458,7 +459,7 @@ let state: DuxState = {
   configEditorContent: "",
   configEditorLoading: false,
   configEditorError: null,
-  renameInstanceOpen: false,
+  customizeWebappOpen: false,
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
@@ -2483,25 +2484,28 @@ export function changesPaneVisible(s: DuxState): boolean {
   return s.changesPaneOverride ?? s.bootstrap?.show_changes_pane ?? true
 }
 
-// Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
-// Changes actions menu) and persist the choice. The override is set
-// optimistically for an instant response; the server writes
+// Set the Changes pane's visibility and persist it (config.ui.show_changes_pane).
+// The override is set optimistically for an instant response; the server writes
 // config.ui.show_changes_pane and emits `config.changed`, the refetched bootstrap
 // document carries the confirmed value, and `applyBootstrap` drops the override
-// so config is the single source of truth across every connected client.
-export function toggleChangesPane(): void {
-  const next = !changesPaneVisible(state)
+// so config is the single source of truth across every connected client. Rolls
+// the optimistic override back with a toast on error.
+export function setChangesPaneVisibility(next: boolean): void {
   setState({ changesPaneOverride: next })
-  configApi
-    .setChangesPaneVisible(next)
-    .catch((e) => {
-      // Roll the optimistic override back so the pane doesn't strand in the
-      // toggled state when the persist fails.
-      setState({ changesPaneOverride: null })
-      toast.error(
-        e instanceof Error ? e.message : "Could not toggle the Changes pane.",
-      )
-    })
+  configApi.setChangesPaneVisible(next).catch((e) => {
+    // Roll the optimistic override back so the pane doesn't strand in the
+    // toggled state when the persist fails.
+    setState({ changesPaneOverride: null })
+    toast.error(
+      e instanceof Error ? e.message : "Could not toggle the Changes pane.",
+    )
+  })
+}
+
+// Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
+// Changes actions menu).
+export function toggleChangesPane(): void {
+  setChangesPaneVisibility(!changesPaneVisible(state))
 }
 
 // The three Ctrl+K preference toggles (random pet-name default, PR banner
@@ -2555,14 +2559,15 @@ export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
 }
 
-// The rename-instance dialog (Ctrl+K "customize-instance"). Open/close just flip the
-// gate; the dialog seeds its title + favicon fields from the bootstrap document.
-export function openRenameInstance(): void {
-  setState({ renameInstanceOpen: true })
+// The customize-webapp dialog (Ctrl+K "customize-webapp"). Open/close just flip the
+// gate; the dialog seeds its title, favicon, and Changes pane fields from the
+// bootstrap document.
+export function openCustomizeWebapp(): void {
+  setState({ customizeWebappOpen: true })
 }
 
-export function closeRenameInstance(): void {
-  setState({ renameInstanceOpen: false })
+export function closeCustomizeWebapp(): void {
+  setState({ customizeWebappOpen: false })
 }
 
 // Persist the instance identity (browser tab title + favicon colour). Fire-and-

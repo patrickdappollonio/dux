@@ -182,7 +182,7 @@ pub enum WireCommand {
     },
     /// Persist this dux instance's identity to `config.toml`: the browser tab
     /// `<title>` (`config.server.title`) and the favicon color
-    /// (`config.server.favicon`). Sent by the web's rename-instance dialog. Each
+    /// (`config.server.favicon`). Sent by the web's customize-webapp dialog. Each
     /// field is optional so a single-field body (just a title, or just a color)
     /// only touches that field; an empty body (both `None`) is a no-op (no write,
     /// no `config.changed`). The title is normalized (control + bidi/format chars
@@ -476,7 +476,7 @@ pub enum WireCommand {
 }
 
 /// The curated favicon TINT color names accepted by `config.server.favicon` and
-/// the rename-instance dialog. The default (an empty value) is the original
+/// the customize-webapp dialog. The default (an empty value) is the original
 /// full-color yellow duck; these names recolor a flat duck silhouette instead, so
 /// `yellow` is intentionally NOT a tint. This is the CANONICAL list; the web
 /// frontend mirrors it. Keep the two in sync.
@@ -7551,7 +7551,7 @@ mod tests {
 
     /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in
     /// `CURATED_FAVICON_COLORS` and in the TS `FAVICON_COLORS` map that drives the
-    /// rename-instance dialog and the tinted-duck SVG. A recolor/rename dialog that
+    /// customize-webapp dialog and the tinted-duck SVG. A recolor/rename dialog that
     /// offered a color the server rejects (or vice versa) would degrade silently, so
     /// this parses the TS map's keys out of `favicon.ts` and asserts the two sets
     /// are identical. Skips (rather than fails) when the web tree isn't present, e.g.

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { configApi } from "./configApi"
 
-// The RenameInstanceDialog test mocks the store wholesale, so this is the one
+// The CustomizeWebappDialog test mocks the store wholesale, so this is the one
 // place the REAL client → wire shape is pinned: a swapped field, wrong path, or
 // wrong method here would otherwise only be caught by the Rust endpoint tests
 // (which hand-author the JSON and never run this browser code).

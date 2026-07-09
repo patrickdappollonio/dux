@@ -29,7 +29,7 @@ import { OfflineOverlay } from "@/components/OfflineOverlay"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
 import { ProjectSettingsDialog } from "@/components/ProjectSettingsDialog"
 import { RemoveProjectDialog } from "@/components/RemoveProjectDialog"
-import { RenameInstanceDialog } from "@/components/RenameInstanceDialog"
+import { CustomizeWebappDialog } from "@/components/CustomizeWebappDialog"
 import { InsetHeader } from "@/components/InsetHeader"
 import { TerminalArea } from "@/components/TerminalArea"
 import {
@@ -67,7 +67,7 @@ function GlobalOverlays() {
       <ConfirmForceReconnectDialog />
       <KillRunningDialog />
       <ConfigEditorDialog />
-      <RenameInstanceDialog />
+      <CustomizeWebappDialog />
       <ConfirmDiscardFileDialog />
       <GlobalEnvDialog />
       <MacrosDialog />

@@ -4,6 +4,7 @@ import { toast } from "sonner"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -20,7 +21,9 @@ import {
 } from "@/lib/favicon"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
-  closeRenameInstance,
+  changesPaneVisible,
+  closeCustomizeWebapp,
+  setChangesPaneVisibility,
   setInstanceIdentity,
   useDux,
 } from "@/lib/store"
@@ -46,12 +49,17 @@ function seedFavicon(raw: string | null | undefined): string {
   return FAVICON_COLORS[value] ? value : ""
 }
 
-function RenameInstanceForm() {
-  const { bootstrap } = useDux()
+function CustomizeWebappForm() {
+  const dux = useDux()
+  const { bootstrap } = dux
   const [title, setTitle] = useState(() =>
     resolveInstanceTitle(bootstrap?.title),
   )
   const [favicon, setFavicon] = useState(() => seedFavicon(bootstrap?.favicon))
+  // Seed both the editable value and its initial snapshot so Save only writes
+  // the Changes pane preference when it actually changed.
+  const [showChanges, setShowChanges] = useState(() => changesPaneVisible(dux))
+  const [initialShowChanges] = useState(() => changesPaneVisible(dux))
 
   // Refuse to write before the config is loaded: the form seeds its fields from
   // `bootstrap`, so saving with a null bootstrap would persist the fallback
@@ -66,7 +74,10 @@ function RenameInstanceForm() {
       return
     }
     setInstanceIdentity({ title, favicon })
-    closeRenameInstance()
+    // The Changes pane preference applies on Save, not live, matching the rest
+    // of this form.
+    if (showChanges !== initialShowChanges) setChangesPaneVisibility(showChanges)
+    closeCustomizeWebapp()
   }
 
   const reset = () => {
@@ -75,16 +86,18 @@ function RenameInstanceForm() {
       return
     }
     setInstanceIdentity({ title: "", favicon: "" })
-    closeRenameInstance()
+    // The config default is visible.
+    if (!changesPaneVisible(dux)) setChangesPaneVisibility(true)
+    closeCustomizeWebapp()
   }
 
   return (
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>Rename this instance</DialogTitle>
+        <DialogTitle>Customize this webapp</DialogTitle>
         <DialogDescription>
-          Set the browser tab title and favicon colour for this dux instance.
-          Saved to config and applied to every connected browser.
+          Set the browser tab title, favicon colour, and whether the Changes
+          pane shows. Saved to config and applied to every connected browser.
         </DialogDescription>
       </DialogHeader>
 
@@ -142,14 +155,25 @@ function RenameInstanceForm() {
         </div>
       </div>
 
-      {/* Misclick-safe spacing between the swatches and the footer buttons. */}
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="customize-show-changes"
+          checked={showChanges}
+          onCheckedChange={setShowChanges}
+        />
+        <label htmlFor="customize-show-changes" className="text-sm">
+          Show the Changes pane (the desktop layout's git panel)
+        </label>
+      </div>
+
+      {/* Misclick-safe spacing between the checkbox and the footer buttons. */}
       <div className="h-2" />
       <DialogFooter className="sm:justify-between">
         <Button variant="ghost" onClick={reset}>
           Reset to default
         </Button>
         <div className="flex flex-col-reverse gap-2 sm:flex-row">
-          <Button variant="outline" autoFocus onClick={closeRenameInstance}>
+          <Button variant="outline" autoFocus onClick={closeCustomizeWebapp}>
             Cancel
           </Button>
           <Button onClick={save}>Save</Button>
@@ -159,17 +183,17 @@ function RenameInstanceForm() {
   )
 }
 
-export function RenameInstanceDialog() {
-  const { renameInstanceOpen } = useDux()
+export function CustomizeWebappDialog() {
+  const { customizeWebappOpen } = useDux()
 
   return (
     <Dialog
-      open={renameInstanceOpen}
+      open={customizeWebappOpen}
       onOpenChange={(o) => {
-        if (!o) closeRenameInstance()
+        if (!o) closeCustomizeWebapp()
       }}
     >
-      {renameInstanceOpen && <RenameInstanceForm />}
+      {customizeWebappOpen && <CustomizeWebappForm />}
     </Dialog>
   )
 }

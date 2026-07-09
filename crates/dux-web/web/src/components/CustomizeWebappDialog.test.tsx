@@ -5,9 +5,9 @@ import type { ReactNode } from "react"
 
 import type { DuxState } from "@/lib/store"
 
-// Override `useDux` so the dialog reads our seeded bootstrap, and replace the two
-// store actions the dialog dispatches with spies so we can assert the exact body
-// it posts. The rest of the real store exports stay intact.
+// Override `useDux` so the dialog reads our seeded bootstrap, and replace the
+// store actions the dialog dispatches with spies so we can assert the exact
+// body it posts. The rest of the real store exports stay intact.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -15,7 +15,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     setInstanceIdentity: vi.fn(),
-    closeRenameInstance: vi.fn(),
+    closeCustomizeWebapp: vi.fn(),
+    setChangesPaneVisibility: vi.fn(),
   }
 })
 
@@ -41,14 +42,20 @@ function installBootStubs() {
   )
 }
 installBootStubs()
-const { RenameInstanceDialog } = await import("./RenameInstanceDialog")
+const { CustomizeWebappDialog } = await import("./CustomizeWebappDialog")
 const store = await import("@/lib/store")
 const setInstanceIdentity = vi.mocked(store.setInstanceIdentity)
-const closeRenameInstance = vi.mocked(store.closeRenameInstance)
+const closeCustomizeWebapp = vi.mocked(store.closeCustomizeWebapp)
+const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 
-function seed(bootstrap: { title?: string; favicon?: string }) {
+function seed(bootstrap: {
+  title?: string
+  favicon?: string
+  show_changes_pane?: boolean
+}) {
   mockState = {
-    renameInstanceOpen: true,
+    customizeWebappOpen: true,
+    changesPaneOverride: null,
     bootstrap,
   } as unknown as DuxState
 }
@@ -56,7 +63,8 @@ function seed(bootstrap: { title?: string; favicon?: string }) {
 beforeEach(() => {
   installBootStubs()
   setInstanceIdentity.mockClear()
-  closeRenameInstance.mockClear()
+  closeCustomizeWebapp.mockClear()
+  setChangesPaneVisibility.mockClear()
 })
 
 afterEach(() => {
@@ -64,10 +72,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe("RenameInstanceDialog", () => {
+describe("CustomizeWebappDialog", () => {
   it("posts the edited title and the picked tint colour on Save", () => {
     seed({ title: "old instance", favicon: "" })
-    render(<RenameInstanceDialog />)
+    render(<CustomizeWebappDialog />)
 
     const input = screen.getByPlaceholderText("dux") as HTMLInputElement
     fireEvent.change(input, { target: { value: "prod dux" } })
@@ -79,12 +87,12 @@ describe("RenameInstanceDialog", () => {
       title: "prod dux",
       favicon: "blue",
     })
-    expect(closeRenameInstance).toHaveBeenCalled()
+    expect(closeCustomizeWebapp).toHaveBeenCalled()
   })
 
   it("posts empty strings (reset-to-default) on Reset to default", () => {
     seed({ title: "prod dux", favicon: "amber" })
-    render(<RenameInstanceDialog />)
+    render(<CustomizeWebappDialog />)
 
     fireEvent.click(screen.getByRole("button", { name: "Reset to default" }))
 
@@ -94,7 +102,7 @@ describe("RenameInstanceDialog", () => {
 
   it("selects the empty favicon when the Original swatch is chosen", () => {
     seed({ title: "old instance", favicon: "amber" })
-    render(<RenameInstanceDialog />)
+    render(<CustomizeWebappDialog />)
 
     // Move off the seeded colour, then back to Original, and confirm Save carries
     // the empty favicon (the bundled full-colour duck).
@@ -110,7 +118,7 @@ describe("RenameInstanceDialog", () => {
 
   it("saves on Enter in the title input without a full-page reload", () => {
     seed({ title: "old instance", favicon: "" })
-    render(<RenameInstanceDialog />)
+    render(<CustomizeWebappDialog />)
 
     const input = screen.getByPlaceholderText("dux") as HTMLInputElement
     fireEvent.change(input, { target: { value: "renamed" } })
@@ -125,5 +133,52 @@ describe("RenameInstanceDialog", () => {
       title: "renamed",
       favicon: "",
     })
+  })
+
+  it("renders the Changes pane checkbox checked when show_changes_pane is true", () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    render(<CustomizeWebappDialog />)
+
+    const checkbox = screen.getByRole("checkbox")
+    expect(checkbox.getAttribute("aria-checked")).toBe("true")
+  })
+
+  it("renders the Changes pane checkbox unchecked when show_changes_pane is false", () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: false })
+    render(<CustomizeWebappDialog />)
+
+    const checkbox = screen.getByRole("checkbox")
+    expect(checkbox.getAttribute("aria-checked")).toBe("false")
+  })
+
+  it("unchecking the Changes pane checkbox and saving persists it, alongside the identity", () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByRole("checkbox"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(setChangesPaneVisibility).toHaveBeenCalledTimes(1)
+    expect(setChangesPaneVisibility).toHaveBeenCalledWith(false)
+    expect(setInstanceIdentity).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not persist the Changes pane preference when Save is clicked without touching it", () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: true })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(setChangesPaneVisibility).not.toHaveBeenCalled()
+  })
+
+  it("resets the Changes pane to visible on Reset to default when it was hidden", () => {
+    seed({ title: "old instance", favicon: "", show_changes_pane: false })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset to default" }))
+
+    expect(setChangesPaneVisibility).toHaveBeenCalledTimes(1)
+    expect(setChangesPaneVisibility).toHaveBeenCalledWith(true)
   })
 })

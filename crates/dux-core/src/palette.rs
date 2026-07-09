@@ -356,12 +356,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: Action::RenameWebInstance,
-        name: "customize-instance",
-        description: "Rename this dux instance and pick a favicon color",
-        // Web-only: opens the rename-instance dialog (browser tab title + favicon
-        // color), which POSTs to /api/v1/config/instance-identity. The TUI sets
-        // config.server.title/favicon through `dux config`, so it does not list
-        // this.
+        name: "customize-webapp",
+        description: "Rename this dux instance, pick a favicon color, and show or hide the Changes pane",
+        // Web-only: opens the customize-webapp dialog (browser tab title + favicon
+        // color + Changes pane visibility), which POSTs to
+        // /api/v1/config/instance-identity. The TUI sets config.server.title/favicon
+        // through `dux config`, so it does not list this.
         surface: PaletteSurface::Web,
     },
     PaletteCommand {
@@ -567,7 +567,7 @@ mod tests {
         let expected = [
             "add-project",
             "configure-global-env",
-            "customize-instance",
+            "customize-webapp",
             "edit-config",
             "edit-macros",
             "kill-running",
