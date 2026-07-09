@@ -38,7 +38,7 @@ pub use status_op::{Final, HandlerStatusOp, ResolvedFinal, StatusOp, status_op};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -127,6 +127,19 @@ pub struct Engine {
     pub branch_sync_sessions: Arc<Mutex<Vec<BranchSyncEntry>>>,
     pub pr_sync_sessions: Arc<Mutex<Vec<PrSyncEntry>>>,
     pub pr_sync_enabled: Arc<AtomicBool>,
+    /// Seconds between blind PR-sync safety polls, shared with the loop thread so
+    /// a config reload can retune it live. `0` disables the blind poll (updates
+    /// then come only from the refs watcher and foreground focus). Seeded from
+    /// `config.ui.pr_poll_interval_seconds` at spawn and in `apply_reloaded_config`.
+    pub pr_poll_interval_secs: Arc<AtomicU64>,
+    /// Active PR-check backoff windows, keyed by GitHub host (`host -> until`).
+    /// A host present with a future instant means every PR-check path (the
+    /// batched safety poll AND the event-driven one-shot checks) skips that host
+    /// until then, because its GraphQL quota ran low or `gh` is hard-failing.
+    /// Per-host so one unreachable GitHub Enterprise host doesn't pause checks
+    /// for a healthy github.com. Shared so both the loop and the one-shot checks
+    /// read and update it.
+    pub pr_backoff: Arc<Mutex<crate::gh::BackoffSnapshot>>,
     /// File-system watcher for `.git/refs/heads/` directories. `None` if the
     /// watcher could not be created (graceful fallback to poll-only).
     pub refs_watcher: Option<Arc<Mutex<notify::RecommendedWatcher>>>,
@@ -458,6 +471,31 @@ pub const FOREGROUND_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// create-await window (the from-PR path waits up to 60s) so a slow create still
 /// resolves, but short enough that the map self-trims on a long-running server.
 pub const CREATED_SESSION_TTL: Duration = Duration::from_secs(120);
+
+/// Minimum spacing between per-session PR checks for the background triggers
+/// (refs watcher, agent exit). Guards against a burst of triggers spawning
+/// concurrent `gh` calls for the same session.
+pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Tighter debounce for foreground-focus PR checks (switching to / activating an
+/// agent in the TUI, opening its PTY on the web) so a freshly-focused agent shows
+/// current data even if no branch-change event fired recently, without letting
+/// focus-thrash hammer `gh`.
+pub const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
+
+/// Correlation key for the "GitHub API quota low / recovered" status so the
+/// warning and its eventual recovery/clear replace the same entry.
+const PR_QUOTA_STATUS_KEY: &str = "pr-quota";
+
+/// How long to pause all PR checks after a hard `gh` failure (spawn error,
+/// timeout, or a rate-limit response with no parseable quota numbers) — the case
+/// the quota-number backoff can't see.
+const PR_HARD_FAILURE_BACKOFF_SECS: u64 = 60;
+
+/// The PR-sync loop sleeps in slices of this length so a disable or an interval
+/// change is observed within a few seconds rather than after a full (up to
+/// multi-hour) interval elapses.
+const PR_SYNC_SLICE_SECS: u64 = 3;
 
 /// Rewrite an absolute path under the user's home directory to the portable
 /// `$HOME/...` form so config.toml stays machine-independent (the tenet:
@@ -805,6 +843,13 @@ impl Engine {
             &config,
         );
         self.config = config;
+        // Retune the live PR-sync poll interval (the loop reads this each tick).
+        self.pr_poll_interval_secs.store(
+            u64::from(crate::config::normalized_pr_poll_interval(
+                self.config.ui.pr_poll_interval_seconds,
+            )),
+            Ordering::Relaxed,
+        );
         self.refresh_project_defaults();
         self.update_branch_sync_sessions();
         Ok(())
@@ -1024,14 +1069,12 @@ impl Engine {
                     let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotInstalled));
                     return;
                 }
-                // Step 2: Is `gh` authenticated?
-                let authed = std::process::Command::new("gh")
-                    .args(["auth", "status"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
+                // Step 2: Is `gh` authenticated? Bounded so a wedged credential
+                // helper can't park the boot probe indefinitely.
+                let authed = matches!(
+                    crate::gh::run_gh_with_timeout(&["auth", "status"], crate::gh::GH_CALL_TIMEOUT),
+                    crate::gh::GhCallOutcome::Completed(o) if o.status.success()
+                );
                 if !authed {
                     crate::logger::info("[gh-integration] gh CLI found but not authenticated");
                     let _ = tx.send(WorkerEvent::GhStatusChecked(GhStatus::NotAuthenticated));
@@ -1260,20 +1303,51 @@ impl Engine {
     pub fn spawn_pr_sync_worker(&self) {
         let sessions = Arc::clone(&self.pr_sync_sessions);
         let enabled = Arc::clone(&self.pr_sync_enabled);
-        // Signal that the worker is running BEFORE spawning so the kill switch
-        // observes the live state on first iteration.
+        let interval_secs = Arc::clone(&self.pr_poll_interval_secs);
+        // Seed the shared interval from config so the first iteration honors it,
+        // and signal the worker is running BEFORE spawning so the kill switch
+        // observes the live state on the first iteration.
+        interval_secs.store(
+            u64::from(crate::config::normalized_pr_poll_interval(
+                self.config.ui.pr_poll_interval_seconds,
+            )),
+            Ordering::Relaxed,
+        );
         enabled.store(true, Ordering::Relaxed);
+        let backoff = Arc::clone(&self.pr_backoff);
         self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "pr-sync".into(),
             },
             move |tx| {
-                let interval = Duration::from_secs(45);
-                thread::sleep(interval);
-                if !enabled.load(Ordering::Relaxed) {
-                    return LoopControl::Break;
+                let secs = interval_secs.load(Ordering::Relaxed);
+                // Sleep in short slices so a disable (`enabled=false`) or a
+                // retuned interval is observed within a few seconds rather than
+                // after a full (up to multi-hour) interval elapses. `0` = the
+                // blind poll is disabled; we still nap (events drive updates).
+                let nap = if secs == 0 { 60 } else { secs };
+                let mut slept = 0u64;
+                while slept < nap {
+                    let slice = PR_SYNC_SLICE_SECS.min(nap - slept);
+                    thread::sleep(Duration::from_secs(slice));
+                    slept += slice;
+                    if !enabled.load(Ordering::Relaxed) {
+                        return LoopControl::Break;
+                    }
+                    if interval_secs.load(Ordering::Relaxed) != secs {
+                        // Interval retuned (incl. 0<->N) — restart the wait.
+                        return LoopControl::Continue;
+                    }
                 }
-                let results = crate::gh::run_pr_sync(&sessions);
+                if secs == 0 {
+                    return LoopControl::Continue;
+                }
+                // Backed-off hosts are skipped inside run_pr_sync via this
+                // snapshot (their sessions keep last-known PRs), so no global
+                // pause is needed here.
+                let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot);
+                Self::apply_pr_backoff(&backoff, &signals, tx);
                 if !results.is_empty() && tx.send(WorkerEvent::PrStatusReady(results)).is_err() {
                     return LoopControl::Break;
                 }
@@ -1282,18 +1356,107 @@ impl Engine {
         );
     }
 
+    /// Update the shared per-host PR-check backoff from a sync's per-host signals
+    /// and surface a keyed status per host. A low quota pauses until `resetAt`; a
+    /// hard failure (checked independently, so a healthy host can't mask a broken
+    /// one) pauses a fixed short window; a healthy signal clears that host's pause.
+    /// The warning fires once on entering backoff and a paired keyed recovery
+    /// message clears it, so neither surface strands a stale toast. Only queried
+    /// hosts appear in `signals`, so a skipped/backed-off host is never spuriously
+    /// cleared.
+    fn apply_pr_backoff(
+        shared: &Arc<Mutex<crate::gh::BackoffSnapshot>>,
+        signals: &[crate::gh::HostSignal],
+        tx: &Sender<WorkerEvent>,
+    ) {
+        for sig in signals {
+            let key = format!("{PR_QUOTA_STATUS_KEY}:{}", sig.host);
+            // Low quota takes priority; otherwise a hard failure (independent of
+            // any rate reading) pauses; otherwise the host is healthy → clear.
+            let decision: Option<(Instant, String)> = match sig
+                .rate
+                .as_ref()
+                .filter(|r| r.remaining < crate::gh::RATE_LIMIT_BACKOFF_FLOOR)
+            {
+                Some(r) => {
+                    let secs_until = r
+                        .reset_at
+                        .map(|t| (t - Utc::now()).num_seconds().clamp(0, 3600) as u64)
+                        .unwrap_or(PR_HARD_FAILURE_BACKOFF_SECS);
+                    let when = r
+                        .reset_at
+                        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                        .unwrap_or_else(|| "the next reset".to_string());
+                    Some((
+                        Instant::now() + Duration::from_secs(secs_until),
+                        format!(
+                            "GitHub API quota is low on {} ({} points left). Pausing PR status \
+                                 checks until {when}. Adjust ui.pr_poll_interval_seconds if this recurs.",
+                            sig.host, r.remaining,
+                        ),
+                    ))
+                }
+                None if sig.hard_failed => Some((
+                    Instant::now() + Duration::from_secs(PR_HARD_FAILURE_BACKOFF_SECS),
+                    format!(
+                        "GitHub PR status checks are failing on {} (network or `gh` error). \
+                             Pausing briefly before retrying.",
+                        sig.host,
+                    ),
+                )),
+                None => None,
+            };
+
+            match decision {
+                Some((until, message)) => {
+                    let already_active = {
+                        let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        let already = map.get(&sig.host).is_some_and(|u| Instant::now() < *u);
+                        map.insert(sig.host.clone(), until);
+                        already
+                    };
+                    if !already_active {
+                        let _ = tx.send(WorkerEvent::CommandWorkerStarted(
+                            StatusUpdate::warning(message).with_key(key),
+                        ));
+                    }
+                }
+                None => {
+                    let was_present = {
+                        let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        map.remove(&sig.host).is_some()
+                    };
+                    if was_present {
+                        let _ = tx.send(WorkerEvent::CommandWorkerStarted(StatusUpdate::keyed(
+                            key,
+                            crate::statusline::StatusTone::Info,
+                            format!(
+                                "GitHub API access to {} recovered — PR status checks resumed.",
+                                sig.host
+                            ),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
     pub fn spawn_initial_pr_refresh(&mut self) {
         let sessions = Arc::clone(&self.pr_sync_sessions);
+        let backoff = Arc::clone(&self.pr_backoff);
         self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label: "initial-pr-refresh".into(),
                 in_flight_key: None,
-                // PR sync has no failure event; the next poll cycle will
-                // re-attempt regardless. Log-only is sufficient.
+                // A panic here has no completion event to synthesize; the next
+                // poll cycle re-attempts regardless. `apply_pr_backoff` below
+                // already surfaces call failures as a keyed warning. Log-only.
                 panic_event: None,
             },
             move |tx| {
-                let results = crate::gh::run_pr_sync(&sessions);
+                let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let (results, signals) = crate::gh::run_pr_sync(&sessions, &snapshot);
+                Self::apply_pr_backoff(&backoff, &signals, &tx);
                 if !results.is_empty() {
                     let _ = tx.send(WorkerEvent::PrStatusReady(results));
                 }
@@ -1384,23 +1547,40 @@ impl Engine {
         }
     }
 
+    /// Trigger a foreground PR check (agent brought to the foreground): the same
+    /// one-shot check as [`Self::spawn_pr_check_for_session`] but with the tighter
+    /// [`PR_FOREGROUND_DEBOUNCE`] window, so focusing an agent shows fresh data.
+    pub fn spawn_foreground_pr_check(&mut self, session_id: &str) {
+        self.spawn_pr_check_for_session(session_id, PR_FOREGROUND_DEBOUNCE);
+    }
+
     /// Trigger a one-shot PR check for a single session, unless it was checked
-    /// recently (within 10 seconds).
+    /// more recently than `min_interval` ago. Background triggers (refs watcher,
+    /// agent exit) pass [`PR_CHECK_MIN_INTERVAL`]; foreground focus passes the
+    /// tighter [`PR_FOREGROUND_DEBOUNCE`] via [`Self::spawn_foreground_pr_check`].
     ///
     /// The timestamp is recorded BEFORE the worker thread is spawned so a burst
     /// of triggers within a single event-loop tick — e.g. several callers each
     /// invoking this for the same session before the first worker's
     /// `PrStatusReady` event has been processed — does not bypass the
     /// rate-limit and spawn N concurrent `gh` subprocesses.
-    pub fn spawn_pr_check_for_session(&mut self, session_id: &str) {
+    pub fn spawn_pr_check_for_session(&mut self, session_id: &str, min_interval: Duration) {
         if !self.github_integration_enabled
             || !matches!(self.gh_status, crate::model::GhStatus::Available)
         {
             return;
         }
-        // Rate-limit: skip if checked within the last 10 seconds.
+        // Don't stack concurrent gh subprocesses for the same session: a call can
+        // run up to GH_CALL_TIMEOUT, which exceeds the debounce, so guard on an
+        // in-flight check before the debounce stamp (a skipped call must not push
+        // the debounce forward). Backed-off hosts are skipped inside the sync
+        // itself (per-host), so no host check is needed here.
+        if self.is_in_flight(&InFlightKey::PrCheck(session_id.to_string())) {
+            return;
+        }
+        // Rate-limit: skip if checked more recently than `min_interval` ago.
         if let Some(last) = self.pr_last_checked.get(session_id)
-            && last.elapsed() < Duration::from_secs(10)
+            && last.elapsed() < min_interval
         {
             return;
         }
@@ -1422,17 +1602,26 @@ impl Engine {
             agent_exited: !self.providers.contains_key(session_id),
         };
         let label = format!("pr-check:{}", entry.session_id);
+        let backoff = Arc::clone(&self.pr_backoff);
+        let abort_sid = entry.session_id.clone();
         self.spawn_background_worker(
             BackgroundWorkerSpec {
                 label,
-                in_flight_key: None,
-                // A panic here means we just skip this PR-check; the next
-                // tick of the PR sync loop (or the next call site) will
-                // re-attempt. Log-only is appropriate.
-                panic_event: None,
+                in_flight_key: Some(InFlightKey::PrCheck(entry.session_id.clone())),
+                // On panic, clear the in-flight key without wiping the badge (a
+                // synthesized `PrStatusReady(None)` would). The next trigger
+                // re-attempts.
+                panic_event: Some(Box::new(move |_reason| {
+                    WorkerEvent::PrCheckAborted(abort_sid.clone())
+                })),
             },
             move |tx| {
-                let result = crate::gh::check_pr_for_entry(&entry);
+                let snapshot = backoff.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let (result, signals) = crate::gh::check_pr_for_entry(&entry, &snapshot);
+                // Event-driven checks feed the shared backoff too, so a sustained
+                // failure arms the pause (and clears it on recovery) even when the
+                // blind poll is disabled.
+                Self::apply_pr_backoff(&backoff, &signals, &tx);
                 let _ = tx.send(WorkerEvent::PrStatusReady(vec![(entry.session_id, result)]));
             },
         );

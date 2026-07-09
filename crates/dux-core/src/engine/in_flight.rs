@@ -18,6 +18,11 @@ pub enum InFlightKey {
     BranchRename(String),
     Pull(String),
     ResourceStats,
+    /// A one-shot PR check (foreground/refs-watcher/exit trigger) is running for
+    /// this session id. Bounds concurrent `gh` subprocesses for one session (a
+    /// call can run up to `GH_CALL_TIMEOUT`, longer than the debounce). Cleared
+    /// by the `PrStatusReady`/`PrCheckAborted` handlers.
+    PrCheck(String),
     /// Creating an initial commit for the repo at this path, then registering
     /// it. Keyed by canonical path so two concurrent "create initial commit &
     /// add" requests for the same repo can't both run and append two commits.

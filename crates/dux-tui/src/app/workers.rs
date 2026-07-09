@@ -261,7 +261,10 @@ impl App {
                 let is_main =
                     self.engine.owning_session_for_tab(tab_id).as_deref() == Some(tab_id.as_str());
                 if is_main && !handled.contains(tab_id) {
-                    self.engine.spawn_pr_check_for_session(tab_id);
+                    self.engine.spawn_pr_check_for_session(
+                        tab_id,
+                        dux_core::engine::PR_CHECK_MIN_INTERVAL,
+                    );
                 }
             }
         }

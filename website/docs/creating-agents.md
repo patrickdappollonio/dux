@@ -100,6 +100,26 @@ URL or type a PR number. After you confirm, dux:
 If the branch already exists locally (for example, from a previous fetch), dux
 attaches to it without fetching again.
 
+### How PR status stays fresh
+
+Once `github_integration` is on, dux shows a PR status pill on each agent branch
+and keeps it current without hammering GitHub's API. Updates are driven by events:
+pushing to a branch refreshes that agent's PR, and bringing an agent to the
+foreground refreshes it too. A slow background poll is the only fallback, for
+changes made on GitHub itself (someone merges or closes a PR in the browser):
+
+```toml
+[ui]
+# Seconds between blind PR-status safety polls. Most updates come from events,
+# so this is just the backstop. Set to 0 to rely on events alone.
+pr_poll_interval_seconds = 180
+```
+
+Each poll batches your tracked PRs into as few GraphQL requests as possible — one
+per GitHub host, up to ~100 PRs each — so the cost to your API quota stays low
+even with many agents. If your quota ever runs low (or GitHub starts erroring),
+dux pauses PR checks until it recovers and tells you in the status line.
+
 ## Creating an agent from an existing worktree
 
 Select a project and run the `new-agent-from-worktree` palette command. dux opens

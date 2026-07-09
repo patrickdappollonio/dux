@@ -939,6 +939,13 @@ pub(crate) fn run_engine_loop(
     );
     // Subscribes waiting for their provider to come up via the worker-event drain.
     let mut pending: Vec<PendingSubscribe> = Vec::new();
+    // The session most recently brought to the foreground via a PTY subscribe.
+    // Workspace-global (single-tenant server), last-subscribe-wins across browser
+    // clients — deliberately NOT the engine's `watched_session_id` (that is the
+    // TUI's changed-files watch). Gates the tight foreground PR check so a socket
+    // reconnect for an already-focused agent doesn't re-fire it (only a real
+    // focus change does).
+    let mut last_pr_foregrounded: Option<String> = None;
     // Change-gated spine check (fingerprints, cached `/spine` JSON, backstop
     // accumulator). Seeded from the current state so the first tick does not emit
     // a spurious change for an unchanged spine and a `/spine` read before the
@@ -1226,7 +1233,13 @@ pub(crate) fn run_engine_loop(
         loop {
             match req_rx.try_recv() {
                 Ok(EngineRequest::SubscribePty(session_id, reply)) => {
-                    handle_subscribe(&mut engine, &mut pending, session_id, reply);
+                    handle_subscribe(
+                        &mut engine,
+                        &mut pending,
+                        &mut last_pr_foregrounded,
+                        session_id,
+                        reply,
+                    );
                 }
                 Ok(EngineRequest::SpineJson(reply)) => {
                     // Serve the loop-local cache (handled here, not in
@@ -1826,9 +1839,24 @@ fn write_raw_config_on_engine(
 fn handle_subscribe(
     engine: &mut Engine,
     pending: &mut Vec<PendingSubscribe>,
+    last_pr_foregrounded: &mut Option<String>,
     session_id: String,
     reply: oneshot::Sender<Result<PtySubscription, String>>,
 ) {
+    // Opening an agent's PTY foregrounds it — refresh its PR status. The
+    // subscribed id may be an extra-tab id, so resolve the owning session first
+    // (a session-slot id resolves to itself). Only a GENUINE focus change gets
+    // the tight foreground refresh; a reconnect/remount of the already-focused
+    // agent falls back to the normal background cadence, so socket blips don't
+    // re-poll `gh` (mirrors the TUI's `previously_watched` gate).
+    if let Some(owner) = engine.owning_session_for_tab(&session_id) {
+        if last_pr_foregrounded.as_deref() != Some(owner.as_str()) {
+            engine.spawn_foreground_pr_check(&owner);
+        } else {
+            engine.spawn_pr_check_for_session(&owner, dux_core::engine::PR_CHECK_MIN_INTERVAL);
+        }
+        *last_pr_foregrounded = Some(owner);
+    }
     if let Some(client) = engine.providers.get(&session_id) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;

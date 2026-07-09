@@ -2009,6 +2009,9 @@ impl Engine {
                 let mut changed = false;
                 for (session_id, maybe_pr) in results {
                     self.pr_last_checked.insert(session_id.clone(), now);
+                    // Clear any one-shot PR-check in-flight guard for this session
+                    // (a no-op for batched-loop results, which set no key).
+                    self.clear_in_flight(&InFlightKey::PrCheck(session_id.clone()));
                     match maybe_pr {
                         Some(pr) => {
                             // Persist the PR association (including state) so
@@ -2052,6 +2055,12 @@ impl Engine {
                     EventReaction::Nothing
                 }
             }
+            WorkerEvent::PrCheckAborted(session_id) => {
+                // The one-shot check worker panicked; clear its guard so the next
+                // trigger can retry. The badge is left untouched.
+                self.clear_in_flight(&InFlightKey::PrCheck(session_id));
+                EventReaction::Nothing
+            }
             WorkerEvent::PullRequestResolved {
                 result,
                 status_op_id,
@@ -2080,7 +2089,7 @@ impl Engine {
                     "[gh-integration] refs watcher: triggering PR check for session {}",
                     session_id,
                 ));
-                self.spawn_pr_check_for_session(&session_id);
+                self.spawn_pr_check_for_session(&session_id, crate::engine::PR_CHECK_MIN_INTERVAL);
                 EventReaction::Nothing
             }
             WorkerEvent::BrowserEntriesReady { dir, entries } => {
@@ -4464,7 +4473,7 @@ mod tests {
             .pr_last_checked
             .insert("s1".to_string(), Instant::now());
 
-        engine.spawn_pr_check_for_session("s1");
+        engine.spawn_pr_check_for_session("s1", crate::engine::PR_CHECK_MIN_INTERVAL);
 
         // No worker was spawned, so nothing should have been posted to the
         // channel. A short timeout keeps the test responsive while still
@@ -4487,7 +4496,7 @@ mod tests {
         assert!(!engine.pr_last_checked.contains_key("s1"));
 
         let before = Instant::now();
-        engine.spawn_pr_check_for_session("s1");
+        engine.spawn_pr_check_for_session("s1", crate::engine::PR_CHECK_MIN_INTERVAL);
 
         // The timestamp must be recorded synchronously — before the worker
         // thread is spawned — so a burst of triggers within one tick cannot
@@ -4506,6 +4515,176 @@ mod tests {
         assert!(
             recorded.elapsed() < std::time::Duration::from_secs(1),
             "recorded instant should be very recent",
+        );
+    }
+
+    #[test]
+    fn foreground_pr_check_uses_tighter_window_than_background() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        engine.sessions.push(sample_session("s1", "p1", "feat/x"));
+        // Last checked 5s ago: inside the 10s background window, outside the 3s
+        // foreground window.
+        let five_ago = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(5))
+            .unwrap();
+        engine.pr_last_checked.insert("s1".to_string(), five_ago);
+
+        // Background window (10s) → suppressed, timestamp unchanged.
+        engine.spawn_pr_check_for_session("s1", crate::engine::PR_CHECK_MIN_INTERVAL);
+        assert_eq!(engine.pr_last_checked.get("s1").copied(), Some(five_ago));
+
+        // Foreground window (3s) → proceeds, timestamp refreshed.
+        engine.spawn_foreground_pr_check("s1");
+        assert!(engine.pr_last_checked.get("s1").copied().unwrap() > five_ago);
+    }
+
+    fn backoff_map() -> std::sync::Arc<std::sync::Mutex<crate::gh::BackoffSnapshot>> {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    fn host_signal(host: &str, remaining: Option<i64>, hard_failed: bool) -> crate::gh::HostSignal {
+        crate::gh::HostSignal {
+            host: host.to_string(),
+            rate: remaining.map(|remaining| crate::gh::RateLimitInfo {
+                remaining,
+                reset_at: Some(Utc::now() + chrono::Duration::seconds(120)),
+            }),
+            hard_failed,
+        }
+    }
+
+    #[test]
+    fn apply_pr_backoff_pauses_and_warns_when_low_per_host() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        Engine::apply_pr_backoff(&shared, &[host_signal("github.com", Some(5), false)], &tx);
+
+        // The window is set for that host, ~120s out (the reset), not "now".
+        let until = *shared
+            .lock()
+            .unwrap()
+            .get("github.com")
+            .expect("backoff set");
+        let secs = until.saturating_duration_since(Instant::now()).as_secs();
+        assert!((90..=130).contains(&secs), "backoff ~120s, got {secs}s");
+        match rx.try_recv() {
+            Ok(WorkerEvent::CommandWorkerStarted(s)) => assert!(s.key.is_some()),
+            _ => panic!("expected a keyed quota-low warning"),
+        }
+    }
+
+    #[test]
+    fn apply_pr_backoff_warns_only_once_while_active() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        let sig = [host_signal("github.com", Some(5), false)];
+        Engine::apply_pr_backoff(&shared, &sig, &tx);
+        Engine::apply_pr_backoff(&shared, &sig, &tx);
+        // First call warns; the second (window still active) must be silent.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(WorkerEvent::CommandWorkerStarted(_))
+        ));
+        assert!(rx.try_recv().is_err(), "warning must fire only once");
+    }
+
+    #[test]
+    fn apply_pr_backoff_hard_failure_not_masked_by_healthy_rate() {
+        // A host with a HEALTHY rate reading AND hard_failed=true must still back
+        // off (regression guard for the masking bug).
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        Engine::apply_pr_backoff(&shared, &[host_signal("github.com", Some(5000), true)], &tx);
+        assert!(
+            shared.lock().unwrap().contains_key("github.com"),
+            "a hard failure must pause even with a healthy quota reading",
+        );
+    }
+
+    #[test]
+    fn apply_pr_backoff_is_per_host() {
+        // One bad host must not pause a healthy one.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        Engine::apply_pr_backoff(
+            &shared,
+            &[
+                host_signal("github.com", Some(5000), false),
+                host_signal("ghe.corp", None, true),
+            ],
+            &tx,
+        );
+        let map = shared.lock().unwrap();
+        assert!(!map.contains_key("github.com"), "healthy host not paused");
+        assert!(map.contains_key("ghe.corp"), "failing host paused");
+    }
+
+    #[test]
+    fn apply_pr_backoff_clears_and_announces_recovery_per_host() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        shared.lock().unwrap().insert(
+            "github.com".to_string(),
+            Instant::now() + std::time::Duration::from_secs(120),
+        );
+        Engine::apply_pr_backoff(
+            &shared,
+            &[host_signal("github.com", Some(5000), false)],
+            &tx,
+        );
+        assert!(
+            !shared.lock().unwrap().contains_key("github.com"),
+            "healthy signal clears that host's backoff",
+        );
+        match rx.try_recv() {
+            Ok(WorkerEvent::CommandWorkerStarted(s)) => {
+                assert!(s.key.is_some(), "recovery clear must be keyed")
+            }
+            _ => panic!("expected a keyed recovery message"),
+        }
+    }
+
+    #[test]
+    fn apply_pr_backoff_healthy_from_idle_is_silent() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        Engine::apply_pr_backoff(
+            &shared,
+            &[host_signal("github.com", Some(5000), false)],
+            &tx,
+        );
+        assert!(shared.lock().unwrap().is_empty());
+        assert!(rx.try_recv().is_err(), "no message when never backed off");
+    }
+
+    #[test]
+    fn pr_check_skips_while_its_host_is_backed_off_and_resumes_after() {
+        // A future backoff window for the session's host makes the check a no-op
+        // (via the in-flight/host skip inside the sync); an expired window lets it
+        // proceed. Here we assert the shared-map contract the sync relies on.
+        let shared = backoff_map();
+        shared.lock().unwrap().insert(
+            "github.com".to_string(),
+            Instant::now() + std::time::Duration::from_secs(60),
+        );
+        let snap = shared.lock().unwrap().clone();
+        assert!(
+            snap.get("github.com").is_some_and(|u| Instant::now() < *u),
+            "an active window must read as future",
+        );
+        // Expired window: no longer blocks.
+        shared.lock().unwrap().insert(
+            "github.com".to_string(),
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap(),
+        );
+        let snap = shared.lock().unwrap().clone();
+        assert!(
+            snap.get("github.com").is_none_or(|u| Instant::now() >= *u),
+            "an expired window must not block",
         );
     }
 

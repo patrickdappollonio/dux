@@ -246,6 +246,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.ui.github_integration,
         current.ui.github_integration,
     );
+    diff_u16(
+        &mut changes,
+        "ui.pr_poll_interval_seconds",
+        defaults.ui.pr_poll_interval_seconds,
+        current.ui.pr_poll_interval_seconds,
+    );
     diff_bool(
         &mut changes,
         "ui.auto_reopen_agents",

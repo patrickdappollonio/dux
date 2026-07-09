@@ -2,9 +2,12 @@
 //! (`spawn_pr_sync_worker`, `spawn_initial_pr_refresh`, `spawn_pr_check_for_session`).
 //! All helpers shell out to `gh` and parse JSON; no UI deps.
 
+use std::io::Read;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::git;
 use crate::logger;
@@ -12,86 +15,597 @@ use crate::model::{PrInfo, PrState, Project};
 use crate::storage::StoredPr;
 use crate::worker::{PrSyncEntry, PullRequestLookup, ResolvedPullRequest, WorkerEvent};
 
-pub fn run_pr_sync(sessions: &Arc<Mutex<Vec<PrSyncEntry>>>) -> Vec<(String, Option<PrInfo>)> {
-    let snapshot = match sessions.lock() {
-        Ok(guard) => guard.clone(),
-        Err(_) => return Vec::new(),
-    };
-    snapshot
-        .iter()
-        .map(|entry| {
-            let result = check_pr_for_entry(entry);
-            (entry.session_id.clone(), result)
-        })
-        .collect()
+/// Live GraphQL rate-limit snapshot parsed from a batched query's top-level
+/// `rateLimit` field. Lets the PR-sync loop back off before it exhausts the
+/// GraphQL points budget (typically 5000/hour, higher on GitHub Enterprise Cloud).
+#[derive(Clone, Debug)]
+pub struct RateLimitInfo {
+    pub remaining: i64,
+    pub reset_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Determine the current PR state for a session. The check strategy depends on
-/// what we already know and whether the agent is still running:
-///
-/// | Known PR state | Agent running? | Action                                |
-/// |----------------|---------------|---------------------------------------|
-/// | None           | any           | `gh pr list --head` to discover       |
-/// | OPEN           | any           | `gh pr view` + discover newer         |
-/// | MERGED/CLOSED  | yes           | discover newer (agent may push again) |
-/// | MERGED/CLOSED  | no            | **zero calls** — nothing will change  |
-///
-/// The last row is the key optimization: once a PR is in a terminal state and
-/// the agent has exited, nobody is pushing to that branch anymore, so there is
-/// no reason to check for newer PRs. This reduces API calls from O(sessions)
-/// to O(active_sessions) for repos with many completed agents.
-pub fn check_pr_for_entry(entry: &PrSyncEntry) -> Option<PrInfo> {
-    let remote = git::remote_github_repo(Path::new(&entry.worktree_path));
-    let (host, owner_repo) = if let Some(remote) = remote {
-        (remote.host, remote.owner_repo)
-    } else if let Some(known) = &entry.known_pr {
-        (known.host.clone(), known.owner_repo.clone())
-    } else {
-        return None;
+/// Per-host outcome of a sync cycle, used to drive the per-host backoff. Only
+/// hosts that were actually queried this cycle appear (a host skipped because it
+/// is already backed off, or one with only zero-network sessions, is absent — so
+/// its backoff window is left untouched rather than spuriously cleared).
+pub struct HostSignal {
+    pub host: String,
+    pub rate: Option<RateLimitInfo>,
+    /// A whole-call failure (spawn error / timeout / unparseable-or-null data) on
+    /// at least one of this host's chunks.
+    pub hard_failed: bool,
+}
+
+/// One batched-sync outcome: the per-session PR results plus a per-host signal
+/// for every host actually queried this cycle.
+type PrSyncOutcome = (Vec<(String, Option<PrInfo>)>, Vec<HostSignal>);
+
+/// One chunk's outcome: per-session results, the chunk's `rateLimit` snapshot,
+/// and whether the whole call hard-failed. Aggregated per host by `run_entries`.
+type ChunkOutcome = (Vec<(String, Option<PrInfo>)>, Option<RateLimitInfo>, bool);
+
+/// Snapshot of the active per-host backoff windows (`host -> until`) passed into
+/// a sync so backed-off hosts are skipped (their sessions keep last-known PRs)
+/// without another `gh` call.
+pub type BackoffSnapshot = std::collections::HashMap<String, Instant>;
+
+/// GraphQL `rateLimit.remaining` floor below which the loop pauses polling
+/// until the quota resets.
+pub const RATE_LIMIT_BACKOFF_FLOOR: i64 = 100;
+
+/// Max GraphQL aliases per `gh api graphql` invocation. Each session emits 1–2
+/// aliases; capping the batch keeps every query ~1 GraphQL point AND stays well
+/// under Linux's ~128 KiB per-argv-entry limit for the inlined `-f query=` arg.
+const MAX_ALIASES_PER_QUERY: usize = 100;
+
+/// Hard wall-clock cap on a single `gh` invocation. A hung `gh` (stalled TCP,
+/// DNS hang, credential-helper prompt) must not park a worker thread: we bail
+/// fast and let the next cycle retry rather than block for long.
+pub(crate) const GH_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// After we kill a timed-out/failed `gh`, how long to wait for its output-reader
+/// threads to drain before abandoning them (they finish on their own once the
+/// pipe closes). Bounds the wait so a pathological grandchild holding the pipe
+/// open can never freeze the caller.
+const GH_READER_DRAIN: Duration = Duration::from_secs(2);
+
+/// Batched PR sync over the shared session snapshot. Issues one or more
+/// `gh api graphql` requests per GitHub host (sessions chunked to at most
+/// `MAX_ALIASES_PER_QUERY` aliases each), aliasing every session's lookup into a
+/// single query per chunk, and returns one `(session_id, Option<PrInfo>)` per
+/// session plus a per-host signal for the backoff. Hosts already backed off in
+/// `backoff` are skipped (their sessions keep last-known PRs) with no `gh` call.
+pub fn run_pr_sync(
+    sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
+    backoff: &BackoffSnapshot,
+) -> PrSyncOutcome {
+    let snapshot = match sessions.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return (Vec::new(), Vec::new()),
     };
+    run_entries(&snapshot, backoff)
+}
 
-    if let Some(ref known) = entry.known_pr {
-        let is_terminal = known.state == "MERGED" || known.state == "CLOSED";
+/// Single-session PR check (foreground / refs-watcher / exit triggers). Shares
+/// the batched machinery with a one-element batch; returns the PR plus the
+/// per-host signal so the one-shot caller can arm/clear the shared backoff too.
+pub fn check_pr_for_entry(
+    entry: &PrSyncEntry,
+    backoff: &BackoffSnapshot,
+) -> (Option<PrInfo>, Vec<HostSignal>) {
+    let (results, signals) = run_entries(std::slice::from_ref(entry), backoff);
+    let pr = results.into_iter().next().and_then(|(_, pr)| pr);
+    (pr, signals)
+}
 
-        if is_terminal {
-            if entry.agent_exited {
-                // Terminal PR + exited agent = zero network calls.
-                // The agent process is gone and the PR is already merged/closed,
-                // so no new commits or PRs will appear on this branch.
-                return reconstruct_from_stored(known);
-            }
+/// A session that needs at least one GraphQL alias this cycle.
+struct Planned {
+    session_id: String,
+    host: String,
+    owner: String,
+    repo: String,
+    branch: String,
+    known: Option<StoredPr>,
+    is_terminal: bool,
+    /// Open known PRs also get a by-number alias (robust when the branch was
+    /// deleted on merge). Terminal-but-running and undiscovered sessions get
+    /// only the head-ref discovery alias.
+    emit_num: bool,
+}
 
-            // Terminal PR but agent is still running — it might push new commits
-            // and open a follow-up PR, so we still check for newer PRs.
-            if let Some(newer) =
-                discover_pr_by_branch(&entry.branch_name, &host, &owner_repo, &entry.session_id)
-                && newer.number > known.pr_number
-            {
-                return Some(newer);
-            }
-            return reconstruct_from_stored(known);
+/// Single source of truth for "this stored PR is terminal (MERGED/CLOSED)".
+/// Used by both `run_entries`' zero-network short-circuit and `Planned::new`.
+fn stored_pr_is_terminal(known: Option<&StoredPr>) -> bool {
+    known.is_some_and(|k| k.state == "MERGED" || k.state == "CLOSED")
+}
+
+impl Planned {
+    /// Build a planned lookup, deriving the terminal/emit_num eligibility from
+    /// the known PR so the single rule lives in one place (production and tests
+    /// both go through here and can't drift).
+    fn new(
+        session_id: String,
+        host: String,
+        owner: String,
+        repo: String,
+        branch: String,
+        known: Option<StoredPr>,
+    ) -> Self {
+        let is_terminal = stored_pr_is_terminal(known.as_ref());
+        // Open known PRs also get a by-number alias; terminal-but-running and
+        // undiscovered sessions get only the head-ref discovery alias.
+        let emit_num = known.is_some() && !is_terminal;
+        Planned {
+            session_id,
+            host,
+            owner,
+            repo,
+            branch,
+            known,
+            is_terminal,
+            emit_num,
+        }
+    }
+}
+
+/// Core of the batched sync. Classifies each entry, resolves the ones that need
+/// no network call (terminal + exited → reconstruct from SQLite), and batches
+/// the rest into `gh api graphql` requests grouped by host.
+///
+/// Per-session strategy (preserves the pre-batch semantics exactly):
+///
+/// | Known PR state | Agent running? | Aliases                                   |
+/// |----------------|----------------|-------------------------------------------|
+/// | None           | any            | head-ref discovery                        |
+/// | OPEN           | any            | head-ref discovery **+** by-number refresh|
+/// | MERGED/CLOSED  | yes            | head-ref discovery (catches a follow-up PR)|
+/// | MERGED/CLOSED  | no             | **zero calls** — reconstruct from SQLite  |
+fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutcome {
+    let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
+    let mut planned: Vec<Planned> = Vec::new();
+
+    for entry in entries {
+        // Resolve (host, owner_repo): live remote first, else the known PR's repo
+        // (works even after the branch/remote is gone).
+        let remote = git::remote_github_repo(Path::new(&entry.worktree_path));
+        let (host, owner_repo) = if let Some(remote) = remote {
+            (remote.host, remote.owner_repo)
+        } else if let Some(known) = &entry.known_pr {
+            (known.host.clone(), known.owner_repo.clone())
+        } else {
+            results.push((entry.session_id.clone(), None));
+            continue;
+        };
+
+        // Terminal PR + exited agent: nobody is pushing to that branch anymore,
+        // so reconstruct from SQLite with zero network calls.
+        if stored_pr_is_terminal(entry.known_pr.as_ref()) && entry.agent_exited {
+            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
+            results.push((entry.session_id.clone(), pr));
+            continue;
         }
 
-        // Open PR: refresh its current state via `gh pr view`.
-        if let Some(pr) = view_pr_by_number(
-            known.pr_number,
-            &known.host,
-            &known.owner_repo,
-            &entry.session_id,
-        ) {
-            // Also check if a newer PR was opened.
-            if let Some(newer) =
-                discover_pr_by_branch(&entry.branch_name, &host, &owner_repo, &entry.session_id)
-                && newer.number > pr.number
-            {
-                return Some(newer);
+        let Some((owner, repo)) = owner_repo.split_once('/') else {
+            // Malformed owner/repo — nothing we can query; fall back to stored.
+            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
+            results.push((entry.session_id.clone(), pr));
+            continue;
+        };
+
+        planned.push(Planned::new(
+            entry.session_id.clone(),
+            normalize_github_host(&host).to_string(),
+            owner.to_string(),
+            repo.to_string(),
+            entry.branch_name.clone(),
+            entry.known_pr.clone(),
+        ));
+    }
+
+    // Group by host; for each host either skip it (already backed off — keep
+    // last-known PRs, no gh call, no signal) or chunk its sessions by alias
+    // budget and emit one per-host signal driving the backoff.
+    let now = Instant::now();
+    let mut signals: Vec<HostSignal> = Vec::new();
+    let mut by_host: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
+    for (i, p) in planned.iter().enumerate() {
+        by_host.entry(p.host.clone()).or_default().push(i);
+    }
+    for (host, idxs) in by_host {
+        // Host is under an active backoff window: preserve last-known PRs and skip
+        // the network call entirely (the window will expire on its own).
+        if backoff.get(&host).is_some_and(|until| now < *until) {
+            for i in idxs {
+                let p = &planned[i];
+                results.push((
+                    p.session_id.clone(),
+                    p.known.as_ref().and_then(reconstruct_from_stored),
+                ));
             }
-            return Some(pr);
+            continue;
+        }
+
+        let mut rate: Option<RateLimitInfo> = None;
+        let mut hard_failed = false;
+        let mut chunk: Vec<usize> = Vec::new();
+        let mut alias_count = 0usize;
+        for i in idxs {
+            let cost = if planned[i].emit_num { 2 } else { 1 };
+            if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
+                let (r, rl, failed) = run_chunk(&host, &planned, &chunk);
+                results.extend(r);
+                rate = tighter_rate_limit(rate, rl);
+                hard_failed |= failed;
+                chunk.clear();
+                alias_count = 0;
+            }
+            chunk.push(i);
+            alias_count += cost;
+        }
+        if !chunk.is_empty() {
+            let (r, rl, failed) = run_chunk(&host, &planned, &chunk);
+            results.extend(r);
+            rate = tighter_rate_limit(rate, rl);
+            hard_failed |= failed;
+        }
+        signals.push(HostSignal {
+            host,
+            rate,
+            hard_failed,
+        });
+    }
+
+    (results, signals)
+}
+
+/// Keep the snapshot with the fewer remaining points (the more urgent backoff
+/// signal) across chunked calls.
+fn tighter_rate_limit(a: Option<RateLimitInfo>, b: Option<RateLimitInfo>) -> Option<RateLimitInfo> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.remaining < a.remaining { b } else { a }),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
+/// GraphQL-escape a string literal for inlining into the query body. Branch
+/// names can contain `/` and, rarely, `"`; JSON string encoding is a valid
+/// GraphQL string literal.
+fn graphql_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+// The GraphQL alias names. `build_chunk_query` writes them and
+// `parse_chunk_response` reads them back, so both sides MUST derive them from
+// these helpers — a divergence would silently return "no PR" for every session.
+fn repo_alias(k: usize) -> String {
+    format!("r{k}")
+}
+fn ref_alias(pos: usize) -> String {
+    format!("s{pos}_ref")
+}
+fn num_alias(pos: usize) -> String {
+    format!("s{pos}_num")
+}
+
+/// Outcome of a bounded `gh` invocation. `Failed` carries the failure text (a
+/// spawn or wait error) so callers can log the real cause instead of conflating
+/// it with a timeout.
+pub(crate) enum GhCallOutcome {
+    Completed(std::process::Output),
+    TimedOut,
+    Failed(String),
+}
+
+/// Run `gh <args>` with piped stdout/stderr drained on threads and a hard
+/// wall-clock cap. On every non-`Completed` exit the child is killed and reaped;
+/// the reader threads are drained with a bounded wait ([`GH_READER_DRAIN`]) and
+/// then abandoned (they self-terminate at EOF) so the caller can never block.
+pub(crate) fn run_gh_with_timeout(args: &[&str], timeout: Duration) -> GhCallOutcome {
+    let mut cmd = std::process::Command::new("gh");
+    cmd.args(args);
+    run_command_with_timeout(cmd, timeout)
+}
+
+/// Binary-agnostic core of [`run_gh_with_timeout`], split out so the
+/// timeout/kill/drain contract is unit-testable with `sleep`/`sh` instead of a
+/// live `gh`. (Distinct from `git::wait_child_or_kill`, which deliberately does
+/// NOT drain stdout/stderr — it pipes only a tiny stderr — so it can't be reused
+/// for the larger GraphQL responses this helper captures.)
+fn run_command_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> GhCallOutcome {
+    let mut child = match cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) => return GhCallOutcome::Failed(err.to_string()),
+    };
+
+    // Drain the pipes on their own threads (so a full pipe buffer can't wedge the
+    // child) and hand each buffer back over a channel, so we can wait for them
+    // with a deadline and abandon them if a grandchild keeps the pipe open.
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    match (child.stdout.take(), child.stderr.take()) {
+        (Some(mut out), Some(mut err)) => {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = out.read_to_end(&mut buf);
+                let _ = out_tx.send(buf);
+            });
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let _ = err.read_to_end(&mut buf);
+                let _ = err_tx.send(buf);
+            });
+        }
+        _ => {
+            // Should be unreachable (we just set piped stdio), but never leak the
+            // spawned child if a pipe handle is somehow missing.
+            let _ = child.kill();
+            let _ = child.wait();
+            return GhCallOutcome::Failed("gh stdout/stderr pipe unavailable".to_string());
         }
     }
 
-    // No known PR — discover by branch name.
-    discover_pr_by_branch(&entry.branch_name, &host, &owner_repo, &entry.session_id)
+    // Read the readers with a deadline, then abandon them.
+    let drain = |rx: &std::sync::mpsc::Receiver<Vec<u8>>| {
+        rx.recv_timeout(GH_READER_DRAIN).unwrap_or_default()
+    };
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return GhCallOutcome::Completed(std::process::Output {
+                    status,
+                    stdout: drain(&out_rx),
+                    stderr: drain(&err_rx),
+                });
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Best-effort drain; the readers unblock once the killed
+                    // child's pipes close.
+                    let _ = drain(&out_rx);
+                    let _ = drain(&err_rx);
+                    return GhCallOutcome::TimedOut;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = drain(&out_rx);
+                let _ = drain(&err_rx);
+                return GhCallOutcome::Failed(format!("waiting for gh failed: {err}"));
+            }
+        }
+    }
+}
+
+/// Build and run one batched GraphQL query for a chunk of same-host sessions,
+/// returning `(session_id, Option<PrInfo>)` for each, the rate-limit snapshot,
+/// and whether the whole call hard-failed (spawn error / timeout / unparseable
+/// stdout — as opposed to a per-alias error, which is handled inline).
+fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
+    let (query, pos_repo) = build_chunk_query(planned, chunk);
+
+    // On a spawn failure / timeout we still finalize with no data (each session
+    // falls back to its stored result) rather than dropping the whole cycle.
+    let qarg = format!("query={query}");
+    let (data_json, stderr): (Option<serde_json::Value>, String) = match run_gh_with_timeout(
+        &["api", "graphql", "--hostname", host, "-f", &qarg],
+        GH_CALL_TIMEOUT,
+    ) {
+        GhCallOutcome::Completed(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // IMPORTANT: `gh api graphql` exits non-zero whenever the response
+            // carries any `errors` (e.g. one deleted-repo alias returns
+            // `repository: null` + NOT_FOUND), but `data` is still present. Parse
+            // stdout regardless of exit status; a single bad alias must not
+            // poison the whole batch.
+            (
+                serde_json::from_str::<serde_json::Value>(stdout.trim()).ok(),
+                stderr,
+            )
+        }
+        GhCallOutcome::TimedOut => (
+            None,
+            format!(
+                "gh api graphql timed out after {}s",
+                GH_CALL_TIMEOUT.as_secs()
+            ),
+        ),
+        GhCallOutcome::Failed(msg) => (None, format!("failed to run gh: {msg}")),
+    };
+    // Collapse both an absent `data` key and an explicit `data: null` (a real
+    // GraphQL execution-failure shape) to "no data", so both drive the
+    // hard-failure path and the preserve-last-known-PR fallback below.
+    let data = data_json
+        .as_ref()
+        .and_then(|j| j.get("data"))
+        .filter(|d| !d.is_null());
+    let hard_failed = data.is_none();
+    if hard_failed {
+        // Always log a total failure (not gated on stderr being non-empty), with
+        // the host and how many sessions it affected, so a stuck PR badge is
+        // traceable. Include GitHub's own error text when present.
+        let errors = data_json
+            .as_ref()
+            .and_then(|j| j.get("errors"))
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        logger::debug(&format!(
+            "[gh-integration] gh api graphql failed for host {host} ({} session(s)): {stderr}{}",
+            chunk.len(),
+            if errors.is_empty() {
+                String::new()
+            } else {
+                format!(" | errors: {errors}")
+            },
+        ));
+    }
+    let (out, rate) = parse_chunk_response(planned, chunk, &pos_repo, data);
+    (out, rate, hard_failed)
+}
+
+/// Build the batched GraphQL query for a chunk plus the per-position repo-alias
+/// index (`pos_repo[pos] == k` means session `s{pos}` lives under `r{k}`), so the
+/// response can be reparsed. Pure — no I/O — so it is unit-testable.
+fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize>) {
+    // Group the chunk's sessions by repo → one aliased `repository(...)` block
+    // each. `pos` is the session's index within the chunk (its `s{pos}` alias).
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> = Default::default();
+    for (pos, &i) in chunk.iter().enumerate() {
+        groups
+            .entry((planned[i].owner.clone(), planned[i].repo.clone()))
+            .or_default()
+            .push(pos);
+    }
+    let mut pos_repo: Vec<usize> = vec![0; chunk.len()];
+    for (k, (_, positions)) in groups.iter().enumerate() {
+        for &pos in positions {
+            pos_repo[pos] = k;
+        }
+    }
+
+    let mut q = String::from("{\n  rateLimit { cost remaining resetAt }\n");
+    for (k, ((owner, repo), positions)) in groups.iter().enumerate() {
+        q.push_str(&format!(
+            "  {}: repository(owner: {}, name: {}) {{\n",
+            repo_alias(k),
+            graphql_string(owner),
+            graphql_string(repo),
+        ));
+        for &pos in positions {
+            let p = &planned[chunk[pos]];
+            let qname = graphql_string(&format!("refs/heads/{}", p.branch));
+            q.push_str(&format!(
+                "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(first: 1, orderBy: {{field: CREATED_AT, direction: DESC}}) {{ nodes {{ number state title url }} }} }}\n",
+                ref_alias(pos),
+            ));
+            if p.emit_num
+                && let Some(known) = &p.known
+            {
+                q.push_str(&format!(
+                    "    {}: pullRequest(number: {}) {{ number state title url }}\n",
+                    num_alias(pos),
+                    known.pr_number,
+                ));
+            }
+        }
+        q.push_str("  }\n");
+    }
+    q.push_str("}\n");
+    (q, pos_repo)
+}
+
+/// Map a GraphQL `data` object (or `None` when the call failed) back to each
+/// chunk session's `(session_id, Option<PrInfo>)`, applying the per-session merge
+/// rule. A `null` repo/node (deleted repo or branch) resolves independently to
+/// that session's fallback, so one bad alias never poisons the batch. Pure — so
+/// it is unit-testable with a synthetic response.
+fn parse_chunk_response(
+    planned: &[Planned],
+    chunk: &[usize],
+    pos_repo: &[usize],
+    data: Option<&serde_json::Value>,
+) -> (Vec<(String, Option<PrInfo>)>, Option<RateLimitInfo>) {
+    let rate = data.and_then(parse_rate_limit);
+    let mut out = Vec::with_capacity(chunk.len());
+    for (pos, &i) in chunk.iter().enumerate() {
+        let p = &planned[i];
+        // Whole-call failure (`data` absent, not a per-alias null): preserve each
+        // session's last-known PR instead of reporting `None`, which the sidebar
+        // would render as "PR gone" and wipe a still-open badge. Mirrors the
+        // terminal-state fallback; the next successful cycle re-confirms it.
+        if data.is_none() {
+            out.push((
+                p.session_id.clone(),
+                p.known.as_ref().and_then(reconstruct_from_stored),
+            ));
+            continue;
+        }
+        let owner_repo = format!("{}/{}", p.owner, p.repo);
+        let repo_obj = data
+            .and_then(|d| d.get(repo_alias(pos_repo[pos]).as_str()))
+            .filter(|v| !v.is_null());
+        let ref_pr = repo_obj
+            .and_then(|r| r.get(ref_alias(pos).as_str()))
+            .and_then(|rf| rf.get("associatedPullRequests"))
+            .and_then(|a| a.get("nodes"))
+            .and_then(|n| n.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|node| parse_pr_json_value(node, &p.host, &owner_repo));
+        let num_pr = if p.emit_num {
+            repo_obj
+                .and_then(|r| r.get(num_alias(pos).as_str()))
+                .filter(|v| !v.is_null())
+                .and_then(|node| parse_pr_json_value(node, &p.host, &owner_repo))
+        } else {
+            None
+        };
+        out.push((p.session_id.clone(), merge_pr_result(p, ref_pr, num_pr)));
+    }
+    (out, rate)
+}
+
+/// Reconcile the head-ref discovery result and the by-number refresh into the
+/// single PR to report, matching the pre-batch behavior:
+///   - terminal + running: a strictly-newer follow-up PR wins, else the stored PR
+///   - open known: the newest PR by number wins (a newer PR opened on the same
+///     branch), else the by-number refresh (robust when the branch was deleted)
+///   - undiscovered: whatever the head-ref discovery found
+fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) -> Option<PrInfo> {
+    let Some(known) = &p.known else {
+        return ref_pr;
+    };
+    if p.is_terminal {
+        if let Some(r) = &ref_pr
+            && r.number > known.pr_number
+        {
+            return ref_pr;
+        }
+        return reconstruct_from_stored(known);
+    }
+    match (num_pr, ref_pr) {
+        (Some(rf), Some(nw)) => {
+            if nw.number > rf.number {
+                Some(nw)
+            } else {
+                Some(rf)
+            }
+        }
+        (Some(rf), None) => Some(rf),
+        (None, Some(nw)) => Some(nw),
+        // Both lookups came back empty for a KNOWN-open PR — this is a per-alias
+        // fetch failure (a null repo alias / transient GraphQL error), NOT a real
+        // close (GitHub returns the node with state CLOSED/MERGED, never null, for
+        // a real terminal PR). Preserve the last-known PR instead of wiping the
+        // badge, mirroring the whole-call-failure and terminal fallbacks.
+        (None, None) => reconstruct_from_stored(known),
+    }
+}
+
+/// Extract the `rateLimit` snapshot from a GraphQL `data` object.
+fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
+    let rl = data.get("rateLimit")?;
+    let remaining = rl.get("remaining")?.as_i64()?;
+    let reset_at = rl
+        .get("resetAt")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+    Some(RateLimitInfo {
+        remaining,
+        reset_at,
+    })
 }
 
 /// Reconstruct a PrInfo from stored data without a network call.
@@ -113,80 +627,8 @@ fn reconstruct_from_stored(stored: &StoredPr) -> Option<PrInfo> {
     })
 }
 
-/// Check a known PR by number using `gh pr view`.
-fn view_pr_by_number(
-    number: u64,
-    host: &str,
-    owner_repo: &str,
-    session_id: &str,
-) -> Option<PrInfo> {
-    let repo = gh_repo_arg(host, owner_repo);
-    let output = std::process::Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &repo,
-            "--json",
-            "number,state,title,url",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        logger::debug(&format!(
-            "[gh-integration] gh pr view #{number} failed for {session_id}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_pr_json_object(text.trim(), host, owner_repo)
-}
-
-/// Discover a PR by branch name using `gh pr list --state all`.
-fn discover_pr_by_branch(
-    branch: &str,
-    host: &str,
-    owner_repo: &str,
-    session_id: &str,
-) -> Option<PrInfo> {
-    let repo = gh_repo_arg(host, owner_repo);
-    let output = std::process::Command::new("gh")
-        .args([
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--repo",
-            &repo,
-            "--state",
-            "all",
-            "--json",
-            "number,state,title,url",
-            "--limit",
-            "1",
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        logger::debug(&format!(
-            "[gh-integration] gh pr list failed for {session_id}: {}",
-            String::from_utf8_lossy(&output.stderr).trim(),
-        ));
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let arr: Vec<serde_json::Value> = serde_json::from_str(text.trim()).ok()?;
-    let obj = arr.first()?;
-    parse_pr_json_value(obj, host, owner_repo)
-}
-
-/// Parse a single PR JSON object (from `gh pr view` output).
+/// Parse a single PR JSON object. Test-only helper.
+#[cfg(test)]
 fn parse_pr_json_object(json: &str, host: &str, owner_repo: &str) -> Option<PrInfo> {
     let obj: serde_json::Value = serde_json::from_str(json).ok()?;
     parse_pr_json_value(&obj, host, owner_repo)
@@ -356,32 +798,43 @@ pub fn run_pull_request_lookup_job(
     };
 
     let repo = gh_repo_arg(&lookup.host, &lookup.owner_repo);
-    let output = std::process::Command::new("gh")
-        .args([
+    let number = lookup.number.to_string();
+    // Bounded so a hung `gh pr view` (stalled network, credential prompt) can't
+    // strand the web CreateAgentFromPr Busy status forever.
+    let result = match run_gh_with_timeout(
+        &[
             "pr",
             "view",
-            &lookup.number.to_string(),
+            &number,
             "--repo",
             &repo,
             "--json",
             "number,title,state,headRefName",
-        ])
-        .output();
-    let result = match output {
-        Ok(output) if output.status.success() => parse_resolved_pull_request_json(
-            &String::from_utf8_lossy(&output.stdout),
-            project,
-            &lookup.host,
-            &lookup.owner_repo,
-            custom_name,
-        ),
-        Ok(output) => Err(format!(
+        ],
+        GH_CALL_TIMEOUT,
+    ) {
+        GhCallOutcome::Completed(output) if output.status.success() => {
+            parse_resolved_pull_request_json(
+                &String::from_utf8_lossy(&output.stdout),
+                project,
+                &lookup.host,
+                &lookup.owner_repo,
+                custom_name,
+            )
+        }
+        GhCallOutcome::Completed(output) => Err(format!(
             "Failed to resolve PR #{} from {}: {}",
             lookup.number,
             lookup.owner_repo,
             String::from_utf8_lossy(&output.stderr).trim()
         )),
-        Err(err) => Err(format!("Failed to run gh pr view: {err}")),
+        GhCallOutcome::TimedOut => Err(format!(
+            "gh pr view timed out after {}s resolving PR #{} from {}.",
+            GH_CALL_TIMEOUT.as_secs(),
+            lookup.number,
+            lookup.owner_repo,
+        )),
+        GhCallOutcome::Failed(msg) => Err(format!("Failed to run gh pr view: {msg}")),
     };
     let _ = worker_tx.send(WorkerEvent::PullRequestResolved {
         result,
@@ -433,6 +886,380 @@ fn parse_resolved_pull_request_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored(number: u64, state: &str) -> StoredPr {
+        StoredPr {
+            session_id: "s".to_string(),
+            pr_number: number,
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+            state: state.to_string(),
+            title: "Stored".to_string(),
+            url: format!("https://github.com/octocat/Hello-World/pull/{number}"),
+        }
+    }
+
+    fn planned(
+        session_id: &str,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        known: Option<StoredPr>,
+    ) -> Planned {
+        // Go through the real constructor so the is_terminal/emit_num rule is
+        // never duplicated between production and tests.
+        Planned::new(
+            session_id.to_string(),
+            "github.com".to_string(),
+            owner.to_string(),
+            repo.to_string(),
+            branch.to_string(),
+            known,
+        )
+    }
+
+    /// A ref-discovery node wrapped as the GraphQL shape `s{pos}_ref` resolves to.
+    fn ref_node(number: u64, state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "associatedPullRequests": {
+                "nodes": [ pr_node(number, state) ]
+            }
+        })
+    }
+
+    fn pr_node(number: u64, state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "state": state,
+            "title": format!("PR {number}"),
+            "url": format!("https://github.com/octocat/Hello-World/pull/{number}"),
+        })
+    }
+
+    #[test]
+    fn build_chunk_query_discovers_undiscovered_session() {
+        let ps = vec![planned("s0", "octocat", "Hello-World", "feat/x", None)];
+        let (q, pos_repo) = build_chunk_query(&ps, &[0]);
+        assert_eq!(pos_repo, vec![0]);
+        assert!(q.contains("rateLimit { cost remaining resetAt }"));
+        assert!(q.contains("r0: repository(owner: \"octocat\", name: \"Hello-World\")"));
+        // Branch with a slash must be JSON-escaped into a valid GraphQL string.
+        assert!(q.contains("s0_ref: ref(qualifiedName: \"refs/heads/feat/x\")"));
+        assert!(q.contains("CREATED_AT"));
+        // No known PR → no by-number alias.
+        assert!(!q.contains("s0_num"));
+    }
+
+    #[test]
+    fn build_chunk_query_open_known_emits_both_aliases() {
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "OPEN")),
+        )];
+        let (q, _) = build_chunk_query(&ps, &[0]);
+        assert!(q.contains("s0_ref: ref(qualifiedName:"));
+        assert!(q.contains("s0_num: pullRequest(number: 42)"));
+    }
+
+    #[test]
+    fn build_chunk_query_groups_by_repo() {
+        let ps = vec![
+            planned("s0", "octocat", "repo-a", "feat/a", None),
+            planned("s1", "octocat", "repo-b", "feat/b", None),
+        ];
+        let (q, pos_repo) = build_chunk_query(&ps, &[0, 1]);
+        // Two distinct repos → two aliased repository blocks.
+        assert!(q.contains("repository(owner: \"octocat\", name: \"repo-a\")"));
+        assert!(q.contains("repository(owner: \"octocat\", name: \"repo-b\")"));
+        assert_eq!(pos_repo.len(), 2);
+        assert_ne!(pos_repo[0], pos_repo[1]);
+    }
+
+    #[test]
+    fn build_and_parse_two_sessions_on_same_repo() {
+        // The core batching case: two agents on the SAME repo share one
+        // repository(...) block, each with its own aliased sub-fields, and
+        // parse_chunk_response must demultiplex both back to the right session.
+        let ps = vec![
+            planned("s0", "octocat", "Hello-World", "feat/a", None),
+            planned("s1", "octocat", "Hello-World", "feat/b", None),
+        ];
+        let chunk = [0usize, 1usize];
+        let (q, pos_repo) = build_chunk_query(&ps, &chunk);
+        // One shared repo block; both sessions' ref aliases live under it.
+        assert_eq!(q.matches("repository(owner:").count(), 1);
+        assert_eq!(pos_repo, vec![0, 0]);
+        assert!(q.contains("s0_ref: ref(qualifiedName: \"refs/heads/feat/a\")"));
+        assert!(q.contains("s1_ref: ref(qualifiedName: \"refs/heads/feat/b\")"));
+
+        let data = serde_json::json!({
+            "r0": { "s0_ref": ref_node(10, "OPEN"), "s1_ref": ref_node(20, "OPEN") },
+        });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
+        assert_eq!(by_id[&"s0".to_string()].as_ref().unwrap().number, 10);
+        assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 20);
+    }
+
+    #[test]
+    fn tighter_rate_limit_keeps_the_lower_remaining() {
+        let a = RateLimitInfo {
+            remaining: 500,
+            reset_at: None,
+        };
+        let b = RateLimitInfo {
+            remaining: 50,
+            reset_at: None,
+        };
+        // Whichever ordering, the tighter (fewer-remaining) snapshot wins.
+        assert_eq!(
+            tighter_rate_limit(Some(a.clone()), Some(b.clone()))
+                .unwrap()
+                .remaining,
+            50
+        );
+        assert_eq!(
+            tighter_rate_limit(Some(b), Some(a.clone()))
+                .unwrap()
+                .remaining,
+            50
+        );
+        // None cases pass through the present snapshot.
+        assert_eq!(
+            tighter_rate_limit(None, Some(a.clone())).unwrap().remaining,
+            500
+        );
+        assert_eq!(tighter_rate_limit(Some(a), None).unwrap().remaining, 500);
+        assert!(tighter_rate_limit(None, None).is_none());
+    }
+
+    #[test]
+    fn parse_chunk_response_preserves_known_pr_on_whole_call_failure() {
+        // data=None means the whole gh call failed; an OPEN known PR must NOT be
+        // wiped to None (which the UI reads as "PR gone") — keep last-known state.
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "OPEN")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let (results, rate) = parse_chunk_response(&ps, &chunk, &pos_repo, None);
+        let pr = results[0].1.as_ref().expect("kept last-known PR");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Open);
+        assert!(rate.is_none());
+    }
+
+    #[test]
+    fn parse_chunk_response_discovers_pr_and_rate_limit() {
+        let ps = vec![planned("s0", "octocat", "Hello-World", "feat/x", None)];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let data = serde_json::json!({
+            "rateLimit": { "remaining": 42, "resetAt": "2030-01-01T00:00:00Z" },
+            "r0": { "s0_ref": ref_node(7, "OPEN") },
+        });
+        let (results, rate) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        assert_eq!(results.len(), 1);
+        let pr = results[0].1.as_ref().expect("discovered pr");
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.state, PrState::Open);
+        assert_eq!(rate.expect("rate").remaining, 42);
+    }
+
+    #[test]
+    fn parse_chunk_response_open_prefers_newer_ref_pr() {
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "OPEN")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        // A newer PR (#43) exists on the branch; the by-number refresh still shows #42.
+        let data = serde_json::json!({
+            "r0": { "s0_ref": ref_node(43, "OPEN"), "s0_num": pr_node(42, "OPEN") },
+        });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        assert_eq!(results[0].1.as_ref().unwrap().number, 43);
+    }
+
+    #[test]
+    fn parse_chunk_response_open_survives_branch_deletion_on_merge() {
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "OPEN")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        // Branch deleted on squash-merge → ref is null, but by-number still resolves
+        // the now-MERGED PR (the case the pre-batch `gh pr view` handled).
+        let data = serde_json::json!({
+            "r0": { "s0_ref": serde_json::Value::Null, "s0_num": pr_node(42, "MERGED") },
+        });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let pr = results[0].1.as_ref().unwrap();
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    #[test]
+    fn parse_chunk_response_terminal_running_keeps_stored_unless_newer() {
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "MERGED")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        // Same PR still on the branch → keep the stored terminal PR, not a re-fetch.
+        let same = serde_json::json!({ "r0": { "s0_ref": ref_node(42, "MERGED") } });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same));
+        assert_eq!(results[0].1.as_ref().unwrap().number, 42);
+        // A strictly-newer follow-up PR (#50) replaces it.
+        let newer = serde_json::json!({ "r0": { "s0_ref": ref_node(50, "OPEN") } });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&newer));
+        let pr = results[0].1.as_ref().unwrap();
+        assert_eq!(pr.number, 50);
+        assert_eq!(pr.state, PrState::Open);
+    }
+
+    #[test]
+    fn parse_chunk_response_one_bad_repo_does_not_poison_the_batch() {
+        // s0's repo was deleted (r0: null + NOT_FOUND); s1 is fine in r1.
+        let ps = vec![
+            planned("s0", "octocat", "gone", "feat/a", None),
+            planned("s1", "octocat", "repo-b", "feat/b", None),
+        ];
+        let chunk = [0usize, 1usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let data = serde_json::json!({
+            "r0": serde_json::Value::Null,
+            "r1": { "s1_ref": ref_node(9, "OPEN") },
+        });
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data));
+        let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
+        assert!(by_id[&"s0".to_string()].is_none());
+        assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 9);
+    }
+
+    #[test]
+    fn parse_rate_limit_extracts_remaining_and_reset() {
+        let data = serde_json::json!({
+            "rateLimit": { "remaining": 4321, "resetAt": "2030-06-01T12:00:00Z" },
+        });
+        let rl = parse_rate_limit(&data).expect("rate limit");
+        assert_eq!(rl.remaining, 4321);
+        assert!(rl.reset_at.is_some());
+    }
+
+    #[test]
+    fn run_entries_terminal_exited_reconstructs_without_network() {
+        // A terminal + exited session is reconstructed from SQLite with no gh call
+        // (the worktree path is bogus, so any git/gh access would fail).
+        let entry = PrSyncEntry {
+            session_id: "s0".to_string(),
+            branch_name: "feat/done".to_string(),
+            worktree_path: "/nonexistent/dux-test-path".to_string(),
+            known_pr: Some(stored(42, "MERGED")),
+            agent_exited: true,
+        };
+        let (results, signals) = run_entries(
+            std::slice::from_ref(&entry),
+            &std::collections::HashMap::new(),
+        );
+        // Zero-network (terminal+exited) → no host was queried, so no signal.
+        assert!(signals.is_empty(), "no network call means no host signal");
+        assert_eq!(results.len(), 1);
+        let pr = results[0].1.as_ref().expect("reconstructed");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Merged);
+    }
+
+    #[test]
+    fn merge_pr_result_open_known_preserves_stored_on_double_null() {
+        // A per-alias null (transient error) yields (None, None) for a KNOWN-open
+        // PR: preserve the stored PR rather than wiping the badge.
+        let p = planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "OPEN")),
+        );
+        let merged = merge_pr_result(&p, None, None).expect("preserved");
+        assert_eq!(merged.number, 42);
+        assert_eq!(merged.state, PrState::Open);
+    }
+
+    #[test]
+    fn parse_chunk_response_preserves_terminal_known_pr_on_whole_call_failure() {
+        // The whole-call-failure fallback must also cover a CLOSED/terminal known
+        // PR (agent still running, so it was queried), not just OPEN.
+        let ps = vec![planned(
+            "s0",
+            "octocat",
+            "Hello-World",
+            "feat/x",
+            Some(stored(42, "CLOSED")),
+        )];
+        let chunk = [0usize];
+        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
+        let (results, _) = parse_chunk_response(&ps, &chunk, &pos_repo, None);
+        let pr = results[0].1.as_ref().expect("kept last-known terminal PR");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.state, PrState::Closed);
+    }
+
+    #[test]
+    fn run_command_with_timeout_kills_a_wedged_child() {
+        // A command that never exits must be killed at the timeout and reported as
+        // TimedOut, not hang the caller.
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let started = Instant::now();
+        let outcome = run_command_with_timeout(cmd, Duration::from_millis(200));
+        assert!(matches!(outcome, GhCallOutcome::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "must return promptly after the timeout, not block",
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_captures_output_and_reports_spawn_failure() {
+        let out = run_command_with_timeout(
+            {
+                let mut c = std::process::Command::new("sh");
+                c.args(["-c", "printf hello"]);
+                c
+            },
+            Duration::from_secs(5),
+        );
+        match out {
+            GhCallOutcome::Completed(o) => assert_eq!(&o.stdout, b"hello"),
+            _ => panic!("expected Completed with captured stdout"),
+        }
+        // A binary that doesn't exist → Failed (spawn error), not TimedOut.
+        let missing = run_command_with_timeout(
+            std::process::Command::new("dux-nonexistent-binary-xyz"),
+            Duration::from_secs(5),
+        );
+        assert!(matches!(missing, GhCallOutcome::Failed(_)));
+    }
 
     #[test]
     fn gh_repo_arg_uses_owner_repo_for_github_dot_com() {

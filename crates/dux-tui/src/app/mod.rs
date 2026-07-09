@@ -1736,6 +1736,8 @@ impl App {
             branch_sync_sessions,
             pr_sync_sessions,
             pr_sync_enabled,
+            pr_poll_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pr_backoff: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             refs_watcher: None,
             refs_watch_paths: HashMap::new(),
             resume_fallback_candidates: HashMap::new(),
@@ -3006,6 +3008,11 @@ impl App {
 
     pub(crate) fn reload_changed_files(&mut self) {
         let session_id = self.selected_session().map(|s| s.id.clone());
+        // Capture the previously-watched session BEFORE set_watched_session
+        // overwrites it, so we can tell a genuine focus change from an incidental
+        // reload of the already-selected session (commit, stage/discard, a
+        // file-watcher refresh, etc. all call this helper).
+        let previously_watched = self.engine.watched_session_id.clone();
         // The engine sets the watch (cheap, no git) and returns the worktree to
         // compute changed files for. The web computes this off-thread (the actor
         // thread serves every client), but the TUI is single-user on its own App
@@ -3019,9 +3026,16 @@ impl App {
             self.engine.unstaged_files = unstaged;
         }
         self.clamp_files_cursor();
-        // Opportunistically check PR status for the newly-selected session.
         if let Some(sid) = session_id {
-            self.engine.spawn_pr_check_for_session(&sid);
+            if previously_watched.as_deref() != Some(sid.as_str()) {
+                // Genuine focus change → tight foreground refresh.
+                self.engine.spawn_foreground_pr_check(&sid);
+            } else {
+                // Incidental reload of the already-focused session → keep the
+                // normal background spacing so file ops don't over-poll `gh`.
+                self.engine
+                    .spawn_pr_check_for_session(&sid, dux_core::engine::PR_CHECK_MIN_INTERVAL);
+            }
         }
     }
 
@@ -3520,6 +3534,8 @@ impl App {
         self.last_snapshot_id = None;
         self.last_pty_size = (0, 0);
         self.terminal_selection = None;
+        // Switching tabs foregrounds the owning agent — refresh its PR status.
+        self.engine.spawn_foreground_pr_check(session_id);
     }
 
     /// Drop a session's focused-tab entry (called on session teardown so

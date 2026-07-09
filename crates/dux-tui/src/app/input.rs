@@ -5732,6 +5732,8 @@ impl App {
             ));
             return Ok(());
         };
+        // Activating brings the agent to the foreground — refresh its PR status.
+        self.engine.spawn_foreground_pr_check(&session_id);
         // Resolve the FOCUSED tab so activation acts on the visible tab.
         let tab_id = self.focused_tab_id(&session_id);
         if self.engine.providers.contains_key(&tab_id) {

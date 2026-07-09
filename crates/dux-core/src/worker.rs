@@ -340,6 +340,9 @@ pub enum WorkerEvent {
     ResourceStatsReady(Vec<ResourceStats>),
     GhStatusChecked(crate::model::GhStatus),
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
+    /// A one-shot PR check worker panicked; carries the session id so its
+    /// `InFlightKey::PrCheck` guard is cleared without wiping the PR badge.
+    PrCheckAborted(String),
     PullRequestResolved {
         result: Result<ResolvedPullRequest, String>,
         /// Correlation id for a web `HandlerStatusOp` whose final is resolved in

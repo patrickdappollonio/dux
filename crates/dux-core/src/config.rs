@@ -205,6 +205,46 @@ pub const DEFAULT_SHUTDOWN_TIMEOUT_SECONDS: u16 = 30;
 /// misconfiguration from wedging shutdown while still allowing any sane grace.
 pub const MAX_SHUTDOWN_TIMEOUT_SECONDS: u16 = 600;
 
+/// Default seconds between blind GitHub PR-status safety polls. Deliberately
+/// slow: most PR updates arrive via events (a branch push, or focusing an
+/// agent), so this backstop only needs to catch changes made on GitHub itself.
+pub const DEFAULT_PR_POLL_INTERVAL_SECONDS: u16 = 180;
+
+/// Hard ceiling on the PR poll interval (6 hours). Already far slower than any
+/// useful safety net, so cap there to keep a fat-fingered value from silently
+/// neutering the backstop while still allowing any sane interval.
+pub const MAX_PR_POLL_INTERVAL_SECONDS: u16 = 21_600;
+
+/// Floor on a *nonzero* PR poll interval. `0` disables the blind poll entirely;
+/// any positive value below this is clamped up so a mistyped tiny value (e.g.
+/// `1`) can't hammer the GitHub API every second.
+pub const MIN_PR_POLL_INTERVAL_SECONDS: u16 = 30;
+
+/// Normalize a configured `pr_poll_interval_seconds`: `0` is a valid
+/// "disable the blind poll" value and is preserved; any other value is clamped
+/// into `[MIN_PR_POLL_INTERVAL_SECONDS, MAX_PR_POLL_INTERVAL_SECONDS]` (with a
+/// warning) so a fat-fingered entry can't hammer the API or neuter the backstop.
+pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
+    if seconds == 0 {
+        return 0;
+    }
+    if seconds > MAX_PR_POLL_INTERVAL_SECONDS {
+        crate::logger::warn(&format!(
+            "pr_poll_interval_seconds = {seconds} exceeds the maximum of \
+             {MAX_PR_POLL_INTERVAL_SECONDS}s and is being clamped."
+        ));
+        return MAX_PR_POLL_INTERVAL_SECONDS;
+    }
+    if seconds < MIN_PR_POLL_INTERVAL_SECONDS {
+        crate::logger::warn(&format!(
+            "pr_poll_interval_seconds = {seconds} is below the minimum of \
+             {MIN_PR_POLL_INTERVAL_SECONDS}s and is being clamped (use 0 to disable the poll)."
+        ));
+        return MIN_PR_POLL_INTERVAL_SECONDS;
+    }
+    seconds
+}
+
 /// Convert a configured `shutdown_timeout_seconds` into the grace `Duration`
 /// every shutdown path uses, clamped to [`MAX_SHUTDOWN_TIMEOUT_SECONDS`]. Logs a
 /// warning when the configured value is above the ceiling so the operator learns
@@ -383,6 +423,12 @@ pub struct UiConfig {
     pub show_diff_line_numbers: bool,
     pub diff_tab_width: u16,
     pub github_integration: bool,
+    /// Seconds between blind GitHub PR-status safety polls. Most updates are
+    /// event-driven (a branch push, or focusing an agent), so this is only the
+    /// backstop for changes made on GitHub itself. `0` disables the blind poll
+    /// entirely (updates then come only from those events). Clamped to
+    /// [`MAX_PR_POLL_INTERVAL_SECONDS`].
+    pub pr_poll_interval_seconds: u16,
     /// Whether selecting text in the web terminal auto-copies it to the
     /// clipboard (X11-style "highlight to copy"). Toggling it from the web
     /// command palette persists the new value here. Web-only behavior.
@@ -516,6 +562,7 @@ impl Default for UiConfig {
             show_diff_line_numbers: false,
             diff_tab_width: 4,
             github_integration: true,
+            pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
             copy_on_select: true,
             auto_reopen_agents: false,
             show_changes_pane: true,
@@ -991,6 +1038,7 @@ impl Default for Config {
                 show_diff_line_numbers: false,
                 diff_tab_width: 4,
                 github_integration: true,
+                pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
                 copy_on_select: true,
                 auto_reopen_agents: false,
                 show_changes_pane: true,
@@ -2118,5 +2166,51 @@ mod agent_tabs_cap_tests {
     #[test]
     fn normalized_agent_tabs_max_passes_through_sane_values() {
         assert_eq!(normalized_agent_tabs_max(8), 8);
+    }
+
+    #[test]
+    fn pr_poll_interval_default_is_180() {
+        assert_eq!(DEFAULT_PR_POLL_INTERVAL_SECONDS, 180);
+        assert_eq!(
+            UiConfig::default().pr_poll_interval_seconds,
+            DEFAULT_PR_POLL_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn normalized_pr_poll_interval_preserves_zero_as_disabled() {
+        // 0 is a valid "disable the blind poll" value, NOT substituted with a default.
+        assert_eq!(normalized_pr_poll_interval(0), 0);
+    }
+
+    #[test]
+    fn normalized_pr_poll_interval_clamps_oversized_values() {
+        assert_eq!(
+            normalized_pr_poll_interval(u16::MAX),
+            MAX_PR_POLL_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn normalized_pr_poll_interval_passes_through_sane_values() {
+        assert_eq!(normalized_pr_poll_interval(180), 180);
+    }
+
+    #[test]
+    fn normalized_pr_poll_interval_clamps_small_nonzero_up_to_floor() {
+        assert_eq!(normalized_pr_poll_interval(1), MIN_PR_POLL_INTERVAL_SECONDS);
+        // The floor itself passes through unchanged.
+        assert_eq!(
+            normalized_pr_poll_interval(MIN_PR_POLL_INTERVAL_SECONDS),
+            MIN_PR_POLL_INTERVAL_SECONDS
+        );
+    }
+
+    #[test]
+    fn normalized_pr_poll_interval_allows_exact_ceiling() {
+        assert_eq!(
+            normalized_pr_poll_interval(MAX_PR_POLL_INTERVAL_SECONDS),
+            MAX_PR_POLL_INTERVAL_SECONDS
+        );
     }
 }

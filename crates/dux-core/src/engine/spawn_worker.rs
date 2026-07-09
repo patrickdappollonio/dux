@@ -378,7 +378,8 @@ impl Engine {
     /// in-flight state and callers commonly spawn them at bootstrap.
     ///
     /// `catch_unwind` runs once per iteration; with the in-tree loop
-    /// intervals measured in seconds (2s, 10s, 45s) the overhead is
+    /// intervals measured in seconds (2s, 10s, and the configurable PR-sync
+    /// interval — 180s default, up to 21600s, 0 = disabled) the overhead is
     /// negligible and not worth optimising.
     pub fn spawn_loop_worker<F>(&self, spec: LoopWorkerSpec, mut body: F)
     where

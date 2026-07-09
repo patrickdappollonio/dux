@@ -170,7 +170,7 @@ Each macro can be scoped to the agent pane, the companion terminal, or both.
 
 The right pane is a full git staging area. Stage and unstage files, view syntax-highlighted diffs, write your commit message, push, and pull, all without leaving dux. Want help wording it? Just ask your agent in its terminal to draft the commit for you.
 
-**PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface.
+**PR tracking:** With the `gh` CLI installed, dux tracks pull requests for your agent branches and shows status pills right in the interface. Updates are event-driven (a push or focusing an agent refreshes its PR) with a slow batched safety poll, so it stays current without burning through your GitHub API quota.
 
 ### Companion Terminals
 

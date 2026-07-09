@@ -580,6 +580,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.github_integration),
         },
         ConfigEntry::Field {
+            key: "pr_poll_interval_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds between blind GitHub PR-status safety polls.\n# Most PR updates arrive from events (pushing a branch, or focusing an\n# agent), so this is only the backstop for changes made on GitHub itself.\n# Each cycle is batched into as few GraphQL requests as possible (one per\n# host, up to ~100 PRs each) to stay cheap on your API quota.\n# Set to 0 to disable the blind poll (updates then come only from events).",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.pr_poll_interval_seconds),
+        },
+        ConfigEntry::Field {
             key: "copy_on_select",
             comment: Some(CommentSource::Static(
                 "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; a right-click menu and Ctrl-Shift-C /\n# Ctrl-Insert copy regardless. Toggle at runtime from the web command palette.",
@@ -1367,6 +1374,7 @@ mod tests {
         assert!(rendered.contains("args = [\"-l\", \"-c\"]"));
         assert!(rendered.contains("[ui]"));
         assert!(rendered.contains("agent_scrollback_lines = 10000"));
+        assert!(rendered.contains("pr_poll_interval_seconds = 180"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("copy_on_select = true"));
         assert!(rendered.contains("auto_reopen_agents = false"));
