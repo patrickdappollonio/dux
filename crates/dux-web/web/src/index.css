@@ -66,10 +66,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* The working-agent name shimmer, a greyscale "loading" sweep that dims the name
-   and runs a soft white highlight through it (see --dux-shimmer-* below). Neutral
-   so it sits quietly in the UI. One of two "working" cues on the row (the Bot icon
-   also bobs).
+/* The working-agent name shimmer, a greyscale "loading" sweep that keeps the name
+   bright white and runs a soft grey highlight through it (see --dux-shimmer-*
+   below). Neutral so it sits quietly in the UI. One of two "working" cues on the
+   row (the Bot icon also bobs).
 
    The machinery is ALWAYS on the name, only the STATE toggles (.agent-name-shimmer
    --on), so the fill can cross-fade instead of snapping. Idle, the fill is
@@ -77,8 +77,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    behind the opaque fill; the sweep animation is present but paused. Working,
    `--on` makes the fill transparent (revealing the moving gradient) and resumes
    the sweep. When work stops the `transition` below eases the fill from transparent
-   back to the solid colour, so the name fades back to bright text instead of
-   snapping from the grey shimmer. `background-clip: text` paints the gradient
+   back to the solid colour, so the name settles back to solid text instead of
+   snapping out of the shimmer. `background-clip: text` paints the gradient
    through the glyphs; the keyframe slides it so the highlight travels left to
    right. */
 .agent-name-shimmer {
@@ -190,14 +190,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-accent-foreground: oklch(0.205 0 0);
     --sidebar-border: oklch(0.922 0 0);
     --sidebar-ring: oklch(0.708 0 0);
-    /* Greyscale shimmer for the working-agent name: the text dims to `base`
-       (muted grey) while `bright` (white) is the highlight that sweeps through,
-       `accent` the transition between them. Neutral to match the app's greyscale
-       palette. (For a "dark through" look instead, swap so `bright` is darker
-       than `base`.) Constant across light/dark since the app is dark-only. */
-    --dux-shimmer-base: oklch(0.62 0 0);
+    /* Greyscale shimmer for the working-agent name: the name rests at `base`
+       (white) and a `bright` (muted grey) highlight sweeps through it, `accent`
+       the transition between them. This is the "dark through" look — `bright` is
+       darker than `base` — so a soft grey band travels across bright white text.
+       Neutral to match the app's greyscale palette. Constant across light/dark
+       since the app is dark-only. */
+    --dux-shimmer-base: oklch(1 0 0);
     --dux-shimmer-accent: oklch(0.8 0 0);
-    --dux-shimmer-bright: oklch(1 0 0);
+    --dux-shimmer-bright: oklch(0.62 0 0);
 }
 
 .dark {
@@ -233,9 +234,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
     /* Greyscale shimmer for the working-agent name (see :root above). */
-    --dux-shimmer-base: oklch(0.62 0 0);
+    --dux-shimmer-base: oklch(1 0 0);
     --dux-shimmer-accent: oklch(0.8 0 0);
-    --dux-shimmer-bright: oklch(1 0 0);
+    --dux-shimmer-bright: oklch(0.62 0 0);
 }
 
 /* Slim the xterm scrollbar so it doesn't dominate the terminal column. xterm 6
