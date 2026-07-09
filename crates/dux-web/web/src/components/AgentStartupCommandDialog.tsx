@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeAgentStartupCommand,
   updateProjectSettings,
@@ -80,7 +81,13 @@ export function AgentStartupCommandDialog() {
   const { spine, agentStartupCommandTarget } = useDux()
   const session = spine?.sessions.find((s) => s.id === agentStartupCommandTarget)
   const project = spine?.projects.find((p) => p.id === session?.project_id)
-  const open = agentStartupCommandTarget !== null
+  // Closes the dialog when the agent or its project vanishes from the
+  // ViewModel; see the hook.
+  const open = useVanishedTargetGuard(
+    agentStartupCommandTarget !== null,
+    session !== undefined && project !== undefined,
+    closeAgentStartupCommand,
+  )
 
   return (
     <Dialog

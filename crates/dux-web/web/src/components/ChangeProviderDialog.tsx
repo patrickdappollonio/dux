@@ -16,6 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   changeAgentProvider,
   closeChangeProvider,
@@ -97,8 +98,15 @@ function ChangeProviderForm({
 // the server re-validates the choice.
 export function ChangeProviderDialog() {
   const { changeProviderTarget, spine, bootstrap } = useDux()
-  const open = changeProviderTarget !== null
   const session = spine?.sessions.find((s) => s.id === changeProviderTarget)
+  // Closes the dialog when the agent vanishes from the ViewModel; this is
+  // orthogonal to the save flow above, which deliberately stays open on a
+  // rejected save. See the hook.
+  const open = useVanishedTargetGuard(
+    changeProviderTarget !== null,
+    session !== undefined,
+    closeChangeProvider,
+  )
 
   return (
     <Dialog

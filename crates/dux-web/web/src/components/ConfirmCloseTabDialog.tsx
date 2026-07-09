@@ -1,5 +1,3 @@
-import { useEffect } from "react"
-
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -9,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a tab. Closing ALWAYS confirms (matching the TUI):
@@ -35,17 +34,13 @@ export function ConfirmCloseTabDialog() {
     ? liveTabs <= 1
     : liveTabs === 0
 
-  // If the tab (or its whole session) vanishes from the ViewModel while the
-  // dialog is open (deleted from another client, or the tab already closed),
-  // drop the modal instead of lingering on a stale target — the same
-  // vanished-target guard the sibling confirm dialogs use.
-  useEffect(() => {
-    if (closeTabTarget && !tab) {
-      closeCloseTab()
-    }
-  }, [closeTabTarget, tab])
-
-  const isOpen = closeTabTarget !== null && tab !== undefined
+  // Closes the dialog when the tab (or its whole session) vanishes from the
+  // ViewModel; see the hook.
+  const isOpen = useVanishedTargetGuard(
+    closeTabTarget !== null,
+    tab !== undefined,
+    closeCloseTab,
+  )
 
   function handleConfirm() {
     if (!closeTabTarget) return

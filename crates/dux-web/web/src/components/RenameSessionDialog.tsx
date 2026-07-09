@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import {
   closeRename,
@@ -24,9 +25,16 @@ import {
 // the new-agent dialog, so the input stays fully controlled.
 export function RenameSessionDialog() {
   const { renameTarget, renameDraft, spine } = useDux()
-  const open = renameTarget !== null
   const session = spine?.sessions.find((s) => s.id === renameTarget)
   const branchName = session?.branch_name ?? ""
+  // Closes the dialog when the agent vanishes from the ViewModel: renaming a
+  // deleted agent is moot, and the draft lives in the store so the store's
+  // close already handles it. See the hook.
+  const open = useVanishedTargetGuard(
+    renameTarget !== null,
+    session !== undefined,
+    closeRename,
+  )
 
   // Empty is allowed (clears the title). A non-empty invalid name disables save.
   const invalidNonEmpty =

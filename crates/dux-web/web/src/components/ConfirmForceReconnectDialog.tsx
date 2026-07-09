@@ -1,5 +1,3 @@
-import { useEffect } from "react"
-
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -9,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeForceReconnect,
   reconnectSession,
@@ -24,18 +23,16 @@ export function ConfirmForceReconnectDialog() {
   const { forceReconnectTarget, spine } = useDux()
 
   // Resolve the session from the ViewModel so an agent deleted while the dialog
-  // is open closes it instead of confirming against a gone target (mirrors the
-  // vanished-target guard in AgentInfoDialog).
+  // is open closes it instead of confirming against a gone target.
   const session = forceReconnectTarget
     ? spine?.sessions.find((s) => s.id === forceReconnectTarget)
     : undefined
-  useEffect(() => {
-    if (forceReconnectTarget && !session) {
-      closeForceReconnect()
-    }
-  }, [forceReconnectTarget, session])
-
-  const isOpen = forceReconnectTarget !== null && session !== undefined
+  // Closes the dialog when the agent vanishes from the ViewModel; see the hook.
+  const isOpen = useVanishedTargetGuard(
+    forceReconnectTarget !== null,
+    session !== undefined,
+    closeForceReconnect,
+  )
   const name = session ? session.title || session.branch_name : ""
 
   function handleConfirm() {

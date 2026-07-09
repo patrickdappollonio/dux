@@ -1,5 +1,4 @@
 import { TriangleAlert } from "lucide-react"
-import { useEffect } from "react"
 
 import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -10,6 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { branchDrift } from "@/lib/agentTabs"
 import { formatDisplayDate } from "@/lib/projectInfo"
 import { closeAgentInfo, useDux } from "@/lib/store"
@@ -28,23 +28,19 @@ function statusLabel(status: SessionView["status"]): string {
 export function AgentInfoDialog() {
   const { agentInfoTarget, spine } = useDux()
 
-  // Derive the session from the ViewModel so an agent removed while the dialog is
-  // open closes it gracefully via the effect below, mirroring the project info
-  // dialog's vanished-target handling.
+  // Derive the session from the ViewModel so an agent removed while the dialog
+  // is open closes it gracefully, mirroring the project info dialog.
   let session: SessionView | undefined
   if (agentInfoTarget && spine) {
     session = spine.sessions.find((s) => s.id === agentInfoTarget)
   }
 
-  // If the target was set but no longer exists in the ViewModel, the agent was
-  // removed. Drop the modal so it doesn't linger pointing at a gone agent.
-  useEffect(() => {
-    if (agentInfoTarget && !session) {
-      closeAgentInfo()
-    }
-  }, [agentInfoTarget, session])
-
-  const isOpen = agentInfoTarget !== null && session !== undefined
+  // Closes the dialog when the agent vanishes from the ViewModel; see the hook.
+  const isOpen = useVanishedTargetGuard(
+    agentInfoTarget !== null,
+    session !== undefined,
+    closeAgentInfo,
+  )
 
   function handleOpenChange(open: boolean) {
     if (!open) closeAgentInfo()

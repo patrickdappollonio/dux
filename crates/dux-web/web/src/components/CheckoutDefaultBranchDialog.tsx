@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   checkoutDefaultBranch,
   closeCheckoutDefaultBranch,
@@ -21,9 +22,15 @@ import {
 export function CheckoutDefaultBranchDialog() {
   const { checkoutDefaultBranchTarget, spine } = useDux()
 
-  const isOpen = checkoutDefaultBranchTarget !== null
   const project = spine?.projects.find(
     (p) => p.id === checkoutDefaultBranchTarget,
+  )
+  // Closes the dialog when the project vanishes from the ViewModel: checking
+  // out a branch of a project that no longer exists is moot. See the hook.
+  const isOpen = useVanishedTargetGuard(
+    checkoutDefaultBranchTarget !== null,
+    project !== undefined,
+    closeCheckoutDefaultBranch,
   )
   const name = project?.name ?? "this project"
 

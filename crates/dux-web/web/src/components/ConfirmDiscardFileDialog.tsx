@@ -1,5 +1,3 @@
-import { useEffect } from "react"
-
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -8,6 +6,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDiscard, discardFile, useDux } from "@/lib/store"
 
 // Confirmation before discarding an unstaged file's changes. The TUI confirms
@@ -18,23 +17,19 @@ import { closeDiscard, discardFile, useDux } from "@/lib/store"
 export function ConfirmDiscardFileDialog() {
   const { discardTarget, changes } = useDux()
 
-  // If the file leaves the unstaged list while the dialog is open (committed
-  // or staged elsewhere, or already discarded), close rather than linger on a
-  // stale path with possibly-wrong restore-vs-DELETE copy. Mirrors the
-  // vanished-target handling in ConfirmDeleteTerminalDialog; the external-store
-  // call is not a React setState, so the set-state-in-effect rule doesn't bite.
   // Trust the changes slice only when it belongs to the discard target's session.
   const stillUnstaged =
     discardTarget !== null &&
     changes.sessionId === discardTarget.sessionId &&
     changes.unstaged.some((f) => f.path === discardTarget.path)
-  useEffect(() => {
-    if (discardTarget && !stillUnstaged) {
-      closeDiscard()
-    }
-  }, [discardTarget, stillUnstaged])
-
-  const isOpen = discardTarget !== null && stillUnstaged
+  // Closes the dialog when the file leaves the unstaged list (committed or
+  // staged elsewhere, or already discarded), rather than lingering on a stale
+  // path with possibly-wrong restore-vs-DELETE copy; see the hook.
+  const isOpen = useVanishedTargetGuard(
+    discardTarget !== null,
+    stillUnstaged,
+    closeDiscard,
+  )
   const path = discardTarget?.path ?? ""
   const untracked = discardTarget?.untracked ?? false
 

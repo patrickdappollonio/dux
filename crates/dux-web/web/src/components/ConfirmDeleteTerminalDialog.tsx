@@ -1,5 +1,3 @@
-import { useEffect } from "react"
-
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -8,6 +6,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeDeleteTerminal,
   deleteTerminal,
@@ -37,16 +36,13 @@ export function ConfirmDeleteTerminalDialog() {
     }
   }
 
-  // If the target was set but no longer exists in the ViewModel, the terminal
-  // already closed (its process exited). Drop the pending confirmation so the
-  // dialog doesn't linger pointing at a dead terminal.
-  useEffect(() => {
-    if (deleteTerminalTarget && !terminal) {
-      closeDeleteTerminal()
-    }
-  }, [deleteTerminalTarget, terminal])
-
-  const isOpen = deleteTerminalTarget !== null && terminal !== undefined
+  // Closes the dialog when the terminal vanishes from the ViewModel (its
+  // process exited); see the hook.
+  const isOpen = useVanishedTargetGuard(
+    deleteTerminalTarget !== null,
+    terminal !== undefined,
+    closeDeleteTerminal,
+  )
   // The title names the STATIC label like the TUI's prompt does ("delete
   // Terminal 1?"); the running command appears in the warning body instead —
   // avoiding the redundant "Close vim?" + "vim is running…" phrasing.

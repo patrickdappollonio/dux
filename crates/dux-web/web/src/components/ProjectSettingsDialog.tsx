@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { envToText, parseEnv } from "@/lib/env"
 import { closeProjectSettings, updateProjectSettings, useDux } from "@/lib/store"
 import type { PatchProjectBody } from "@/lib/projectsApi"
@@ -161,9 +162,16 @@ function ProjectSettingsForm({
 
 export function ProjectSettingsDialog() {
   const { spine, bootstrap, projectSettingsTarget } = useDux()
-  const open = projectSettingsTarget !== null
   const project = spine?.projects.find(
     (p) => p.id === projectSettingsTarget,
+  )
+  // Closes the dialog when the project vanishes from the ViewModel; this is
+  // orthogonal to the save flow above, which deliberately stays open on a
+  // rejected save. See the hook.
+  const open = useVanishedTargetGuard(
+    projectSettingsTarget !== null,
+    project !== undefined,
+    closeProjectSettings,
   )
 
   return (
