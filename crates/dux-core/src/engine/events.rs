@@ -4552,6 +4552,16 @@ mod tests {
                 reset_at: Some(Utc::now() + chrono::Duration::seconds(120)),
             }),
             hard_failed,
+            rate_limited: false,
+        }
+    }
+
+    fn rate_limited_signal(host: &str) -> crate::gh::HostSignal {
+        crate::gh::HostSignal {
+            host: host.to_string(),
+            rate: None,
+            hard_failed: true,
+            rate_limited: true,
         }
     }
 
@@ -4569,9 +4579,40 @@ mod tests {
             .expect("backoff set");
         let secs = until.saturating_duration_since(Instant::now()).as_secs();
         assert!((90..=130).contains(&secs), "backoff ~120s, got {secs}s");
+        // Info-toned (self-dismissing), keyed per host, and worded as rate-limiting.
         match rx.try_recv() {
-            Ok(WorkerEvent::CommandWorkerStarted(s)) => assert!(s.key.is_some()),
-            _ => panic!("expected a keyed quota-low warning"),
+            Ok(WorkerEvent::CommandWorkerStarted(s)) => {
+                assert!(s.key.is_some());
+                assert_eq!(s.tone, crate::statusline::StatusTone::Info);
+                assert!(s.message.contains("rate limit"), "got: {}", s.message);
+            }
+            _ => panic!("expected a keyed quota-low notice"),
+        }
+    }
+
+    #[test]
+    fn apply_pr_backoff_rate_limited_says_so_and_backs_off_longer() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = backoff_map();
+        Engine::apply_pr_backoff(&shared, &[rate_limited_signal("github.com")], &tx);
+        // A rate-limit hard failure pauses for the longer window, not the 60s one.
+        let until = *shared
+            .lock()
+            .unwrap()
+            .get("github.com")
+            .expect("backoff set");
+        let secs = until.saturating_duration_since(Instant::now()).as_secs();
+        assert!(secs > 120, "rate-limit backoff should be long, got {secs}s");
+        match rx.try_recv() {
+            Ok(WorkerEvent::CommandWorkerStarted(s)) => {
+                assert_eq!(s.tone, crate::statusline::StatusTone::Info);
+                assert!(
+                    s.message.to_lowercase().contains("rate-limiting"),
+                    "got: {}",
+                    s.message,
+                );
+            }
+            _ => panic!("expected a keyed rate-limit notice"),
         }
     }
 
@@ -4622,7 +4663,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_pr_backoff_clears_and_announces_recovery_per_host() {
+    fn apply_pr_backoff_clears_backed_off_host_silently() {
         let (tx, rx) = std::sync::mpsc::channel();
         let shared = backoff_map();
         shared.lock().unwrap().insert(
@@ -4638,12 +4679,9 @@ mod tests {
             !shared.lock().unwrap().contains_key("github.com"),
             "healthy signal clears that host's backoff",
         );
-        match rx.try_recv() {
-            Ok(WorkerEvent::CommandWorkerStarted(s)) => {
-                assert!(s.key.is_some(), "recovery clear must be keyed")
-            }
-            _ => panic!("expected a keyed recovery message"),
-        }
+        // No "resumed" toast: the Info-toned pause notice already auto-cleared, so a
+        // fresh message on recovery would be stale.
+        assert!(rx.try_recv().is_err(), "recovery must be silent");
     }
 
     #[test]

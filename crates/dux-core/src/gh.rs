@@ -34,6 +34,10 @@ pub struct HostSignal {
     /// A whole-call failure (spawn error / timeout / unparseable-or-null data) on
     /// at least one of this host's chunks.
     pub hard_failed: bool,
+    /// The failure looked like GitHub rate-limiting (a 403 / secondary limit, or a
+    /// `RATE_LIMITED` GraphQL error), as opposed to a network/`gh` error. Lets the
+    /// status message say so instead of a vague "network or gh error".
+    pub rate_limited: bool,
 }
 
 /// One batched-sync outcome: the per-session PR results plus a per-host signal
@@ -41,8 +45,14 @@ pub struct HostSignal {
 type PrSyncOutcome = (Vec<(String, Option<PrInfo>)>, Vec<HostSignal>);
 
 /// One chunk's outcome: per-session results, the chunk's `rateLimit` snapshot,
-/// and whether the whole call hard-failed. Aggregated per host by `run_entries`.
-type ChunkOutcome = (Vec<(String, Option<PrInfo>)>, Option<RateLimitInfo>, bool);
+/// whether the whole call hard-failed, and whether that failure looked like
+/// rate-limiting. Aggregated per host by `run_entries`.
+type ChunkOutcome = (
+    Vec<(String, Option<PrInfo>)>,
+    Option<RateLimitInfo>,
+    bool,
+    bool,
+);
 
 /// Snapshot of the active per-host backoff windows (`host -> until`) passed into
 /// a sync so backed-off hosts are skipped (their sessions keep last-known PRs)
@@ -227,15 +237,17 @@ fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutc
 
         let mut rate: Option<RateLimitInfo> = None;
         let mut hard_failed = false;
+        let mut rate_limited = false;
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         for i in idxs {
             let cost = if planned[i].emit_num { 2 } else { 1 };
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
-                let (r, rl, failed) = run_chunk(&host, &planned, &chunk);
+                let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
                 results.extend(r);
                 rate = tighter_rate_limit(rate, rl);
                 hard_failed |= failed;
+                rate_limited |= limited;
                 chunk.clear();
                 alias_count = 0;
             }
@@ -243,15 +255,17 @@ fn run_entries(entries: &[PrSyncEntry], backoff: &BackoffSnapshot) -> PrSyncOutc
             alias_count += cost;
         }
         if !chunk.is_empty() {
-            let (r, rl, failed) = run_chunk(&host, &planned, &chunk);
+            let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
             results.extend(r);
             rate = tighter_rate_limit(rate, rl);
             hard_failed |= failed;
+            rate_limited |= limited;
         }
         signals.push(HostSignal {
             host,
             rate,
             hard_failed,
+            rate_limited,
         });
     }
 
@@ -432,6 +446,7 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         .and_then(|j| j.get("data"))
         .filter(|d| !d.is_null());
     let hard_failed = data.is_none();
+    let mut rate_limited = false;
     if hard_failed {
         // Always log a total failure (not gated on stderr being non-empty), with
         // the host and how many sessions it affected, so a stuck PR badge is
@@ -441,8 +456,12 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
             .and_then(|j| j.get("errors"))
             .map(|e| e.to_string())
             .unwrap_or_default();
+        // Distinguish rate-limiting (a 403 / secondary limit, or a RATE_LIMITED
+        // GraphQL error) from a generic network/gh failure so the status message
+        // can say which. Scan gh's stderr and the GraphQL errors payload.
+        rate_limited = looks_rate_limited(&stderr) || looks_rate_limited(&errors);
         logger::debug(&format!(
-            "[gh-integration] gh api graphql failed for host {host} ({} session(s)): {stderr}{}",
+            "[gh-integration] gh api graphql failed for host {host} ({} session(s), rate_limited={rate_limited}): {stderr}{}",
             chunk.len(),
             if errors.is_empty() {
                 String::new()
@@ -452,7 +471,17 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         ));
     }
     let (out, rate) = parse_chunk_response(planned, chunk, &pos_repo, data);
-    (out, rate, hard_failed)
+    (out, rate, hard_failed, rate_limited)
+}
+
+/// Heuristic: does this `gh`/GraphQL failure text indicate GitHub rate-limiting
+/// (a primary/secondary API rate limit) rather than a plain network/`gh` error?
+fn looks_rate_limited(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("rate limit")
+        || t.contains("rate_limited")
+        || t.contains("secondary rate")
+        || t.contains("abuse detection")
 }
 
 /// Build the batched GraphQL query for a chunk plus the per-position repo-alias
@@ -1002,6 +1031,26 @@ mod tests {
         let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
         assert_eq!(by_id[&"s0".to_string()].as_ref().unwrap().number, 10);
         assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 20);
+    }
+
+    #[test]
+    fn looks_rate_limited_detects_github_limit_messages() {
+        assert!(looks_rate_limited(
+            "HTTP 403: API rate limit exceeded for user"
+        ));
+        assert!(looks_rate_limited(
+            "You have exceeded a secondary rate limit"
+        ));
+        assert!(looks_rate_limited(
+            r#"[{"type":"RATE_LIMITED","message":"..."}]"#
+        ));
+        // Not rate-limiting: a plain network / not-found error.
+        assert!(!looks_rate_limited(
+            "dial tcp: lookup api.github.com: no such host"
+        ));
+        assert!(!looks_rate_limited(
+            "Could not resolve to a Repository with the name"
+        ));
     }
 
     #[test]

@@ -487,10 +487,15 @@ pub const PR_FOREGROUND_DEBOUNCE: Duration = Duration::from_secs(3);
 /// warning and its eventual recovery/clear replace the same entry.
 const PR_QUOTA_STATUS_KEY: &str = "pr-quota";
 
-/// How long to pause all PR checks after a hard `gh` failure (spawn error,
-/// timeout, or a rate-limit response with no parseable quota numbers) — the case
-/// the quota-number backoff can't see.
+/// How long to pause a host's PR checks after a hard `gh` failure (spawn error,
+/// timeout, or an unparseable response) — the case the quota-number backoff can't
+/// see. Short, since a transient network/`gh` error usually clears quickly.
 const PR_HARD_FAILURE_BACKOFF_SECS: u64 = 60;
+
+/// How long to pause a host's PR checks when GitHub is rate-limiting us but we
+/// have no `resetAt` to time it precisely. Longer than a transient error, since a
+/// (secondary) rate limit takes a while to clear and re-hitting it just extends it.
+const PR_RATE_LIMIT_BACKOFF_SECS: u64 = 300;
 
 /// The PR-sync loop sleeps in slices of this length so a disable or an interval
 /// change is observed within a few seconds rather than after a full (up to
@@ -1357,13 +1362,14 @@ impl Engine {
     }
 
     /// Update the shared per-host PR-check backoff from a sync's per-host signals
-    /// and surface a keyed status per host. A low quota pauses until `resetAt`; a
-    /// hard failure (checked independently, so a healthy host can't mask a broken
-    /// one) pauses a fixed short window; a healthy signal clears that host's pause.
-    /// The warning fires once on entering backoff and a paired keyed recovery
-    /// message clears it, so neither surface strands a stale toast. Only queried
-    /// hosts appear in `signals`, so a skipped/backed-off host is never spuriously
-    /// cleared.
+    /// and surface a keyed, per-host status. Rate-limiting (approaching the points
+    /// limit, or a 403/secondary limit) and plain network/`gh` errors each pause
+    /// that host with an appropriately-worded, INFO-toned notice that auto-clears
+    /// (the pause is temporary and self-resolving, so it must not sit on screen as
+    /// a stuck warning); a healthy signal clears the host's pause silently. The
+    /// notice fires once per pause window (`already_active`). Only queried hosts
+    /// appear in `signals`, so a skipped/backed-off host is never spuriously
+    /// touched.
     fn apply_pr_backoff(
         shared: &Arc<Mutex<crate::gh::BackoffSnapshot>>,
         signals: &[crate::gh::HostSignal],
@@ -1371,40 +1377,56 @@ impl Engine {
     ) {
         for sig in signals {
             let key = format!("{PR_QUOTA_STATUS_KEY}:{}", sig.host);
-            // Low quota takes priority; otherwise a hard failure (independent of
-            // any rate reading) pauses; otherwise the host is healthy → clear.
-            let decision: Option<(Instant, String)> = match sig
+            // Decide (pause-window, message). Priority: approaching the GraphQL
+            // points limit (we know the reset time) → GitHub rate-limiting us (a
+            // 403/secondary limit, checked independently so a healthy host can't
+            // mask it) → a plain network/`gh` error → healthy (clear).
+            let decision: Option<(Instant, String)> = if let Some(r) = sig
                 .rate
                 .as_ref()
                 .filter(|r| r.remaining < crate::gh::RATE_LIMIT_BACKOFF_FLOOR)
             {
-                Some(r) => {
-                    let secs_until = r
-                        .reset_at
-                        .map(|t| (t - Utc::now()).num_seconds().clamp(0, 3600) as u64)
-                        .unwrap_or(PR_HARD_FAILURE_BACKOFF_SECS);
-                    let when = r
-                        .reset_at
-                        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
-                        .unwrap_or_else(|| "the next reset".to_string());
-                    Some((
-                        Instant::now() + Duration::from_secs(secs_until),
+                let secs_until = r
+                    .reset_at
+                    .map(|t| (t - Utc::now()).num_seconds().clamp(0, 3600) as u64)
+                    .unwrap_or(PR_RATE_LIMIT_BACKOFF_SECS);
+                let when = r
+                    .reset_at
+                    .map(|t| {
                         format!(
-                            "GitHub API quota is low on {} ({} points left). Pausing PR status \
-                                 checks until {when}. Adjust ui.pr_poll_interval_seconds if this recurs.",
-                            sig.host, r.remaining,
-                        ),
-                    ))
-                }
-                None if sig.hard_failed => Some((
-                    Instant::now() + Duration::from_secs(PR_HARD_FAILURE_BACKOFF_SECS),
+                            " around {}",
+                            t.with_timezone(&chrono::Local).format("%H:%M")
+                        )
+                    })
+                    .unwrap_or_default();
+                Some((
+                    Instant::now() + Duration::from_secs(secs_until),
                     format!(
-                        "GitHub PR status checks are failing on {} (network or `gh` error). \
-                             Pausing briefly before retrying.",
+                        "GitHub's API rate limit for {} is nearly used up ({} points left). dux \
+                         paused PR status checks; they resume automatically{when}.",
+                        sig.host, r.remaining,
+                    ),
+                ))
+            } else if sig.rate_limited {
+                Some((
+                    Instant::now() + Duration::from_secs(PR_RATE_LIMIT_BACKOFF_SECS),
+                    format!(
+                        "GitHub is rate-limiting API requests on {}. dux paused PR status checks; \
+                         they resume automatically once the limit clears.",
                         sig.host,
                     ),
-                )),
-                None => None,
+                ))
+            } else if sig.hard_failed {
+                Some((
+                    Instant::now() + Duration::from_secs(PR_HARD_FAILURE_BACKOFF_SECS),
+                    format!(
+                        "dux couldn't reach GitHub for PR status on {} (network or `gh` error); \
+                         it will retry shortly.",
+                        sig.host,
+                    ),
+                ))
+            } else {
+                None
             };
 
             match decision {
@@ -1415,27 +1437,24 @@ impl Engine {
                         map.insert(sig.host.clone(), until);
                         already
                     };
+                    // Info-toned (not a persistent warning) so it self-dismisses:
+                    // the pause is temporary and resolves on its own, so the notice
+                    // auto-clears instead of sitting on screen. Emitted once per
+                    // pause window (the `already_active` gate), keyed per host.
                     if !already_active {
-                        let _ = tx.send(WorkerEvent::CommandWorkerStarted(
-                            StatusUpdate::warning(message).with_key(key),
-                        ));
-                    }
-                }
-                None => {
-                    let was_present = {
-                        let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
-                        map.remove(&sig.host).is_some()
-                    };
-                    if was_present {
                         let _ = tx.send(WorkerEvent::CommandWorkerStarted(StatusUpdate::keyed(
                             key,
                             crate::statusline::StatusTone::Info,
-                            format!(
-                                "GitHub API access to {} recovered — PR status checks resumed.",
-                                sig.host
-                            ),
+                            message,
                         )));
                     }
+                }
+                None => {
+                    // Host is healthy again: clear its backoff so it is queried
+                    // normally. No "resumed" message — the Info-toned pause notice
+                    // already auto-cleared, so a fresh toast now would be stale.
+                    let mut map = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    map.remove(&sig.host);
                 }
             }
         }
