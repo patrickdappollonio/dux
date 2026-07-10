@@ -838,6 +838,22 @@ impl Engine {
         self.needs_attention.contains(tab_id)
     }
 
+    /// Whether ANY tab of the session (session-slot or extra) currently needs
+    /// attention. The any-tab rollup the sidebar row uses, mirroring how
+    /// `working` rolls up. Cheap: `needs_attention` is usually empty, so this
+    /// short-circuits without scanning tabs.
+    pub fn session_needs_attention(&self, session_id: &str) -> bool {
+        if self.needs_attention.is_empty() {
+            return false;
+        }
+        if self.needs_attention.contains(session_id) {
+            return true;
+        }
+        self.agent_tabs
+            .values()
+            .any(|t| t.session_id == session_id && self.needs_attention.contains(&t.id))
+    }
+
     /// True if the given key is currently marked in-flight.
     pub fn is_in_flight(&self, key: &InFlightKey) -> bool {
         self.in_flight.contains(key)

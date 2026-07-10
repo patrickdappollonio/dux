@@ -7,6 +7,7 @@ describe("agentRowVisual", () => {
     expect(agentRowVisual("active", true)).toEqual({
       shimmer: true,
       dimmed: false,
+      attention: false,
     })
   })
 
@@ -14,6 +15,7 @@ describe("agentRowVisual", () => {
     expect(agentRowVisual("active", false)).toEqual({
       shimmer: false,
       dimmed: false,
+      attention: false,
     })
   })
 
@@ -21,12 +23,14 @@ describe("agentRowVisual", () => {
     expect(agentRowVisual("detached", false)).toEqual({
       shimmer: false,
       dimmed: true,
+      attention: false,
     })
     // Even if a non-active agent somehow reports working, it stays dimmed and
     // unshimmered — shimmer is gated on the active status.
     expect(agentRowVisual("detached", true)).toEqual({
       shimmer: false,
       dimmed: true,
+      attention: false,
     })
   })
 
@@ -34,6 +38,22 @@ describe("agentRowVisual", () => {
     expect(agentRowVisual("exited", false)).toEqual({
       shimmer: false,
       dimmed: true,
+      attention: false,
+    })
+  })
+
+  it("flags attention independently of shimmer and dimmed", () => {
+    // A flagged agent may still be streaming its permission prompt.
+    expect(agentRowVisual("active", true, true)).toEqual({
+      shimmer: true,
+      dimmed: false,
+      attention: true,
+    })
+    // Attention without streaming.
+    expect(agentRowVisual("active", false, true)).toEqual({
+      shimmer: false,
+      dimmed: false,
+      attention: true,
     })
   })
 })

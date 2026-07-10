@@ -184,6 +184,13 @@ export function applyFavicon(raw: string | null | undefined): void {
     return
   }
 
+  setIconLink(href, type)
+}
+
+/** Replace the `<link rel="icon">` element with one pointing at `href`. Assumes
+ * the caller already confirmed a real DOM and that the target differs from the
+ * current icon. */
+function setIconLink(href: string, type: string): void {
   document.querySelectorAll("link[rel='icon']").forEach((el) => el.remove())
 
   const link = document.createElement("link")
@@ -191,4 +198,115 @@ export function applyFavicon(raw: string | null | undefined): void {
   link.setAttribute("type", type)
   link.setAttribute("href", href)
   document.head.appendChild(link)
+}
+
+// The amber attention dot and its dark rim (for contrast against the duck).
+const ATTENTION_DOT_FILL = "#f59e0b"
+const ATTENTION_DOT_RIM = "#1a1a1a"
+
+// Composed "base icon + dot" data URLs, keyed by the base href. A given base is
+// composited at most once (drawing onto a canvas is the expensive part), then the
+// result is reused for every later push while the count stays above zero.
+const dottedFaviconCache = new Map<string, string>()
+// The base href whose dotted variant we currently WANT applied, or null when the
+// clean icon should show. Set synchronously so an async compose that resolves
+// after a clear does not stomp the restored clean icon.
+let wantedDotBase: string | null = null
+// The data URL currently on the `<link>` via the attention path, so a repeat
+// call with the same state doesn't touch the DOM.
+let appliedDottedIcon: string | null = null
+
+/**
+ * Composite the current favicon with an amber dot in the bottom-right corner, or
+ * restore the clean icon, based on `hasAttention`. Idempotent: it composes a
+ * given base at most once (cached) and only touches the DOM when the shown icon
+ * changes. Self-guards on the DOM (no-op under the store's Node test env), and
+ * degrades gracefully where `<canvas>` is unavailable (jsdom): it simply leaves
+ * the clean icon in place rather than throwing — the browser-tab count still
+ * conveys the state.
+ */
+export function applyAttentionFavicon(
+  raw: string | null | undefined,
+  hasAttention: boolean,
+): void {
+  if (typeof document === "undefined") return
+  if (typeof document.createElement !== "function" || !document.head) return
+
+  if (!hasAttention) {
+    // Restore the clean base icon and forget any dotted state.
+    wantedDotBase = null
+    appliedDottedIcon = null
+    applyFavicon(raw)
+    return
+  }
+
+  const { href } = faviconHref(raw)
+  wantedDotBase = href
+
+  const cached = dottedFaviconCache.get(href)
+  if (cached) {
+    if (appliedDottedIcon !== cached) {
+      setIconLink(cached, "image/png")
+      appliedDottedIcon = cached
+    }
+    return
+  }
+
+  composeFaviconWithDot(href)
+    .then((composed) => {
+      if (!composed) return
+      dottedFaviconCache.set(href, composed)
+      // Only apply if the dot is still wanted for THIS base (a clear or a base
+      // change may have landed while we composited).
+      if (wantedDotBase === href && appliedDottedIcon !== composed) {
+        setIconLink(composed, "image/png")
+        appliedDottedIcon = composed
+      }
+    })
+    .catch(() => {
+      /* leave the clean icon in place on any compositing failure */
+    })
+}
+
+/** Draw the base favicon plus an amber corner dot onto a canvas and return a PNG
+ * data URL, or `null` when canvas/image loading is unavailable (e.g. jsdom). */
+function composeFaviconWithDot(href: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const size = 64
+    const canvas = document.createElement("canvas")
+    canvas.width = size
+    canvas.height = size
+    const ctx =
+      typeof canvas.getContext === "function"
+        ? (canvas.getContext("2d") as CanvasRenderingContext2D | null)
+        : null
+    if (!ctx) {
+      resolve(null)
+      return
+    }
+    const img = new Image()
+    img.onload = () => {
+      try {
+        ctx.clearRect(0, 0, size, size)
+        ctx.drawImage(img, 0, 0, size, size)
+        const r = size * 0.26
+        const cx = size - r - size * 0.05
+        const cy = size - r - size * 0.05
+        // Dark rim first for contrast against the duck, then the amber fill.
+        ctx.beginPath()
+        ctx.arc(cx, cy, r + size * 0.06, 0, Math.PI * 2)
+        ctx.fillStyle = ATTENTION_DOT_RIM
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, 0, Math.PI * 2)
+        ctx.fillStyle = ATTENTION_DOT_FILL
+        ctx.fill()
+        resolve(canvas.toDataURL("image/png"))
+      } catch {
+        resolve(null)
+      }
+    }
+    img.onerror = () => resolve(null)
+    img.src = href
+  })
 }

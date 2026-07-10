@@ -14,6 +14,11 @@ use dux_core::theme::DEFAULT_THEME_NAME;
 /// card, status line, and left-pane streaming indicator.
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Glyph shown (blinking, in the `session_attention` color) in the sidebar when
+/// an agent needs attention. Distinct from the round status dots so it reads as
+/// "needs you", not a status.
+pub const ATTENTION_GLYPH: &str = "◆";
+
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
 const DUX_DARK_TOML: &str = include_str!("../../../assets/themes/dux_dark.toml");
@@ -60,6 +65,11 @@ pub struct Theme {
     /// future theme customization can differentiate the colors without a
     /// code change.
     pub session_deleting: Color,
+    /// Foreground for the blinking attention glyph shown in the sidebar when an
+    /// agent needs attention (a permission prompt, a finished turn). Amber/urgent
+    /// by default (mapped to the `warning` semantic); a dedicated slot so themes
+    /// can distinguish "needs you" from the ordinary detached/warning states.
+    pub session_attention: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,
     pub status_busy_fg: Color,
@@ -328,6 +338,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.session_detached", warning);
     theme.register_default_token("dux.session_exited", text_dim);
     theme.register_default_token("dux.session_deleting", text_dim);
+    theme.register_default_token("dux.session_attention", warning);
 
     // Status line
     theme.register_default_token("dux.status_info_fg", text_muted);
@@ -464,6 +475,7 @@ impl Theme {
             session_detached: pick("dux.session_detached"),
             session_exited: pick("dux.session_exited"),
             session_deleting: pick("dux.session_deleting"),
+            session_attention: pick("dux.session_attention"),
             status_info_fg: pick("dux.status_info_fg"),
             status_info_bg: pick("dux.status_info_bg"),
             status_busy_fg: pick("dux.status_busy_fg"),
@@ -682,6 +694,9 @@ mod tests {
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
             session_deleting: Color::Rgb(100, 100, 100),
+            // Maps to the `warning` semantic (like `session_detached`), so the
+            // bundled dux-dark theme resolves it to the same amber.
+            session_attention: Color::Yellow,
             status_info_fg: Color::Rgb(100, 100, 100),
             status_info_bg: Color::Rgb(25, 25, 25),
             status_busy_fg: Color::Yellow,
@@ -784,6 +799,7 @@ mod tests {
         assert_field!(session_detached);
         assert_field!(session_exited);
         assert_field!(session_deleting);
+        assert_field!(session_attention);
         assert_field!(status_info_fg);
         assert_field!(status_info_bg);
         assert_field!(status_busy_fg);

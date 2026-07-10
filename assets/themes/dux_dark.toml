@@ -68,6 +68,7 @@ ansi_darkgray = "#808080"
 "dux.session_detached"     = "ansi_yellow"
 "dux.session_exited"       = "#646464"
 "dux.session_deleting"     = "#646464"
+"dux.session_attention"    = "ansi_yellow"
 
 # ── Status line ──────────────────────────────────────────────────────
 "dux.status_info_fg"       = "#646464"

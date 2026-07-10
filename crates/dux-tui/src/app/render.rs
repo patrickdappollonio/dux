@@ -629,19 +629,32 @@ impl App {
                         .title
                         .clone()
                         .unwrap_or_else(|| session.branch_name.clone());
-                    let (dot, dot_color) =
-                        if matches!(session.status, crate::model::SessionStatus::Active)
-                            && self.engine.is_agent_streaming(&session.id)
-                        {
-                            let idx = self.spinner_frame_index();
-                            (
-                                crate::theme::SPINNER_FRAMES[idx].to_string(),
-                                self.theme.session_active,
-                            )
+                    // Attention wins over the working spinner (a flagged agent
+                    // may still be streaming its permission prompt). The glyph
+                    // blinks on wall-clock time; in its "off" half it renders as a
+                    // blank so the row visibly pulses. Gated by the config
+                    // preference. Rolled up across the agent's tabs.
+                    let needs_attention = self.engine.config.ui.attention_indicator
+                        && self.engine.session_needs_attention(&session.id);
+                    let (dot, dot_color) = if needs_attention {
+                        let glyph = if self.attention_blink_on() {
+                            crate::theme::ATTENTION_GLYPH
                         } else {
-                            let (d, c) = self.theme.session_dot(&session.status);
-                            (d.to_string(), c)
+                            " "
                         };
+                        (glyph.to_string(), self.theme.session_attention)
+                    } else if matches!(session.status, crate::model::SessionStatus::Active)
+                        && self.engine.is_agent_streaming(&session.id)
+                    {
+                        let idx = self.spinner_frame_index();
+                        (
+                            crate::theme::SPINNER_FRAMES[idx].to_string(),
+                            self.theme.session_active,
+                        )
+                    } else {
+                        let (d, c) = self.theme.session_dot(&session.status);
+                        (d.to_string(), c)
+                    };
                     // While a background delete is in flight for this session,
                     // dim the row text and italicize it so the user sees the
                     // transient state. This covers the dot, label, and
@@ -650,6 +663,15 @@ impl App {
                     // and the in-flight window is too brief to justify
                     // threading a deletion flag through it.
                     let deleting = self.engine.pending_deletions.contains(&session.id);
+                    // The label follows the dot color, EXCEPT while blinking for
+                    // attention: the glyph pulses amber on/off, but the label must
+                    // stay a steady color rather than flicker with it, so it falls
+                    // back to the plain status-dot color in that case.
+                    let label_fallback_color = if needs_attention {
+                        self.theme.session_dot(&session.status).1
+                    } else {
+                        dot_color
+                    };
                     let label_color = if deleting {
                         self.theme.session_deleting
                     } else {
@@ -657,7 +679,7 @@ impl App {
                             Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
                             Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
                             Some(crate::model::PrState::Open) => self.theme.pr_open_label,
-                            None => dot_color,
+                            None => label_fallback_color,
                         }
                     };
                     let label_style = if deleting {
@@ -683,7 +705,16 @@ impl App {
                     ListItem::new(Line::from(
                         vec![
                             Span::styled(connector, Style::default().fg(self.theme.project_icon)),
-                            Span::styled(format!("{dot} "), label_style),
+                            Span::styled(
+                                format!("{dot} "),
+                                if needs_attention && !deleting {
+                                    // The glyph carries the amber attention color;
+                                    // the label stays steady (see label_color).
+                                    Style::default().fg(dot_color)
+                                } else {
+                                    label_style
+                                },
+                            ),
                             Span::styled(label, label_style),
                             Span::styled(
                                 provider_label,

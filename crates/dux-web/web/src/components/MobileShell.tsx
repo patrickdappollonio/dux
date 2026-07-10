@@ -295,7 +295,12 @@ function SessionRow({
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
   // Running agents shimmer their name; non-running (detached/exited) recede.
-  const { shimmer, dimmed } = agentRowVisual(session.status, session.working)
+  // `attention` adds an amber dot when the agent needs the user.
+  const { shimmer, dimmed, attention } = agentRowVisual(
+    session.status,
+    session.working,
+    session.needs_attention
+  )
 
   // Long-press (250ms) starts the drag so taps still select and vertical scroll
   // isn't hijacked — see the sensor config on the enclosing DndContext. The
@@ -333,6 +338,14 @@ function SessionRow({
               shimmer && "motion-safe:animate-agent-working"
             )}
           />
+          {/* Amber attention dot: the agent needs the user (a permission prompt
+              or a finished turn). Gently pulses; static under reduced motion. */}
+          {attention && (
+            <span
+              aria-label="Needs attention"
+              className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-pulse motion-reduce:animate-none"
+            />
+          )}
           {/* Its name also dims with a soft white highlight sweeping through (see
               .agent-name-shimmer), a second working cue alongside the bob. The
               base class is always applied so the fill cross-fades back to solid

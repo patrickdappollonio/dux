@@ -32,8 +32,9 @@ describe("fetchSpine", () => {
     vi.stubGlobal("fetch", fetchMock)
 
     const result = await fetchSpine()
-    // A session that omits `tabs`/`initial_branch`/`source_branch` (an older
-    // server) is coerced to `tabs: []` and empty-string branch fields.
+    // A session that omits `tabs`/`initial_branch`/`source_branch`/
+    // `needs_attention` (an older server) is coerced to `tabs: []`, empty-string
+    // branch fields, and `needs_attention: false`.
     expect(result).toEqual({
       ...body,
       sessions: [
@@ -43,6 +44,7 @@ describe("fetchSpine", () => {
           tabs: [],
           initial_branch: "",
           source_branch: "",
+          needs_attention: false,
         },
       ],
     })

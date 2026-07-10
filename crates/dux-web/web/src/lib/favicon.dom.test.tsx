@@ -5,7 +5,7 @@ vi.mock("sonner", () => ({ toast: { info: vi.fn() } }))
 
 import { toast } from "sonner"
 
-import { applyFavicon } from "./favicon"
+import { applyAttentionFavicon, applyFavicon } from "./favicon"
 
 const toastInfo = vi.mocked(toast.info)
 
@@ -104,5 +104,36 @@ describe("applyFavicon legacy migration notice", () => {
     applyFavicon("violet")
     applyFavicon("rose")
     expect(toastInfo).not.toHaveBeenCalled()
+  })
+})
+
+describe("applyAttentionFavicon", () => {
+  afterEach(() => {
+    document.head.innerHTML = ""
+  })
+
+  it("restores the clean base icon when there is no attention", () => {
+    applyAttentionFavicon("", false)
+    const links = iconLinks()
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute("href")).toBe("/favicon.png")
+  })
+
+  it("does not throw when canvas is unavailable (jsdom) and leaves the base icon", () => {
+    // jsdom has no real <canvas> 2d context, so the dot compositor resolves to a
+    // no-op. The clean base icon must remain and nothing must throw.
+    applyAttentionFavicon("", false)
+    expect(() => applyAttentionFavicon("", true)).not.toThrow()
+    const links = iconLinks()
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute("href")).toBe("/favicon.png")
+  })
+
+  it("restores the base after attention clears", () => {
+    applyAttentionFavicon("", true) // no-op compose under jsdom
+    applyAttentionFavicon("", false)
+    const links = iconLinks()
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute("href")).toBe("/favicon.png")
   })
 })

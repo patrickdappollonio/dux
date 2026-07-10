@@ -1895,6 +1895,22 @@ impl App {
         Ok(false)
     }
 
+    /// Clear (and suppress) the attention flag on the agent tab the user is
+    /// actively looking at: the Center pane has focus, an agent is selected, and
+    /// the Center is showing that agent's PTY rather than a companion terminal.
+    /// Called once per tick so continuous viewing keeps the flag down. This is
+    /// the TUI half of the "looking at an agent clears its attention" rule
+    /// (typing is handled separately via `note_pty_input`).
+    pub(crate) fn note_focused_agent_viewed(&mut self) {
+        if self.focus == FocusPane::Center
+            && self.active_terminal_id.is_none()
+            && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
+        {
+            let tab_id = self.focused_tab_id(&session_id);
+            self.engine.note_agent_viewed(&tab_id);
+        }
+    }
+
     fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Any keystroke during a held mouse-press cancels the press —
         // mouse-up will see no pending press and will not fire an

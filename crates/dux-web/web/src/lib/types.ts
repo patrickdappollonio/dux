@@ -65,6 +65,10 @@ export interface AgentTabView {
   provider: string
   order: number
   working: boolean
+  /** This specific tab needs attention (a permission prompt, a finished turn)
+   * the user has not yet looked at. The tab strip marks the flagged pill; the
+   * sidebar rolls this up across tabs into `SessionView.needs_attention`. */
+  needs_attention: boolean
   has_output: boolean
   has_live_process: boolean
 }
@@ -108,6 +112,11 @@ export interface SessionView {
   /** Hysteresis boolean: the agent emitted PTY output within the last second.
    * Drives the "working" ping-ring animation on the active status badge. */
   working: boolean
+  /** Any of the agent's tabs needs attention (a permission prompt, a finished
+   * turn) the user has not yet looked at. Rolled up any-tab, mirroring `working`.
+   * Drives the sidebar dot, the browser-tab count, and the favicon dot. An older
+   * server omits it; `applySpine` normalizes a missing value to `false`. */
+  needs_attention: boolean
   /** RFC 3339 / ISO 8601 creation time. Backs the client-side sort-by commands
    * (sort agents by creation time) that mirror the TUI's palette parity. */
   created_at: string

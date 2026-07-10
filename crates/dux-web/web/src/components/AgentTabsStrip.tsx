@@ -160,6 +160,17 @@ function TabPill({
           tab.working && "motion-safe:animate-agent-working",
         )}
       />
+      {/* Amber attention dot on the flagged tab's pill (a permission prompt or a
+          finished turn on this specific tab). Gently pulses; static under
+          reduced motion. */}
+      {tab.needs_attention && (
+        <SimpleTooltip content="Needs attention">
+          <span
+            aria-label="Needs attention"
+            className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-pulse motion-reduce:animate-none"
+          />
+        </SimpleTooltip>
+      )}
       <span className="max-w-40 truncate">{label}</span>
       {/* The ⋯ trigger consumes NO layout space at rest: the wrapper's max-width
           collapses to zero (not opacity-only, which would still reserve the

@@ -965,6 +965,10 @@ pub(crate) fn run_engine_loop(
     // be detected O(1) without re-deriving history each tick.
     let mut prev_streaming: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
+    // Per-tick snapshot of the engine's needs-attention set, carried across ticks
+    // so a set/clear can bump the spine-change gate promptly instead of waiting
+    // for the ~2s backstop (see `poll_attention_transitions`).
+    let mut prev_attention: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Tick counter for throttling the spine fingerprint/cache check (see
     // SPINE_CHECK_TICK_INTERVAL) so it is evaluated ~every 250ms rather than every
     // tick.
@@ -1131,6 +1135,13 @@ pub(crate) fn run_engine_loop(
         // report and any output it also produced land in the same tick. Keeps the
         // "working" override truthful and maintains the per-tab attention flag.
         engine.poll_agent_signals();
+
+        // Push attention set/clear promptly: the `needs_attention` projection is
+        // event-derived (a mutation counter can't see it flip), so this O(1)
+        // compare bumps `mutation_version` on any change to open the fingerprint
+        // gate. The fingerprint (which includes `needs_attention`) stays the
+        // precise emit gate.
+        poll_attention_transitions(&engine, &mut prev_attention, &mut mutation_version);
 
         // Track per-agent streaming transitions. The `working` flag is time-derived
         // (it flips off once AGENT_STREAMING_WINDOW lapses), so a mutation counter
@@ -1570,6 +1581,23 @@ fn poll_streaming_transitions(
     }
 }
 
+/// Bump `*version` whenever the engine's needs-attention set changed since the
+/// last tick, so a set or clear opens the change-gated spine check promptly (the
+/// `needs_attention` projection is event-derived and a coarse mutation counter
+/// otherwise wouldn't see it flip). The serialized-spine fingerprint remains the
+/// precise emit gate; this only opens the door. The set is small (usually empty),
+/// so the comparison and occasional clone are cheap.
+fn poll_attention_transitions(
+    engine: &Engine,
+    prev_attention: &mut std::collections::HashSet<String>,
+    version: &mut u64,
+) {
+    if engine.needs_attention != *prev_attention {
+        *version = version.wrapping_add(1);
+        *prev_attention = engine.needs_attention.clone();
+    }
+}
+
 fn handle_request(
     engine: &mut Engine,
     req: EngineRequest,
@@ -1862,6 +1890,11 @@ fn handle_subscribe(
         }
         *last_pr_foregrounded = Some(owner);
     }
+    // Opening a tab's live view is the web's "looking at it" signal: clear and
+    // briefly suppress its attention flag. Stamp the subscribed TAB id (which may
+    // be an extra tab), not the owning session. Typing then keeps it cleared via
+    // `note_pty_input` on `WritePty`.
+    engine.note_agent_viewed(&session_id);
     if let Some(client) = engine.providers.get(&session_id) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;
@@ -2668,6 +2701,38 @@ mod tests {
             check.fp_call_count, 1,
             "a streaming_version change must open the gate"
         );
+    }
+
+    #[test]
+    fn attention_transition_bumps_version() {
+        // Setting and clearing the needs-attention flag must bump the version so
+        // the spine change is pushed promptly; a steady state must not.
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let engine_seed = bootstrap_engine(&paths).expect("bootstrap");
+        // We mutate the set directly to drive transitions deterministically.
+        let mut engine = engine_seed;
+
+        let mut prev: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut version = 0u64;
+
+        // No change yet.
+        poll_attention_transitions(&engine, &mut prev, &mut version);
+        assert_eq!(version, 0, "an empty, unchanged set must not bump");
+
+        // Set → transition.
+        engine.needs_attention.insert("s1".to_string());
+        poll_attention_transitions(&engine, &mut prev, &mut version);
+        assert_eq!(version, 1, "raising the flag must bump the version");
+
+        // Steady → no bump.
+        poll_attention_transitions(&engine, &mut prev, &mut version);
+        assert_eq!(version, 1, "a steady flag must not bump every tick");
+
+        // Clear → transition.
+        engine.needs_attention.clear();
+        poll_attention_transitions(&engine, &mut prev, &mut version);
+        assert_eq!(version, 2, "clearing the flag must bump the version");
     }
 
     #[test]

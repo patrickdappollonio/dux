@@ -1995,7 +1995,9 @@ impl App {
                 // Drain attention/progress signals: keeps the "working" override
                 // truthful and maintains the per-tab attention flag. Must run
                 // after `poll_pty_activity` so a progress report and the activity
-                // it also produced are observed in the same tick.
+                // it also produced are observed in the same tick. Stamp the tab
+                // the user is looking at first so the poll suppresses/clears it.
+                self.note_focused_agent_viewed();
                 self.engine.poll_agent_signals();
                 self.tick_count = self.tick_count.wrapping_add(1);
                 // Expire a transient status (e.g. a success confirmation) after
@@ -2341,6 +2343,15 @@ impl App {
     /// regardless of event loop frequency.
     pub(crate) fn spinner_frame_index(&self) -> usize {
         ((self.start_time.elapsed().as_millis() / 80) as usize) % crate::theme::SPINNER_FRAMES.len()
+    }
+
+    /// Whether the sidebar attention glyph is in its "on" (visible) half of the
+    /// blink cycle right now. Wall-clock based (like the spinner) so the blink
+    /// cadence stays constant regardless of event-loop frequency, per the
+    /// "animations use wall-clock time" tenet. 600ms period, on for the first
+    /// half.
+    pub(crate) fn attention_blink_on(&self) -> bool {
+        (self.start_time.elapsed().as_millis() / 300).is_multiple_of(2)
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {

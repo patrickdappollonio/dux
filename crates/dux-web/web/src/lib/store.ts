@@ -23,7 +23,8 @@ import {
   type SessionChangesResponse,
 } from "./changesApi"
 import { type Bootstrap, fetchBootstrap } from "./bootstrapApi"
-import { applyFavicon } from "./favicon"
+import { attentionCount, formatTabTitle } from "./attention"
+import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
 import type {
@@ -767,19 +768,28 @@ function applyBootstrap(b: Bootstrap): void {
         ? null
         : state.changesPaneOverride,
   })
-  // Reflect the configured instance name in the browser tab. Guarded because the
+  // Reflect the configured instance name and favicon in the browser tab, plus the
+  // live attention count/dot. Guarded inside `refreshAttentionChrome` because the
   // store also runs under the Node test environment, where `document` is absent
   // unless a test stubs it. Runs on first load and on every config.changed
-  // refetch, so a live rename updates the tab without a reload.
-  if (typeof document !== "undefined") {
-    document.title = resolveInstanceTitle(b.title)
-  }
-  // Swap the favicon to the configured one: the bundled full-colour duck when
-  // unset, a recoloured duck silhouette for a curated tint colour, or the default
-  // duck (with a one-time notice) for anything else. Self-guards on the DOM, so it
-  // is a no-op under the store's Node test environment. Runs on first load and
-  // every config.changed; `applyFavicon` no-ops when the resolved icon is unchanged.
-  applyFavicon(b.favicon)
+  // refetch, so a live rename updates the tab (and re-applies the current dot)
+  // without a reload.
+  refreshAttentionChrome()
+}
+
+// The instance title/favicon carry a live "needs attention" overlay: a `(N) `
+// count prefix on the browser-tab title and an amber dot composited onto the
+// favicon, both driven by how many agents are flagged in the current spine. This
+// runs whenever the count could change (a spine apply) or the base title/favicon
+// changes (a bootstrap/config.changed). `applyAttentionFavicon` composes at most
+// once per state and no-ops when nothing changed, so calling this on every spine
+// apply is cheap. Self-guards on the DOM.
+function refreshAttentionChrome(): void {
+  if (typeof document === "undefined") return
+  const count = attentionCount(state.spine?.sessions ?? [])
+  const base = resolveInstanceTitle(state.bootstrap?.title)
+  document.title = formatTabTitle(base, count)
+  applyAttentionFavicon(state.bootstrap?.favicon, count > 0)
 }
 
 // Monotonic sequence for spine loads. Two rapid `sessions.changed`/
@@ -850,6 +860,10 @@ function applySpine(rawSpine: Spine, seq: number): void {
   restoreDeepLink(spine)
   focusNewlyCreatedSession(spine)
   pruneSelectionIfGone(spine)
+  // The flagged-agent count may have changed with this spine: refresh the
+  // browser-tab count prefix and the favicon dot. Backgrounded tabs update too,
+  // since spines arrive from server pushes without a visit.
+  refreshAttentionChrome()
 }
 
 // The per-connection id now arrives as the `connected` event on `/ws/events`
