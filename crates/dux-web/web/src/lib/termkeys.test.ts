@@ -5,6 +5,8 @@ import {
   arrowSeq,
   classifyClipboardKey,
   type ClipboardKeyEvent,
+  copyOnSelectAction,
+  type CopyOnSelectContext,
   ctrlByte,
   ESC,
   LF,
@@ -412,5 +414,67 @@ describe("classifyClipboardKey", () => {
     expect(classifyClipboardKey(ev({ ctrlKey: true, code: "", keyCode: 0 }))).toBe(
       "passthrough",
     )
+  })
+})
+
+describe("copyOnSelectAction", () => {
+  const ctx = (o: Partial<CopyOnSelectContext> = {}): CopyOnSelectContext => ({
+    copyOnSelect: true,
+    selection: "",
+    dragged: false,
+    mouseTrackingMode: "none",
+    hintShown: false,
+    ...o,
+  })
+
+  it("copies a real multi-char selection", () => {
+    expect(copyOnSelectAction(ctx({ selection: "hello" }))).toBe("copy")
+  })
+
+  it("ignores an empty or whitespace-only selection", () => {
+    expect(copyOnSelectAction(ctx({ selection: "" }))).toBe("ignore")
+    expect(copyOnSelectAction(ctx({ selection: "   " }))).toBe("ignore")
+  })
+
+  it("ignores a trivial one-char selection (drag-misclick guard)", () => {
+    expect(copyOnSelectAction(ctx({ selection: "x" }))).toBe("ignore")
+  })
+
+  it("does nothing when the preference is off, even with a selection", () => {
+    expect(copyOnSelectAction(ctx({ copyOnSelect: false, selection: "hello" }))).toBe(
+      "ignore",
+    )
+  })
+
+  it("hints when a drag produced no local selection while the app holds the mouse", () => {
+    expect(
+      copyOnSelectAction(ctx({ dragged: true, mouseTrackingMode: "any" })),
+    ).toBe("hint")
+  })
+
+  it("does not hint on a plain click (no drag) in a mouse-reporting app", () => {
+    expect(
+      copyOnSelectAction(ctx({ dragged: false, mouseTrackingMode: "any" })),
+    ).toBe("ignore")
+  })
+
+  it("does not hint when the app has not captured the mouse", () => {
+    expect(
+      copyOnSelectAction(ctx({ dragged: true, mouseTrackingMode: "none" })),
+    ).toBe("ignore")
+  })
+
+  it("hints only once per session", () => {
+    expect(
+      copyOnSelectAction(ctx({ dragged: true, mouseTrackingMode: "any", hintShown: true })),
+    ).toBe("ignore")
+  })
+
+  it("prefers copying a real selection over hinting", () => {
+    expect(
+      copyOnSelectAction(
+        ctx({ selection: "hello", dragged: true, mouseTrackingMode: "any" }),
+      ),
+    ).toBe("copy")
   })
 })

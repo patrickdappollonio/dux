@@ -23,6 +23,7 @@ import {
   applyModifiers,
   arrowSeq,
   classifyClipboardKey,
+  copyOnSelectAction,
   ESC,
   LF,
   pageKeySeq,
@@ -81,6 +82,16 @@ function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
   term?.clearSelection()
   pty?.sendInput(LF_BYTES)
 }
+
+// Whether the "app captured the mouse, hold the modifier to select" hint has been
+// shown. Module level so it fires at most once per page session, surviving the pane
+// remounts that happen on every agent/tab switch (a per-component ref would reset).
+let mouseCaptureHintShown = false
+
+// The pointer must move at least this many CSS px between mousedown and mouseup to
+// count as a drag (a selection attempt) rather than a click. Guards the mouse-capture
+// hint from firing on a plain click into a mouse-reporting app.
+const DRAG_THRESHOLD_PX = 4
 
 // Copy the terminal's current selection to the clipboard and toast the result.
 // `copyToClipboard` writes via the async Clipboard API in a secure context and
@@ -249,6 +260,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // signal is exact where an `isMobile` width check is not (a touchscreen laptop
   // with a mouse must still get right-click paste).
   const pointerTypeRef = useRef("")
+  // The left-button mousedown position, so `onMouseUp` can tell a drag (a selection
+  // attempt) from a plain click and only hint about mouse-capture on the former.
+  const mouseDownPosRef = useRef<{ x: number; y: number } | null>(null)
 
   // Per-PTY ownership. A PTY is shared across every connected device, but only
   // the owner drives its size and may type into it; the others render a read-only
@@ -366,6 +380,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       scrollback: scrollbackRef.current,
       overviewRuler: { width: scrollbarWidth },
       theme: { background: resolvedBg },
+      // When the app in the PTY enables mouse reporting, xterm forwards a drag to
+      // the host instead of selecting locally. The escape hatch is a modifier that
+      // forces a LOCAL selection: Shift on Linux/Windows (xterm default), but on
+      // macOS xterm gates it behind Option AND this flag. Enable it so a Mac-browser
+      // visitor can Option-drag to select and copy to THEIR clipboard rather than
+      // the host's. See the `onMouseUp` mouse-capture hint below.
+      macOptionClickForcesSelection: true,
     })
     // This xterm is a VIEWER of a PTY that dux-core's alacritty_terminal already
     // drives and answers device/color queries for. Stop it from also answering
@@ -527,14 +548,40 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // Copy-on-select (highlight to copy), gated by the `copy_on_select`
     // preference. Runs in the `mouseup` user gesture so the clipboard write is
     // permitted even over plain-HTTP (copyToClipboard falls synchronously to its
-    // execCommand path there). Skip empty/whitespace-only and trivial 1-char
-    // selections so a stray click-drag doesn't clobber the clipboard.
-    const onMouseUp = () => {
-      if (!copyOnSelectRef.current) return
-      const sel = term.getSelection()
-      if (sel.trim().length === 0 || sel.length < 2) return
-      copyTermSelection(term)
+    // execCommand path there). Record the left-button-down position so mouseup can
+    // tell a drag from a click. `copyOnSelectAction` decides: copy a real local
+    // selection; when the user dragged but the app captured the mouse (so xterm
+    // forwarded the drag to the host and nothing was selected locally), surface a
+    // one-time hint to hold the force-selection modifier; otherwise do nothing.
+    const onMouseDown = (e: MouseEvent) => {
+      if (e.button === 0) mouseDownPosRef.current = { x: e.clientX, y: e.clientY }
     }
+    const onMouseUp = (e: MouseEvent) => {
+      const down = mouseDownPosRef.current
+      mouseDownPosRef.current = null
+      const dragged =
+        down !== null &&
+        Math.hypot(e.clientX - down.x, e.clientY - down.y) >= DRAG_THRESHOLD_PX
+      const action = copyOnSelectAction({
+        copyOnSelect: copyOnSelectRef.current,
+        selection: term.getSelection(),
+        dragged,
+        mouseTrackingMode: term.modes.mouseTrackingMode,
+        hintShown: mouseCaptureHintShown,
+      })
+      if (action === "copy") {
+        copyTermSelection(term)
+      } else if (action === "hint") {
+        mouseCaptureHintShown = true
+        toast(
+          `This app is using the mouse. Hold ${
+            isMac ? "⌥ Option" : "Shift"
+          } and drag to select and copy to your device.`,
+          { id: "term-mouse-capture-hint", duration: 8000 },
+        )
+      }
+    }
+    container.addEventListener("mousedown", onMouseDown)
     container.addEventListener("mouseup", onMouseUp)
 
     // Kill xterm's right-click paste. On a mouse right-click xterm's own handler
@@ -880,6 +927,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       clearTimeout(jiggleTimer)
       clearTimeout(resyncTimer)
       clearTimeout(longPressTimer)
+      container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)
       container.removeEventListener("contextmenu", onContextMenuPasteGuard)
       container.removeEventListener("touchstart", onTouchStart)

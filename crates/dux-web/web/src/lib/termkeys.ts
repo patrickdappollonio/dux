@@ -345,3 +345,47 @@ export function classifyClipboardKey(ev: ClipboardKeyEvent): ClipboardKeyAction 
   // else is left to xterm / the browser.
   return "passthrough"
 }
+
+/** What a copy-on-select `mouseup` should do. */
+export type CopyOnSelectAction = "copy" | "hint" | "ignore"
+
+/**
+ * The runtime context a copy-on-select `mouseup` is judged against. Kept as a
+ * plain struct so the branching is pure and unit-testable without mounting xterm.
+ */
+export interface CopyOnSelectContext {
+  /** The `ui.copy_on_select` preference (default on). */
+  copyOnSelect: boolean
+  /** `term.getSelection()` at mouseup. Empty when no local selection was made. */
+  selection: string
+  /** Whether the pointer actually moved far enough to count as a drag (not a click). */
+  dragged: boolean
+  /**
+   * `term.modes.mouseTrackingMode`. Anything other than `"none"` means the app in
+   * the PTY has grabbed the mouse, so xterm forwarded the drag to the *host*
+   * instead of selecting locally — the highlighted text was copied on the host,
+   * never on the visitor's machine.
+   */
+  mouseTrackingMode: string
+  /** Whether the mouse-capture hint has already been shown this session. */
+  hintShown: boolean
+}
+
+/**
+ * Decides what a copy-on-select `mouseup` does.
+ *
+ * - `copy`   -> a real local selection exists; copy it to the visitor's clipboard.
+ * - `hint`   -> the user dragged but the app captured the mouse, so nothing was
+ *               selected locally (the text went to the host). Surface the
+ *               force-selection-modifier hint, once per session.
+ * - `ignore` -> preference off, a plain click, or nothing worth acting on.
+ *
+ * The `selection.length >= 2` floor matches the drag-misclick guard: a stray
+ * one-char selection never clobbers the clipboard.
+ */
+export function copyOnSelectAction(ctx: CopyOnSelectContext): CopyOnSelectAction {
+  if (!ctx.copyOnSelect) return "ignore"
+  if (ctx.selection.trim().length > 0 && ctx.selection.length >= 2) return "copy"
+  if (ctx.dragged && ctx.mouseTrackingMode !== "none" && !ctx.hintShown) return "hint"
+  return "ignore"
+}
