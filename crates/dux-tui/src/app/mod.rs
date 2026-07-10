@@ -1755,6 +1755,9 @@ impl App {
             branch_sync_worker_started: AtomicBool::new(false),
             pty_activity: HashMap::new(),
             pty_input: HashMap::new(),
+            needs_attention: HashSet::new(),
+            pty_progress: HashMap::new(),
+            agent_viewed: HashMap::new(),
             last_foreground_refresh: None,
             pending_web_checkout_ops: HashMap::new(),
             pending_web_add_project_ops: HashMap::new(),
@@ -1989,6 +1992,11 @@ impl App {
 
                 self.drain_events();
                 self.engine.poll_pty_activity();
+                // Drain attention/progress signals: keeps the "working" override
+                // truthful and maintains the per-tab attention flag. Must run
+                // after `poll_pty_activity` so a progress report and the activity
+                // it also produced are observed in the same tick.
+                self.engine.poll_agent_signals();
                 self.tick_count = self.tick_count.wrapping_add(1);
                 // Expire a transient status (e.g. a success confirmation) after
                 // its configured lifetime. Busy entries older than BUSY_TIMEOUT

@@ -205,6 +205,11 @@ pub struct SessionView {
     /// a stable `working: true` until a transition (idle→working or
     /// working→idle) occurs.
     pub working: bool,
+    /// Whether any of this agent's tabs currently needs attention (a permission
+    /// prompt, a finished turn) that the user has not yet looked at. Rolled up
+    /// any-tab, mirroring `working`. Memory-only runtime state; the web surfaces
+    /// this as a sidebar dot, a browser-tab count, and a favicon dot.
+    pub needs_attention: bool,
     /// Session creation time as an RFC 3339 / ISO 8601 string. Exposed so the
     /// web client can compute the same sort orders the TUI offers
     /// (`sort-agents-by-created`) and feed the result back through
@@ -248,6 +253,9 @@ pub struct AgentTabView {
     pub order: u32,
     /// Whether this tab's PTY is actively streaming (per-tab hysteresis boolean).
     pub working: bool,
+    /// Whether this specific tab needs attention (unacknowledged). The tab strip
+    /// marks the flagged tab's pill; the sidebar rolls this up across tabs.
+    pub needs_attention: bool,
     /// Whether this tab's PTY has emitted any output yet.
     pub has_output: bool,
     /// Whether a live PTY exists for this tab right now. `false` for a dormant
@@ -314,6 +322,7 @@ impl SessionView {
         tabs: Vec<AgentTabView>,
         has_output: bool,
         working: bool,
+        needs_attention: bool,
     ) -> Self {
         Self {
             id: s.id.clone(),
@@ -331,6 +340,7 @@ impl SessionView {
             tabs,
             has_output,
             working,
+            needs_attention,
             created_at: s.created_at.to_rfc3339(),
             updated_at: s.updated_at.to_rfc3339(),
         }
@@ -444,6 +454,11 @@ impl Engine {
         let working = std::iter::once(s.id.as_str())
             .chain(support_tabs.iter().map(|t| t.id.as_str()))
             .any(|id| self.is_agent_streaming(id));
+        // Attention rolls up any-tab, exactly like `working`: the sidebar row
+        // marks the agent if any of its tabs (session-slot or extra) is flagged.
+        let needs_attention = std::iter::once(s.id.as_str())
+            .chain(support_tabs.iter().map(|t| t.id.as_str()))
+            .any(|id| self.tab_needs_attention(id));
         // Tabs, session-slot first, then extras in creation order.
         let mut tabs = vec![self.tab_view(&s.id, self.running_provider_for(s), 0)];
         let mut support: Vec<_> = support_tabs.to_vec();
@@ -467,6 +482,7 @@ impl Engine {
             tabs,
             has_output,
             working,
+            needs_attention,
         )
     }
 
@@ -478,6 +494,7 @@ impl Engine {
             provider: provider.as_str().to_string(),
             order,
             working: self.is_agent_streaming(id),
+            needs_attention: self.tab_needs_attention(id),
             has_output: self
                 .providers
                 .get(id)

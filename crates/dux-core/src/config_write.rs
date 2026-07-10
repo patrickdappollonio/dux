@@ -289,6 +289,13 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "always_show_tab_strip",
         config.ui.always_show_tab_strip,
     );
+    patch_table_bool(
+        doc,
+        "ui",
+        "attention_indicator",
+        config.ui.attention_indicator,
+    );
+    patch_table_bool(doc, "ui", "attention_on_bell", config.ui.attention_on_bell);
     patch_table_str(
         doc,
         "ui",

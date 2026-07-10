@@ -1127,6 +1127,11 @@ pub(crate) fn run_engine_loop(
         // poll site for the other surface; the two never run at once).
         engine.poll_pty_activity();
 
+        // Drain attention/progress signals right after activity so the progress
+        // report and any output it also produced land in the same tick. Keeps the
+        // "working" override truthful and maintains the per-tab attention flag.
+        engine.poll_agent_signals();
+
         // Track per-agent streaming transitions. The `working` flag is time-derived
         // (it flips off once AGENT_STREAMING_WINDOW lapses), so a mutation counter
         // cannot see it; this O(1) poll bumps `streaming_version` on any flip so the

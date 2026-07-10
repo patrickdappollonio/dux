@@ -132,6 +132,9 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         branch_sync_worker_started: AtomicBool::new(false),
         pty_activity: HashMap::new(),
         pty_input: HashMap::new(),
+        needs_attention: HashSet::new(),
+        pty_progress: HashMap::new(),
+        agent_viewed: HashMap::new(),
         last_foreground_refresh: None,
     };
 

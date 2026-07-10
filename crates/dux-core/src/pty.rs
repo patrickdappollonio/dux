@@ -443,12 +443,33 @@ pub struct PtyClient {
     /// Handle to the background reader thread. Joined in `Drop` (after the
     /// child is killed and reaped) so the thread does not outlive the client.
     reader_thread: Option<thread::JoinHandle<()>>,
+    /// Consuming flag set when the terminal parser reported a `Bell` (shared with
+    /// the `EventProxy`). Drained by [`PtyClient::take_attention`].
+    attention_bell: Arc<AtomicBool>,
+    /// Consuming flag set by the reader loop's raw-byte scanner when an `OSC 9` /
+    /// `OSC 777` notification is seen. Drained by [`PtyClient::take_attention`].
+    attention_notify: Arc<AtomicBool>,
+    /// The most recent `OSC 9;4` progress report, or `None` if the agent has not
+    /// emitted one. Read (not consumed) by the engine's working predicate; the
+    /// engine applies its own staleness window.
+    progress: Arc<Mutex<Option<ProgressReport>>>,
 }
 
 #[derive(Default)]
 struct PendingIngest {
     buf: Vec<u8>,
     dropped: bool,
+}
+
+/// The most recent `OSC 9;4` progress report an agent emitted, with the moment
+/// it arrived. The engine reads this to drive a truer "working" indicator: while
+/// the report is fresh it overrides the output-activity heuristic, and it goes
+/// stale (falling back to the heuristic) if no newer report arrives. `working`
+/// mirrors [`crate::attention::AttentionEvent::Progress`].
+#[derive(Debug, Clone, Copy)]
+pub struct ProgressReport {
+    pub working: bool,
+    pub at: Instant,
 }
 
 impl PtyClient {
@@ -532,7 +553,11 @@ impl PtyClient {
             }
         };
 
-        let terminal = Arc::new(Mutex::new(TerminalState::new(rows, cols, scrollback_lines)));
+        let terminal_state = TerminalState::new(rows, cols, scrollback_lines);
+        // Grab the shared bell flag before the terminal moves behind the mutex,
+        // so the client can consume bell events the parser reports.
+        let attention_bell = terminal_state.bell_flag();
+        let terminal = Arc::new(Mutex::new(terminal_state));
         let writer = PtyWriter::spawn(pty_writer);
         let writer_tx = writer.sender();
         let exited = Arc::new(AtomicBool::new(false));
@@ -542,6 +567,8 @@ impl PtyClient {
         let scroll_paused = Arc::new(AtomicBool::new(false));
         let pending_bytes = Arc::new(Mutex::new(PendingIngest::default()));
         let subscribers: SubscriberList = Arc::new(Mutex::new(Vec::new()));
+        let attention_notify = Arc::new(AtomicBool::new(false));
+        let progress: Arc<Mutex<Option<ProgressReport>>> = Arc::new(Mutex::new(None));
 
         let terminal_ref = Arc::clone(&terminal);
         let exited_ref = Arc::clone(&exited);
@@ -551,6 +578,8 @@ impl PtyClient {
         let scroll_paused_ref = Arc::clone(&scroll_paused);
         let pending_bytes_ref = Arc::clone(&pending_bytes);
         let subscribers_ref = Arc::clone(&subscribers);
+        let attention_notify_ref = Arc::clone(&attention_notify);
+        let progress_ref = Arc::clone(&progress);
         let reader_thread = thread::spawn(move || {
             Self::reader_loop(
                 reader,
@@ -563,6 +592,8 @@ impl PtyClient {
                 scroll_paused_ref,
                 pending_bytes_ref,
                 subscribers_ref,
+                attention_notify_ref,
+                progress_ref,
             );
         });
 
@@ -581,6 +612,9 @@ impl PtyClient {
             subscribers,
             next_sub_id: AtomicU64::new(0),
             reader_thread: Some(reader_thread),
+            attention_bell,
+            attention_notify,
+            progress,
         })
     }
 
@@ -596,8 +630,15 @@ impl PtyClient {
         scroll_paused: Arc<AtomicBool>,
         pending_bytes: Arc<Mutex<PendingIngest>>,
         subscribers: SubscriberList,
+        attention_notify: Arc<AtomicBool>,
+        progress: Arc<Mutex<Option<ProgressReport>>>,
     ) {
         let mut buf = [0u8; 4096];
+        // Raw-byte scanner for OSC notifications and progress reports. Lives on
+        // the reader thread's stack so its cross-chunk carry persists between
+        // reads. Runs on every chunk regardless of scroll-pause, so a
+        // notification is never lost while the user browses scrollback.
+        let mut scanner = crate::attention::AttentionScanner::new();
         loop {
             match crate::io_retry::retry_on_interrupt(|| reader.read(&mut buf)) {
                 Ok(0) => {
@@ -606,6 +647,24 @@ impl PtyClient {
                 }
                 Ok(n) => {
                     let data = &buf[..n];
+
+                    // Scan for attention/progress signals before any pause branch
+                    // so both are detected even while ingestion is paused.
+                    for event in scanner.scan(data) {
+                        match event {
+                            crate::attention::AttentionEvent::Notify => {
+                                attention_notify.store(true, Ordering::Release);
+                            }
+                            crate::attention::AttentionEvent::Progress { working } => {
+                                if let Ok(mut slot) = progress.lock() {
+                                    *slot = Some(ProgressReport {
+                                        working,
+                                        at: Instant::now(),
+                                    });
+                                }
+                            }
+                        }
+                    }
 
                     // Fan raw bytes out to web subscribers before the TUI-only
                     // scroll-pause branch, so web clients stream independently.
@@ -957,6 +1016,24 @@ impl PtyClient {
         true
     }
 
+    /// Consume any pending attention signals, returning `true` if the agent
+    /// asked for attention since the last call. Both the bell and notification
+    /// flags are drained every call (so a suppressed signal never lingers);
+    /// `count_bell` gates whether a plain bell counts (the `attention_on_bell`
+    /// preference). Notifications always count when the feature is enabled.
+    pub fn take_attention(&self, count_bell: bool) -> bool {
+        let notify = self.attention_notify.swap(false, Ordering::AcqRel);
+        let bell = self.attention_bell.swap(false, Ordering::AcqRel);
+        notify || (count_bell && bell)
+    }
+
+    /// The most recent `OSC 9;4` progress report, if the agent emitted one. This
+    /// is a non-consuming read: the value persists until a newer report replaces
+    /// it. Staleness is the engine's concern.
+    pub fn progress_report(&self) -> Option<ProgressReport> {
+        self.progress.lock().ok().and_then(|slot| *slot)
+    }
+
     /// Whether the child process has enabled any mouse tracking mode
     /// (e.g. via DECSET 1000/1002/1003). When true, non-scroll mouse
     /// events should be forwarded to the PTY rather than dropped.
@@ -1167,6 +1244,12 @@ impl TerminalState {
             .renderable_content()
             .display_iter
             .any(|indexed| !indexed.cell.c.is_whitespace())
+    }
+
+    /// Clone the shared bell flag so the owning [`PtyClient`] can consume bell
+    /// events the parser reported.
+    fn bell_flag(&self) -> Arc<AtomicBool> {
+        self.event_proxy.bell_flag()
     }
 
     /// Count the number of distinct viewport rows that contain at least one
@@ -1455,6 +1538,12 @@ impl TerminalState {
 struct EventProxy {
     pending: Arc<Mutex<PendingEvents>>,
     size: Arc<Mutex<(u16, u16)>>,
+    /// Set whenever the terminal parser reports a `Bell` event (the classic
+    /// terminal ding, `0x07`). Consumed by [`PtyClient::take_attention`] via the
+    /// clone the client holds. The emulator delivers `Event::Bell` for every
+    /// ding but dux otherwise drops it; capturing it here is how a bell becomes
+    /// an attention signal.
+    bell: Arc<AtomicBool>,
 }
 
 impl EventProxy {
@@ -1462,7 +1551,13 @@ impl EventProxy {
         Self {
             pending: Arc::new(Mutex::new(PendingEvents::default())),
             size: Arc::new(Mutex::new((rows, cols))),
+            bell: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Clone the shared bell flag so the owning [`PtyClient`] can consume it.
+    fn bell_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.bell)
     }
 
     fn push_bytes(&self, bytes: &[u8]) {
@@ -1497,6 +1592,9 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => self.push_bytes(text.as_bytes()),
+            // The terminal ding: record it as an attention signal. The owning
+            // client consumes and config-gates it (`attention_on_bell`).
+            Event::Bell => self.bell.store(true, Ordering::Release),
             Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
             Event::TextAreaSizeRequest(formatter) => {
                 let (rows, cols) = self.size.lock().map(|size| *size).unwrap_or((24, 80));
@@ -1795,6 +1893,21 @@ mod tests {
             }
         }
         rows
+    }
+
+    #[test]
+    fn bell_event_sets_attention_flag() {
+        // The emulator must deliver `Event::Bell` for a `0x07` byte and our
+        // `EventProxy` must capture it into the shared bell flag. This guards the
+        // one-line bell hook the attention feature relies on.
+        let mut terminal = TerminalState::with_scrollback(3, 12, 100);
+        let bell = terminal.bell_flag();
+        assert!(!bell.load(Ordering::Acquire));
+        terminal.process(b"\x07");
+        assert!(
+            bell.load(Ordering::Acquire),
+            "a 0x07 byte should raise the bell flag"
+        );
     }
 
     #[test]

@@ -445,6 +445,16 @@ pub struct UiConfig {
     /// persists the new value here immediately; it is a shared preference,
     /// not a per-session override.
     pub always_show_tab_strip: bool,
+    /// Show an indicator when an agent asks for attention (a permission prompt,
+    /// a finished turn). Detected from the agent's terminal notifications and
+    /// bell. When false, no attention glyph/dot/tab-title/favicon cue is shown on
+    /// either surface. Default true.
+    pub attention_indicator: bool,
+    /// Also treat a plain terminal bell as an attention request. The bell is the
+    /// most compatible signal (Codex falls back to it; Claude Code emits it in
+    /// terminal_bell mode) but can occasionally ring for mundane reasons, so this
+    /// switch turns it off independently of `attention_indicator`. Default true.
+    pub attention_on_bell: bool,
     pub pr_banner_position: String,
     pub theme: String,
 }
@@ -567,6 +577,8 @@ impl Default for UiConfig {
             auto_reopen_agents: false,
             show_changes_pane: true,
             always_show_tab_strip: false,
+            attention_indicator: true,
+            attention_on_bell: true,
             pr_banner_position: "bottom".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
@@ -1043,6 +1055,8 @@ impl Default for Config {
                 auto_reopen_agents: false,
                 show_changes_pane: true,
                 always_show_tab_strip: false,
+                attention_indicator: true,
+                attention_on_bell: true,
                 pr_banner_position: "bottom".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },

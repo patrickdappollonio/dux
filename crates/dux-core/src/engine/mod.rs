@@ -53,7 +53,7 @@ use crate::model::{
     AgentSession, AgentTab, ChangedFile, CompanionTerminal, GhStatus, PrInfo, Project,
     ProviderKind, SessionStatus,
 };
-use crate::pty::PtyClient;
+use crate::pty::{ProgressReport, PtyClient};
 use crate::storage::SessionStore;
 use crate::worker::{BranchSyncEntry, PrSyncEntry, ProjectPersistenceAction, WorkerEvent};
 
@@ -242,6 +242,28 @@ pub struct Engine {
     /// `pty_activity` is cleared (session teardown, detach, forced relaunch) so
     /// the two never drift; a new teardown path must drop both entries.
     pub pty_input: HashMap<String, Instant>,
+    /// Tabs (keyed by tab id) that have raised a "needs attention" signal that
+    /// has not yet been looked at. Memory-only runtime state, never persisted —
+    /// like `working`/`has_output`, it does not survive a restart, by tenet.
+    /// Populated by [`Engine::poll_agent_signals`] (which suppresses a signal on
+    /// a tab the user is engaged with) and cleared when the user looks at or
+    /// tears down the tab. The sidebar rolls this up across an agent's tabs.
+    pub needs_attention: HashSet<String>,
+    /// The most recent `OSC 9;4` progress report per tab (keyed by tab id), with
+    /// the moment the engine observed it. [`Engine::is_agent_streaming`] treats a
+    /// fresh report as authoritative for the "working" indicator, overriding the
+    /// output-activity heuristic; a stale report (older than
+    /// [`PROGRESS_AUTHORITY_WINDOW`]) is ignored and the heuristic resumes.
+    /// Memory-only; dropped on tab teardown so a crashed agent can never leave a
+    /// spinner stuck on.
+    pub pty_progress: HashMap<String, ProgressReport>,
+    /// Wall-clock timestamp of when the user was last actively looking at each
+    /// tab (keyed by tab id): the TUI stamps the focused-interactive agent tab
+    /// each tick; the web stamps a tab on PTY subscribe (opening its live view).
+    /// A fresh entry (within [`ATTENTION_ENGAGED_WINDOW`]) both suppresses a new
+    /// attention signal and clears an existing one, so an agent you are already
+    /// looking at never nags you. Typing is handled separately via `pty_input`.
+    pub agent_viewed: HashMap<String, Instant>,
     /// Wall-clock timestamp of the last companion-terminal foreground refresh.
     /// [`Engine::refresh_terminal_foregrounds`] throttles itself against this so
     /// callers can invoke it every tick while the actual `tcgetpgrp` probe runs
@@ -458,6 +480,42 @@ pub const AGENT_STREAMING_WINDOW: Duration = Duration::from_secs(1);
 /// tick. Shared by the TUI spinner and the web ViewModel through
 /// [`Engine::is_agent_streaming`].
 pub const AGENT_INPUT_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1250);
+
+/// How long an `OSC 9;4` progress report stays authoritative for the "working"
+/// indicator before [`Engine::is_agent_streaming`] falls back to the
+/// output-activity heuristic. Agents that emit progress (e.g. Claude Code)
+/// stream it many times a second while busy, so any real gap this long means the
+/// report channel has gone quiet and the heuristic should take over. This also
+/// bounds how long a crashed agent's last "working" report can linger before the
+/// spinner settles. Wall-clock, per the design tenet.
+pub const PROGRESS_AUTHORITY_WINDOW: Duration = Duration::from_secs(10);
+
+/// How long after the user last looked at a tab (TUI focus, web PTY subscribe)
+/// an attention signal on that tab stays suppressed/cleared. Must comfortably
+/// exceed a surface's tick cadence so continuously viewing a tab keeps its
+/// attention flag from ever rising. Typing suppression is separate
+/// ([`AGENT_INPUT_SUPPRESSION_WINDOW`]). Wall-clock, per the design tenet.
+pub const ATTENTION_ENGAGED_WINDOW: Duration = Duration::from_secs(3);
+
+/// Whether the user is currently "engaged" with a tab and so should not be
+/// nagged about it: they either looked at it within [`ATTENTION_ENGAGED_WINDOW`]
+/// (`viewed`) or typed into it within [`AGENT_INPUT_SUPPRESSION_WINDOW`]
+/// (`typed`). A free function so [`Engine::poll_agent_signals`] can call it while
+/// holding a disjoint mutable borrow of `needs_attention`, and so the windowing
+/// is unit-testable without a live PTY.
+fn attention_engaged(
+    viewed: &HashMap<String, Instant>,
+    typed: &HashMap<String, Instant>,
+    tab_id: &str,
+    now: Instant,
+) -> bool {
+    viewed
+        .get(tab_id)
+        .is_some_and(|t| now.duration_since(*t) < ATTENTION_ENGAGED_WINDOW)
+        || typed
+            .get(tab_id)
+            .is_some_and(|t| now.duration_since(*t) < AGENT_INPUT_SUPPRESSION_WINDOW)
+}
 
 /// How often [`Engine::refresh_terminal_foregrounds`] actually probes companion
 /// terminals for their foreground command. Calls more frequent than this are
@@ -682,6 +740,17 @@ impl Engine {
     /// assumed to be the echo of that typing and the indicator is voided.
     /// Keyed by TAB id (see `poll_pty_activity`), not session id.
     pub fn is_agent_streaming(&self, tab_id: &str) -> bool {
+        // A fresh OSC 9;4 progress report is authoritative: the agent is stating
+        // its own busy/idle status, which we trust over the output-activity
+        // heuristic (and over typing suppression — a progress report is the
+        // agent's own signal, not a terminal echo of the user's keystrokes). A
+        // stale report is ignored and the heuristic below resumes, so a crashed
+        // agent that stopped reporting can never leave the spinner stuck on.
+        if let Some(report) = self.pty_progress.get(tab_id)
+            && report.at.elapsed() < PROGRESS_AUTHORITY_WINDOW
+        {
+            return report.working;
+        }
         let streaming = self
             .pty_activity
             .get(tab_id)
@@ -694,6 +763,79 @@ impl Engine {
             .get(tab_id)
             .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW);
         !typing
+    }
+
+    /// Poll every provider for attention and progress signals once per tick,
+    /// mirroring [`Engine::poll_pty_activity`]. This is the single drain site for
+    /// the consuming per-tab attention flag (both the TUI run loop and the web
+    /// engine actor call it exactly once per tick, and never at the same time).
+    ///
+    /// - Progress reports are captured unconditionally (they feed the working
+    ///   indicator regardless of the attention preference).
+    /// - Attention signals are drained every call so a suppressed one never
+    ///   lingers, but only set the flag when `attention_indicator` is on AND the
+    ///   user is not currently engaged with that tab (looking at it or typing
+    ///   into it). Looking at or typing into a tab also clears an existing flag.
+    pub fn poll_agent_signals(&mut self) {
+        let now = Instant::now();
+        let enabled = self.config.ui.attention_indicator;
+        let count_bell = self.config.ui.attention_on_bell;
+
+        // Collect first: iterating `providers` borrows it immutably, so the
+        // per-tab map mutations below must happen after the loop.
+        let mut progress_updates: Vec<(String, ProgressReport)> = Vec::new();
+        let mut fired: Vec<String> = Vec::new();
+        for (tab_id, provider) in &self.providers {
+            if let Some(report) = provider.progress_report() {
+                progress_updates.push((tab_id.clone(), report));
+            }
+            // Always drain (consume) the flag so a toggle can't replay a stale
+            // signal; only record the hit while the feature is enabled.
+            if provider.take_attention(count_bell) && enabled {
+                fired.push(tab_id.clone());
+            }
+        }
+
+        for (tab_id, report) in progress_updates {
+            self.pty_progress.insert(tab_id, report);
+        }
+
+        if !enabled {
+            // Feature off: never accumulate, and drop anything left over from
+            // before a runtime toggle so nothing lingers.
+            self.needs_attention.clear();
+            return;
+        }
+
+        // Direct field borrows (not a `self` method) so the disjoint mutable
+        // borrow of `needs_attention` below is allowed alongside these reads.
+        let viewed = &self.agent_viewed;
+        let typed = &self.pty_input;
+        let engaged = |tab: &str| attention_engaged(viewed, typed, tab, now);
+
+        // Looking at (or typing into) a tab clears its flag.
+        self.needs_attention.retain(|tab| !engaged(tab));
+        // A newly-fired signal sets the flag unless the user is engaged with it.
+        for tab in fired {
+            if !engaged(&tab) {
+                self.needs_attention.insert(tab);
+            }
+        }
+    }
+
+    /// Record that the user is actively looking at the given tab's live view
+    /// (TUI: the focused, interactive agent tab; web: a PTY subscribe). This both
+    /// clears an existing attention flag immediately and suppresses a new one for
+    /// [`ATTENTION_ENGAGED_WINDOW`] so an agent you are watching never nags you.
+    pub fn note_agent_viewed(&mut self, tab_id: &str) {
+        self.agent_viewed.insert(tab_id.to_string(), Instant::now());
+        self.needs_attention.remove(tab_id);
+    }
+
+    /// Whether the given tab currently has an unacknowledged attention signal.
+    /// Keyed by TAB id; the sidebar rolls this up across an agent's tabs.
+    pub fn tab_needs_attention(&self, tab_id: &str) -> bool {
+        self.needs_attention.contains(tab_id)
     }
 
     /// True if the given key is currently marked in-flight.
@@ -2305,6 +2447,129 @@ mod tests {
             engine.is_agent_streaming("s1"),
             "once the input window lapses, ongoing output reads as streaming"
         );
+    }
+
+    #[test]
+    fn progress_report_overrides_working_true() {
+        let (mut engine, _tmp) = test_engine();
+        // No output activity at all, but a fresh progress report says "working".
+        engine.pty_progress.insert(
+            "s1".to_string(),
+            ProgressReport {
+                working: true,
+                at: Instant::now(),
+            },
+        );
+        assert!(
+            engine.is_agent_streaming("s1"),
+            "a fresh working progress report must light the indicator"
+        );
+    }
+
+    #[test]
+    fn progress_report_overrides_working_false_even_with_activity() {
+        let (mut engine, _tmp) = test_engine();
+        // Output activity would read as streaming, but the agent's own progress
+        // report states it is idle — the report wins.
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine.pty_progress.insert(
+            "s1".to_string(),
+            ProgressReport {
+                working: false,
+                at: Instant::now(),
+            },
+        );
+        assert!(
+            !engine.is_agent_streaming("s1"),
+            "a fresh idle progress report must override the activity heuristic"
+        );
+    }
+
+    #[test]
+    fn stale_progress_report_falls_back_to_heuristic() {
+        let (mut engine, _tmp) = test_engine();
+        // The last progress report is older than the authority window, so the
+        // output-activity heuristic takes over again.
+        engine.pty_progress.insert(
+            "s1".to_string(),
+            ProgressReport {
+                working: true,
+                at: Instant::now() - (PROGRESS_AUTHORITY_WINDOW + Duration::from_millis(50)),
+            },
+        );
+        assert!(
+            !engine.is_agent_streaming("s1"),
+            "a stale report grants no authority; with no activity the agent is idle"
+        );
+
+        // With fresh activity and the same stale report, the heuristic lights it.
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        assert!(
+            engine.is_agent_streaming("s1"),
+            "a stale report must not suppress genuine ongoing output"
+        );
+    }
+
+    #[test]
+    fn note_agent_viewed_clears_attention_immediately() {
+        let (mut engine, _tmp) = test_engine();
+        engine.needs_attention.insert("s1".to_string());
+        assert!(engine.tab_needs_attention("s1"));
+        engine.note_agent_viewed("s1");
+        assert!(
+            !engine.tab_needs_attention("s1"),
+            "looking at a tab must clear its attention flag at once"
+        );
+    }
+
+    #[test]
+    fn attention_engaged_covers_viewing_and_typing() {
+        let now = Instant::now();
+        let mut viewed = HashMap::new();
+        let mut typed = HashMap::new();
+
+        // Nothing recorded → not engaged.
+        assert!(!attention_engaged(&viewed, &typed, "s1", now));
+
+        // Fresh view → engaged.
+        viewed.insert("s1".to_string(), now);
+        assert!(attention_engaged(&viewed, &typed, "s1", now));
+
+        // Stale view → not engaged.
+        viewed.insert(
+            "s1".to_string(),
+            now - (ATTENTION_ENGAGED_WINDOW + Duration::from_millis(50)),
+        );
+        assert!(!attention_engaged(&viewed, &typed, "s1", now));
+
+        // Fresh typing alone → engaged.
+        typed.insert("s1".to_string(), now);
+        assert!(attention_engaged(&viewed, &typed, "s1", now));
+
+        // Stale typing → not engaged.
+        typed.insert(
+            "s1".to_string(),
+            now - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+        );
+        assert!(!attention_engaged(&viewed, &typed, "s1", now));
+    }
+
+    #[test]
+    fn clear_tab_runtime_drops_attention_and_progress() {
+        let (mut engine, _tmp) = test_engine();
+        engine.needs_attention.insert("s1".to_string());
+        engine.pty_progress.insert(
+            "s1".to_string(),
+            ProgressReport {
+                working: true,
+                at: Instant::now(),
+            },
+        );
+        engine.agent_viewed.insert("s1".to_string(), Instant::now());
+        engine.clear_tab_runtime("s1");
+        assert!(!engine.tab_needs_attention("s1"));
+        assert!(!engine.pty_progress.contains_key("s1"));
+        assert!(!engine.agent_viewed.contains_key("s1"));
     }
 
     #[test]

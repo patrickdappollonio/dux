@@ -270,6 +270,18 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.ui.always_show_tab_strip,
         current.ui.always_show_tab_strip,
     );
+    diff_bool(
+        &mut changes,
+        "ui.attention_indicator",
+        defaults.ui.attention_indicator,
+        current.ui.attention_indicator,
+    );
+    diff_bool(
+        &mut changes,
+        "ui.attention_on_bell",
+        defaults.ui.attention_on_bell,
+        current.ui.attention_on_bell,
+    );
     diff_str(
         &mut changes,
         "ui.pr_banner_position",

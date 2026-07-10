@@ -615,6 +615,20 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.always_show_tab_strip),
         },
         ConfigEntry::Field {
+            key: "attention_indicator",
+            comment: Some(CommentSource::Static(
+                "# Show an indicator when an agent asks for attention (a permission\n# prompt, a finished turn). Detected from the agent's terminal\n# notifications and bell. The TUI blinks a marker in the sidebar; the web\n# UI shows a dot, a browser-tab count, and a favicon dot. Set to false to\n# disable it everywhere.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.attention_indicator),
+        },
+        ConfigEntry::Field {
+            key: "attention_on_bell",
+            comment: Some(CommentSource::Static(
+                "# Also treat a plain terminal bell as an attention request. The bell is\n# the most compatible signal (Codex falls back to it; Claude Code emits it\n# in terminal_bell mode) but can occasionally ring for mundane reasons, so\n# turn this off if you find it noisy. Has no effect when\n# attention_indicator is false.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.attention_on_bell),
+        },
+        ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
                 "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",
@@ -1379,6 +1393,8 @@ mod tests {
         assert!(rendered.contains("copy_on_select = true"));
         assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("always_show_tab_strip = false"));
+        assert!(rendered.contains("attention_indicator = true"));
+        assert!(rendered.contains("attention_on_bell = true"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
         assert!(rendered.contains("[editor]"));
