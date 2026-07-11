@@ -4325,7 +4325,9 @@ mod tab_ops_tests {
         let tab = support_tab("tab-1", "s1", "codex");
         engine.agent_tabs.insert(tab.id.clone(), tab);
         // Session-slot "s1" has no provider; the extra tab does.
-        engine.providers.insert("tab-1".into(), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert("tab-1".into(), spawn_cat(tmp.path()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
     }
@@ -4337,7 +4339,9 @@ mod tab_ops_tests {
         let tab = support_tab("tab-1", "s1", "codex");
         engine.agent_tabs.insert(tab.id.clone(), tab);
         engine.providers.insert("s1".into(), spawn_cat(tmp.path()));
-        engine.providers.insert("tab-1".into(), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert("tab-1".into(), spawn_cat(tmp.path()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("s1".to_string()));
     }
@@ -4354,8 +4358,12 @@ mod tab_ops_tests {
         engine.agent_tabs.insert(later.id.clone(), later);
         // Both are live; the lower sort_order ("tab-1") should win, not
         // insertion/HashMap order.
-        engine.providers.insert("tab-2".into(), spawn_cat(tmp.path()));
-        engine.providers.insert("tab-1".into(), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert("tab-2".into(), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert("tab-1".into(), spawn_cat(tmp.path()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
     }
