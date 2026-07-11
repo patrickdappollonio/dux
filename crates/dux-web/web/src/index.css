@@ -58,8 +58,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        that when work stops the icon glides back to rest (translateY(0)) instead
        of freezing at the top or bottom of the bob. */
     --animate-agent-working: agent-working 0.5s ease-in-out infinite;
-    /* The "needs attention" dot rhythm: two quick pulses, then a slow fade back
-       up, then repeat. Faster and more insistent than Tailwind's stock 2s
+    /* The "needs attention" dot rhythm: two quick pulses, then a steady hold,
+       then repeat. Faster and more insistent than Tailwind's stock 2s
        `animate-pulse` (which this replaced), because the whole point of the dot
        is to be noticed from the corner of your eye. Pure opacity so reduced
        motion can drop it wholesale (`motion-reduce:animate-none` on the dot). */
@@ -72,13 +72,14 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     75% { transform: translateY(10%); }
 }
 
-/* Two quick dips (~0.35s each), then one long fade down and back to full.
-   Starts and ends at full opacity so the loop is seamless. */
+/* Two quick dips (~0.35s each), then the dot holds at full opacity for the rest
+   of the cycle. No trailing fade: with one, the recovering fade-in reads like a
+   third half-blink right before the next pair and the rhythm feels off. Starts
+   and ends at full opacity so the loop is seamless. */
 @keyframes attention-pulse {
     0%, 36%, 100% { opacity: 1; }
     9%, 27% { opacity: 0.25; }
     18% { opacity: 1; }
-    70% { opacity: 0.2; }
 }
 
 /* The working-agent name shimmer, a greyscale "loading" sweep that keeps the name
