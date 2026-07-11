@@ -339,7 +339,11 @@ function SessionRow({
               the two Tailwind `animate-*` utilities never fight over the
               `animation` property and the cues mix cleanly. Steady amber under
               reduced motion. COLOR PAIRING: amber-400, matching `AttentionDot`
-              and `ATTENTION_DOT_FILL` in lib/favicon.ts. */}
+              and `ATTENTION_DOT_FILL` in lib/favicon.ts.
+
+              SIZING NOTE: the icon sizes itself (`size-4.5`, a step up from the
+              button's default 16px); the explicit size- class also opts it out
+              of the shared Button's `[&_svg:not([class*='size-'])]` sizing. */}
           <span
             aria-label={attention ? "Needs attention" : undefined}
             className={cn(
@@ -350,7 +354,7 @@ function SessionRow({
           >
             <Bot
               className={cn(
-                "motion-safe:transition-transform motion-safe:duration-300",
+                "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
                 shimmer && "motion-safe:animate-agent-working"
               )}
             />

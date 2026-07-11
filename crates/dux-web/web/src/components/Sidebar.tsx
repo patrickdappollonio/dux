@@ -310,18 +310,24 @@ function SessionSubItem({
               element would fight over the `animation` property; nested, the two
               cues mix cleanly. Under reduced motion the icon holds steady amber.
               COLOR PAIRING: amber-400, matching `AttentionDot` and
-              `ATTENTION_DOT_FILL` in lib/favicon.ts. */}
+              `ATTENTION_DOT_FILL` in lib/favicon.ts.
+
+              SIZING/COLOR NOTE: wrapping the icon takes it out of reach of the
+              sub-button's direct-child `[&>svg]` selectors, so the icon sizes
+              itself (`size-4.5`, deliberately a step up from the old 16px) and
+              the wrapper carries the color the selector used to apply. */}
           <span
             aria-label={attention ? "Needs attention" : undefined}
             className={cn(
               "inline-flex shrink-0",
-              attention &&
-                "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+              attention
+                ? "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                : "text-sidebar-accent-foreground"
             )}
           >
             <Bot
               className={cn(
-                "motion-safe:transition-transform motion-safe:duration-300",
+                "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
                 shimmer && "motion-safe:animate-agent-working"
               )}
             />
