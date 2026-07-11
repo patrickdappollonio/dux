@@ -20,11 +20,15 @@ There's no "main" tab and no "support" tab. Every tab is just a provider session
 in the agent's shared worktree, and they all look and behave the same. Add one,
 close one, switch between them freely.
 
-Add a tab with the `+` button on the strip (or the new-tab command). It spawns the
-project's default provider immediately. Want a different provider on that tab?
-Retarget it from its `⋯` menu on the web, or with the change-provider action in the
-TUI. There's a per-agent cap (20 by default, and fully configurable) so the strip
-stays sane; the `+` button politely bows out once you hit it.
+Add a tab with the `+` button on the strip. On the web it spawns the project's
+default provider immediately. In the TUI, adding a tab (the `+` button, the
+new-agent-tab command, or the equivalent key) opens a picker so you can choose
+which configured provider the new tab runs, with the project default
+preselected; when only one provider is configured it skips the picker and just
+uses it. Want a different provider on a tab later? Retarget it from its `⋯` menu
+on the web, or with the change-provider action in the TUI. There's a per-agent
+cap (20 by default, and fully configurable) so the strip stays sane; adding a
+tab politely bows out once you hit it.
 
 ## How resume works
 

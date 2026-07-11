@@ -116,8 +116,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: Action::NewTab,
-        name: "new-tab",
-        description: "Add a tab to the selected agent (starts fresh)",
+        name: "new-agent-tab",
+        description: "Add a tab to the selected agent, choosing its provider",
         // Per-session: web adds tabs from the tab strip's + button.
         surface: PaletteSurface::Tui,
     },
@@ -546,6 +546,20 @@ mod tests {
                 c.name
             );
         }
+    }
+
+    #[test]
+    fn new_agent_tab_command_is_named_new_agent_tab() {
+        assert!(
+            PALETTE_COMMANDS
+                .iter()
+                .any(|c| c.action == Action::NewTab && c.name == "new-agent-tab"),
+            "expected a new-agent-tab palette command for Action::NewTab"
+        );
+        assert!(
+            !PALETTE_COMMANDS.iter().any(|c| c.name == "new-tab"),
+            "the old new-tab palette command name should no longer exist"
+        );
     }
 
     #[test]

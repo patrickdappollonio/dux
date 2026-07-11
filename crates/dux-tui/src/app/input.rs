@@ -752,7 +752,7 @@ impl App {
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::NextTab if !in_diff => self.focus_tab_relative(true),
                 Action::PrevTab if !in_diff => self.focus_tab_relative(false),
-                Action::NewTab if !in_diff => self.new_tab_for_selected_session()?,
+                Action::NewTab if !in_diff => self.open_new_tab_provider_prompt()?,
                 Action::CloseTab if !in_diff => self.close_focused_tab_prompt(),
                 Action::SelectTab1 if !in_diff => self.focus_tab_index(0),
                 Action::SelectTab2 if !in_diff => self.focus_tab_index(1),
@@ -5987,7 +5987,7 @@ impl App {
             && contains_point(add, column, row)
         {
             self.focus = FocusPane::Center;
-            let _ = self.new_tab_for_selected_session();
+            let _ = self.open_new_tab_provider_prompt();
             return true;
         }
         if let Some((tab_id, _)) = self
@@ -6671,15 +6671,16 @@ mod tests {
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::test_support::*;
     use crate::app::{
-        AgentLaunchKind, App, BranchWarningKind, CenterMode, ConfigReloadFailedFocus,
-        ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection,
-        CreateAgentRequest, DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget,
-        KillRunningAction, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
-        KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection, MacroBarState,
-        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
-        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt,
-        ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget, ResourceStats, RightSection,
-        RuntimeTargetId, StartupCommandLogPrompt, TextInput, WorkerEvent,
+        AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
+        ConfigReloadFailedFocus, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
+        CreateAgentBranchInspection, CreateAgentRequest, DeleteAgentFocus, FocusPane,
+        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
+        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
+        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
+        NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
+        PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
+        ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt, TextInput,
+        WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
@@ -11335,6 +11336,149 @@ cyan = "#00ffff"
             }
             other => panic!("expected change-agent-provider prompt, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn retarget_prompt_still_opens_in_retarget_mode() {
+        // Regression: opening the ctrl+p retarget prompt (as opposed to the
+        // new-agent-tab picker) must keep using ChangeAgentProviderMode::Retarget.
+        let mut app = test_app(default_bindings());
+        app.open_change_agent_provider_prompt()
+            .expect("open retarget prompt");
+        match &app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                assert_eq!(prompt.mode, ChangeAgentProviderMode::Retarget);
+            }
+            other => panic!("expected change-agent-provider prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_tab_picker_opens_modal_with_project_default_preselected() {
+        let mut app = test_app(default_bindings());
+        // test_app seeds project-1 with default_provider "codex".
+        app.open_new_tab_provider_prompt()
+            .expect("open new-agent-tab picker");
+        match &app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                assert_eq!(prompt.mode, ChangeAgentProviderMode::NewTab);
+                let preselected = &prompt.options[prompt.selected];
+                assert_eq!(preselected.provider.as_str(), "codex");
+            }
+            other => panic!("expected new-agent-tab picker prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_tab_picker_confirm_creates_tab_with_chosen_provider() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+
+        app.open_new_tab_provider_prompt()
+            .expect("open new-agent-tab picker");
+        match &mut app.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                prompt.selected = prompt
+                    .options
+                    .iter()
+                    .position(|option| option.provider.as_str() == "opencode")
+                    .expect("opencode option");
+            }
+            other => panic!("expected new-agent-tab picker prompt, got {other:?}"),
+        }
+
+        app.apply_change_agent_provider()
+            .expect("apply new tab creation");
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(
+            app.engine
+                .session_store
+                .count_agent_tabs(&session_id)
+                .expect("count tabs"),
+            1
+        );
+        let created = app
+            .engine
+            .agent_tabs
+            .values()
+            .find(|tab| tab.session_id == session_id)
+            .expect("tab row exists");
+        assert_eq!(created.provider.as_str(), "opencode");
+        assert_eq!(
+            app.focused_tabs.get(&session_id).map(|id| id.as_str()),
+            Some(created.id.as_str()),
+            "the new tab should be focused"
+        );
+    }
+
+    #[test]
+    fn new_tab_picker_esc_creates_no_tab() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+
+        app.open_new_tab_provider_prompt()
+            .expect("open new-agent-tab picker");
+        assert!(matches!(app.prompt, PromptState::ChangeAgentProvider(_)));
+
+        let should_quit = app
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("handle esc");
+        assert!(!should_quit);
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(
+            app.engine
+                .session_store
+                .count_agent_tabs(&session_id)
+                .expect("count tabs"),
+            0
+        );
+    }
+
+    #[test]
+    fn new_tab_picker_at_cap_reports_and_does_not_open() {
+        let mut app = test_app(default_bindings());
+        // The session-slot tab already counts as one of the cap; a cap of 1
+        // means no extra tab may be added.
+        app.engine.config.ui.agent_tabs_max = 1;
+
+        app.open_new_tab_provider_prompt()
+            .expect("open handler returns Ok even when it refuses");
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            app.status.text().contains("maximum") && app.status.text().contains('1'),
+            "expected a keyed cap-reached error, got: {}",
+            app.status.text()
+        );
+    }
+
+    #[test]
+    fn new_tab_picker_single_provider_skips_modal_and_creates() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine
+            .config
+            .providers
+            .commands
+            .retain(|name, _| name == "codex");
+        assert_eq!(app.engine.config.providers.commands.len(), 1);
+
+        app.open_new_tab_provider_prompt()
+            .expect("open handler with a single configured provider");
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a single configured provider should skip the modal"
+        );
+        let created = app
+            .engine
+            .agent_tabs
+            .values()
+            .find(|tab| tab.session_id == session_id)
+            .expect("tab row exists");
+        assert_eq!(created.provider.as_str(), "codex");
     }
 
     #[test]
