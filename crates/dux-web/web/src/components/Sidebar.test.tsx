@@ -625,4 +625,57 @@ describe("AppSidebar collapsed icon rail", () => {
     const icon = rail.querySelector("button svg")
     expect(icon?.getAttribute("class")).toContain("size-4.5!")
   })
+
+  it("renders the shared AgentVitalsTooltip content (branch and worktree rows) for a rail icon", () => {
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const tooltips = rail.querySelectorAll('[data-testid="tooltip-content"]')
+    // makeSessionSpine's session s1 carries branch_name "main" and worktree_path
+    // "/tmp/p1" — both should surface as vitals rows, proving the rail uses the
+    // full AgentVitalsTooltip content component and not the old 2-line tooltip.
+    expect(tooltips[0].textContent).toContain("main")
+    expect(tooltips[0].textContent).toContain("/tmp/p1")
+  })
+})
+
+describe("AppSidebar expanded agent row vitals tooltip", () => {
+  it("wraps the agent name in a SimpleTooltip carrying the shared AgentVitalsTooltip content", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const tooltips = screen.getAllByTestId("tooltip-content")
+    const vitalsTooltip = tooltips.find(
+      (t) => t.textContent?.includes("/tmp/p1"),
+    )
+    expect(vitalsTooltip).toBeTruthy()
+    // Status line + project name from the row context.
+    expect(vitalsTooltip?.textContent).toContain("Repo")
+    expect(vitalsTooltip?.textContent?.toLowerCase()).toContain("active")
+  })
 })

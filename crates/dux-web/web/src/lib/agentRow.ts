@@ -29,3 +29,24 @@ export function agentRowVisual(
     attention: needsAttention,
   }
 }
+
+// The status dot color, mirroring StatusBadge's STATUS map (active=green,
+// detached=amber, exited=muted). Kept here (a framework-free lib file, not a
+// component file) so both StatusBadge and any other surface building its own
+// status line (the agent vitals tooltip) can share the exact mapping without
+// re-deriving it and risking drift, and so StatusBadge.tsx stays a
+// components-only export for React Fast Refresh. `needsAttention` takes
+// precedence over the raw status, matching the amber "needs attention"
+// treatment used elsewhere (the sidebar row's Bot icon, the favicon dot).
+const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
+  active: "text-green-500",
+  detached: "text-amber-500",
+  exited: "text-muted-foreground",
+}
+
+export function statusDotColorClass(
+  status: SessionStatus,
+  needsAttention = false,
+): string {
+  return needsAttention ? "text-amber-400" : STATUS_DOT_COLOR[status]
+}

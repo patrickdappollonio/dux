@@ -44,6 +44,7 @@ import { defaultProviderForSession } from "@/lib/agentTabs"
 import { copyToClipboard } from "@/lib/clipboard"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
+import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { ConnDot } from "@/components/ConnDot"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -178,7 +179,13 @@ function TerminalSubItem({
         onClick={() => selectTerminal(terminal.id, sessionId)}
       >
         <SquareTerminal />
-        <SimpleTooltip content={terminal.label} side="right">
+        {/* When no foreground command is running, `title` already equals
+            `terminal.label` (see terminalTitle), so the tooltip would just
+            repeat the visible text — only show it once the two diverge. */}
+        <SimpleTooltip
+          content={title !== terminal.label ? terminal.label : null}
+          side="right"
+        >
           <span className="flex-1 truncate">{title}</span>
         </SimpleTooltip>
       </SidebarMenuSubButton>
@@ -217,9 +224,11 @@ function TerminalSubItem({
 function SessionSubItem({
   session,
   selectedTarget,
+  projectName,
 }: {
   session: SessionView
   selectedTarget: SelectedTarget | null
+  projectName: string
 }) {
   const label = session.title || session.branch_name
   const agentSelected =
@@ -238,7 +247,15 @@ function SessionSubItem({
   // or more tabs (AgentTabsStrip mounts only then) — without this menu item a
   // fresh 1-tab session could never reach its first extra tab from the web.
   // Mirrors the strip's own cap/in-flight disabling.
-  const { bootstrap, spine, createTabInFlight } = useDux()
+  const { bootstrap, spine, createTabInFlight, changes } = useDux()
+  // The changed-files store slice only ever holds data for the currently
+  // SELECTED session (see ChangesSlice in lib/store.ts), so a non-selected
+  // row's vitals tooltip omits the changes count rather than showing stale or
+  // wrong data for an agent that isn't loaded.
+  const changesCount =
+    changes?.sessionId === session.id && changes?.phase === "loaded"
+      ? changes.staged.length + changes.unstaged.length
+      : null
   const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const atTabCap = session.tabs.length >= tabCap
   const addingTab = createTabInFlight.includes(session.id)
@@ -335,15 +352,31 @@ function SessionSubItem({
           {/* Its name also dims with a soft white highlight sweeping through (see
               .agent-name-shimmer), a second working cue alongside the bob. The
               base class is always applied so the fill cross-fades back to solid
-              text when work stops; `--on` toggles the active sweep. */}
-          <span
-            className={cn(
-              "truncate agent-name-shimmer",
-              shimmer && "agent-name-shimmer--on"
-            )}
+              text when work stops; `--on` toggles the active sweep.
+
+              The "full vitals" tooltip carries a longer (600ms) hover delay than
+              the default 300ms so scanning down the sidebar doesn't strobe a
+              card per row — only a deliberate pause over one agent opens it. */}
+          <SimpleTooltip
+            content={
+              <AgentVitalsTooltip
+                session={session}
+                projectName={projectName}
+                changesCount={changesCount}
+              />
+            }
+            side="right"
+            delay={600}
           >
-            {label}
-          </span>
+            <span
+              className={cn(
+                "truncate agent-name-shimmer",
+                shimmer && "agent-name-shimmer--on"
+              )}
+            >
+              {label}
+            </span>
+          </SimpleTooltip>
           <span className="ml-auto flex shrink-0 items-center gap-1">
             {session.pr ? (
               // Icon-only PR link: just the state-tinted glyph, with the full
@@ -556,10 +589,12 @@ function SessionList({
   projectId,
   sessions,
   selectedTarget,
+  projectName,
 }: {
   projectId: string
   sessions: SessionView[]
   selectedTarget: SelectedTarget | null
+  projectName: string
 }) {
   // 6px activation distance: a plain click still selects; a small drag starts a
   // reorder. Tuned low so selection feels instant yet drags are intentional.
@@ -595,6 +630,7 @@ function SessionList({
               key={session.id}
               session={session}
               selectedTarget={selectedTarget}
+              projectName={projectName}
             />
           ))}
         </SidebarMenuSub>
@@ -743,6 +779,7 @@ function ProjectItem({
               projectId={id}
               sessions={sessions}
               selectedTarget={selectedTarget}
+              projectName={name}
             />
           ) : null}
         </CollapsibleContent>
@@ -775,22 +812,24 @@ function CollapsedAgentIcon({
     session.working,
     session.needs_attention,
   )
-  const statusLabel = attention
-    ? "needs attention"
-    : session.status === "active" && session.working
-      ? "active — working"
-      : session.status
+  // The changed-files store slice only ever holds data for the currently
+  // SELECTED session (see ChangesSlice in lib/store.ts), so a non-selected
+  // rail icon's vitals tooltip omits the changes count.
+  const { changes } = useDux()
+  const changesCount =
+    changes?.sessionId === session.id && changes?.phase === "loaded"
+      ? changes.staged.length + changes.unstaged.length
+      : null
 
   return (
     <SidebarMenuItem>
       <SimpleTooltip
         content={
-          <span className="flex flex-col gap-0.5">
-            <span className="font-medium">{label}</span>
-            <span className="text-muted-foreground">
-              {projectName} · {statusLabel}
-            </span>
-          </span>
+          <AgentVitalsTooltip
+            session={session}
+            projectName={projectName}
+            changesCount={changesCount}
+          />
         }
         side="right"
       >
