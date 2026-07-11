@@ -63,6 +63,29 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Truncate `s` to at most `max_w` display columns, measured by real
+/// terminal cell width (unicode-width via `CellWidth`), not byte or char
+/// count. Stops before any character that would push the running width over
+/// `max_w`, so multi-byte/double-width glyphs (CJK, emoji) are never split
+/// mid-character and the result never overflows its budget.
+fn truncate_to_width(s: &str, max_w: u16) -> String {
+    if s.cell_width() <= max_w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0u16;
+    for ch in s.chars() {
+        let mut buf = [0u8; 4];
+        let cw = ch.encode_utf8(&mut buf).cell_width();
+        if w + cw > max_w {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out
+}
+
 fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     if width == 0 {
         return 0;
@@ -1239,34 +1262,61 @@ impl App {
         let avail = strip_area.width.saturating_sub(add_total_w);
 
         // Segment text/width per tab. All tabs are generic — no per-tab marker
-        // — except the focused tab, which is prefixed with a solid dot so the
-        // active tab is unambiguous even without color (matches the "●" =
-        // active/present convention used by `session_dot`/`ATTENTION_GLYPH`
-        // elsewhere in the theme). Each segment carries a leading `│`
+        // — except the focused tab, which is prefixed with the shared solid
+        // dot glyph so the active tab is unambiguous even without color
+        // (matches the "●" = active/present convention used by
+        // `session_dot`/`ATTENTION_GLYPH` elsewhere in the theme). Every tab,
+        // focused or not, reserves the same dot-width gutter: an unfocused
+        // tab renders spaces where the dot would go, so a tab's rendered
+        // width never depends on whether it is focused and the strip doesn't
+        // reflow/jitter as focus moves. Each segment carries a leading `│`
         // separator so adjacent tabs read as bordered/boxed rather than a
         // bare run of text; the separator is drawn in its own style, not
         // counted as part of the label content.
         const TAB_SEP: &str = "│";
-        const TAB_ACTIVE_DOT: &str = "●";
-        let seg_content: Vec<String> = labels
+        let tab_active_dot: &str = crate::theme::DOT_GLYPH;
+        let dot_gutter: String = " ".repeat(tab_active_dot.cell_width().max(1) as usize);
+        let mut seg_content: Vec<String> = labels
             .iter()
             .enumerate()
             .map(|(i, l)| {
                 if tab_ids[i] == focused_id {
-                    format!(" {TAB_ACTIVE_DOT} {l} ")
+                    format!(" {tab_active_dot} {l} ")
                 } else {
-                    format!(" {l} ")
+                    format!(" {dot_gutter} {l} ")
                 }
             })
             .collect();
-        // +1 per segment for the leading separator column.
-        let seg_w: Vec<u16> = seg_content
+        // +1 per segment for the leading separator column. Measured in real
+        // display columns (unicode-width via `CellWidth`), not
+        // `chars().count()`: a char-count measure undercounts double-width
+        // CJK/emoji glyphs in custom provider labels, which would overflow
+        // the segment's recorded region and paint over the add button.
+        let mut seg_w: Vec<u16> = seg_content
             .iter()
-            .map(|t| t.chars().count() as u16 + 1)
+            .map(|t| t.as_str().cell_width() + 1)
             .collect();
 
         // Choose a start index so the focused tab is visible within `avail`.
         let focused_idx = tab_ids.iter().position(|i| *i == focused_id).unwrap_or(0);
+
+        // If the focused segment alone is wider than the available strip
+        // width, truncate its label (UTF-8/width-safe) so it fits within
+        // `avail`. Without this, the scroll-into-view loop below can never
+        // include the focused segment (its width alone exceeds `avail`, so
+        // the inner loop always yields `count == 0` at `start == focused_idx`)
+        // and `start` walks straight past it, leaving the focused tab
+        // entirely off-screen.
+        if let Some(focused_w) = seg_w.get(focused_idx).copied()
+            && focused_w > avail
+        {
+            // Reserve 1 column for the leading separator; fit the rest of the
+            // content (dot/gutter + label + padding) into what remains.
+            let budget = avail.saturating_sub(1);
+            seg_content[focused_idx] = truncate_to_width(&seg_content[focused_idx], budget);
+            seg_w[focused_idx] = seg_content[focused_idx].as_str().cell_width() + 1;
+        }
+
         let mut start = 0usize;
         loop {
             let mut w = 0u16;
@@ -1288,6 +1338,12 @@ impl App {
             } else {
                 break;
             }
+        }
+        // Safety net: guarantee the focused tab is visible even if the loop
+        // above couldn't include it (e.g. it walked `start` past
+        // `focused_idx` before the truncation above narrowed the segment).
+        if start > focused_idx {
+            start = focused_idx;
         }
 
         let buf = frame.buffer_mut();
@@ -8194,6 +8250,167 @@ mod tests {
                 "the add-tab region must stay within the pane width: {add_region:?}"
             );
         }
+    }
+
+    /// F1 regression: a custom provider label made of double-width CJK glyphs
+    /// must be measured by real display columns (unicode-width), not
+    /// `chars().count()`. A char-count-based width undercounts "克劳德" (3
+    /// chars, 6 display columns) by half, so the label overflows its
+    /// recorded region and paints over the add button.
+    #[test]
+    fn tab_strip_cjk_label_region_matches_rendered_width_and_no_add_button_overlap() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_render_tab(&mut app, &session_id, "tab-2", "克劳德", 1);
+        app.set_focused_tab(&session_id, "tab-2");
+
+        let width = 40u16;
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, width, 24);
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+
+        let tab_region = app
+            .agent_tab_regions
+            .iter()
+            .find(|(id, _)| id == "tab-2")
+            .map(|(_, rect)| *rect)
+            .expect("tab-2 region recorded");
+        let add_region = app
+            .agent_tab_add_region
+            .expect("add button region recorded");
+
+        assert!(
+            tab_region.x + tab_region.width <= add_region.x,
+            "the CJK tab's recorded region must not overlap the add button: \
+             tab={tab_region:?} add={add_region:?}"
+        );
+
+        // The region must be wide enough to actually contain the rendered
+        // label: its real display width (unicode-width, not char count) plus
+        // the leading separator column and the dot gutter/padding.
+        let expected_min_width = "克劳德".cell_width() + 1;
+        assert!(
+            tab_region.width >= expected_min_width,
+            "tab region width {} must cover the CJK label's real display width {}",
+            tab_region.width,
+            expected_min_width
+        );
+    }
+
+    /// F2 regression: in a narrow pane with long labels, the focused tab must
+    /// always be at least partially visible (dot or truncated label
+    /// rendered), regardless of which tab index is focused. Previously an
+    /// over-wide focused segment starved the scroll-into-view loop, walking
+    /// `start` straight past `focused_idx` and leaving the focused tab
+    /// entirely off-screen.
+    #[test]
+    fn tab_strip_keeps_focused_tab_visible_for_every_focus_index_in_narrow_pane() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for focus_idx in 0..6 {
+            let mut app = test_app(default_bindings());
+            let session_id = app.engine.sessions[0].id.clone();
+            for i in 0..6 {
+                seed_render_tab(
+                    &mut app,
+                    &session_id,
+                    &format!("tab-{i}"),
+                    "a-very-long-custom-provider-name",
+                    i as i64,
+                );
+            }
+            let focused_tab_id = format!("tab-{focus_idx}");
+            app.set_focused_tab(&session_id, &focused_tab_id);
+
+            let width = 30u16;
+            let backend = TestBackend::new(width, 24);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let area = Rect::new(0, 0, width, 24);
+            terminal
+                .draw(|frame| {
+                    app.render_agent_tab_strip_if_needed(frame, area, true);
+                })
+                .expect("render frame");
+
+            assert!(
+                app.agent_tab_regions
+                    .iter()
+                    .any(|(id, _)| *id == focused_tab_id),
+                "focused tab {focused_tab_id} must be visible/rendered in a narrow pane, \
+                 focus_idx={focus_idx}"
+            );
+        }
+    }
+
+    /// F3 regression: the active-tab dot must come from the one shared glyph
+    /// source in `theme.rs`, not a re-literaled `"●"` in render.rs.
+    #[test]
+    fn tab_active_dot_reuses_shared_theme_glyph() {
+        assert_eq!(crate::theme::ATTENTION_GLYPH, crate::theme::DOT_GLYPH);
+        assert_eq!(crate::theme::DOT_GLYPH, "●");
+    }
+
+    /// F4 regression: a tab's rendered width must not depend on whether it is
+    /// focused. Previously only the focused tab carried the dot glyph, making
+    /// it 2 columns wider than an unfocused tab and causing the strip to
+    /// reflow/jitter as focus moved between tabs.
+    #[test]
+    fn tab_strip_segment_width_is_focus_independent() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+
+        let width = 60u16;
+        let area = Rect::new(0, 0, width, 24);
+
+        app.set_focused_tab(&session_id, "tab-2");
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+        let focused_width = app
+            .agent_tab_regions
+            .iter()
+            .find(|(id, _)| id == "tab-2")
+            .map(|(_, rect)| rect.width)
+            .expect("tab-2 region recorded while focused");
+
+        let session_id_clone = session_id.clone();
+        app.set_focused_tab(&session_id, &session_id_clone);
+        let backend2 = TestBackend::new(width, 24);
+        let mut terminal2 = Terminal::new(backend2).expect("terminal");
+        terminal2
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+        let unfocused_width = app
+            .agent_tab_regions
+            .iter()
+            .find(|(id, _)| id == "tab-2")
+            .map(|(_, rect)| rect.width)
+            .expect("tab-2 region recorded while unfocused");
+
+        assert_eq!(
+            focused_width, unfocused_width,
+            "a tab's width must not change when focus moves onto/off of it, or the strip \
+             reflows/jitters as the user tabs between agents"
+        );
     }
 
     /// Regression test for issue #258: while the interactive agent terminal is
