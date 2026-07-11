@@ -4,8 +4,9 @@ import { SimpleTooltip } from "@/components/SimpleTooltip"
 import type { TooltipContent } from "@/components/ui/tooltip"
 
 // The single "needs attention" marker used across every surface (sidebar rows,
-// the mobile agent rows, the tab-strip pills): an amber dot that gently pulses
-// and holds still under reduced motion. Extracted so the markup and, crucially,
+// the mobile agent rows, the tab-strip pills): an amber dot that blinks in a
+// double-pulse-then-fade rhythm (`--animate-attention-pulse` in index.css) and
+// holds still under reduced motion. Extracted so the markup and, crucially,
 // the amber color live in exactly one place.
 //
 // COLOR PAIRING: the fill is Tailwind `bg-amber-400`. The favicon compositor in
@@ -25,7 +26,7 @@ export function AttentionDot({
   const dot = (
     <span
       aria-label="Needs attention"
-      className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-pulse motion-reduce:animate-none"
+      className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
     />
   )
   if (!withTooltip) return dot
