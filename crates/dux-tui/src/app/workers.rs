@@ -1541,6 +1541,7 @@ mod tests {
             status: SessionStatus::Active,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_focused_tab: None,
         }
     }
 
@@ -1798,6 +1799,7 @@ mod tests {
             status: SessionStatus::Active,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         };
         let (worker_tx, worker_rx) = mpsc::channel();
 

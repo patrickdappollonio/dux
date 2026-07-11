@@ -3578,6 +3578,12 @@ impl App {
     /// The focused tab id for a session, defaulting to the session-slot tab (the
     /// session id). Clamps to Main when the stored tab no longer exists, so
     /// every seam that resolves the focused tab is safe after a tab close.
+    ///
+    /// The in-process `focused_tabs` HashMap is the live value and wins when it
+    /// has an entry for this session. When it has none (e.g. right after a
+    /// restart, before this process has focused anything itself), falls back to
+    /// the engine's persisted `AgentSession.last_focused_tab` via the shared
+    /// resolver so the remembered tab survives a restart too.
     pub(crate) fn focused_tab_id(&self, session_id: &str) -> String {
         match self.focused_tabs.get(session_id) {
             Some(id) if id == session_id => id.clone(),
@@ -3590,7 +3596,19 @@ impl App {
             {
                 id.clone()
             }
-            _ => session_id.to_string(),
+            Some(_) => session_id.to_string(),
+            None => match self.engine.sessions.iter().find(|s| s.id == session_id) {
+                Some(session) => {
+                    let live_extra_ids = self
+                        .engine
+                        .agent_tabs
+                        .values()
+                        .filter(|t| t.session_id == session_id)
+                        .map(|t| t.id.as_str());
+                    session.resolved_focused_tab(live_extra_ids).to_string()
+                }
+                None => session_id.to_string(),
+            },
         }
     }
 
@@ -3630,6 +3648,14 @@ impl App {
     /// Set the focused tab for a session (Main clears the entry). Switching
     /// forces a snapshot + PTY-size refresh and clears the terminal selection,
     /// mirroring the side effects of a surface change.
+    ///
+    /// Also writes the choice through to the engine's persisted
+    /// `last_focused_tab` (a tiny synchronous UPDATE, like
+    /// `ToggleAgentAutoReopen`) so it survives a restart and is visible to the
+    /// web surface sharing the same SQLite file. This is a silent, best-effort
+    /// persist: a failure here must not block or roll back the (already
+    /// authoritative) in-process focus switch, so any error is intentionally
+    /// discarded, matching the wire command's "no status" contract (J3).
     pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
         if tab_id == session_id {
             self.focused_tabs.remove(session_id);
@@ -3637,6 +3663,14 @@ impl App {
             self.focused_tabs
                 .insert(session_id.to_string(), tab_id.to_string());
         }
+        let _ = self.engine.set_last_focused_tab(
+            session_id,
+            if tab_id == session_id {
+                None
+            } else {
+                Some(tab_id)
+            },
+        );
         self.last_snapshot_id = None;
         self.last_pty_size = (0, 0);
         self.terminal_selection = None;
@@ -4120,6 +4154,7 @@ mod tests {
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         }
     }
 

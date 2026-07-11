@@ -7853,6 +7853,7 @@ not_a_real_action = ["x"]
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         });
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.providers.insert(
@@ -7916,6 +7917,7 @@ not_a_real_action = ["x"]
                 status: SessionStatus::Detached,
                 created_at: now,
                 updated_at: now,
+                last_focused_tab: None,
             };
             app.engine.session_store.upsert_session(&session).unwrap();
             app.engine.sessions.push(session);
@@ -8484,6 +8486,7 @@ not_a_real_action = ["x"]
             status: SessionStatus::Active,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_focused_tab: None,
         };
         let args = vec!["-c".to_string(), "sleep 1".to_string()];
         let client = PtyClient::spawn("/bin/sh", &args, &worktree, 24, 80, 1_000)
@@ -9445,6 +9448,7 @@ not_a_real_action = ["x"]
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         });
         app.rebuild_left_items();
         app.selected_left = 1;
