@@ -3,7 +3,12 @@ import { ChevronRight, File as FileIcon, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { fileApi } from "@/lib/fileApi"
-import { ancestorDirs, dirsToLoadFor, flattenLazy } from "@/lib/fileTree"
+import {
+  ancestorDirs,
+  descendantDirPaths,
+  dirsToLoadFor,
+  flattenLazy,
+} from "@/lib/fileTree"
 import type { DirState } from "@/lib/fileTree"
 
 const ROW_HEIGHT = 28 // px — must match the py-1 + text-sm row height
@@ -34,9 +39,23 @@ export function FileTree({
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(400)
-  // The dirs already requested (loading OR resolved), so effects and toggles
-  // never double-fetch. A ref: fetch bookkeeping, not render state.
+  // The dirs already requested (loading OR resolved OR errored), so effects
+  // never auto-refetch a dir they've already tried. A ref: fetch bookkeeping,
+  // not render state. Deliberately NOT cleared on failure (see F9 note in
+  // fetchDir's .catch below) — only the explicit Retry button refetches an
+  // errored dir.
   const requestedRef = useRef<Set<string>>(new Set())
+  // Unmount guard plus a per-dir request counter, so a stale response (the
+  // same dir refetched again before the first call resolves, or the
+  // component having unmounted) never overwrites fresher state.
+  const unmountedRef = useRef(false)
+  const requestTokenRef = useRef<Map<string, number>>(new Map())
+
+  useEffect(() => {
+    return () => {
+      unmountedRef.current = true
+    }
+  }, [])
 
   useEffect(() => {
     const el = containerRef.current
@@ -50,6 +69,8 @@ export function FileTree({
   const fetchDir = useCallback(
     (dir: string) => {
       requestedRef.current.add(dir)
+      const token = (requestTokenRef.current.get(dir) ?? 0) + 1
+      requestTokenRef.current.set(dir, token)
       setDirs((prev) => {
         const next = new Map(prev)
         next.set(dir, { status: "loading" })
@@ -58,6 +79,8 @@ export function FileTree({
       fileApi
         .tree(sessionId, dir)
         .then((result) => {
+          if (unmountedRef.current || requestTokenRef.current.get(dir) !== token)
+            return
           setDirs((prev) => {
             const next = new Map(prev)
             next.set(dir, { status: "loaded", entries: result.entries })
@@ -65,8 +88,15 @@ export function FileTree({
           })
         })
         .catch((e) => {
-          // Allow a retry to refetch after a failure.
-          requestedRef.current.delete(dir)
+          if (unmountedRef.current || requestTokenRef.current.get(dir) !== token)
+            return
+          // Deliberately do NOT delete `dir` from requestedRef here: doing so
+          // used to make the automatic dirsToLoadFor("missing ancestors")
+          // effect below treat an errored dir as still-needing-a-fetch on
+          // every subsequent `dirs` change, retrying it forever with no
+          // backoff. Leaving it in requestedRef means only an explicit Retry
+          // click (which calls fetchDir directly, bypassing requestedRef)
+          // refetches an errored dir.
           setDirs((prev) => {
             const next = new Map(prev)
             next.set(dir, {
@@ -100,10 +130,21 @@ export function FileTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // The open path already reveal-checked, so the stale-parent refetch below
-  // runs at most once per opened file (guards against a refetch loop when the
-  // file genuinely isn't on disk, e.g. opened from a stale changed-files row).
+  // The open file's parent-refetch (below) is gated by this ref so it fires
+  // at most once per opened file, regardless of how many times the effect
+  // re-runs as `dirs` changes (guards against a refetch loop when the file
+  // genuinely isn't on disk, e.g. opened from a stale changed-files row). The
+  // "missing ancestors" fetch above it is separately guarded: fetchDir never
+  // clears a dir from requestedRef on failure (see F9 note in fetchDir), so
+  // dirsToLoadFor stops treating an errored ancestor as "missing" after its
+  // first attempt.
   const revealCheckedRef = useRef<string | null>(null)
+  // Auto-expanding the open file's ancestor chain is also one-shot per
+  // openPath: without this latch, every `dirs` change (e.g. fetching an
+  // unrelated sibling directory) re-runs this effect and re-adds the
+  // ancestors to `expanded`, silently overriding a user who had manually
+  // collapsed one of them. After the initial reveal, the user's collapse wins.
+  const autoExpandedRef = useRef<string | null>(null)
 
   // When the open file changes to a path whose parents were never loaded (a
   // file just created, or switched to from search), pull the missing ancestors
@@ -122,31 +163,53 @@ export function FileTree({
         if (!st.entries.some((e) => e.path === openPath)) fetchDir(parent)
       }
     }
-    setExpanded((prev) => {
-      const wanted = dirsToLoadFor(openPath, new Set([""]))
-      if (wanted.every((d) => prev.has(d))) return prev
-      const next = new Set(prev)
-      for (const d of wanted) next.add(d)
-      return next
-    })
+    if (autoExpandedRef.current !== openPath) {
+      autoExpandedRef.current = openPath
+      setExpanded((prev) => {
+        const wanted = dirsToLoadFor(openPath, new Set([""]))
+        if (wanted.every((d) => prev.has(d))) return prev
+        const next = new Set(prev)
+        for (const d of wanted) next.add(d)
+        return next
+      })
+    }
   }, [openPath, dirs, fetchDir])
 
   const toggle = useCallback(
     (path: string, expandable: boolean) => {
-      setExpanded((prev) => {
-        const next = new Set(prev)
-        if (next.has(path)) {
-          next.delete(path)
-        } else {
+      if (expanded.has(path)) {
+        // Collapsing: evict this dir's cached listing and any loaded/loading/
+        // errored descendants so a huge subtree doesn't linger in memory
+        // forever. Re-expanding later refetches fresh data.
+        const toEvict = [path, ...descendantDirPaths(dirs, path)]
+        setDirs((prev) => {
+          const next = new Map(prev)
+          for (const d of toEvict) next.delete(d)
+          return next
+        })
+        for (const d of toEvict) requestedRef.current.delete(d)
+        setExpanded((prev) => {
+          const next = new Set(prev)
+          for (const d of toEvict) next.delete(d)
+          return next
+        })
+      } else {
+        setExpanded((prev) => {
+          const next = new Set(prev)
           next.add(path)
-          if (expandable && !requestedRef.current.has(path)) fetchDir(path)
-        }
-        return next
-      })
+          return next
+        })
+        if (expandable && !requestedRef.current.has(path)) fetchDir(path)
+      }
     },
-    [fetchDir],
+    [fetchDir, dirs, expanded],
   )
 
+  // Re-flattens the whole visible tree on any `dirs`/`expanded` change,
+  // including ones unrelated to what's currently rendered (O(n) in loaded
+  // node count). Accepted cost: the list is virtualized below so render work
+  // is bounded by viewport size regardless of flatten cost, and collapse now
+  // evicts subtrees (see `toggle`), which keeps `dirs` itself bounded too.
   const rows = useMemo(() => flattenLazy(dirs, expanded), [dirs, expanded])
 
   const rootState = dirs.get("")
@@ -235,7 +298,7 @@ export function FileTree({
                   </span>
                 </button>
               </li>
-            ) : row.path.endsWith("/__loading__") ? (
+            ) : row.kind === "loading" ? (
               <li key={row.path}>
                 <div
                   className="flex items-center gap-1 py-1 pr-1 text-muted-foreground"
@@ -248,7 +311,7 @@ export function FileTree({
                   <span className="text-sm">Loading…</span>
                 </div>
               </li>
-            ) : row.path.endsWith("/__error__") ? (
+            ) : row.kind === "error" ? (
               <li key={row.path}>
                 <button
                   type="button"

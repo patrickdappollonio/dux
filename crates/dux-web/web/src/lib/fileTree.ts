@@ -58,9 +58,28 @@ export interface TreeRow {
   isSymlink: boolean
   // For dir rows: "loading" while the dir's children fetch is in flight (or an
   // expanded dir has no cache entry yet), "error" when the fetch failed.
-  // Placeholder child rows (`<dir>/__loading__`, `<dir>/__error__`) carry the
-  // same state at depth+1 so the component can render a spinner/retry row.
+  // Placeholder child rows carry the same state at depth+1 so the component
+  // can render a spinner/retry row.
   state: "idle" | "loading" | "error"
+  // Explicit discriminant for placeholder rows, checked by the component
+  // INSTEAD of the row's path. flattenLazy synthesizes a `<dir>/__loading__`
+  // or `<dir>/__error__` path for placeholder rows purely so each has a
+  // unique React `key`; a real worktree file named `__loading__` or
+  // `__error__` still gets `kind: "entry"` and renders as a normal file row.
+  kind: "entry" | "loading" | "error"
+}
+
+/// The cached dir paths strictly nested under `path` (not `path` itself),
+/// e.g. descendantDirPaths(dirs, "a") with dirs keyed "a", "a/b", "a/b/c",
+/// "ax" returns ["a/b", "a/b/c"]. Used on collapse to evict a subtree's
+/// cached listings (and any still-loading/errored entries) instead of
+/// leaking them in memory forever.
+export function descendantDirPaths(
+  dirs: Map<string, DirState>,
+  path: string,
+): string[] {
+  const prefix = `${path}/`
+  return [...dirs.keys()].filter((k) => k.startsWith(prefix))
 }
 
 /// Flatten the loaded tree into render rows honoring the `expanded` set. Only
@@ -95,6 +114,7 @@ export function flattenLazy(
       expandable: entry.expandable,
       isSymlink: entry.is_symlink,
       state: rowState,
+      kind: "entry",
     })
     if (!isExpanded) continue
     if (childState?.status === "loaded") {
@@ -108,6 +128,7 @@ export function flattenLazy(
         expandable: false,
         isSymlink: false,
         state: "error",
+        kind: "error",
       })
     } else {
       // Absent or loading → one synthetic placeholder row.
@@ -119,6 +140,7 @@ export function flattenLazy(
         expandable: false,
         isSymlink: false,
         state: "loading",
+        kind: "loading",
       })
     }
   }

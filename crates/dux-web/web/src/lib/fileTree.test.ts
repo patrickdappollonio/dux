@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { ancestorDirs, dirsToLoadFor, flattenLazy } from "./fileTree"
+import {
+  ancestorDirs,
+  descendantDirPaths,
+  dirsToLoadFor,
+  flattenLazy,
+} from "./fileTree"
 import type { DirEntry, DirState } from "./fileTree"
 
 function file(path: string): DirEntry {
@@ -99,5 +104,68 @@ describe("flattenLazy", () => {
     expect(rows).toHaveLength(1)
     expect(rows[0].isSymlink).toBe(true)
     expect(rows[0].expandable).toBe(false)
+  })
+
+  it("marks a real file named __error__ as a normal entry row, not a placeholder", () => {
+    const real = file("src/__error__")
+    const dirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("src")] }],
+      ["src", { status: "loaded", entries: [real] }],
+    ])
+    const rows = flattenLazy(dirs, new Set(["src"]))
+    const row = rows.find((r) => r.path === "src/__error__")
+    expect(row).toBeDefined()
+    expect(row?.kind).toBe("entry")
+    expect(row?.isDir).toBe(false)
+  })
+
+  it("marks a real file named __loading__ as a normal entry row, not a placeholder", () => {
+    const real = file("src/__loading__")
+    const dirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("src")] }],
+      ["src", { status: "loaded", entries: [real] }],
+    ])
+    const rows = flattenLazy(dirs, new Set(["src"]))
+    const row = rows.find((r) => r.path === "src/__loading__")
+    expect(row).toBeDefined()
+    expect(row?.kind).toBe("entry")
+  })
+
+  it("tags synthetic loading/error placeholder rows with the matching kind", () => {
+    const loadingDirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("src")] }],
+    ])
+    const loadingRows = flattenLazy(loadingDirs, new Set(["src"]))
+    expect(loadingRows.find((r) => r.path === "src/__loading__")?.kind).toBe(
+      "loading",
+    )
+
+    const errorDirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("src")] }],
+      ["src", { status: "error", message: "boom" }],
+    ])
+    const errorRows = flattenLazy(errorDirs, new Set(["src"]))
+    expect(errorRows.find((r) => r.path === "src/__error__")?.kind).toBe(
+      "error",
+    )
+  })
+})
+
+describe("descendantDirPaths", () => {
+  it("returns dirs nested under the given path, excluding the path itself and siblings", () => {
+    const dirs = new Map<string, DirState>([
+      ["a", { status: "loaded", entries: [] }],
+      ["a/b", { status: "loaded", entries: [] }],
+      ["a/b/c", { status: "loading" }],
+      ["ax", { status: "loaded", entries: [] }],
+    ])
+    expect(descendantDirPaths(dirs, "a").sort()).toEqual(["a/b", "a/b/c"])
+  })
+
+  it("returns an empty list when nothing is nested under the path", () => {
+    const dirs = new Map<string, DirState>([
+      ["a", { status: "loaded", entries: [] }],
+    ])
+    expect(descendantDirPaths(dirs, "a")).toEqual([])
   })
 })
