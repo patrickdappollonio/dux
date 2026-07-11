@@ -81,6 +81,21 @@ struct FileList {
     truncated: bool,
 }
 
+/// Request for the lazy tree listing: one worktree-relative directory
+/// (`""` = the worktree root).
+#[derive(Deserialize)]
+struct TreeOp {
+    #[serde(default)]
+    dir: String,
+}
+
+/// One directory's children for the lazy file tree, pre-sorted dirs-first.
+#[derive(Serialize)]
+struct TreeList {
+    dir: String,
+    entries: Vec<dux_core::git::DirEntryInfo>,
+}
+
 #[derive(Serialize)]
 struct OpenedEditor {
     /// Human-readable editor label (e.g. "VS Code") for the success toast.
@@ -96,6 +111,7 @@ pub fn routes() -> Router<AppState> {
     let prefix = "/api/v1/sessions/{id}/files";
     Router::new()
         .route(&format!("{prefix}/list"), post(list_files))
+        .route(&format!("{prefix}/tree"), post(list_tree))
         .route(&format!("{prefix}/read"), post(read_file))
         .route(&format!("{prefix}/diff"), post(diff_contents))
         .route(&format!("{prefix}/raw"), get(read_raw))
@@ -121,6 +137,39 @@ async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>)
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("list task failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Lazy tree listing: one directory per request, no recursion, no cap. The
+/// blocking `read_dir` runs off the async reactor via `spawn_blocking`.
+async fn list_tree(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<TreeOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let dir = op.dir;
+    let dir_echo = dir.clone();
+    match tokio::task::spawn_blocking(move || dux_core::git::list_dir(&worktree, &dir)).await {
+        Ok(Ok(entries)) => Json(TreeList {
+            dir: dir_echo,
+            entries,
+        })
+        .into_response(),
+        // list_dir errors are containment/traversal/missing-dir conditions the
+        // client caused — surface them as a 400, not a server error.
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("tree task failed: {e}"),
         )
             .into_response(),
     }
