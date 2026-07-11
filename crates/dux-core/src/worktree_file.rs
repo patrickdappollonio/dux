@@ -444,6 +444,20 @@ mod tests {
     }
 
     #[test]
+    fn read_file_can_open_git_head_as_read_only() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let f = read_file(dir.path(), ".git/HEAD").unwrap();
+        assert!(
+            f.content.contains("refs/heads/main"),
+            "content: {}",
+            f.content
+        );
+        assert!(f.read_only, ".git/HEAD must be read_only");
+    }
+
+    #[test]
     fn read_file_git_objects_is_not_readable_via_read_file() {
         // .git/objects is excluded from the listing (Task 1) but the read endpoint
         // could still be called directly. It is binary content; the binary flag
