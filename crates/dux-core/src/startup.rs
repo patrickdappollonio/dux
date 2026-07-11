@@ -413,6 +413,7 @@ mod tests {
             status: SessionStatus::Active,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         }
     }
 

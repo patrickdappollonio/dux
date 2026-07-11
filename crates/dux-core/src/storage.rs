@@ -215,6 +215,11 @@ impl SessionStore {
         if sort_order_added || self.session_sort_order_needs_backfill()? {
             self.backfill_session_sort_order()?;
         }
+        // Per-agent remembered focused tab (derived runtime/UI state, never config).
+        // Additive, NULL default = "no memory" = falls back to the session-slot tab.
+        // Deliberately OMITTED from `upsert_session`'s SET/INSERT lists (same rationale
+        // as `sort_order`): a dedicated setter owns it so status/config churn can't reset it.
+        ensure_column(&self.conn, "agent_sessions", "last_focused_tab", "text")?;
         self.conn.execute_batch(
             r#"
             create table if not exists session_prs (
@@ -933,7 +938,7 @@ impl SessionStore {
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>> {
         let mut stmt = self.conn.prepare(
             r#"
-            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch
+            select id, project_id, provider, source_branch, branch_name, worktree_path, title, project_path, started_providers, desired_running, auto_reopen_enabled, status, created_at, updated_at, initial_branch, last_focused_tab
             from agent_sessions
             order by sort_order asc, updated_at desc
             "#,
@@ -958,6 +963,7 @@ impl SessionStore {
                 created_at: parse_time(&created_at).unwrap_or_else(Utc::now),
                 updated_at: parse_time(&updated_at).unwrap_or_else(Utc::now),
                 initial_branch: row.get(14)?,
+                last_focused_tab: row.get(15)?,
             })
         })?;
 
@@ -991,6 +997,21 @@ impl SessionStore {
         self.conn.execute(
             "update agent_sessions set desired_running = ?2, updated_at = ?3 where id = ?1",
             params![id, desired_running, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Persist the remembered last-focused tab for a session. `None` clears the
+    /// memory (resolves to the session-slot tab). Deliberately its own tiny
+    /// setter, mirroring [`Self::set_auto_reopen_enabled`], rather than folded
+    /// into `upsert_session` — see the field doc comment on
+    /// [`crate::model::AgentSession::last_focused_tab`] for why. `updated_at` is
+    /// intentionally NOT touched: a focus change is not a content change, and
+    /// touching it would perturb "sort by most recently updated" ordering.
+    pub fn set_last_focused_tab(&self, id: &str, tab_id: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "update agent_sessions set last_focused_tab = ?2 where id = ?1",
+            params![id, tab_id],
         )?;
         Ok(())
     }
@@ -1082,6 +1103,7 @@ fn test_session(
         status: SessionStatus::Active,
         created_at,
         updated_at,
+        last_focused_tab: None,
     }
 }
 
@@ -1480,6 +1502,62 @@ mod tests {
         let loaded = store.load_sessions().unwrap();
         assert!(!loaded[0].desired_running);
         assert!(loaded[0].auto_reopen_enabled);
+    }
+
+    #[test]
+    fn last_focused_tab_is_null_on_a_fresh_row_and_round_trips_through_the_setter() {
+        let store = test_store();
+        let now = Utc::now();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+
+        // Fresh row: NULL, i.e. "no memory recorded".
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded[0].last_focused_tab, None);
+
+        store.set_last_focused_tab("s1", Some("t1")).unwrap();
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded[0].last_focused_tab.as_deref(), Some("t1"));
+
+        // Setting None clears it back to NULL.
+        store.set_last_focused_tab("s1", None).unwrap();
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded[0].last_focused_tab, None);
+    }
+
+    #[test]
+    fn last_focused_tab_survives_upsert_session_status_churn() {
+        // Locks in the "omit from SET/INSERT lists" decision: re-upserting an
+        // existing session (simulating a status change or config-reload churn)
+        // must never clobber a previously remembered focused tab, exactly like
+        // `sort_order`.
+        let store = test_store();
+        let now = Utc::now();
+        let session = test_session("s1", now, now);
+        store.upsert_session(&session).unwrap();
+        store.set_last_focused_tab("s1", Some("t1")).unwrap();
+
+        // Re-upsert with an unrelated field changed, like a status transition.
+        let mut churned = session;
+        churned.status = SessionStatus::Detached;
+        churned.updated_at = Utc::now();
+        store.upsert_session(&churned).unwrap();
+
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded[0].last_focused_tab.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn last_focused_tab_column_migration_is_idempotent() {
+        let store = test_store();
+        // migrate() ran in open(); a second migrate is a no-op and the column
+        // stays present and nullable.
+        store.migrate().unwrap();
+        store
+            .upsert_session(&test_session("s1", Utc::now(), Utc::now()))
+            .unwrap();
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].last_focused_tab, None);
     }
 
     #[test]
