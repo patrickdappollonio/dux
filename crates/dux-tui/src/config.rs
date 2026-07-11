@@ -923,6 +923,19 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Usize(c.server.search_index_max_files),
         },
+        ConfigEntry::Field {
+            key: "tree_list_max_concurrency",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of /files/tree directory listings the web editor may run\n\
+                 # concurrently across all sessions. Each listing does one blocking read_dir\n\
+                 # off the server's async reactor; this protects the server's blocking-thread\n\
+                 # pool from a burst of tree requests (for example several tabs expanding\n\
+                 # directories at once) starving other blocking work such as git operations\n\
+                 # and file reads/writes. A request beyond the limit waits for a free slot\n\
+                 # rather than being refused. Set to 0 to disable the bound entirely.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.tree_list_max_concurrency as usize),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -1509,6 +1522,7 @@ mod tests {
         assert!(rendered.contains("max_websocket_terminal_connections = 64"));
         assert!(rendered.contains("max_websocket_tab_connections = 64"));
         assert!(rendered.contains("search_index_max_files = 50000"));
+        assert!(rendered.contains("tree_list_max_concurrency = 8"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that

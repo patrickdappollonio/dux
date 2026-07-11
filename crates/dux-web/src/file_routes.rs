@@ -24,6 +24,8 @@
 //! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
 //! `session.changes` event reaches subscribed clients on `/ws/events`.
 
+use std::sync::Arc;
+
 use axum::{
     Json, Router,
     extract::{Path as ApiPath, Query, State},
@@ -147,7 +149,13 @@ async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>)
 }
 
 /// Lazy tree listing: one directory per request, no recursion, no cap. The
-/// blocking `read_dir` runs off the async reactor via `spawn_blocking`.
+/// blocking `read_dir` runs off the async reactor via `spawn_blocking`, bounded
+/// by `state.tree_list_semaphore` (`[server] tree_list_max_concurrency`) so a
+/// burst of tree requests cannot exhaust the server's blocking-thread pool. A
+/// request beyond the limit WAITS for a free permit (`acquire_owned().await`)
+/// rather than being rejected — this is a small, fast unit of background work,
+/// not a long-lived connection like the `ws_*_semaphore` classes, which 503 on
+/// exhaustion instead.
 async fn list_tree(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -159,6 +167,20 @@ async fn list_tree(
     let worktree = match resolve_worktree(&state, id).await {
         Ok(w) => w,
         Err(r) => return r,
+    };
+    // `None` means the config value is 0 (unlimited): skip the permit entirely.
+    let _permit = match &state.tree_list_semaphore {
+        Some(sem) => match Arc::clone(sem).acquire_owned().await {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "tree listing semaphore closed unexpectedly",
+                )
+                    .into_response();
+            }
+        },
+        None => None,
     };
     let dir = op.dir;
     let dir_echo = dir.clone();

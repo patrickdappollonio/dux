@@ -404,6 +404,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.search_index_max_files,
         current.server.search_index_max_files,
     );
+    diff_usize(
+        &mut changes,
+        "server.tree_list_max_concurrency",
+        defaults.server.tree_list_max_concurrency as usize,
+        current.server.tree_list_max_concurrency as usize,
+    );
 
     // [terminal]
     diff_str(
