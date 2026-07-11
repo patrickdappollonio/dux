@@ -27,7 +27,7 @@ import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
-import { resolveFocusedTab } from "./agentTabs"
+import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
 import type {
   BranchWarningView,
   ChangedFileView,
@@ -1260,10 +1260,12 @@ function restoreDeepLink(spine: Spine): void {
     // Terminal id gone — fall back to the owning agent.
   } else if (link.tabId !== link.sessionId) {
     // A extra-tab deep link: restore it only if the tab still exists, else
-    // fall through to the session-slot tab.
+    // fall through to the session-slot tab. `persist: false` because merely
+    // FOLLOWING a shared link must not rewrite the workspace-shared
+    // remembered tab for everyone that opens it.
     const stillThere = session.tabs.some((t) => t.id === link.tabId)
     if (stillThere) {
-      selectTab(link.sessionId, link.tabId)
+      selectTab(link.sessionId, link.tabId, { persist: false })
       return
     }
   }
@@ -1331,8 +1333,14 @@ export function selectSession(id: string | null): void {
 // Persists the choice as the agent's remembered tab-focus (J3: fire-and-forget,
 // no status/toast) so a later `selectSession` restores it, on this client or
 // any other sharing the same server. `tabsApi.setFocusedTab` itself normalizes
-// `tabId === sessionId` to "clear the memory" server-side.
-export function selectTab(sessionId: string, tabId: string): void {
+// `tabId === sessionId` to "clear the memory" server-side. Pass `persist:
+// false` for a selection that must not rewrite the workspace-shared memory
+// (e.g. `restoreDeepLink`, which only follows a link, it doesn't set intent).
+export function selectTab(
+  sessionId: string,
+  tabId: string,
+  opts?: { persist?: boolean },
+): void {
   const prev = state.selectedSessionId
   setState({
     selectedTarget: { kind: "agent", sessionId, tabId },
@@ -1342,7 +1350,41 @@ export function selectTab(sessionId: string, tabId: string): void {
   switchChangesSubscription(prev, sessionId)
   writeSelectionHash()
   if (prev !== sessionId) loadChanges(sessionId)
-  void tabsApi.setFocusedTab(sessionId, tabId === sessionId ? null : tabId)
+  if (opts?.persist === false) return
+  persistFocusedTab(sessionId, tabId === sessionId ? null : tabId)
+}
+
+// Per-session bookkeeping for the fire-and-forget focus-tab PUT. `selectTab`
+// can fire in rapid succession (fast tab switching) and the resulting network
+// responses can settle out of order, so we keep only the LATEST intended
+// `(generation, tabId)` per session. When a response settles for a stale
+// generation whose value differs from the current intent
+// (`shouldRefireFocusPut`), we re-issue a PUT for the latest intent so the
+// server's last write always matches the user's last click, regardless of
+// response ordering.
+const focusPutIntent = new Map<
+  string,
+  { generation: number; tabId: string | null }
+>()
+
+function persistFocusedTab(sessionId: string, tabId: string | null): void {
+  const generation = (focusPutIntent.get(sessionId)?.generation ?? 0) + 1
+  focusPutIntent.set(sessionId, { generation, tabId })
+  fireFocusedTabPut(sessionId, tabId, generation)
+}
+
+function fireFocusedTabPut(
+  sessionId: string,
+  tabId: string | null,
+  generation: number,
+): void {
+  void tabsApi.setFocusedTab(sessionId, tabId).then(() => {
+    const latest = focusPutIntent.get(sessionId)
+    if (!latest) return
+    if (shouldRefireFocusPut(latest, { generation, tabId })) {
+      fireFocusedTabPut(sessionId, latest.tabId, latest.generation)
+    }
+  })
 }
 
 // Select one of a session's companion terminals as the streamed target. The
@@ -1476,7 +1518,13 @@ export function closeTab(sessionId: string, tabId: string): void {
         target.tabId === tabId
       if (!focused) return
       if (tabId !== sessionId) {
-        selectSession(sessionId) // focus the session-slot tab
+        // Focus the session-slot tab DIRECTLY via `selectTab`, not
+        // `selectSession`: the spine may still be stale at this point (no
+        // `sessions.changed` refetch has pruned it yet), and `selectSession`
+        // would resolve the remembered tab against that stale spine, which
+        // can still name the tab we just deleted, so use `selectTab` to
+        // pick the session-slot tab without consulting that memory.
+        selectTab(sessionId, sessionId)
         return
       }
       // Closing the focused session-slot tab: an older server that still replies

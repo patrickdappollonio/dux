@@ -208,6 +208,22 @@ describe("selectSession restores the remembered tab", () => {
   })
 })
 
+describe("restoreDeepLink does not persist", () => {
+  it("following a deep link to an extra tab selects it but fires no PUT", async () => {
+    const mod = await loadStore("#/agent/s1/tab/t2", [
+      { id: "s1", project_id: "p1", tabs: ["t2"], last_focused_tab: null },
+    ])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t2",
+    })
+    // Merely following the link must not rewrite the workspace-shared
+    // remembered tab for everyone.
+    expect(putCalls).toHaveLength(0)
+  })
+})
+
 describe("selectTab / selectSession persist the focus choice", () => {
   it("selectTab PUTs the focused-tab endpoint with the chosen extra tab", async () => {
     const mod = await loadStore("", [
