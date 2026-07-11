@@ -803,7 +803,17 @@ function CollapsedAgentIcon({
           {/* Same wrapper-span pattern as the expanded agent row: the attention
               blink (opacity/color) lives on the wrapper, the working bob
               (transform) lives on the icon itself, so the two `animate-*`
-              utilities never fight over the `animation` property. */}
+              utilities never fight over the `animation` property.
+
+              SIZING NOTE: unlike the expanded row (which sits inside
+              SidebarMenuSubButton and its direct-child `[&>svg]` selector,
+              defeated by this same wrapper), this rail button is a plain
+              SidebarMenuButton, whose `[&_svg]:size-4` is a DESCENDANT
+              selector — it still matches the icon through the wrapper span.
+              The wrapper does nothing to stop it here; only equal-or-higher
+              specificity wins, so `size-4.5` alone silently loses to it and
+              the icon renders 16px instead of the intended 18px. Force it
+              with `!important` to match the expanded row. */}
           <span
             aria-label={attention ? "Needs attention" : undefined}
             className={cn(
@@ -815,7 +825,7 @@ function CollapsedAgentIcon({
           >
             <Bot
               className={cn(
-                "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
+                "size-4.5! shrink-0 motion-safe:transition-transform motion-safe:duration-300",
                 shimmer && "motion-safe:animate-agent-working",
               )}
             />
@@ -846,7 +856,22 @@ function CollapsedAgentRail({
   return (
     <SidebarGroup
       data-testid="collapsed-agent-rail"
-      className="hidden group-data-[collapsible=icon]:flex"
+      // SidebarContent (ui/sidebar.tsx) sets `overflow-hidden` in icon mode —
+      // upstream shadcn behavior that keeps a still-animating (width-collapsing)
+      // label from bleeding a horizontal scrollbar during the expand/collapse
+      // transition. This rail is SidebarContent's only visible child at icon
+      // width (the project tree above is `hidden` there), so with that
+      // ancestor clipping unconditionally, any list past a screenful (roughly
+      // 30 agents at these size-8 rows) was clipped, unreachable, and
+      // unclickable below the fold. Rather than loosen the shared
+      // SidebarContent rule (and reopen the horizontal-bleed bug it exists to
+      // prevent) for every consumer, give this rail its own bounded,
+      // vertically scrollable region: `min-h-0` lets it shrink inside the
+      // flex column instead of pushing past it, and `overflow-y-auto` scrolls
+      // internally before the ancestor's clip boundary is ever reached.
+      // `no-scrollbar` keeps the scrollbar-less look consistent with the
+      // expanded sidebar's own scroll region.
+      className="hidden min-h-0 flex-1 overflow-y-auto no-scrollbar group-data-[collapsible=icon]:flex"
     >
       <SidebarGroupContent>
         <SidebarMenu>

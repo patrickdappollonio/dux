@@ -572,4 +572,57 @@ describe("AppSidebar collapsed icon rail", () => {
       buttons[1].querySelector("[aria-label='Needs attention']"),
     ).toBeTruthy()
   })
+
+  it("scrolls internally in icon mode instead of relying on SidebarContent's clipped overflow", () => {
+    // jsdom does not lay out or clip content, so it can't observe the actual
+    // clipping bug (icons past ~a screenful becoming unreachable below the
+    // fold). This asserts the class contract instead: the rail must carry its
+    // own bounded, scrollable region (min-h-0 so it can shrink inside the
+    // flex column, overflow-y-auto so it scrolls before ever hitting
+    // SidebarContent's group-data-[collapsible=icon]:overflow-hidden).
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    expect(rail.className).toContain("overflow-y-auto")
+    expect(rail.className).toContain("min-h-0")
+    expect(rail.className).toContain("no-scrollbar")
+  })
+
+  it("forces the rail icon to size-4.5 with !important so it wins over SidebarMenuButton's descendant [&_svg]:size-4 rule", () => {
+    // jsdom doesn't compute layout/CSS cascade, so it can't measure the
+    // rendered pixel size. This asserts the class contract instead: the
+    // important-variant utility must be present, since a plain `size-4.5`
+    // loses to SidebarMenuButton's higher-specificity descendant selector.
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const icon = rail.querySelector("button svg")
+    expect(icon?.getAttribute("class")).toContain("size-4.5!")
+  })
 })
