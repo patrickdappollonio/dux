@@ -4799,9 +4799,17 @@ impl App {
         } else {
             match self.engine.close_tab(&session_id, &tab_id) {
                 Ok(()) => {
-                    // Return focus to the session-slot tab (also resets the
-                    // snapshot so its PTY renders immediately).
-                    self.set_focused_tab(&session_id, &session_id);
+                    // Prefer a live sibling tab so the user lands on something
+                    // running; fall back to the session-slot tab only when
+                    // nothing else is live. This also resets the snapshot so
+                    // the target tab's PTY renders immediately, and keeps the
+                    // next ExitInteractive (activate) from relaunching a
+                    // dormant tab.
+                    let target = self
+                        .engine
+                        .first_live_tab(&session_id)
+                        .unwrap_or_else(|| session_id.clone());
+                    self.set_focused_tab(&session_id, &target);
                     self.rebuild_left_items();
                     self.set_info("Tab closed.".to_string());
                 }
@@ -15048,7 +15056,88 @@ cyan = "#00ffff"
         assert_eq!(
             app.focused_tab_id(&session_id),
             session_id,
-            "focus should return to the session-slot tab after closing an extra tab"
+            "falls back to session-slot when no live sibling remains"
+        );
+    }
+
+    #[test]
+    fn closing_focused_tab_refocuses_live_sibling_not_dormant_main() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        // The session-slot tab is dormant (no provider). Two extra tabs, both live.
+        insert_support_tab(&mut app, &session_id, "tab-1");
+        app.engine
+            .providers
+            .insert("tab-1".to_string(), spawn_test_provider(&worktree));
+        insert_support_tab(&mut app, &session_id, "tab-2");
+        app.engine
+            .providers
+            .insert("tab-2".to_string(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, "tab-1");
+        app.focus = FocusPane::Center;
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: "tab-1".to_string(),
+            provider_label: "Codex".to_string(),
+            is_main: false,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        assert!(!app.engine.agent_tabs.contains_key("tab-1"));
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            "tab-2",
+            "focus should land on the live sibling, not the dormant session-slot tab"
+        );
+    }
+
+    #[test]
+    fn ctrl_g_after_closing_tab_enters_live_sibling_without_relaunch() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        insert_support_tab(&mut app, &session_id, "tab-1");
+        app.engine
+            .providers
+            .insert("tab-1".to_string(), spawn_test_provider(&worktree));
+        insert_support_tab(&mut app, &session_id, "tab-2");
+        app.engine
+            .providers
+            .insert("tab-2".to_string(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, "tab-1");
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: "tab-1".to_string(),
+            provider_label: "Codex".to_string(),
+            is_main: false,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        let in_flight_before = app
+            .engine
+            .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch("tab-2".into()));
+        assert!(!in_flight_before, "tab-2 already has a live provider");
+
+        // Ctrl-g in the non-interactive Center pane should enter interactive
+        // mode on the live sibling, not relaunch it.
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch("tab-2".into())),
+            "no new launch should have been dispatched for the live sibling"
         );
     }
 
