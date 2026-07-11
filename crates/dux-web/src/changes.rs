@@ -805,6 +805,7 @@ mod tests {
             status: dux_core::model::SessionStatus::Detached,
             created_at: n,
             updated_at: n,
+            last_focused_tab: None,
         }
     }
 

@@ -29,6 +29,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
         status: dux_core::model::SessionStatus::Detached,
         created_at: n,
         updated_at: n,
+        last_focused_tab: None,
     }
 }
 

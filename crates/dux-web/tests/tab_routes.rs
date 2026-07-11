@@ -29,6 +29,7 @@ fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
         status: dux_core::model::SessionStatus::Detached,
         created_at: n,
         updated_at: n,
+        last_focused_tab: None,
     }
 }
 
@@ -514,6 +515,109 @@ async fn patch_tab_with_bad_session_id_is_unknown_session_not_unknown_tab() {
         body, "unknown session",
         "an out-of-bound session id must be reported as an unknown session"
     );
+}
+
+// ── PUT /api/v1/sessions/:id/focused-tab: remembered tab-focus persistence ───
+
+#[tokio::test]
+async fn put_focused_tab_persists_and_is_readable_from_the_session() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let tab = create_support_tab(&client, addr, "s1").await;
+
+    let resp = client
+        .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
+        .json(&serde_json::json!({ "tab_id": tab }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let session: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(session["last_focused_tab"], tab);
+}
+
+#[tokio::test]
+async fn put_focused_tab_null_clears_the_memory() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let tab = create_support_tab(&client, addr, "s1").await;
+    client
+        .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
+        .json(&serde_json::json!({ "tab_id": tab }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
+        .json(&serde_json::json!({ "tab_id": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let session: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(session["last_focused_tab"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn put_focused_tab_rejects_a_tab_owned_by_another_session() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let foreign_tab = create_support_tab(&client, addr, "s2").await;
+
+    let resp = client
+        .put(format!("http://{addr}/api/v1/sessions/s1/focused-tab"))
+        .json(&serde_json::json!({ "tab_id": foreign_tab }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Normalized to no-memory rather than an error, matching the engine's
+    // silent-normalization contract for a foreign/unknown tab id.
+    let session: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/sessions/s1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(session["last_focused_tab"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn put_focused_tab_with_bad_session_id_is_unknown_session() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let bad_id = "x".repeat(dux_web::rest_common::MAX_ID_LEN + 1);
+    let resp = client
+        .put(format!(
+            "http://{addr}/api/v1/sessions/{bad_id}/focused-tab"
+        ))
+        .json(&serde_json::json!({ "tab_id": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "unknown session");
 }
 
 // ── WebSocket route: ownership + per-agent socket cap ────────────────────────
