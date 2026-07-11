@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import type { ReactNode } from "react"
 
 import { SidebarProvider } from "@/components/ui/sidebar"
 import type { DuxState } from "@/lib/store"
@@ -9,15 +10,39 @@ import type { DuxState } from "@/lib/store"
 // (keeping every other real store export intact) so the brand-block wiring
 // (`bootstrap.title` to `resolveInstanceTitle` to the rendered wordmark) is
 // exercised end to end. This guards against a regression that silently swaps the
-// title for another field (e.g. the version) or re-hardcodes "dux". `addTab` is
-// ALSO overridden (as a spy) so the "Add tab" menu item test can assert it was
-// called without making a real network request.
+// title for another field (e.g. the version) or re-hardcodes "dux". `addTab` and
+// `selectSession` are ALSO overridden (as spies) so call sites can be asserted
+// without making a real network request or mutating the real store singleton.
 let mockState: DuxState
 const addTabMock = vi.fn()
+const selectSessionMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState, addTab: addTabMock }
+  return {
+    ...actual,
+    useDux: () => mockState,
+    addTab: addTabMock,
+    selectSession: selectSessionMock,
+  }
 })
+
+// The real tooltip only mounts its popup into a portal on hover and needs a
+// ResizeObserver, which jsdom lacks. Render its `content` inline instead so a
+// test can assert what a row's tooltip is wired to reveal.
+vi.mock("@/components/SimpleTooltip", () => ({
+  SimpleTooltip: ({
+    children,
+    content,
+  }: {
+    children: ReactNode
+    content: ReactNode
+  }) => (
+    <>
+      {children}
+      <div data-testid="tooltip-content">{content}</div>
+    </>
+  ),
+}))
 
 // The real store module boots on import (it reads localStorage and fires the
 // bootstrap fetch + reconnect timers). jsdom doesn't expose localStorage/fetch as bare
@@ -110,6 +135,7 @@ function makeSessionSpine(tabCount: number): DuxState["spine"] {
 beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
+  selectSessionMock.mockClear()
 })
 
 afterEach(() => {
@@ -363,5 +389,187 @@ describe("AppSidebar resize affordances", () => {
     expect(
       container.querySelector('[data-sidebar="expand-handle"]'),
     ).toBeNull()
+  })
+})
+
+// A second project with its own single agent, so the rail's "project order,
+// then agent order" claim is actually exercised across projects (not just
+// within one).
+function makeTwoProjectSpine(): DuxState["spine"] {
+  const base = makeSessionSpine(1) as unknown as {
+    projects: unknown[]
+    sessions: {
+      id: string
+      project_id: string
+      status: string
+      working: boolean
+      needs_attention: boolean
+    }[]
+    sidebar: { groups: unknown[]; agentless_start: null }
+  }
+  const secondProject = {
+    id: "p2",
+    name: "Other",
+    path: "/tmp/p2",
+    default_provider: "claude",
+    current_branch: "main",
+    branch_status: "leading",
+  }
+  const secondSession = {
+    ...base.sessions[0],
+    id: "s2",
+    project_id: "p2",
+    status: "detached",
+    working: false,
+    needs_attention: false,
+  }
+  return {
+    ...base,
+    projects: [...base.projects, secondProject],
+    sessions: [...base.sessions, secondSession],
+    sidebar: {
+      groups: [
+        ...base.sidebar.groups,
+        { project_id: "p2", name: "Other", orphaned: false },
+      ],
+      agentless_start: null,
+    },
+  } as unknown as DuxState["spine"]
+}
+
+describe("AppSidebar collapsed icon rail", () => {
+  it("renders one agent icon per session across projects instead of project folders", () => {
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    // One button per agent, in project order then agent order: s1 (Repo) then
+    // s2 (Other). No project folder affordance ("Project actions" menu) inside
+    // the rail — only agent icons.
+    expect(rail.querySelectorAll('[aria-label="Session actions"]').length).toBe(
+      0,
+    )
+    expect(
+      rail.querySelectorAll('[aria-label="Project actions"]').length,
+    ).toBe(0)
+    const buttons = rail.querySelectorAll("button")
+    expect(buttons.length).toBe(2)
+    expect(buttons[0].getAttribute("aria-label")).toContain("Repo")
+    expect(buttons[1].getAttribute("aria-label")).toContain("Other")
+  })
+
+  it("clicking an agent icon selects that agent", () => {
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const buttons = rail.querySelectorAll("button")
+    fireEvent.click(buttons[1])
+    expect(selectSessionMock).toHaveBeenCalledWith("s2")
+  })
+
+  it("shows the selected agent's icon in the active state", () => {
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      selectedTarget: { kind: "agent", sessionId: "s2" },
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const buttons = rail.querySelectorAll("button")
+    expect(buttons[0].hasAttribute("data-active")).toBe(false)
+    expect(buttons[1].hasAttribute("data-active")).toBe(true)
+  })
+
+  it("carries the agent name, project name, and status in the tooltip", () => {
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const tooltips = rail.querySelectorAll('[data-testid="tooltip-content"]')
+    expect(tooltips.length).toBe(2)
+    expect(tooltips[0].textContent).toContain("Repo")
+    expect(tooltips[0].textContent?.toLowerCase()).toContain("active")
+    expect(tooltips[1].textContent).toContain("Other")
+    expect(tooltips[1].textContent?.toLowerCase()).toContain("detached")
+  })
+
+  it("carries the working bob and attention blink classes on the rail icon", () => {
+    const spine = makeTwoProjectSpine() as unknown as {
+      sessions: { working: boolean; needs_attention: boolean }[]
+    }
+    spine.sessions[0].working = true
+    spine.sessions[1].needs_attention = true
+    mockState = makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const rail = screen.getByTestId("collapsed-agent-rail")
+    const buttons = rail.querySelectorAll("button")
+    // s1 is active + working: its Bot icon bobs.
+    expect(
+      buttons[0].querySelector("svg")?.getAttribute("class"),
+    ).toContain("animate-agent-working")
+    // s2 needs attention: its icon wrapper carries the amber blink.
+    expect(
+      buttons[1].querySelector("[aria-label='Needs attention']"),
+    ).toBeTruthy()
   })
 })

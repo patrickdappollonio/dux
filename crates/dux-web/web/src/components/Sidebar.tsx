@@ -751,6 +751,122 @@ function ProjectItem({
   )
 }
 
+// The icon rail replaces the grouped project/agent tree when the sidebar
+// collapses to `collapsible="icon"` mode. Project headers carry no meaning at
+// icon width (they'd just be an unlabeled folder glyph), so instead of
+// collapsing to folder icons the rail renders every AGENT across all projects,
+// flattened in the same order they appear expanded (project order, then agent
+// order within it) — a project with zero agents contributes nothing. Each icon
+// keeps the row's working-bob/attention-blink cues and opens the same
+// selection the expanded row's click does, so switching agents from the rail
+// behaves identically to the expanded tree.
+function CollapsedAgentIcon({
+  session,
+  projectName,
+  selected,
+}: {
+  session: SessionView
+  projectName: string
+  selected: boolean
+}) {
+  const label = session.title || session.branch_name
+  const { shimmer, dimmed, attention } = agentRowVisual(
+    session.status,
+    session.working,
+    session.needs_attention,
+  )
+  const statusLabel = attention
+    ? "needs attention"
+    : session.status === "active" && session.working
+      ? "active — working"
+      : session.status
+
+  return (
+    <SidebarMenuItem>
+      <SimpleTooltip
+        content={
+          <span className="flex flex-col gap-0.5">
+            <span className="font-medium">{label}</span>
+            <span className="text-muted-foreground">
+              {projectName} · {statusLabel}
+            </span>
+          </span>
+        }
+        side="right"
+      >
+        <SidebarMenuButton
+          isActive={selected}
+          aria-label={`${label} (${projectName})`}
+          onClick={() => selectSession(session.id)}
+          className={cn("touch-manipulation", dimmed && "opacity-70")}
+        >
+          {/* Same wrapper-span pattern as the expanded agent row: the attention
+              blink (opacity/color) lives on the wrapper, the working bob
+              (transform) lives on the icon itself, so the two `animate-*`
+              utilities never fight over the `animation` property. */}
+          <span
+            aria-label={attention ? "Needs attention" : undefined}
+            className={cn(
+              "inline-flex shrink-0",
+              attention
+                ? "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                : "text-sidebar-accent-foreground",
+            )}
+          >
+            <Bot
+              className={cn(
+                "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
+                shimmer && "motion-safe:animate-agent-working",
+              )}
+            />
+          </span>
+        </SidebarMenuButton>
+      </SimpleTooltip>
+    </SidebarMenuItem>
+  )
+}
+
+function CollapsedAgentRail({
+  projectIds,
+  grouped,
+  projectName,
+  selectedTarget,
+}: {
+  projectIds: string[]
+  grouped: Map<string, SessionView[]>
+  projectName: (id: string) => string
+  selectedTarget: SelectedTarget | null
+}) {
+  const entries = projectIds.flatMap((projectId) =>
+    (grouped.get(projectId) ?? []).map((session) => ({ session, projectId })),
+  )
+
+  if (entries.length === 0) return null
+
+  return (
+    <SidebarGroup
+      data-testid="collapsed-agent-rail"
+      className="hidden group-data-[collapsible=icon]:flex"
+    >
+      <SidebarGroupContent>
+        <SidebarMenu>
+          {entries.map(({ session, projectId }) => (
+            <CollapsedAgentIcon
+              key={session.id}
+              session={session}
+              projectName={projectName(projectId)}
+              selected={
+                selectedTarget?.kind === "agent" &&
+                selectedTarget.sessionId === session.id
+              }
+            />
+          ))}
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
+  )
+}
+
 // Edge affordance pinned to the sidebar's right edge. shadcn's `collapsible="icon"`
 // only collapses; when expanded this lets the user resize the width by dragging,
 // clamped to [14rem, 28rem] and persisted on release. When collapsed it becomes a
@@ -949,7 +1065,10 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        <SidebarGroup>
+        {/* Grouped project/agent tree: hidden entirely at icon width. Project
+            headers carry no meaning as a bare folder glyph, so the icon rail
+            below takes over instead of letting these collapse to folder icons. */}
+        <SidebarGroup className="group-data-[collapsible=icon]:hidden">
           <SidebarGroupLabel>Projects</SidebarGroupLabel>
           {withAgents.length === 0 && withoutAgents.length === 0 ? (
             <SidebarGroupContent>
@@ -980,7 +1099,7 @@ export function AppSidebar() {
         {withoutAgents.length > 0 ? (
           // Mirrors the TUI's "Projects with no agents" separator: agent-less
           // projects sink below the active ones under their own heading.
-          <SidebarGroup>
+          <SidebarGroup className="group-data-[collapsible=icon]:hidden">
             <SidebarGroupLabel>Projects with no agents</SidebarGroupLabel>
             <ProjectGroup
               members={withoutAgents}
@@ -993,6 +1112,15 @@ export function AppSidebar() {
           </SidebarGroup>
         ) : null}
 
+        {/* Icon rail: only visible at icon width, mirroring the tree above but
+            flattened to agents across every project (agent-less projects
+            contribute nothing — they have no agents to show). */}
+        <CollapsedAgentRail
+          projectIds={withAgents}
+          grouped={grouped}
+          projectName={projectName}
+          selectedTarget={selectedTarget}
+        />
       </SidebarContent>
 
       <SidebarFooter>
