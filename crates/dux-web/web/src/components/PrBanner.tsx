@@ -1,6 +1,5 @@
 import { GitPullRequest } from "lucide-react"
 
-import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { prBannerClass, prStateLabel } from "@/lib/pr"
 import { cn } from "@/lib/utils"
 import type { PrView } from "@/lib/types"
@@ -23,25 +22,23 @@ export function PrBanner({
 }) {
   const state = prStateLabel(pr.state)
   return (
-    <SimpleTooltip content={`#${pr.number} · ${pr.title}`}>
-      <a
-        href={pr.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={cn(
-          "flex h-9 shrink-0 items-center gap-2 px-3 text-sm transition-colors",
-          position === "top" ? "border-b" : "border-t",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          prBannerClass(pr.state)
-        )}
-      >
-        <GitPullRequest className="size-4 shrink-0" />
-        {/* Single font (sans) across the strip: a mono `#N` next to the sans
-            state/title misaligned vertically under items-center. */}
-        <span className="shrink-0 font-semibold">#{pr.number}</span>
-        <span className="shrink-0 capitalize opacity-80">{state}</span>
-        <span className="truncate text-foreground/80">{pr.title}</span>
-      </a>
-    </SimpleTooltip>
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        "flex h-9 shrink-0 items-center gap-2 px-3 text-sm transition-colors",
+        position === "top" ? "border-b" : "border-t",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        prBannerClass(pr.state)
+      )}
+    >
+      <GitPullRequest className="size-4 shrink-0" />
+      {/* Single font (sans) across the strip: a mono `#N` next to the sans
+          state/title misaligned vertically under items-center. */}
+      <span className="shrink-0 font-semibold">#{pr.number}</span>
+      <span className="shrink-0 capitalize opacity-80">{state}</span>
+      <span className="truncate text-foreground/80">{pr.title}</span>
+    </a>
   )
 }
