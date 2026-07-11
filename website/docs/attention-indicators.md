@@ -14,12 +14,15 @@ fixes that. When an agent needs you, it says so, and now dux listens.
 When an agent pauses for you, the indicator lights up wherever you happen to be
 looking:
 
-- **In the TUI**, a blinking amber diamond (`◆`) takes over the agent's status dot
-  in the sidebar. It wins over the working spinner, so an agent that is streaming
-  its permission prompt still reads as "needs you," not just "busy."
-- **In the web UI**, an amber dot appears next to the agent's name in the sidebar
-  (and on the specific tab's pill when you are running several tabs). The dot
-  pulses gently, and holds still if you have reduced-motion turned on.
+- **In the TUI**, a blinking amber dot (`●`) takes over the agent's status dot in
+  the sidebar: two quick blinks, a steady hold, repeat. It wins over the working
+  spinner, so an agent that is streaming its permission prompt still reads as
+  "needs you," not just "busy."
+- **In the web UI**, the agent's icon itself turns amber and does the same
+  two-quick-blinks rhythm, in the sidebar and in the mobile list alike (plus a
+  small dot on the specific tab's pill when you are running several tabs). If the
+  agent was mid-bounce when it stopped to ask, the blink layers cleanly on top.
+  Everything holds still if you have reduced-motion turned on.
 - **The browser tab title** gains a count in front of your configured instance
   name: `(2) dux` when two agents are waiting. A backgrounded dux tab updates the
   count without you visiting it, so a glance at your tab strip is enough.
@@ -102,6 +105,41 @@ consumed by dux's embedded terminal and not re-forwarded to the terminal you run
 dux in. If you would rather have the agent's real desktop notifications reach your
 host terminal (or your browser, in the web UI), that is a separate, opt-in feature
 covered in [Terminal capabilities](/docs/terminal-capabilities).
+
+## When nothing lights up
+
+Detection depends on the agent choosing to speak, and agents only speak to
+terminals they recognize. Work down this list before concluding it is broken:
+
+1. **Check what terminal the agent thinks it is in.** This is the number one
+   cause of silence. In the TUI, dux mirrors your real terminal's identity, even
+   seeing through tmux to the terminal underneath it; in the web UI it presents
+   ghostty, an identity the browser terminal renders well. Open a companion
+   terminal (which gets the same identity as the agent) and run
+   `echo $TERM_PROGRAM`. If you see your real terminal (or `ghostty` on the web),
+   identity is doing its job. If you see nothing, someone set
+   `terminal_identity = "none"` in `[capabilities]`, and agents like Claude Code
+   will quietly emit nothing at all. The full story lives in
+   [Terminal capabilities](/docs/terminal-capabilities).
+2. **Give it a few seconds.** Some agents wait for a beat of true idleness before
+   notifying (Claude Code holds off for about six seconds after a question
+   appears), and dux itself holds fire briefly after you have just been typing at
+   the agent, so a question you were clearly present for does not double-ding
+   you. A short pause between "the agent stopped" and "the indicator lit" is
+   normal, not a miss.
+3. **Remember that the agent you are watching never lights up.** By design.
+   Focused terminal in the TUI, open live view in the web: both count as "you are
+   already looking," and the flag stays down. To see the indicator fire, ask the
+   agent something and then switch to a different agent or tab.
+4. **Prove the plumbing with a forged signal.** Ask the agent itself to run
+   `printf '\033]9;test\007'`. Those bytes land in the agent's terminal exactly
+   like a real notification would, so if the indicator lights up, dux's side
+   works end to end and the silence is the agent's configuration (see the
+   per-agent list above). If even that does nothing, check that
+   `attention_indicator` is still `true`.
+5. **Know which silences are expected.** OpenCode has no capturable signal out of
+   the box, and Copilot's turn-completion bell ships disabled, both covered in
+   the per-agent list above.
 
 ## Limitations
 
