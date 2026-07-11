@@ -87,6 +87,16 @@ integration is worth the extra intrusion, the door is open.
 On the web, click a pill, and the tab is deep-linkable, so the URL points right at
 it and a reload brings you back to the same one.
 
+dux also remembers, per agent, whichever tab you had focused last. Jump to a
+different agent and back — on the web that's a sidebar click or the plain
+`#/agent/<id>` link, in the terminal UI it's just reselecting the agent — and
+you land back on that same tab, not always the first one. This persists across
+restarts too, and it's shared between the terminal UI and the web (they read the
+same store), so switching a tab in one surface is remembered by the other. A
+tab you'd closed since is never resurrected by this; you just land on the
+agent's default tab instead. An explicit deep link always wins over the
+remembered tab, so a link someone hands you always opens exactly what it says.
+
 In the terminal UI, switching is keyboard-driven and the keys are yours to rebind
 (the `?` overlay always shows your current bindings). One deliberate quirk: tab
 switching is a non-interactive-mode action. While you're actively typing into an
