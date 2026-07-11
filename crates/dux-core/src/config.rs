@@ -474,15 +474,21 @@ pub struct CapabilitiesConfig {
     /// `kitty`, `iterm2`, or `none` (inherit dux's own env unchanged).
     pub terminal_identity: String,
     /// Forward notification/progress/clipboard sequences from the agent to the
-    /// host terminal (TUI). Master switch for outbound passthrough.
+    /// HOST TERMINAL (TUI only). Master switch for TUI outbound passthrough; it has
+    /// no effect on the web surface, which bridges these sequences to the browser
+    /// through `web_notifications` and `clipboard_passthrough` instead.
     pub passthrough: bool,
-    /// Which agents' OSC 52 clipboard-SET sequences reach the host clipboard:
-    /// `focused` (only the tab you are viewing), `always` (any tab), or `off`.
-    /// Clipboard READ queries are never forwarded.
+    /// Which agents' OSC 52 clipboard-SET sequences reach the clipboard, on BOTH
+    /// surfaces: `focused` (only the tab you are viewing), `always` (any tab), or
+    /// `off`. On the TUI this also requires `passthrough = true`; on the web it
+    /// gates the browser clipboard write directly. Clipboard READ queries are never
+    /// forwarded on either surface.
     pub clipboard_passthrough: String,
-    /// Render OSC 8 hyperlinks (TUI host embed and web click handler).
+    /// Render OSC 8 hyperlinks as clickable (TUI host embed and web click handler).
     pub hyperlinks: bool,
-    /// Bridge agent notification sequences to a browser Notification in the web UI.
+    /// Bridge agent notification sequences to a browser Notification (WEB only).
+    /// No effect on the TUI, whose host-terminal notifications are governed by
+    /// `passthrough`.
     pub web_notifications: bool,
 }
 
@@ -494,6 +500,62 @@ impl Default for CapabilitiesConfig {
             clipboard_passthrough: "focused".to_string(),
             hyperlinks: true,
             web_notifications: true,
+        }
+    }
+}
+
+/// The parsed form of `capabilities.clipboard_passthrough`. Stored as a string in
+/// config (so a typo degrades gracefully rather than failing the whole load) and
+/// parsed at use, mirroring [`crate::term_identity::TerminalIdentityMode`]. Both
+/// surfaces normalize through this so the TUI host forward and the web browser
+/// write agree on the mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardPassthroughMode {
+    /// Forward a clipboard SET only from the tab the user is currently viewing.
+    Focused,
+    /// Forward a clipboard SET from any tab, foreground or background.
+    Always,
+    /// Never forward a clipboard SET.
+    Off,
+}
+
+impl ClipboardPassthroughMode {
+    /// Parse a config string into a mode, returning `None` for an unrecognized
+    /// value so the caller can decide whether to warn. Never warns itself, so the
+    /// per-tick forward path can call it freely.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "focused" => Some(Self::Focused),
+            "always" => Some(Self::Always),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Parse a config string, falling back to [`ClipboardPassthroughMode::Focused`]
+    /// with a logged warning on an unrecognized value. Call this at config
+    /// load/reload (once), NOT per tick, so a typo is surfaced without spamming the
+    /// log; the forward path uses the non-warning [`ClipboardPassthroughMode::parse`].
+    pub fn from_config_str(s: &str) -> Self {
+        match Self::parse(s) {
+            Some(mode) => mode,
+            None => {
+                crate::logger::warn(&format!(
+                    "unknown capabilities.clipboard_passthrough value {s:?}; falling back to \
+                     \"focused\" (valid: focused, always, off)"
+                ));
+                Self::Focused
+            }
+        }
+    }
+
+    /// The canonical lowercase name, used to project the normalized mode into the
+    /// web bootstrap document so both surfaces agree.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Focused => "focused",
+            Self::Always => "always",
+            Self::Off => "off",
         }
     }
 }
@@ -1265,6 +1327,10 @@ pub fn load_config(paths: &DuxPaths) -> Config {
              (supported: cursor, vscode/code, zed, vscodium, sublime)"
         ));
     }
+    // Surface an unrecognized clipboard_passthrough here, once at load, so the
+    // per-tick forward path can parse without warning (see FIX-F5). from_config_str
+    // logs the warning as a side effect and returns the fallback we discard.
+    let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
     config
 }
 

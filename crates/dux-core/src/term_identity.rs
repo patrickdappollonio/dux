@@ -145,9 +145,11 @@ impl HostEnvProbe {
         }
     }
 
-    /// Whether dux is running under tmux: either `TMUX` is set or the inherited
-    /// `TERM_PROGRAM` reports tmux.
-    fn under_tmux(&self) -> bool {
+    /// Whether dux is running under tmux: either `TMUX` is set (non-empty) or the
+    /// inherited `TERM_PROGRAM` reports tmux. `pub(crate)` so the engine can expose
+    /// it as the single tmux predicate (`Engine::host_under_tmux`) for both the
+    /// identity resolver and the TUI's passthrough wrap decision.
+    pub(crate) fn under_tmux(&self) -> bool {
         self.tmux
             || self
                 .term_program

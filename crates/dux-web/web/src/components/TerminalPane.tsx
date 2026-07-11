@@ -213,6 +213,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   useEffect(() => {
     hyperlinksRef.current = bootstrap?.hyperlinks ?? true
   }, [bootstrap?.hyperlinks])
+  // The clipboard passthrough mode (the `capabilities.clipboard_passthrough` bit,
+  // default "focused"). Read lazily by the OSC 52 handler so toggling it never
+  // recreates the terminal; "off" makes the handler consume without writing.
+  const clipboardPassthroughRef = useRef(bootstrap?.clipboard_passthrough ?? "focused")
+  useEffect(() => {
+    clipboardPassthroughRef.current = bootstrap?.clipboard_passthrough ?? "focused"
+  }, [bootstrap?.clipboard_passthrough])
   // Always resolve the owning session by `sessionId` (for an agent, `id` is the
   // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
   // tab's does not, so a lookup by `id` would miss). The focused tab, when this
@@ -434,7 +441,21 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     const disposeAgentNotifications = registerAgentNotifications(term, {
       enabled: () => webNotificationsRef.current,
       title: () => notifyTitleRef.current,
+      clipboardMode: () => clipboardPassthroughRef.current,
+      // A stable per-target tag so repeat notifications from this agent/terminal
+      // replace instead of stack.
+      tag: () => `dux-agent-${id}`,
     })
+    // OSC 8 hyperlink gate at the PARSER layer: when hyperlinks are disabled,
+    // consume the sequence (return true) so xterm creates no clickable link and it
+    // renders as plain text; when enabled, fall through (return false) to xterm's
+    // own OSC 8 handler, whose links the `linkHandler` above then gates to http(s).
+    // Live-toggleable via the ref; links created before a toggle persist until the
+    // cells are rewritten.
+    const disposeOsc8Gate = term.parser.registerOscHandler(
+      8,
+      () => !hyperlinksRef.current,
+    )
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
@@ -1014,6 +1035,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       if (getActivePtySocket() === pty) setActivePtySocket(null)
       termRef.current = null
       disposeAgentNotifications()
+      disposeOsc8Gate.dispose()
       term.dispose()
     }
   }, [kind, id, sessionId])

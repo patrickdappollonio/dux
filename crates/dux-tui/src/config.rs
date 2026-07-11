@@ -37,6 +37,10 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     config.providers.ensure_defaults();
     validate_server_host(&config)?;
     validate_project_envs(&config)?;
+    // Warn once here (TUI startup and reload both funnel through ensure_config) on
+    // an unrecognized clipboard_passthrough so the per-tick host forward can parse
+    // silently (FIX-F5). The warning is from_config_str's side effect.
+    let _ = ClipboardPassthroughMode::from_config_str(&config.capabilities.clipboard_passthrough);
     Ok(config)
 }
 
@@ -670,38 +674,44 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "passthrough",
             comment: Some(CommentSource::Static(
-                "# Forward the agent's notification, progress, and clipboard escape\n\
-                 # sequences to your host terminal (TUI). The master switch for outbound\n\
-                 # passthrough; set false to keep everything the agent emits inside dux.",
+                "# TUI ONLY: forward the agent's notification, progress, and clipboard\n\
+                 # escape sequences to your host terminal. The master switch for the TUI's\n\
+                 # outbound passthrough; set false to keep everything the agent emits\n\
+                 # inside dux. It does not affect the web UI, which uses web_notifications\n\
+                 # and clipboard_passthrough below instead.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.passthrough),
         },
         ConfigEntry::Field {
             key: "clipboard_passthrough",
             comment: Some(CommentSource::Static(
-                "# Whose OSC 52 clipboard writes reach your host clipboard:\n\
+                "# Whose OSC 52 clipboard writes reach the clipboard, on BOTH surfaces:\n\
                  #   \"focused\"  only the agent tab you are currently viewing (the default),\n\
                  #   \"always\"   any agent, even one running in the background,\n\
                  #   \"off\"      never.\n\
                  # Clipboard READ requests are never forwarded (a reply would be typed\n\
-                 # back into dux). Requires passthrough = true.",
+                 # back into dux). On the TUI this also requires passthrough = true; on the\n\
+                 # web it gates the browser clipboard write directly (which the browser\n\
+                 # additionally only permits while the tab has focus).",
             )),
             value_fn: |c| FieldValue::Str(c.capabilities.clipboard_passthrough.clone()),
         },
         ConfigEntry::Field {
             key: "hyperlinks",
             comment: Some(CommentSource::Static(
-                "# Render OSC 8 hyperlinks: clickable links in the TUI (when your host\n\
-                 # terminal supports them) and in the web terminal (http/https only).",
+                "# Render OSC 8 hyperlinks as clickable, on both surfaces: in the TUI\n\
+                 # (when your host terminal supports them) and in the web terminal\n\
+                 # (http/https only). Set false to render links as plain, inert text.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.hyperlinks),
         },
         ConfigEntry::Field {
             key: "web_notifications",
             comment: Some(CommentSource::Static(
-                "# In the web UI, bridge an agent's notification sequences to a browser\n\
-                 # desktop notification. Fires only when the tab is in the background and\n\
-                 # only after you grant permission from the web UI (dux never auto-prompts).",
+                "# WEB ONLY: bridge an agent's notification sequences to a browser desktop\n\
+                 # notification. Fires only when the tab is in the background and only after\n\
+                 # you grant permission from the web UI (dux never auto-prompts). No effect\n\
+                 # on the TUI, whose host-terminal notifications are governed by passthrough.",
             )),
             value_fn: |c| FieldValue::Bool(c.capabilities.web_notifications),
         },

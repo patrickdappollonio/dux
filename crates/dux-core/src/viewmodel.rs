@@ -78,6 +78,12 @@ pub struct BootstrapView {
     /// OSC 8 hyperlinks as clickable (http/https only). Older servers omit it
     /// (treated as true).
     pub hyperlinks: bool,
+    /// The normalized `config.capabilities.clipboard_passthrough` mode ("focused",
+    /// "always", or "off"), governing whether an agent's OSC 52 clipboard SET
+    /// reaches the visitor's browser clipboard. Serialized as its canonical string
+    /// (an unrecognized config value normalizes to "focused"). Older servers omit
+    /// it, so the web client falls back to "focused".
+    pub clipboard_passthrough: String,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
@@ -560,6 +566,12 @@ impl Engine {
             copy_on_select: self.config.ui.copy_on_select,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
+            clipboard_passthrough: crate::config::ClipboardPassthroughMode::parse(
+                &self.config.capabilities.clipboard_passthrough,
+            )
+            .unwrap_or(crate::config::ClipboardPassthroughMode::Focused)
+            .as_str()
+            .to_string(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
@@ -1240,6 +1252,7 @@ mod tests {
             "copy_on_select",
             "web_notifications",
             "hyperlinks",
+            "clipboard_passthrough",
             "pr_banner_position",
             "agent_scrollback_lines",
             "show_changes_pane",

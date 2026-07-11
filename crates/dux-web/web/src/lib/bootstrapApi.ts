@@ -48,6 +48,12 @@ export interface Bootstrap {
    * OSC 8 hyperlinks as clickable (http/https only). Older servers omit it, so
    * consumers fall back to true. */
   hyperlinks?: boolean
+  /** Mirrors `config.capabilities.clipboard_passthrough` (normalized): whether an
+   * agent's OSC 52 clipboard SET reaches the visitor's browser clipboard:
+   * "focused"/"always" write it (the browser still requires the tab to have
+   * focus), "off" never does. Older servers omit it, so consumers fall back to
+   * "focused". */
+  clipboard_passthrough?: "focused" | "always" | "off"
   /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below
    * the terminal, anything else above. (Server sends a free string; the two
    * known values are the only ones the UI branches on.) */

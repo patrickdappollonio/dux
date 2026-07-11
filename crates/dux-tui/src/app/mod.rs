@@ -61,6 +61,15 @@ pub(crate) use dux_core::worker::{
 #[cfg(test)]
 pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 
+/// Maximum agent-passthrough bytes written to the host terminal per tick. A larger
+/// burst is split, with the remainder carried to the next tick, so one oversized
+/// forward can never stall the single-threaded run loop on a blocking `write_all`.
+const HOST_FORWARD_MAX_PER_TICK: usize = 32 * 1024;
+
+/// Minimum interval between logged host-forward write failures, so a persistently
+/// broken stdout logs at most once per interval instead of every tick.
+const HOST_FORWARD_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
 pub struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
@@ -99,10 +108,15 @@ pub struct App {
     /// center pane resolves the focused tab; sidebar/session labels stay
     /// Main-scoped. Pruned when a session is torn down.
     pub(crate) focused_tabs: HashMap<String, String>,
-    /// Whether dux itself runs under tmux (`TMUX` set), cached at construction.
-    /// When true, forwarded passthrough sequences are re-wrapped in a tmux
-    /// passthrough envelope so they survive tmux (requires `allow-passthrough on`).
-    pub(crate) host_is_tmux: bool,
+    /// Passthrough bytes captured but not yet written to the host terminal because
+    /// a single tick's forward exceeded [`HOST_FORWARD_MAX_PER_TICK`]. Carried to
+    /// the next tick so a burst is bounded without dropping data. The host stdout
+    /// is one continuous byte stream, so splitting a sequence across ticks is safe.
+    pub(crate) host_forward_carry: Vec<u8>,
+    /// When the last host-forward write error was logged, so a persistently failing
+    /// stdout logs at most once per [`HOST_FORWARD_ERROR_LOG_INTERVAL`] rather than
+    /// every tick. `None` until the first failure.
+    pub(crate) host_forward_error_logged_at: Option<Instant>,
     /// Click hit-boxes for the agent tab strip, rebuilt each frame while the
     /// strip is drawn: (tab_id, cell rect) for each tab, plus the `+` add rect.
     /// Kept out of `MouseLayoutState` (which is `Copy`); reset by the strip
@@ -1849,7 +1863,8 @@ impl App {
             clipboard: Clipboard::new(),
             active_terminal_id: None,
             focused_tabs: HashMap::new(),
-            host_is_tmux: std::env::var_os("TMUX").is_some(),
+            host_forward_carry: Vec::new(),
+            host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
             agent_tab_add_region: None,
             terminal_return_to_list: false,
@@ -2039,8 +2054,10 @@ impl App {
                 // Forward any captured agent passthrough sequences (notifications,
                 // progress, clipboard writes) to the host terminal. Done AFTER a
                 // successful draw and only here on the single-threaded run loop, so
-                // nothing interleaves mid-frame; every whitelisted sequence is
-                // non-printing and non-positional, so it cannot corrupt the frame.
+                // nothing interleaves mid-frame. Every whitelisted sequence was
+                // validated control-free at capture (C0 bytes are rejected, see
+                // attention.rs), so a forwarded sequence is non-printing and
+                // non-positional and cannot corrupt the frame.
                 let focused_tab = if matches!(self.center_mode, CenterMode::Agent)
                     && self.active_terminal_id.is_none()
                 {
@@ -2048,13 +2065,40 @@ impl App {
                 } else {
                     None
                 };
-                let fwd = self
-                    .engine
-                    .take_host_passthrough(focused_tab.as_deref(), self.host_is_tmux);
+                let under_tmux = self.engine.host_under_tmux();
+                // Prepend any bytes carried over from a previous tick's cap, then
+                // append this tick's fresh capture.
+                let mut fwd = std::mem::take(&mut self.host_forward_carry);
+                fwd.extend_from_slice(
+                    &self
+                        .engine
+                        .take_host_passthrough(focused_tab.as_deref(), under_tmux),
+                );
                 if !fwd.is_empty() {
+                    // Bound the bytes written this tick so a large burst cannot
+                    // stall the run loop on one write_all; the remainder rides the
+                    // carry to the next tick. Splitting at the cap is safe because
+                    // the host stdout is a single continuous byte stream.
+                    if fwd.len() > HOST_FORWARD_MAX_PER_TICK {
+                        self.host_forward_carry = fwd.split_off(HOST_FORWARD_MAX_PER_TICK);
+                    }
                     let mut out = stdout();
-                    let _ = out.write_all(&fwd);
-                    let _ = out.flush();
+                    if let Err(err) = out.write_all(&fwd).and_then(|()| out.flush()) {
+                        // A failing host stdout is unusual and would otherwise be
+                        // silently swallowed; log it, throttled so a persistent
+                        // failure does not spam once per tick.
+                        let now = Instant::now();
+                        let should_log = self
+                            .host_forward_error_logged_at
+                            .is_none_or(|at| at.elapsed() >= HOST_FORWARD_ERROR_LOG_INTERVAL);
+                        if should_log {
+                            self.host_forward_error_logged_at = Some(now);
+                            logger::warn(&format!(
+                                "failed to forward agent passthrough sequences to the host \
+                                 terminal: {err}"
+                            ));
+                        }
+                    }
                 }
 
                 // The `StartWebServer` palette action stashes a pre-bound
@@ -3652,7 +3696,8 @@ impl App {
                 self.last_snapshot_id = Some(client_id);
                 self.terminal_selection = None;
             }
-            provider.snapshot_into(&mut self.snapshot_buf);
+            let collect_links = self.engine.config.capabilities.hyperlinks;
+            provider.snapshot_into(&mut self.snapshot_buf, collect_links);
             true
         } else {
             false

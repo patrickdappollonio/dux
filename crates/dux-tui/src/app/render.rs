@@ -4,6 +4,7 @@ use super::components::{
 };
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
+use ratatui::buffer::{CellDiffOption, CellWidth};
 use std::path::Path;
 
 /// ASCII art logo displayed in the agent pane when no content is active.
@@ -1509,8 +1510,7 @@ impl App {
                     // deliberate: ratatui may repaint any subset of cells in any
                     // order, so a self-contained cell can never leak an unclosed
                     // link; a shared `id` lets a host merge adjacent cells into one
-                    // link. The escape bytes are zero-width, so cell widths and
-                    // ratatui's diffing are unaffected.
+                    // link.
                     let link_uri = self
                         .engine
                         .config
@@ -1520,7 +1520,20 @@ impl App {
                         .flatten()
                         .and_then(|idx| self.snapshot_buf.links.get(idx as usize));
                     if let Some(uri) = link_uri {
-                        ratatui_cell.set_symbol(&osc8_wrap_symbol(&cell.symbol, uri));
+                        // The OSC 8 open/close bytes are non-printing, but ratatui's
+                        // buffer diff derives a cell's on-screen width from its
+                        // symbol string. Those escape bytes are NOT zero-width to
+                        // unicode-width, so without an override ratatui miscounts the
+                        // cell's width and drops the cells that follow it from the
+                        // diff. Force the REAL display width of the underlying glyph
+                        // (1, or 2 for a wide CJK/emoji cell) so diffing stays
+                        // correct.
+                        let width = cell.symbol.as_str().cell_width().max(1);
+                        let forced =
+                            std::num::NonZeroU16::new(width).expect("cell width is at least 1");
+                        ratatui_cell
+                            .set_symbol(&osc8_wrap_symbol(&cell.symbol, uri))
+                            .set_diff_option(CellDiffOption::ForcedWidth(forced));
                     } else {
                         ratatui_cell.set_symbol(&cell.symbol);
                     }
@@ -7813,6 +7826,35 @@ mod tests {
     use crate::app::test_support::{default_bindings, test_app, wait_for_agent_cursor};
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
+
+    #[test]
+    fn osc8_forced_width_keeps_following_cells_in_diff() {
+        use ratatui::buffer::{Buffer, CellDiffOption};
+        use ratatui::layout::Rect;
+
+        let area = Rect::new(0, 0, 3, 1);
+        let prev = Buffer::empty(area);
+        let mut next = Buffer::empty(area);
+        // Cell 0: an OSC-8-wrapped "X" whose forced width is the real glyph width
+        // (1). Cells 1 and 2: plain "Y"/"Z".
+        let wrapped = osc8_wrap_symbol("X", "https://example.com");
+        next[(0, 0)]
+            .set_symbol(&wrapped)
+            .set_diff_option(CellDiffOption::ForcedWidth(
+                std::num::NonZeroU16::new(1).unwrap(),
+            ));
+        next[(1, 0)].set_symbol("Y");
+        next[(2, 0)].set_symbol("Z");
+
+        let diff = prev.diff(&next);
+        let xs: Vec<u16> = diff.iter().map(|(x, _, _)| *x).collect();
+        // Without ForcedWidth the escape bytes make ratatui overcount the linked
+        // cell's width and skip the following cells; with it, Y and Z remain.
+        assert!(
+            xs.contains(&1) && xs.contains(&2),
+            "cells after an OSC 8 link must stay in the diff: {xs:?}"
+        );
+    }
 
     #[test]
     fn osc8_wrap_symbol_wraps_with_stable_id() {

@@ -1,11 +1,17 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { Terminal } from "@xterm/xterm"
 import {
+  CLIPBOARD_MIN_INTERVAL_MS,
+  NOTIFY_MIN_INTERVAL_MS,
+  leadingEdgeAllowed,
   osc52SetText,
   osc777Notify,
   osc99Notify,
   osc9IsProgress,
   osc9NotifyBody,
+  registerAgentNotifications,
   shouldFireNotification,
+  type AgentNotificationOptions,
 } from "./agentNotifications"
 
 describe("osc9 classification", () => {
@@ -87,5 +93,194 @@ describe("shouldFireNotification gating", () => {
     expect(
       shouldFireNotification({ ...base, hidden: false, hasFocus: false })
     ).toBe(true)
+  })
+})
+
+describe("leadingEdgeAllowed", () => {
+  it("allows only after the interval elapses", () => {
+    expect(leadingEdgeAllowed(0, 999, 1000)).toBe(false)
+    expect(leadingEdgeAllowed(0, 1000, 1000)).toBe(true)
+    expect(leadingEdgeAllowed(Number.NEGATIVE_INFINITY, 0, 1000)).toBe(true)
+  })
+})
+
+// --- registerAgentNotifications: parser wiring, gating, throttles ---
+
+interface StubTerm {
+  term: Terminal
+  handlers: Record<number, (data: string) => boolean | Promise<boolean>>
+  disposed: number[]
+}
+
+function stubTerm(): StubTerm {
+  const handlers: StubTerm["handlers"] = {}
+  const disposed: number[] = []
+  const term = {
+    parser: {
+      registerOscHandler(
+        id: number,
+        cb: (data: string) => boolean | Promise<boolean>,
+      ) {
+        handlers[id] = cb
+        return { dispose: () => disposed.push(id) }
+      },
+    },
+  } as unknown as Terminal
+  return { term, handlers, disposed }
+}
+
+class FakeNotification {
+  static permission: NotificationPermission = "granted"
+  static instances: Array<{ title: string; opts?: NotificationOptions }> = []
+  constructor(
+    public title: string,
+    public opts?: NotificationOptions,
+  ) {
+    FakeNotification.instances.push({ title, opts })
+  }
+}
+
+const docState = { hidden: true, hasFocus: false }
+const writeText = vi.fn<(t: string) => Promise<void>>(() => Promise.resolve())
+
+function baseOpts(
+  over: Partial<AgentNotificationOptions> = {},
+): AgentNotificationOptions {
+  return {
+    enabled: () => true,
+    title: () => "Agent",
+    clipboardMode: () => "focused",
+    tag: () => "tag-1",
+    ...over,
+  }
+}
+
+describe("registerAgentNotifications", () => {
+  beforeEach(() => {
+    FakeNotification.instances = []
+    FakeNotification.permission = "granted"
+    docState.hidden = true
+    docState.hasFocus = false
+    writeText.mockClear()
+    vi.stubGlobal("Notification", FakeNotification)
+    vi.stubGlobal("document", {
+      get hidden() {
+        return docState.hidden
+      },
+      hasFocus: () => docState.hasFocus,
+    })
+    vi.stubGlobal("navigator", { clipboard: { writeText } })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it("registers handlers for OSC 9/52/99/777 and disposes them", () => {
+    const { term, handlers, disposed } = stubTerm()
+    const dispose = registerAgentNotifications(term, baseOpts())
+    for (const id of [9, 52, 99, 777]) {
+      expect(typeof handlers[id]).toBe("function")
+    }
+    dispose()
+    for (const id of [9, 52, 99, 777]) {
+      expect(disposed).toContain(id)
+    }
+  })
+
+  it("does not register OSC 8 (the pane owns the hyperlink gate)", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, baseOpts())
+    expect(handlers[8]).toBeUndefined()
+  })
+
+  it("OSC 9 fires when backgrounded+granted, never for progress", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, baseOpts())
+    expect(handlers[9]("Build finished")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(1)
+    expect(FakeNotification.instances[0].opts?.tag).toBe("tag-1")
+    // A progress report falls through (returns false) and never notifies.
+    expect(handlers[9]("4;1;50")).toBe(false)
+    expect(FakeNotification.instances).toHaveLength(1)
+  })
+
+  it("OSC 9 is suppressed when the tab is foregrounded", () => {
+    const { term, handlers } = stubTerm()
+    docState.hidden = false
+    docState.hasFocus = true
+    registerAgentNotifications(term, baseOpts())
+    expect(handlers[9]("hi")).toBe(true) // still consumed
+    expect(FakeNotification.instances).toHaveLength(0)
+  })
+
+  it("OSC 99 fires only for a final displayable notification", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, baseOpts())
+    expect(handlers[99](";Done")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(1)
+    // A continuation is consumed but does not fire.
+    expect(handlers[99]("d=0;partial")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(1)
+  })
+
+  it("OSC 777 fires for notify, falls through otherwise", () => {
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, baseOpts())
+    expect(handlers[777]("notify;T;B")).toBe(true)
+    expect(FakeNotification.instances).toHaveLength(1)
+    expect(handlers[777]("something;else")).toBe(false)
+  })
+
+  it("throttles repeat notifications inside the interval", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const { term, handlers } = stubTerm()
+    registerAgentNotifications(term, baseOpts())
+    handlers[9]("first")
+    handlers[9]("second") // same instant: suppressed
+    expect(FakeNotification.instances).toHaveLength(1)
+    vi.setSystemTime(NOTIFY_MIN_INTERVAL_MS)
+    handlers[9]("third")
+    expect(FakeNotification.instances).toHaveLength(2)
+  })
+
+  it("OSC 52 writes the clipboard under focused/always, never under off", () => {
+    const { term, handlers } = stubTerm()
+    docState.hasFocus = true
+    // off: consumed, no write.
+    const off = registerAgentNotifications(term, baseOpts({ clipboardMode: () => "off" }))
+    expect(handlers[52]("c;aGVsbG8=")).toBe(true)
+    expect(writeText).not.toHaveBeenCalled()
+    off()
+
+    // focused: writes.
+    const { term: t2, handlers: h2 } = stubTerm()
+    registerAgentNotifications(t2, baseOpts({ clipboardMode: () => "focused" }))
+    expect(h2[52]("c;aGVsbG8=")).toBe(true)
+    expect(writeText).toHaveBeenCalledWith("hello")
+  })
+
+  it("OSC 52 read query is consumed without a clipboard write", () => {
+    const { term, handlers } = stubTerm()
+    docState.hasFocus = true
+    registerAgentNotifications(term, baseOpts())
+    expect(handlers[52]("c;?")).toBe(true)
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
+  it("clipboard throttle is keep-last: the final value is written after the window", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const { term, handlers } = stubTerm()
+    docState.hasFocus = true
+    registerAgentNotifications(term, baseOpts())
+    handlers[52]("c;aGVsbG8=") // "hello", immediate
+    handlers[52]("c;d29ybGQ=") // "world", deferred (keep-last)
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(writeText).toHaveBeenLastCalledWith("hello")
+    vi.advanceTimersByTime(CLIPBOARD_MIN_INTERVAL_MS)
+    expect(writeText).toHaveBeenCalledTimes(2)
+    expect(writeText).toHaveBeenLastCalledWith("world")
   })
 })

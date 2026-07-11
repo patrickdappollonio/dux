@@ -99,6 +99,25 @@ pub struct TerminalSnapshot {
     pub links: Vec<String>,
 }
 
+/// Maximum number of distinct OSC 8 hyperlink URIs interned in a single snapshot.
+/// A real terminal frame references only a handful; this bounds the per-frame link
+/// table so an agent that emits a flood of unique links cannot balloon it. Cells
+/// beyond the cap render as plain text (`link = None`).
+const MAX_SNAPSHOT_LINKS: usize = 256;
+
+/// Whether an OSC 8 hyperlink URI is safe to forward to the host terminal: an
+/// `http://` or `https://` scheme (case-insensitive) with no control bytes. This
+/// mirrors the web link handler's gate so both surfaces treat the same links as
+/// clickable; a `file://`, `javascript:`, or control-laced URI is treated as plain
+/// text on both.
+fn is_forwardable_link_uri(uri: &str) -> bool {
+    if uri.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return false;
+    }
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
 impl TerminalSnapshot {
     /// Create an empty snapshot suitable for reuse as a pre-allocated buffer.
     pub fn empty() -> Self {
@@ -791,9 +810,11 @@ impl PtyClient {
                                 ring.push_back(seq);
                             }
                             if dropped != 0 {
-                                logger::debug(
-                                    "passthrough ring dropped captured sequence(s) (over cap or too large)",
-                                );
+                                logger::warn(&format!(
+                                    "passthrough ring dropped {dropped} captured sequence(s) \
+                                     (ring cap reached or an individual sequence exceeded the \
+                                     per-sequence size limit); the host will not see them"
+                                ));
                             }
                         }
                     }
@@ -960,12 +981,17 @@ impl PtyClient {
     /// allocation to avoid per-frame heap churn. Returns `true` if the
     /// snapshot was rebuilt, `false` if the terminal was unchanged and
     /// `target` still holds valid data from the previous call.
-    pub fn snapshot_into(&self, target: &mut TerminalSnapshot) -> bool {
+    ///
+    /// `collect_links` controls whether OSC 8 hyperlinks are interned into
+    /// `target.links` (the TUI passes `config.capabilities.hyperlinks`): when
+    /// `false` no cell carries a `link` and the interning work is skipped
+    /// entirely, so a config that disables hyperlinks pays nothing.
+    pub fn snapshot_into(&self, target: &mut TerminalSnapshot, collect_links: bool) -> bool {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return false;
         }
         let terminal = self.terminal.lock().expect("terminal mutex poisoned");
-        terminal.snapshot_into(target);
+        terminal.snapshot_into(target, collect_links);
         true
     }
 
@@ -1167,6 +1193,17 @@ impl PtyClient {
             .lock()
             .map(|mut ring| ring.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// How many captured passthrough sequences are currently buffered (not yet
+    /// drained). Test/diagnostic support: the ring push is the LAST step of a
+    /// reader-loop scan pass, so a non-zero count proves the reader has fully
+    /// processed a chunk that emitted a capture. Engine tests wait on this instead
+    /// of `progress_report()` (a separate mutex set earlier in the same pass) to
+    /// avoid observing a half-applied scan.
+    #[cfg(test)]
+    pub(crate) fn passthrough_pending(&self) -> usize {
+        self.passthrough.lock().map(|ring| ring.len()).unwrap_or(0)
     }
 
     /// The most recent `OSC 9;4` progress report, if the agent emitted one. This
@@ -1445,13 +1482,15 @@ impl TerminalState {
 
     fn snapshot(&self) -> TerminalSnapshot {
         let mut snap = TerminalSnapshot::empty();
-        self.snapshot_into(&mut snap);
+        self.snapshot_into(&mut snap, true);
         snap
     }
 
     /// Fill `target` with the current terminal viewport, reusing its existing
-    /// `cells` allocation to avoid per-frame heap churn.
-    fn snapshot_into(&self, target: &mut TerminalSnapshot) {
+    /// `cells` allocation to avoid per-frame heap churn. When `collect_links` is
+    /// false, OSC 8 hyperlink interning is skipped and every cell's `link` is
+    /// `None`.
+    fn snapshot_into(&self, target: &mut TerminalSnapshot, collect_links: bool) {
         let renderable = self.term.renderable_content();
         let display_offset = renderable.display_offset;
         let history_size = self.term.grid().history_size();
@@ -1469,6 +1508,12 @@ impl TerminalState {
 
         target.cells.clear();
         target.links.clear();
+        // Per-call side index (URI -> index into `target.links`) so interning a
+        // link that spans many cells stays O(1) instead of a linear scan of
+        // `target.links` per cell (which was quadratic for a wide run of distinct
+        // links). Rebuilt every call alongside `target.links`.
+        let mut link_index: std::collections::HashMap<String, u16> =
+            std::collections::HashMap::new();
         for indexed in renderable.display_iter {
             let cell = indexed.cell;
             if cell
@@ -1491,22 +1536,34 @@ impl TerminalState {
             }
 
             // Intern this cell's OSC 8 hyperlink URI (if any) into the per-snapshot
-            // table, deduplicating so a link spanning many cells stores its URI
-            // once. `u16` indices keep the cell small; a snapshot with more than
-            // 65k distinct links is not a real terminal, so such a cell drops its
-            // link rather than growing the index type.
-            let link = cell.hyperlink().and_then(|hyperlink| {
-                let uri = hyperlink.uri();
-                let idx = target
-                    .links
-                    .iter()
-                    .position(|existing| existing == uri)
-                    .unwrap_or_else(|| {
-                        target.links.push(uri.to_string());
-                        target.links.len() - 1
-                    });
-                u16::try_from(idx).ok()
-            });
+            // table, deduplicating via `link_index` so a link spanning many cells
+            // stores its URI once. Gated three ways: only when `collect_links` is
+            // set (hyperlinks enabled); only for a forwardable scheme (http/https,
+            // no control bytes, mirroring the web link handler) so a `file://` or
+            // `javascript:` URI never wraps; and only up to `MAX_SNAPSHOT_LINKS`
+            // distinct URIs so a hostile flood of unique links cannot grow the
+            // table without bound. A cell whose URI fails any gate renders as plain
+            // text (`link = None`) and does not consume a table slot.
+            let link = if collect_links {
+                cell.hyperlink().and_then(|hyperlink| {
+                    let uri = hyperlink.uri();
+                    if !is_forwardable_link_uri(uri) {
+                        return None;
+                    }
+                    if let Some(idx) = link_index.get(uri) {
+                        return Some(*idx);
+                    }
+                    if target.links.len() >= MAX_SNAPSHOT_LINKS {
+                        return None;
+                    }
+                    let idx = u16::try_from(target.links.len()).ok()?;
+                    target.links.push(uri.to_string());
+                    link_index.insert(uri.to_string(), idx);
+                    Some(idx)
+                })
+            } else {
+                None
+            };
 
             target.cells.push(SnapshotCell {
                 row: point.line as u16,
@@ -1888,12 +1945,27 @@ pub struct PtySpawnOptions<'a> {
 
 /// Apply a resolved terminal identity to a spawn command: remove first, then set.
 /// A `remove` entry ending in `*` scrubs every inherited variable whose name
-/// starts with the prefix (expanded here against the real process environment,
-/// since `env_remove` takes a concrete name).
+/// starts with the prefix, expanded against the real process environment (the one
+/// the child would otherwise inherit) since `env_remove` takes a concrete name.
 fn apply_identity_env(cmd: &mut CommandBuilder, identity: &crate::term_identity::TerminalIdentity) {
+    // Snapshot the ambient environment once per spawn and delegate to the pure
+    // helper. Passing the ambient set as a parameter keeps the prefix-scrub logic
+    // testable without mutating (and racing on) the process-wide environment.
+    let ambient: Vec<(std::ffi::OsString, std::ffi::OsString)> = env::vars_os().collect();
+    apply_identity_env_with(cmd, identity, &ambient);
+}
+
+/// The pure core of [`apply_identity_env`]: apply `identity` against an explicit
+/// `ambient` environment snapshot rather than reading `std::env` directly, so a
+/// unit test can supply a fabricated ambient set and never touch the process env.
+fn apply_identity_env_with(
+    cmd: &mut CommandBuilder,
+    identity: &crate::term_identity::TerminalIdentity,
+    ambient: &[(std::ffi::OsString, std::ffi::OsString)],
+) {
     for name in &identity.remove {
         if let Some(prefix) = name.strip_suffix('*') {
-            for (key, _) in env::vars_os() {
+            for (key, _) in ambient {
                 if let Some(key) = key.to_str()
                     && key.starts_with(prefix)
                 {
@@ -2183,10 +2255,14 @@ mod tests {
 
     #[test]
     fn passthrough_ring_is_capped_drop_oldest() {
-        // Emit far more sequences than the ring holds; the ring must cap at
-        // PASSTHROUGH_RING_CAP, dropping the oldest.
-        let emit = "for i in $(seq 1 200); do printf '\\033]9;n\\007'; done; printf X";
-        let args = vec!["-c".to_string(), emit.to_string()];
+        // Emit far more NUMBERED sequences than the ring holds, then a trailing X.
+        // The ring must cap at PASSTHROUGH_RING_CAP and keep exactly the LAST
+        // cap-worth (the oldest dropped), not merely stay under the cap.
+        const TOTAL: usize = 200;
+        let emit = format!(
+            "for i in $(seq 1 {TOTAL}); do printf '\\033]9;n%d\\007' \"$i\"; done; printf X"
+        );
+        let args = vec!["-c".to_string(), emit];
         let client = PtyClient::spawn_with_env_opts(
             "/bin/sh",
             &args,
@@ -2201,8 +2277,29 @@ mod tests {
             },
         )
         .expect("spawn pty");
+        // X is printed AFTER every sequence, so its visibility proves the reader
+        // thread processed all TOTAL captures (the ring push precedes the terminal
+        // write within each scan pass).
         wait_for_viewport(&client, "X");
-        assert!(client.take_passthrough().len() <= PASSTHROUGH_RING_CAP);
+        let drained = client.take_passthrough();
+        assert_eq!(
+            drained.len(),
+            PASSTHROUGH_RING_CAP,
+            "the ring must retain exactly its cap once flooded"
+        );
+        assert!(!drained.is_empty(), "the ring must not be vacuously empty");
+        // The retained sequences are the LAST cap-worth: n(TOTAL-cap+1)..=n(TOTAL).
+        let first_kept = TOTAL - PASSTHROUGH_RING_CAP + 1;
+        assert_eq!(
+            drained.first().map(|s| s.bytes.clone()),
+            Some(format!("\x1b]9;n{first_kept}\x1b\\").into_bytes()),
+            "oldest retained sequence must be n{first_kept} (older ones dropped)"
+        );
+        assert_eq!(
+            drained.last().map(|s| s.bytes.clone()),
+            Some(format!("\x1b]9;n{TOTAL}\x1b\\").into_bytes()),
+            "newest retained sequence must be n{TOTAL}"
+        );
     }
 
     #[test]
@@ -2365,6 +2462,41 @@ mod tests {
 
         // empty() clears the links table.
         assert!(TerminalSnapshot::empty().links.is_empty());
+    }
+
+    #[test]
+    fn snapshot_skips_links_when_collect_links_false() {
+        let mut terminal = TerminalState::with_scrollback(3, 40, 100);
+        terminal.process(b"\x1b]8;;https://example.com\x1b\\X\x1b]8;;\x1b\\Y");
+        let mut snap = TerminalSnapshot::empty();
+        terminal.snapshot_into(&mut snap, false);
+        assert!(
+            snap.links.is_empty(),
+            "no interning when collect_links=false"
+        );
+        assert!(
+            snap.cells.iter().all(|c| c.link.is_none()),
+            "no cell carries a link when collect_links=false"
+        );
+    }
+
+    #[test]
+    fn snapshot_ignores_non_http_link_schemes() {
+        let mut terminal = TerminalState::with_scrollback(3, 40, 100);
+        // A file:// scheme is not forwardable: the cell renders as plain text and
+        // no slot is consumed in the links table.
+        terminal.process(b"\x1b]8;;file:///etc/passwd\x1b\\X\x1b]8;;\x1b\\Y");
+        let snapshot = terminal.snapshot();
+        assert!(
+            snapshot.links.is_empty(),
+            "file:// must not be interned as a forwardable link"
+        );
+        let x = snapshot
+            .cells
+            .iter()
+            .find(|c| c.symbol == "X")
+            .expect("cell X");
+        assert_eq!(x.link, None);
     }
 
     #[test]
@@ -2694,28 +2826,33 @@ mod tests {
 
     #[test]
     fn apply_identity_env_sets_and_removes() {
-        // SAFETY: single-threaded test; set a var the scrub prefix should strip.
-        unsafe {
-            std::env::set_var("KITTY_TEST_MARKER", "1");
-        }
+        use std::ffi::OsString;
+
         let mut cmd = CommandBuilder::new("printf");
+        // Seed the two variables the identity should scrub directly on the builder,
+        // so the test never mutates (or races on) the process-wide environment.
+        cmd.env("KITTY_TEST_MARKER", "1");
+        cmd.env("TERM_PROGRAM", "iTerm.app");
+        // A fabricated ambient snapshot for the prefix-expansion path (`KITTY_*`).
+        let ambient: Vec<(OsString, OsString)> = vec![
+            (OsString::from("KITTY_TEST_MARKER"), OsString::from("1")),
+            (OsString::from("TERM_PROGRAM"), OsString::from("iTerm.app")),
+        ];
+        // TERM_PROGRAM is BOTH removed (an exact scrub entry) and set: remove runs
+        // first, then set, so the forced value wins.
         let identity = crate::term_identity::TerminalIdentity {
             set: vec![("TERM_PROGRAM".to_string(), "ghostty".to_string())],
-            remove: vec!["KITTY_*".to_string()],
+            remove: vec!["TERM_PROGRAM".to_string(), "KITTY_*".to_string()],
         };
-        // The builder seeds its env from the current process, so the prefix scrub
-        // has a concrete `KITTY_TEST_MARKER` to remove.
         assert!(cmd.get_env("KITTY_TEST_MARKER").is_some());
-        apply_identity_env(&mut cmd, &identity);
+        apply_identity_env_with(&mut cmd, &identity, &ambient);
         assert_eq!(
             cmd.get_env("TERM_PROGRAM").and_then(|v| v.to_str()),
-            Some("ghostty")
+            Some("ghostty"),
+            "an overlapping remove+set resolves to the set value (set runs last)"
         );
         // The prefix `KITTY_*` scrubbed the concrete inherited variable.
         assert!(cmd.get_env("KITTY_TEST_MARKER").is_none());
-        unsafe {
-            std::env::remove_var("KITTY_TEST_MARKER");
-        }
     }
 
     #[test]
@@ -3296,13 +3433,13 @@ mod tests {
         terminal.process(b"hello\r\nworld\r\n");
 
         let mut buf = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut buf);
+        terminal.snapshot_into(&mut buf, true);
         let cap_after_first = buf.cells.capacity();
         assert!(!buf.cells.is_empty(), "first snapshot should have cells");
 
         // Second call should reuse the Vec capacity.
         terminal.process(b"more\r\n");
-        terminal.snapshot_into(&mut buf);
+        terminal.snapshot_into(&mut buf, true);
         assert_eq!(
             buf.cells.capacity(),
             cap_after_first,
@@ -3318,7 +3455,7 @@ mod tests {
 
         let owned = terminal.snapshot();
         let mut buf = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut buf);
+        terminal.snapshot_into(&mut buf, true);
 
         assert_eq!(owned.rows, buf.rows);
         assert_eq!(owned.cols, buf.cols);
@@ -3366,7 +3503,7 @@ mod tests {
         // Simulate first snapshot (dirty=true).
         assert!(dirty.swap(false, Ordering::AcqRel));
         let mut buf = TerminalSnapshot::empty();
-        terminal.snapshot_into(&mut buf);
+        terminal.snapshot_into(&mut buf, true);
         assert!(!buf.cells.is_empty());
 
         // Second check without new data: dirty should be false.

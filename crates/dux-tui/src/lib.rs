@@ -109,6 +109,10 @@ pub fn resume_after_server(mut engine: Box<Engine>) -> Result<TuiExit> {
     // terminal again. Already-running PTYs keep their spawn-time env until they
     // are relaunched.
     engine.surface_kind = dux_core::term_identity::SurfaceKind::Tui;
+    // Capture stayed on while the server owned the host; drop whatever accumulated
+    // so the resumed TUI does not replay a stale passthrough backlog to the host
+    // terminal it is only now taking back.
+    engine.discard_passthrough_backlog();
     let app = app::App::resume(*engine)?;
     run_app(app)
 }
@@ -127,6 +131,9 @@ fn run_app(mut app: app::App) -> Result<TuiExit> {
             // PTYs keep their spawn-time env until relaunch.
             let mut engine = app.into_engine();
             engine.surface_kind = dux_core::term_identity::SurfaceKind::WebHeadless;
+            // Drop any TUI-era passthrough backlog so the server does not inherit a
+            // stale ring; capture continues under the server for the web bridge.
+            engine.discard_passthrough_backlog();
             Ok(TuiExit::FlipToServer {
                 engine: Box::new(engine),
                 listeners,

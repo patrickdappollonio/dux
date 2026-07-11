@@ -467,6 +467,17 @@ fn kitty_notify_is_query(metadata: &[u8]) -> bool {
 /// non-query OSC 99 part (including `d=0` continuations and `p=close`, for protocol
 /// integrity). Returns the canonical `ESC ] <payload> ESC \` bytes to forward.
 fn capture_osc(payload: &[u8]) -> Option<CapturedSeq> {
+    // Refuse to capture any payload carrying a C0 control byte (< 0x20). The
+    // canonical bytes are replayed verbatim to the host terminal, so an embedded
+    // CR/LF/ESC could break out of the sequence or reposition the host cursor.
+    // The whitelisted kinds legitimately contain none: progress is digits and
+    // semicolons, clipboard SET is base64, and a real notification body is a
+    // single prose line. A payload with a C0 byte is malformed or hostile, so it
+    // is dropped from passthrough (its in-app attention classification may still
+    // fire; only the raw forward is refused).
+    if payload.iter().any(|&b| b < 0x20) {
+        return None;
+    }
     let (cmd, rest) = split_once(payload, b';');
     let kind = match cmd {
         b"9" => {
@@ -896,6 +907,20 @@ mod tests {
         let caps = capture_once(b"\x1b]9;ping\x07");
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].bytes, b"\x1b]9;ping\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn capture_rejects_c0_control_bytes_in_payload() {
+        // An OSC 9 whose body carries an embedded CR/LF must not be captured for
+        // host forwarding (a control byte could break out of the sequence).
+        assert!(capture_once(b"\x1b]9;line1\rline2\x07").is_empty());
+        assert!(capture_once(b"\x1b]9;line1\nline2\x07").is_empty());
+        // Attention classification is independent of capture: the same bytes still
+        // register as a Notify for dux's own in-app chrome.
+        assert_eq!(
+            scan_once(b"\x1b]9;line1\rline2\x07"),
+            vec![AttentionEvent::Notify]
+        );
     }
 
     #[test]

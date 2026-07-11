@@ -883,12 +883,13 @@ impl Engine {
         wrap_for_tmux: bool,
     ) -> Vec<u8> {
         let master = self.config.capabilities.passthrough;
-        let clipboard_mode = self
-            .config
-            .capabilities
-            .clipboard_passthrough
-            .trim()
-            .to_ascii_lowercase();
+        // Parse without warning on the per-tick path: an unrecognized value is
+        // surfaced once at config load/reload (see `ClipboardPassthroughMode`), and
+        // falls back to the default here.
+        let clipboard_mode = crate::config::ClipboardPassthroughMode::parse(
+            &self.config.capabilities.clipboard_passthrough,
+        )
+        .unwrap_or(crate::config::ClipboardPassthroughMode::Focused);
         let mut out = Vec::new();
         for (tab_id, provider) in &self.providers {
             // Always drain (keeps the ring bounded even for a headless server).
@@ -898,11 +899,12 @@ impl Engine {
             }
             for seq in seqs {
                 let forward = match seq.kind {
-                    crate::attention::CapturedKind::ClipboardSet => match clipboard_mode.as_str() {
-                        "always" => true,
-                        "off" => false,
-                        // "focused" (the default, and any unrecognized value).
-                        _ => focused_tab == Some(tab_id.as_str()),
+                    crate::attention::CapturedKind::ClipboardSet => match clipboard_mode {
+                        crate::config::ClipboardPassthroughMode::Always => true,
+                        crate::config::ClipboardPassthroughMode::Off => false,
+                        crate::config::ClipboardPassthroughMode::Focused => {
+                            focused_tab == Some(tab_id.as_str())
+                        }
                     },
                     // Notifications and progress forward from every tab.
                     _ => true,
@@ -918,6 +920,27 @@ impl Engine {
             }
         }
         out
+    }
+
+    /// Drain and discard every provider's captured passthrough ring without
+    /// forwarding anything. Called on a surface flip (TUI to serve, or serve back
+    /// to TUI) so the newly-active surface starts from a clean slate: capture stays
+    /// always-on across the flip (so nothing is missed mid-flip), but the backlog
+    /// that accumulated while the other surface owned the host is dropped rather
+    /// than replayed to a terminal that never saw the original context.
+    pub fn discard_passthrough_backlog(&mut self) {
+        for provider in self.providers.values() {
+            let _ = provider.take_passthrough();
+        }
+    }
+
+    /// Whether the dux process is running under tmux, per the single host-env
+    /// probe. This is the one tmux predicate: both the terminal-identity resolver
+    /// (see through tmux to the outer terminal) and the TUI's passthrough wrap
+    /// decision read it, so they can never disagree. `TMUX` set-but-empty does not
+    /// count; an inherited `TERM_PROGRAM=tmux` does.
+    pub fn host_under_tmux(&self) -> bool {
+        self.host_env.under_tmux()
     }
 
     /// Record that the user is actively looking at the given tab's live view
@@ -2892,12 +2915,18 @@ mod tests {
         )
         .expect("spawn passthrough pty");
         engine.providers.insert(tab.to_string(), client);
+        // Gate readiness on the passthrough RING being non-empty, not on the
+        // progress report. The reader loop sets the progress slot earlier in the
+        // same scan pass than it pushes captures into the ring, so a progress-based
+        // wait can observe a half-applied pass where the ring is still empty
+        // (FIX-F15). A non-empty ring proves the capture push completed.
         for _ in 0..200 {
             if engine
                 .providers
                 .get(tab)
-                .and_then(|p| p.progress_report())
-                .is_some()
+                .map(|p| p.passthrough_pending())
+                .unwrap_or(0)
+                > 0
             {
                 return tmp;
             }
@@ -2965,6 +2994,21 @@ mod tests {
         assert!(
             always.windows(4).any(|w| w == b"]52;"),
             "clipboard always forwards even for a background tab"
+        );
+    }
+
+    #[test]
+    fn discard_passthrough_backlog_drops_without_forwarding() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = true;
+        let _wt = seed_passthrough_provider(&mut engine, "s1");
+
+        // Discard drains the ring but forwards nothing.
+        engine.discard_passthrough_backlog();
+        // A subsequent forward sees an empty ring: the backlog was not replayed.
+        assert!(
+            engine.take_host_passthrough(Some("s1"), false).is_empty(),
+            "discarded backlog must not be forwarded on the next drain"
         );
     }
 

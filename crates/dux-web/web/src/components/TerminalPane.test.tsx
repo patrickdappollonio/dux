@@ -22,6 +22,13 @@ class TermStub {
   textarea = { setAttribute() {}, blur() {} }
   buffer = { active: { type: "normal" } }
   modes = { mouseTrackingMode: "none", applicationCursorKeysMode: false }
+  // The pane registers a parser-level OSC 8 gate directly on the terminal (the
+  // hyperlink on/off gate), so the stub must expose registerOscHandler.
+  parser = {
+    registerOscHandler() {
+      return { dispose() {} }
+    },
+  }
   loadAddon() {}
   open() {}
   onData() {

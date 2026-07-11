@@ -96,11 +96,41 @@ export function shouldFireNotification(ctx: {
   )
 }
 
+/** The clipboard passthrough mode, mirroring the Rust
+ * `capabilities.clipboard_passthrough`: `off` never writes the browser clipboard;
+ * `focused`/`always` write it (the browser itself additionally requires the tab to
+ * have focus, so on the web `always` behaves like `focused`). */
+export type ClipboardPassthroughMode = "focused" | "always" | "off"
+
+/** Minimum gap between fired desktop notifications; a repeat inside the window is
+ * suppressed so an agent that spams OSC 9 cannot stack a wall of notifications. */
+export const NOTIFY_MIN_INTERVAL_MS = 1000
+/** Minimum gap between browser-clipboard writes. Unlike notifications this is
+ * keep-last: a write suppressed inside the window is deferred and applied when the
+ * window expires, so the final clipboard value is never dropped. */
+export const CLIPBOARD_MIN_INTERVAL_MS = 500
+
+/** A leading-edge throttle decision: fire when at least `intervalMs` has elapsed
+ * since `lastAt`. Pure and unit-tested; the caller owns the `lastAt` clock. */
+export function leadingEdgeAllowed(
+  lastAt: number,
+  now: number,
+  intervalMs: number,
+): boolean {
+  return now - lastAt >= intervalMs
+}
+
 export interface AgentNotificationOptions {
   /** Live read of the `web_notifications` config bit. */
   enabled: () => boolean
   /** Title shown on the desktop notification (e.g. the agent's name). */
   title: () => string
+  /** Live read of `capabilities.clipboard_passthrough`. Defaults to "focused"
+   * when the caller omits it (older bootstrap). */
+  clipboardMode?: () => ClipboardPassthroughMode
+  /** A stable per-session/tab id used as the Notification `tag` so a repeat from
+   * the same agent REPLACES the previous one instead of stacking. */
+  tag?: () => string
 }
 
 /** Register the OSC handlers on a viewer terminal. Returns a disposer that removes
@@ -111,6 +141,9 @@ export function registerAgentNotifications(
   term: Terminal,
   opts: AgentNotificationOptions,
 ): () => void {
+  // Leading-edge throttle clock for fired notifications (closure-local so two
+  // panes never interfere).
+  let lastNotifyAt = Number.NEGATIVE_INFINITY
   const fire = (title: string, body: string) => {
     if (typeof Notification === "undefined") return
     const ok = shouldFireNotification({
@@ -120,12 +153,65 @@ export function registerAgentNotifications(
       hasFocus: typeof document !== "undefined" && document.hasFocus(),
     })
     if (!ok) return
+    const now = Date.now()
+    if (!leadingEdgeAllowed(lastNotifyAt, now, NOTIFY_MIN_INTERVAL_MS)) return
+    lastNotifyAt = now
     try {
-      new Notification(title, { body })
+      // A stable `tag` makes a repeat from the same agent REPLACE the previous
+      // notification instead of stacking a fresh one.
+      const tag = opts.tag?.()
+      new Notification(title, tag ? { body, tag } : { body })
     } catch {
       // Constructing a Notification can throw on some platforms; ignore.
     }
   }
+
+  // Keep-last clipboard throttle: a write suppressed inside the interval is
+  // deferred and flushed when the window expires so the final value is never lost.
+  let lastClipboardAt = Number.NEGATIVE_INFINITY
+  let clipboardTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingClipboard: string | null = null
+  const doClipboardWrite = (text: string) => {
+    // Re-check the runtime gate at write time (focus can change while a deferred
+    // write waits). The browser only permits a clipboard write from a focused tab.
+    if (
+      typeof document !== "undefined" &&
+      document.hasFocus() &&
+      typeof navigator !== "undefined" &&
+      navigator.clipboard
+    ) {
+      void navigator.clipboard.writeText(text).catch(() => {})
+    }
+  }
+  const writeClipboard = (text: string) => {
+    const now = Date.now()
+    if (leadingEdgeAllowed(lastClipboardAt, now, CLIPBOARD_MIN_INTERVAL_MS)) {
+      lastClipboardAt = now
+      doClipboardWrite(text)
+      return
+    }
+    // Inside the window: remember the latest value and (if not already) schedule
+    // the trailing flush.
+    pendingClipboard = text
+    if (clipboardTimer === null) {
+      const wait = CLIPBOARD_MIN_INTERVAL_MS - (now - lastClipboardAt)
+      clipboardTimer = setTimeout(
+        () => {
+          clipboardTimer = null
+          if (pendingClipboard !== null) {
+            lastClipboardAt = Date.now()
+            const text = pendingClipboard
+            pendingClipboard = null
+            doClipboardWrite(text)
+          }
+        },
+        Math.max(0, wait),
+      )
+    }
+  }
+
+  const clipboardMode = (): ClipboardPassthroughMode =>
+    opts.clipboardMode?.() ?? "focused"
 
   const disposers = [
     term.parser.registerOscHandler(9, (data) => {
@@ -149,14 +235,10 @@ export function registerAgentNotifications(
     }),
     term.parser.registerOscHandler(52, (data) => {
       const text = osc52SetText(data)
-      if (
-        text !== null &&
-        typeof document !== "undefined" &&
-        document.hasFocus() &&
-        typeof navigator !== "undefined" &&
-        navigator.clipboard
-      ) {
-        void navigator.clipboard.writeText(text).catch(() => {})
+      // "off" consumes the sequence but never writes; "focused"/"always" write
+      // (subject to the focus + throttle gates in writeClipboard).
+      if (text !== null && clipboardMode() !== "off") {
+        writeClipboard(text)
       }
       // Consume so xterm never writes the HOST clipboard or answers a read query.
       return true
@@ -164,6 +246,10 @@ export function registerAgentNotifications(
   ]
 
   return () => {
+    if (clipboardTimer !== null) {
+      clearTimeout(clipboardTimer)
+      clipboardTimer = null
+    }
     for (const d of disposers) d.dispose()
   }
 }
