@@ -271,7 +271,7 @@ All keybindings live in the `[keys]` section of the config. Key format supports 
 ```toml
 [keys]
 quit = ["ctrl-q"]
-open_palette = ["ctrl-k"]
+open_palette = ["ctrl-p", "ctrl-space"]
 ```
 
 Press `?` in the app for the full keybinding reference. The help overlay is the authoritative source. This README intentionally doesn't list individual bindings because they're yours to change.
