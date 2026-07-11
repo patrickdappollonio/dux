@@ -636,10 +636,13 @@ function EditorBody({
               <FilePlus />
             </Button>
           </div>
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="p-1">
-              {search.trim() ? (
-                searchLoading ? (
+          {/* The tree owns its own ScrollArea (it virtualizes against its
+              viewport, so it must be the element that scrolls); this outer one
+              wraps only the flat search results. */}
+          {search.trim() ? (
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="p-1">
+                {searchLoading ? (
                   <div className="flex items-center justify-center py-4 text-muted-foreground">
                     <Loader2 className="size-4 motion-safe:animate-spin" />
                   </div>
@@ -677,18 +680,18 @@ function EditorBody({
                       </p>
                     )}
                   </>
-                )
-              ) : (
-                <FileTree
-                  sessionId={sessionId}
-                  openPath={openPath}
-                  changed={changedMap}
-                  initialPath={initialPath}
-                  onOpen={requestSwitch}
-                />
-              )}
-            </div>
-          </ScrollArea>
+                )}
+              </div>
+            </ScrollArea>
+          ) : (
+            <FileTree
+              sessionId={sessionId}
+              openPath={openPath}
+              changed={changedMap}
+              initialPath={initialPath}
+              onOpen={requestSwitch}
+            />
+          )}
         </div>
 
         <div className="relative min-w-0 flex-1">

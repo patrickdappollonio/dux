@@ -7,8 +7,16 @@ import { cn } from "@/lib/utils"
 function ScrollArea({
   className,
   children,
+  viewportRef,
+  onViewportScroll,
   ...props
-}: ScrollAreaPrimitive.Root.Props) {
+}: ScrollAreaPrimitive.Root.Props & {
+  // Access to the actual scrolling element, for consumers that need to window
+  // their content against the real scroll position (e.g. the virtualized file
+  // tree). Base UI merges these with its own internal ref and scroll handler.
+  viewportRef?: React.Ref<HTMLDivElement>
+  onViewportScroll?: React.UIEventHandler<HTMLDivElement>
+}) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
@@ -17,6 +25,8 @@ function ScrollArea({
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
+        ref={viewportRef}
+        onScroll={onViewportScroll}
         className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1"
       >
         {children}

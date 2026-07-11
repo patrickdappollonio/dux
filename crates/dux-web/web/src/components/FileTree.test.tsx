@@ -23,6 +23,12 @@ vi.stubGlobal(
   },
 )
 
+// FileTree renders its own base-ui ScrollArea, whose viewport probes
+// `getAnimations` on a timer; jsdom doesn't implement it.
+if (!Element.prototype.getAnimations) {
+  Element.prototype.getAnimations = () => []
+}
+
 const { FileTree } = await import("./FileTree")
 
 function file(path: string): DirEntry {
@@ -251,5 +257,58 @@ describe("FileTree", () => {
 
     expect(screen.queryByText("target.ts")).toBeNull()
     expect(parentRow.getAttribute("aria-expanded")).toBe("false")
+  })
+
+  // The tree must own its scroll surface: virtualization has to window against
+  // the SAME element the user scrolls. Regression: the tree used to render an
+  // unbounded inner div inside the sidebar's outer ScrollArea, so scrolling
+  // happened on an ancestor its scroll handler never saw and everything past
+  // the first screenful rendered as blank spacer (huge dirs like
+  // target/debug/deps showed a handful of rows, then nothing).
+  it("windows rows against its own scroll viewport and reveals rows on scroll", async () => {
+    const ROW_HEIGHT = 28
+    const many = Array.from({ length: 300 }, (_, i) =>
+      file(`file-${String(i).padStart(3, "0")}.txt`),
+    )
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({ dir: d, entries: d === "" ? many : [] }),
+    )
+
+    const { container } = render(
+      <FileTree
+        sessionId="s1"
+        openPath={null}
+        changed={new Map()}
+        initialPath={null}
+        onOpen={() => {}}
+      />,
+    )
+    expect(await screen.findByText("file-000.txt")).toBeTruthy()
+
+    // The scroller must be the tree's own ScrollArea viewport.
+    const viewport = container.querySelector<HTMLDivElement>(
+      '[data-slot="scroll-area-viewport"]',
+    )
+    if (!viewport) throw new Error("FileTree does not own a scroll viewport")
+
+    // jsdom has no layout: pin the viewport's geometry, then scroll it.
+    Object.defineProperty(viewport, "clientHeight", {
+      configurable: true,
+      value: 10 * ROW_HEIGHT,
+    })
+    Object.defineProperty(viewport, "scrollTop", {
+      configurable: true,
+      writable: true,
+      value: 150 * ROW_HEIGHT,
+    })
+    fireEvent.scroll(viewport)
+
+    // The window follows the scroll: rows near index 150 exist, the top rows
+    // are no longer in the DOM, and the total row count stays bounded by the
+    // viewport window (10 visible + overscan), not the 300-entry listing.
+    expect(screen.getByText("file-150.txt")).toBeTruthy()
+    expect(screen.queryByText("file-000.txt")).toBeNull()
+    const rendered = container.querySelectorAll("li").length
+    expect(rendered).toBeLessThan(60)
   })
 })

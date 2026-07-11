@@ -1,6 +1,7 @@
 import { useRef, useState, useMemo, useCallback, useEffect } from "react"
 import { ChevronRight, File as FileIcon, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { fileApi } from "@/lib/fileApi"
 import {
@@ -36,7 +37,11 @@ export function FileTree({
   // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
   const [dirs, setDirs] = useState<Map<string, DirState>>(() => new Map())
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
-  const containerRef = useRef<HTMLDivElement>(null)
+  // The tree owns its ScrollArea and windows rows against that viewport. The
+  // element arrives via a callback ref (state, not a plain ref) so the
+  // measuring effect below re-runs when it mounts — a mount-only effect would
+  // race the loading-spinner state and never attach.
+  const [viewportEl, setViewportEl] = useState<HTMLDivElement | null>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(400)
   // The dirs already requested (loading OR resolved OR errored), so effects
@@ -58,13 +63,15 @@ export function FileTree({
   }, [])
 
   useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    setViewportHeight(el.clientHeight)
-    const ro = new ResizeObserver(() => setViewportHeight(el.clientHeight))
-    ro.observe(el)
+    if (!viewportEl) return
+    // ResizeObserver delivers an initial notification on observe(), so this
+    // both seeds the height and tracks later resizes.
+    const ro = new ResizeObserver(() =>
+      setViewportHeight(viewportEl.clientHeight),
+    )
+    ro.observe(viewportEl)
     return () => ro.disconnect()
-  }, [])
+  }, [viewportEl])
 
   const fetchDir = useCallback(
     (dir: string) => {
@@ -213,35 +220,6 @@ export function FileTree({
   const rows = useMemo(() => flattenLazy(dirs, expanded), [dirs, expanded])
 
   const rootState = dirs.get("")
-  if (!rootState || rootState.status === "loading") {
-    return (
-      <div className="flex items-center justify-center py-4 text-muted-foreground">
-        <Loader2 className="size-4 motion-safe:animate-spin" />
-      </div>
-    )
-  }
-  if (rootState.status === "error") {
-    return (
-      <div className="flex flex-col items-start gap-1 px-1 py-2">
-        <p className="text-sm text-destructive">{rootState.message}</p>
-        <button
-          type="button"
-          onClick={() => fetchDir("")}
-          className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted"
-        >
-          <RotateCw className="size-3.5" />
-          Retry
-        </button>
-      </div>
-    )
-  }
-  if (rootState.entries.length === 0) {
-    return (
-      <p className="px-1 py-2 text-sm text-muted-foreground">
-        No files in this worktree.
-      </p>
-    )
-  }
 
   const totalHeight = rows.length * ROW_HEIGHT
 
@@ -252,15 +230,47 @@ export function FileTree({
   )
   const visibleRows = rows.slice(firstVisible, lastVisible + 1)
 
+  // The tree renders inside its OWN ScrollArea and windows rows against that
+  // viewport. Virtualizing against any other element breaks silently: the
+  // window only moves on scroll events from the element it measures, so if an
+  // ancestor scrolls instead, everything past the first screenful renders as
+  // empty spacer. The loading/error/empty states render inside the same
+  // ScrollArea so the viewport element exists from the first paint.
   return (
-    <div
-      ref={containerRef}
-      className="overflow-y-auto"
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-      style={{ position: "relative" }}
+    <ScrollArea
+      className="min-h-0 flex-1"
+      viewportRef={setViewportEl}
+      onViewportScroll={(e) => {
+        setScrollTop(e.currentTarget.scrollTop)
+        // Track height here too: cheap, and covers environments where the
+        // ResizeObserver is inert.
+        setViewportHeight(e.currentTarget.clientHeight)
+      }}
     >
-      {/* Total-height spacer so the scrollbar reflects the full list. */}
-      <div style={{ height: totalHeight, position: "relative" }}>
+      <div className="p-1">
+        {!rootState || rootState.status === "loading" ? (
+          <div className="flex items-center justify-center py-4 text-muted-foreground">
+            <Loader2 className="size-4 motion-safe:animate-spin" />
+          </div>
+        ) : rootState.status === "error" ? (
+          <div className="flex flex-col items-start gap-1 px-1 py-2">
+            <p className="text-sm text-destructive">{rootState.message}</p>
+            <button
+              type="button"
+              onClick={() => fetchDir("")}
+              className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted"
+            >
+              <RotateCw className="size-3.5" />
+              Retry
+            </button>
+          </div>
+        ) : rootState.entries.length === 0 ? (
+          <p className="px-1 py-2 text-sm text-muted-foreground">
+            No files in this worktree.
+          </p>
+        ) : (
+          /* Total-height spacer so the scrollbar reflects the full list. */
+          <div style={{ height: totalHeight, position: "relative" }}>
         <ul
           style={{
             position: "absolute",
@@ -351,10 +361,12 @@ export function FileTree({
                   )}
                 </button>
               </li>
-            ),
-          )}
-        </ul>
+              ),
+            )}
+          </ul>
+          </div>
+        )}
       </div>
-    </div>
+    </ScrollArea>
   )
 }
