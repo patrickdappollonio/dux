@@ -473,13 +473,11 @@ function EditorBody({
             a long path; sr-only text announces the state to screen readers. */}
         {dirty && (
           <>
-            <span
-              className="shrink-0 text-primary"
-              aria-hidden="true"
-              title="Unsaved changes"
-            >
-              ●
-            </span>
+            <SimpleTooltip content="Unsaved changes">
+              <span className="shrink-0 text-primary" aria-hidden="true">
+                ●
+              </span>
+            </SimpleTooltip>
             <span className="sr-only">unsaved changes</span>
           </>
         )}
@@ -626,15 +624,16 @@ function EditorBody({
                 className="h-8 pl-7 text-sm"
               />
             </div>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label="New file"
-              title="New file"
-              onClick={() => setNewFileOpen(true)}
-            >
-              <FilePlus />
-            </Button>
+            <SimpleTooltip content="New file">
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label="New file"
+                onClick={() => setNewFileOpen(true)}
+              >
+                <FilePlus />
+              </Button>
+            </SimpleTooltip>
           </div>
           {/* The tree owns its own ScrollArea (it virtualizes against its
               viewport, so it must be the element that scrolls); this outer one
