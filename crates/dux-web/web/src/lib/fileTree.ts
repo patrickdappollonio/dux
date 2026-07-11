@@ -1,81 +1,32 @@
-// Pure helpers for turning a flat list of worktree-relative file paths into a
-// nested tree for the editor's file browser. Kept free of React so it's
+// Pure helpers for the editor's LAZY file tree. The tree is a partially-loaded
+// view of the worktree: each directory's children are fetched from
+// `/files/tree` the first time the directory is expanded, and cached in a
+// Map<dirPath, DirState> owned by the component. Kept free of React so it's
 // trivially unit-testable.
 
-export interface FileTreeNode {
-  // The path segment (folder or file name).
+// One directory entry as returned by the server's `/files/tree` route
+// (mirrors the Rust `DirEntryInfo`). Entries arrive pre-sorted dirs-first,
+// case-insensitive.
+export interface DirEntry {
+  // The child's own name (final path segment).
   name: string
-  // The full worktree-relative path of this node.
+  // The child's worktree-relative path.
   path: string
-  isDir: boolean
-  // Empty for files.
-  children: FileTreeNode[]
+  // True for a directory (including an in-worktree symlinked dir).
+  is_dir: boolean
+  // True for a symlink of any kind. A symlinked dir that escapes the worktree
+  // is reported with is_dir=false and expandable=false.
+  is_symlink: boolean
+  // True when this entry's children may be requested via `/files/tree`.
+  expandable: boolean
 }
 
-/// Cap on the number of FileTreeNode objects that buildFileTree will create.
-/// Prevents a multi-hundred-thousand-file repo from OOMing the browser tab.
-export const FILETREE_NODE_CAP = 100_000
-
-/// Result of buildFileTree when the cap is hit.
-export interface FileTreeResult {
-  nodes: FileTreeNode[]
-  /// True when the input was truncated at FILETREE_NODE_CAP.
-  capped: boolean
-}
-
-function sortNodes(nodes: FileTreeNode[]): void {
-  // Directories first, then files; each group alphabetical (case-insensitive).
-  nodes.sort((a, b) => {
-    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-  })
-  for (const n of nodes) if (n.isDir) sortNodes(n.children)
-}
-
-/// Build the top-level nodes of a file tree from worktree-relative paths.
-/// Uses a parallel Map<string, FileTreeNode> per directory for O(1) child
-/// lookup so large repos (tens-of-thousands of files) stay linear.
-export function buildFileTree(paths: string[]): FileTreeResult {
-  const root: FileTreeNode = { name: "", path: "", isDir: true, children: [] }
-  // childMap caches the children of each directory node by their lookup key
-  // ("name:isDir") so we don't scan the children array on every insertion.
-  const childMap = new Map<FileTreeNode, Map<string, FileTreeNode>>()
-  childMap.set(root, new Map())
-
-  let nodeCount = 0
-  let capped = false
-
-  outer: for (const p of paths) {
-    const segments = p.split("/").filter(Boolean)
-    let node = root
-    let acc = ""
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i]
-      acc = acc ? `${acc}/${seg}` : seg
-      const isDir = i < segments.length - 1
-      const key = `${seg}:${isDir}`
-      let nodeChildren = childMap.get(node)
-      if (!nodeChildren) {
-        nodeChildren = new Map()
-        childMap.set(node, nodeChildren)
-      }
-      let child = nodeChildren.get(key)
-      if (!child) {
-        if (nodeCount >= FILETREE_NODE_CAP) {
-          capped = true
-          break outer
-        }
-        child = { name: seg, path: acc, isDir, children: [] }
-        node.children.push(child)
-        nodeChildren.set(key, child)
-        nodeCount++
-      }
-      node = child
-    }
-  }
-  sortNodes(root.children)
-  return { nodes: root.children, capped }
-}
+// The loaded-directory cache: dirPath ("" = root) → its children, or a
+// sentinel while loading / on error.
+export type DirState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "loaded"; entries: DirEntry[] }
 
 /// The ancestor directory paths of a file path (e.g. "a/b/c.ts" → ["a", "a/b"]),
 /// used to auto-expand the tree down to a file opened from elsewhere.
@@ -88,4 +39,88 @@ export function ancestorDirs(filePath: string): string[] {
     dirs.push(acc)
   }
   return dirs
+}
+
+/// Given a target file path and the set of already-loaded dirs, return the
+/// ancestor dirs (root included) that still need fetching, top-down, so a
+/// deep link can expand the chain to reveal the file.
+export function dirsToLoadFor(filePath: string, loaded: Set<string>): string[] {
+  return ["", ...ancestorDirs(filePath)].filter((d) => !loaded.has(d))
+}
+
+// One render row of the flattened lazy tree.
+export interface TreeRow {
+  path: string
+  name: string
+  depth: number
+  isDir: boolean
+  expandable: boolean
+  isSymlink: boolean
+  // For dir rows: "loading" while the dir's children fetch is in flight (or an
+  // expanded dir has no cache entry yet), "error" when the fetch failed.
+  // Placeholder child rows (`<dir>/__loading__`, `<dir>/__error__`) carry the
+  // same state at depth+1 so the component can render a spinner/retry row.
+  state: "idle" | "loading" | "error"
+}
+
+/// Flatten the loaded tree into render rows honoring the `expanded` set. Only
+/// descends into dirs that are BOTH expanded AND loaded; an expanded-but-not-
+/// yet-loaded dir contributes a single synthetic "loading" placeholder row, an
+/// errored one a single "error" row. Returns [] when the root isn't loaded
+/// (the component shows a top-level spinner instead).
+export function flattenLazy(
+  dirs: Map<string, DirState>,
+  expanded: Set<string>,
+  rootDir = "",
+  depth = 0,
+): TreeRow[] {
+  const state = dirs.get(rootDir)
+  if (!state || state.status !== "loaded") return []
+  const rows: TreeRow[] = []
+  for (const entry of state.entries) {
+    const isExpanded = entry.is_dir && expanded.has(entry.path)
+    const childState = dirs.get(entry.path)
+    const rowState: TreeRow["state"] = !entry.is_dir
+      ? "idle"
+      : childState?.status === "error"
+        ? "error"
+        : isExpanded && (!childState || childState.status === "loading")
+          ? "loading"
+          : "idle"
+    rows.push({
+      path: entry.path,
+      name: entry.name,
+      depth,
+      isDir: entry.is_dir,
+      expandable: entry.expandable,
+      isSymlink: entry.is_symlink,
+      state: rowState,
+    })
+    if (!isExpanded) continue
+    if (childState?.status === "loaded") {
+      rows.push(...flattenLazy(dirs, expanded, entry.path, depth + 1))
+    } else if (childState?.status === "error") {
+      rows.push({
+        path: `${entry.path}/__error__`,
+        name: "",
+        depth: depth + 1,
+        isDir: false,
+        expandable: false,
+        isSymlink: false,
+        state: "error",
+      })
+    } else {
+      // Absent or loading → one synthetic placeholder row.
+      rows.push({
+        path: `${entry.path}/__loading__`,
+        name: "",
+        depth: depth + 1,
+        isDir: false,
+        expandable: false,
+        isSymlink: false,
+        state: "loading",
+      })
+    }
+  }
+  return rows
 }

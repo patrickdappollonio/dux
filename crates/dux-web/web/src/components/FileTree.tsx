@@ -1,57 +1,42 @@
 import { useRef, useState, useMemo, useCallback, useEffect } from "react"
-import { ChevronRight, File as FileIcon } from "lucide-react"
+import { ChevronRight, File as FileIcon, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
-import type { FileTreeNode } from "@/lib/fileTree"
+import { fileApi } from "@/lib/fileApi"
+import { ancestorDirs, dirsToLoadFor, flattenLazy } from "@/lib/fileTree"
+import type { DirState } from "@/lib/fileTree"
 
 const ROW_HEIGHT = 28 // px — must match the py-1 + text-sm row height
-const OVERSCAN = 10  // rows to render above/below the viewport
+const OVERSCAN = 10 // rows to render above/below the viewport
 
 interface FileTreeProps {
-  nodes: FileTreeNode[]
+  sessionId: string
   openPath: string | null
   // path → raw git status code, for marking changed files in the tree.
   changed: Map<string, string>
-  // dir paths to expand on first render (the open file's ancestors).
-  defaultExpanded: Set<string>
+  // A file whose ancestor chain should be fetched + expanded on mount (deep
+  // link / opened-from-elsewhere). Later changes to openPath also pull any
+  // not-yet-loaded parents so a freshly created file is revealed.
+  initialPath: string | null
   onOpen: (path: string) => void
-  capped?: boolean
-}
-
-interface FlatRow {
-  node: FileTreeNode
-  depth: number
-}
-
-function flattenTree(
-  nodes: FileTreeNode[],
-  expanded: Set<string>,
-  depth = 0,
-): FlatRow[] {
-  const rows: FlatRow[] = []
-  for (const node of nodes) {
-    rows.push({ node, depth })
-    if (node.isDir && expanded.has(node.path)) {
-      rows.push(...flattenTree(node.children, expanded, depth + 1))
-    }
-  }
-  return rows
 }
 
 export function FileTree({
-  nodes,
+  sessionId,
   openPath,
   changed,
-  defaultExpanded,
+  initialPath,
   onOpen,
-  capped,
 }: FileTreeProps) {
-  const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set(defaultExpanded),
-  )
+  // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
+  const [dirs, setDirs] = useState<Map<string, DirState>>(() => new Map())
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(400)
+  // The dirs already requested (loading OR resolved), so effects and toggles
+  // never double-fetch. A ref: fetch bookkeeping, not render state.
+  const requestedRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     const el = containerRef.current
@@ -62,19 +47,138 @@ export function FileTree({
     return () => ro.disconnect()
   }, [])
 
-  const toggle = useCallback((path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
+  const fetchDir = useCallback(
+    (dir: string) => {
+      requestedRef.current.add(dir)
+      setDirs((prev) => {
+        const next = new Map(prev)
+        next.set(dir, { status: "loading" })
+        return next
+      })
+      fileApi
+        .tree(sessionId, dir)
+        .then((result) => {
+          setDirs((prev) => {
+            const next = new Map(prev)
+            next.set(dir, { status: "loaded", entries: result.entries })
+            return next
+          })
+        })
+        .catch((e) => {
+          // Allow a retry to refetch after a failure.
+          requestedRef.current.delete(dir)
+          setDirs((prev) => {
+            const next = new Map(prev)
+            next.set(dir, {
+              status: "error",
+              message:
+                e instanceof Error ? e.message : "could not list directory",
+            })
+            return next
+          })
+        })
+    },
+    [sessionId],
+  )
+
+  // Mount: fetch the root; when a deep-link target is present, also fetch and
+  // expand its ancestor chain so the opened file is revealed without clicks.
+  useEffect(() => {
+    const target = initialPath ?? ""
+    const toLoad = dirsToLoadFor(target, requestedRef.current)
+    for (const d of toLoad) fetchDir(d)
+    if (initialPath) {
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        for (const d of dirsToLoadFor(initialPath, new Set([""])))
+          next.add(d)
+        return next
+      })
+    }
+    // Mount-only: the editor body remounts per session/open, and initialPath is
+    // fixed for a mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const rows = useMemo(
-    () => flattenTree(nodes, expanded),
-    [nodes, expanded],
+  // The open path already reveal-checked, so the stale-parent refetch below
+  // runs at most once per opened file (guards against a refetch loop when the
+  // file genuinely isn't on disk, e.g. opened from a stale changed-files row).
+  const revealCheckedRef = useRef<string | null>(null)
+
+  // When the open file changes to a path whose parents were never loaded (a
+  // file just created, or switched to from search), pull the missing ancestors
+  // and expand them so the file is visible in the tree. A parent that IS
+  // loaded but doesn't list the file (it was just created) is refetched once.
+  useEffect(() => {
+    if (!openPath) return
+    const missing = dirsToLoadFor(openPath, requestedRef.current)
+    for (const d of missing) fetchDir(d)
+    if (revealCheckedRef.current !== openPath) {
+      const parents = ancestorDirs(openPath)
+      const parent = parents.length > 0 ? parents[parents.length - 1] : ""
+      const st = dirs.get(parent)
+      if (st?.status === "loaded") {
+        revealCheckedRef.current = openPath
+        if (!st.entries.some((e) => e.path === openPath)) fetchDir(parent)
+      }
+    }
+    setExpanded((prev) => {
+      const wanted = dirsToLoadFor(openPath, new Set([""]))
+      if (wanted.every((d) => prev.has(d))) return prev
+      const next = new Set(prev)
+      for (const d of wanted) next.add(d)
+      return next
+    })
+  }, [openPath, dirs, fetchDir])
+
+  const toggle = useCallback(
+    (path: string, expandable: boolean) => {
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        if (next.has(path)) {
+          next.delete(path)
+        } else {
+          next.add(path)
+          if (expandable && !requestedRef.current.has(path)) fetchDir(path)
+        }
+        return next
+      })
+    },
+    [fetchDir],
   )
+
+  const rows = useMemo(() => flattenLazy(dirs, expanded), [dirs, expanded])
+
+  const rootState = dirs.get("")
+  if (!rootState || rootState.status === "loading") {
+    return (
+      <div className="flex items-center justify-center py-4 text-muted-foreground">
+        <Loader2 className="size-4 motion-safe:animate-spin" />
+      </div>
+    )
+  }
+  if (rootState.status === "error") {
+    return (
+      <div className="flex flex-col items-start gap-1 px-1 py-2">
+        <p className="text-sm text-destructive">{rootState.message}</p>
+        <button
+          type="button"
+          onClick={() => fetchDir("")}
+          className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted"
+        >
+          <RotateCw className="size-3.5" />
+          Retry
+        </button>
+      </div>
+    )
+  }
+  if (rootState.entries.length === 0) {
+    return (
+      <p className="px-1 py-2 text-sm text-muted-foreground">
+        No files in this worktree.
+      </p>
+    )
+  }
 
   const totalHeight = rows.length * ROW_HEIGHT
 
@@ -92,11 +196,6 @@ export function FileTree({
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       style={{ position: "relative" }}
     >
-      {capped && (
-        <div className="px-3 py-1 text-xs text-muted-foreground border-b">
-          Tree too large to fully display — some entries omitted.
-        </div>
-      )}
       {/* Total-height spacer so the scrollbar reflects the full list. */}
       <div style={{ height: totalHeight, position: "relative" }}>
         <ul
@@ -108,44 +207,84 @@ export function FileTree({
           }}
           className="flex flex-col"
         >
-          {visibleRows.map(({ node, depth }) =>
-            node.isDir ? (
-              <li key={node.path}>
+          {visibleRows.map((row) =>
+            row.isDir ? (
+              <li key={row.path}>
                 <button
                   type="button"
-                  onClick={() => toggle(node.path)}
-                  aria-expanded={expanded.has(node.path)}
+                  onClick={() => toggle(row.path, row.expandable)}
+                  aria-expanded={expanded.has(row.path)}
                   className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left hover:bg-muted"
-                  style={{ paddingLeft: `${depth * 0.75 + 0.25}rem`, height: ROW_HEIGHT }}
+                  style={{
+                    paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
+                    height: ROW_HEIGHT,
+                  }}
                 >
-                  <ChevronRight
-                    className={cn(
-                      "size-3.5 shrink-0 text-muted-foreground transition-transform",
-                      expanded.has(node.path) && "rotate-90",
-                    )}
-                  />
+                  {row.state === "loading" ? (
+                    <Loader2 className="size-3.5 shrink-0 text-muted-foreground motion-safe:animate-spin" />
+                  ) : (
+                    <ChevronRight
+                      className={cn(
+                        "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                        expanded.has(row.path) && "rotate-90",
+                      )}
+                    />
+                  )}
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                    {node.name}
+                    {row.name}
                   </span>
                 </button>
               </li>
-            ) : (
-              <li key={node.path}>
+            ) : row.path.endsWith("/__loading__") ? (
+              <li key={row.path}>
+                <div
+                  className="flex items-center gap-1 py-1 pr-1 text-muted-foreground"
+                  style={{
+                    paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
+                    height: ROW_HEIGHT,
+                  }}
+                >
+                  <Loader2 className="size-3.5 shrink-0 motion-safe:animate-spin" />
+                  <span className="text-sm">Loading…</span>
+                </div>
+              </li>
+            ) : row.path.endsWith("/__error__") ? (
+              <li key={row.path}>
                 <button
                   type="button"
-                  onClick={() => onOpen(node.path)}
-                  style={{ paddingLeft: `${depth * 0.75 + 0.25}rem`, height: ROW_HEIGHT }}
+                  onClick={() =>
+                    fetchDir(row.path.slice(0, -"/__error__".length))
+                  }
+                  className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left text-muted-foreground hover:bg-muted"
+                  style={{
+                    paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
+                    height: ROW_HEIGHT,
+                  }}
+                >
+                  <RotateCw className="size-3.5 shrink-0" />
+                  <span className="text-sm">Failed to load — retry</span>
+                </button>
+              </li>
+            ) : (
+              <li key={row.path}>
+                <button
+                  type="button"
+                  onClick={() => onOpen(row.path)}
+                  style={{
+                    paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
+                    height: ROW_HEIGHT,
+                  }}
                   className={cn(
                     "flex w-full items-center gap-1.5 rounded py-1 pr-1 text-left hover:bg-muted",
-                    node.path === openPath && "bg-muted",
+                    row.path === openPath && "bg-muted",
                   )}
                 >
                   <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                    {node.name}
+                    {row.name}
                   </span>
-                  {changed.get(node.path) && (
-                    <FileStatusIcon status={changed.get(node.path)!} />
+                  {changed.get(row.path) && (
+                    <FileStatusIcon status={changed.get(row.path)!} />
                   )}
                 </button>
               </li>

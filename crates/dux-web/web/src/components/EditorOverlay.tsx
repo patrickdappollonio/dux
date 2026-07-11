@@ -18,7 +18,6 @@ import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { FileDiffContents } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
-import { ancestorDirs, buildFileTree } from "@/lib/fileTree"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import { isMarkdownPath } from "@/lib/markdown"
 import { cn } from "@/lib/utils"
@@ -165,12 +164,13 @@ function EditorBody({
   const [pendingDiscard, setPendingDiscard] = useState<PendingDiscard | null>(
     null,
   )
-  // The worktree's browsable files (fetched from the editor's session directly,
-  // independent of the changed-files watch).
-  const [treeFiles, setTreeFiles] = useState<string[]>([])
-  const [treeLoading, setTreeLoading] = useState(true)
-  // True when the server capped the listing before sending all paths.
-  const [treeServerTruncated, setTreeServerTruncated] = useState(false)
+  // The flat file list backing the "Search files…" box (fetched from the
+  // editor's session directly, independent of the changed-files watch). The
+  // TREE does not consume this — it browses lazily via fileApi.tree.
+  const [searchIndex, setSearchIndex] = useState<string[]>([])
+  const [searchLoading, setSearchLoading] = useState(true)
+  // True when the server capped the search index before sending all paths.
+  const [searchTruncated, setSearchTruncated] = useState(false)
   const [search, setSearch] = useState("")
   const [newFileOpen, setNewFileOpen] = useState(false)
   const [newFilePath, setNewFilePath] = useState("")
@@ -236,40 +236,32 @@ function EditorBody({
   // This file's save is in flight (path-scoped — see `saving`).
   const isSaving = saving !== null && saving === openPath
 
-  const { nodes: tree, capped: treeCapped } = useMemo(
-    () => buildFileTree(treeFiles),
-    [treeFiles],
-  )
-  const defaultExpanded = useMemo(
-    () => new Set(initialPath ? ancestorDirs(initialPath) : []),
-    [initialPath],
-  )
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase()
     if (!needle) return []
-    return treeFiles
+    return searchIndex
       .filter((f) => f.toLowerCase().includes(needle))
       .slice(0, MAX_SEARCH_RESULTS)
-  }, [search, treeFiles])
+  }, [search, searchIndex])
 
-  // Fetch the worktree file list on open. The file/diff content loads are driven
-  // by the mode-aware effects below. Mount-only: the body is keyed by
-  // session+file+mode, so a new open remounts.
+  // Fetch the search index (a capped flat walk) on open. The TREE loads itself
+  // lazily per directory. Mount-only: the body is keyed by session+file+mode,
+  // so a new open remounts.
   useEffect(() => {
     let cancelled = false
     fileApi
       .list(sessionId)
       .then((result) => {
         if (!cancelled) {
-          setTreeFiles(result.files)
-          setTreeServerTruncated(result.truncated ?? false)
+          setSearchIndex(result.files)
+          setSearchTruncated(result.truncated ?? false)
         }
       })
       .catch(() => {
-        if (!cancelled) toast.error("could not list worktree files")
+        if (!cancelled) toast.error("could not index worktree files for search")
       })
       .finally(() => {
-        if (!cancelled) setTreeLoading(false)
+        if (!cancelled) setSearchLoading(false)
       })
     return () => {
       cancelled = true
@@ -451,8 +443,10 @@ function EditorBody({
       .write(sessionId, path, "")
       .then(() => fileApi.list(sessionId))
       .then((result) => {
-        setTreeFiles(result.files)
-        setTreeServerTruncated(result.truncated ?? false)
+        // Refresh the search index so the new file is findable; the tree pulls
+        // the file's parent directory itself when requestSwitch lands on it.
+        setSearchIndex(result.files)
+        setSearchTruncated(result.truncated ?? false)
         setNewFileOpen(false)
         setNewFilePath("")
         // A brand-new file is for editing, so land in file mode.
@@ -644,50 +638,53 @@ function EditorBody({
           </div>
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-1">
-              {treeLoading ? (
-                <div className="flex items-center justify-center py-4 text-muted-foreground">
-                  <Loader2 className="size-4 motion-safe:animate-spin" />
-                </div>
-              ) : search.trim() ? (
-                filtered.length === 0 ? (
+              {search.trim() ? (
+                searchLoading ? (
+                  <div className="flex items-center justify-center py-4 text-muted-foreground">
+                    <Loader2 className="size-4 motion-safe:animate-spin" />
+                  </div>
+                ) : filtered.length === 0 ? (
                   <p className="px-1 py-2 text-sm text-muted-foreground">
                     No files match.
                   </p>
                 ) : (
-                  filtered.map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => requestSwitch(p)}
-                      className={cn(
-                        "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
-                        p === openPath && "bg-muted",
-                      )}
-                    >
-                      {changedMap.has(p) && (
-                        <FileStatusIcon status={changedMap.get(p)!} />
-                      )}
-                      {/* Full path → start-ellipsize so the filename stays visible.
-                          <bdi> LTR isolate keeps a leading "." (dotfile path) from
-                          being reordered to the end by direction:rtl. */}
-                      <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
-                        <bdi dir="ltr">{p}</bdi>
-                      </span>
-                    </button>
-                  ))
+                  <>
+                    {filtered.map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => requestSwitch(p)}
+                        className={cn(
+                          "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
+                          p === openPath && "bg-muted",
+                        )}
+                      >
+                        {changedMap.has(p) && (
+                          <FileStatusIcon status={changedMap.get(p)!} />
+                        )}
+                        {/* Full path → start-ellipsize so the filename stays visible.
+                            <bdi> LTR isolate keeps a leading "." (dotfile path) from
+                            being reordered to the end by direction:rtl. */}
+                        <span className="min-w-0 flex-1 truncate text-left font-mono text-sm [direction:rtl]">
+                          <bdi dir="ltr">{p}</bdi>
+                        </span>
+                      </button>
+                    ))}
+                    {searchTruncated && (
+                      <p className="px-1 py-2 text-xs text-muted-foreground">
+                        The search index was capped — results may be
+                        incomplete.
+                      </p>
+                    )}
+                  </>
                 )
-              ) : tree.length === 0 ? (
-                <p className="px-1 py-2 text-sm text-muted-foreground">
-                  No files in this worktree.
-                </p>
               ) : (
                 <FileTree
-                  nodes={tree}
+                  sessionId={sessionId}
                   openPath={openPath}
                   changed={changedMap}
-                  defaultExpanded={defaultExpanded}
+                  initialPath={initialPath}
                   onOpen={requestSwitch}
-                  capped={treeCapped || treeServerTruncated}
                 />
               )}
             </div>
