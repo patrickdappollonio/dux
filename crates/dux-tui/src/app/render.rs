@@ -1503,7 +1503,27 @@ impl App {
                         style = style.bg(bg);
                     }
                     let ratatui_cell = &mut buf[(x, y)];
-                    ratatui_cell.set_symbol(&cell.symbol);
+                    // When this cell carries an OSC 8 hyperlink and links are
+                    // enabled, wrap its symbol in a self-contained OSC 8 open/close
+                    // pair. Per-cell (open + close on every linked cell) is
+                    // deliberate: ratatui may repaint any subset of cells in any
+                    // order, so a self-contained cell can never leak an unclosed
+                    // link; a shared `id` lets a host merge adjacent cells into one
+                    // link. The escape bytes are zero-width, so cell widths and
+                    // ratatui's diffing are unaffected.
+                    let link_uri = self
+                        .engine
+                        .config
+                        .capabilities
+                        .hyperlinks
+                        .then_some(cell.link)
+                        .flatten()
+                        .and_then(|idx| self.snapshot_buf.links.get(idx as usize));
+                    if let Some(uri) = link_uri {
+                        ratatui_cell.set_symbol(&osc8_wrap_symbol(&cell.symbol, uri));
+                    } else {
+                        ratatui_cell.set_symbol(&cell.symbol);
+                    }
                     ratatui_cell.set_style(style);
 
                     // Overlay selection highlight if this cell is selected.
@@ -7709,6 +7729,25 @@ impl App {
     }
 }
 
+/// A short, stable id for an OSC 8 hyperlink URI, so every cell of the same link
+/// carries the same `id=` and a host terminal can merge them into one clickable
+/// span. A hash (not the URI itself) keeps the id short; collisions only ever merge
+/// two distinct links visually, never a safety concern.
+fn osc8_link_id(uri: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    uri.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Wrap a cell symbol in a self-contained OSC 8 open/close pair pointing at `uri`.
+/// The `id=` (a hash of the URI) lets a host terminal merge adjacent cells sharing
+/// the same link into one clickable span. The escape bytes are zero-width.
+fn osc8_wrap_symbol(symbol: &str, uri: &str) -> String {
+    let id = osc8_link_id(uri);
+    format!("\x1b]8;id={id};{uri}\x1b\\{symbol}\x1b]8;;\x1b\\")
+}
+
 /// Set a single cell in the buffer, bounds-checked.
 fn set_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, symbol: &str, style: Style) {
     let area = buf.area();
@@ -7774,6 +7813,21 @@ mod tests {
     use crate::app::test_support::{default_bindings, test_app, wait_for_agent_cursor};
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
+
+    #[test]
+    fn osc8_wrap_symbol_wraps_with_stable_id() {
+        let uri = "https://example.com";
+        let wrapped = osc8_wrap_symbol("X", uri);
+        let id = osc8_link_id(uri);
+        assert_eq!(
+            wrapped,
+            format!("\x1b]8;id={id};{uri}\x1b\\X\x1b]8;;\x1b\\")
+        );
+        // The id is stable per URI so adjacent cells merge into one link, and it
+        // differs for a different URI.
+        assert_eq!(osc8_link_id(uri), osc8_link_id(uri));
+        assert_ne!(osc8_link_id(uri), osc8_link_id("https://other.example"));
+    }
 
     /// F6 regression: closing the session-slot tab (`is_main`) while other
     /// tabs are live must show the non-destructive copy, not the "can't

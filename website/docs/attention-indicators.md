@@ -36,18 +36,28 @@ dux runs each agent inside its own embedded terminal, so it sees exactly what th
 agent tells that terminal. It watches for two things:
 
 - **The terminal bell** (the classic ding). The most compatible signal.
-- **Desktop-notification escape codes** (`OSC 9` and `OSC 777`), the ones that
-  carry a message like "Claude needs your permission."
+- **Desktop-notification escape codes** (`OSC 9`, `OSC 99`, and `OSC 777`), the
+  ones that carry a message like "Claude needs your permission." `OSC 99` is the
+  kitty notification protocol, which some agents prefer when they detect a
+  kitty-family terminal.
 
 There is no formal "I need attention" protocol in the terminal world, so detection
 is best-effort by nature. What an agent emits depends on the agent, and on whether
-it recognizes the terminal it is running in.
+it recognizes the terminal it is running in. That last point is why dux can now
+present a real terminal identity to the agent (see
+[Terminal capabilities](/docs/terminal-capabilities)): an agent that thinks it is
+running in a bare, unknown terminal often emits nothing at all.
 
 ## Turning it on per agent
 
 Some agents need a one-line setting before they emit anything dux can see:
 
-- **Claude Code**: set `preferredNotifChannel: "terminal_bell"` in its settings.
+- **Claude Code**: with dux presenting a real terminal identity (the default
+  `terminal_identity = "auto"`, see
+  [Terminal capabilities](/docs/terminal-capabilities)), Claude Code's automatic
+  notification channel usually recognizes the terminal and just works, no config
+  needed. If your setup still shows nothing (an older Claude, an unusual terminal),
+  fall back to setting `preferredNotifChannel: "terminal_bell"` in its settings and
   dux catches the bell it then rings on a permission prompt or a finished turn.
 - **Codex**: set `tui.notification_method` in its config (any value works). dux
   captures both the bell and the richer notification form.
@@ -87,9 +97,11 @@ Turn `attention_on_bell` off if a chatty tool inside your agent's session (a tes
 runner, tab completion) rings the bell for reasons that are not really about you.
 Turn `attention_indicator` off to silence the whole feature everywhere.
 
-Nothing about this makes dux noisier in your real terminal: bells rung inside an
-agent's session are consumed by dux's embedded terminal and never re-forwarded to
-the terminal you are running dux in.
+By default this feature stays inside dux: bells rung inside an agent's session are
+consumed by dux's embedded terminal and not re-forwarded to the terminal you run
+dux in. If you would rather have the agent's real desktop notifications reach your
+host terminal (or your browser, in the web UI), that is a separate, opt-in feature
+covered in [Terminal capabilities](/docs/terminal-capabilities).
 
 ## Limitations
 

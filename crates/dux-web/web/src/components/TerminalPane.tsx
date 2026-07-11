@@ -206,6 +206,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   useEffect(() => {
     webNotificationsRef.current = bootstrap?.web_notifications ?? true
   }, [bootstrap?.web_notifications])
+  // Whether OSC 8 hyperlinks are clickable (the `capabilities.hyperlinks` bit,
+  // default on). Read lazily by the xterm linkHandler so toggling it never
+  // recreates the terminal.
+  const hyperlinksRef = useRef(bootstrap?.hyperlinks ?? true)
+  useEffect(() => {
+    hyperlinksRef.current = bootstrap?.hyperlinks ?? true
+  }, [bootstrap?.hyperlinks])
   // Always resolve the owning session by `sessionId` (for an agent, `id` is the
   // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
   // tab's does not, so a lookup by `id` would miss). The focused tab, when this
@@ -403,6 +410,18 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       // visitor can Option-drag to select and copy to THEIR clipboard rather than
       // the host's. See the `onMouseUp` mouse-capture hint below.
       macOptionClickForcesSelection: true,
+      // Make OSC 8 hyperlinks the agent emits clickable. xterm 6's built-in
+      // linkHandler resolves real OSC 8 links (unlike the web-links addon, which
+      // regex-scans for bare URLs). Gated to http(s) and to the hyperlinks
+      // preference; opened with noopener,noreferrer so the new tab can't reach
+      // back into the app.
+      linkHandler: {
+        activate: (_event, uri) => {
+          if (!hyperlinksRef.current) return
+          if (!/^https?:\/\//i.test(uri)) return
+          window.open(uri, "_blank", "noopener,noreferrer")
+        },
+      },
     })
     // This xterm is a VIEWER of a PTY that dux-core's alacritty_terminal already
     // drives and answers device/color queries for. Stop it from also answering

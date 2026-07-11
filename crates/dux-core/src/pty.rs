@@ -80,6 +80,10 @@ pub struct SnapshotCell {
     pub fg: CellColor,
     pub bg: CellColor,
     pub modifier: CellModifier,
+    /// Index into [`TerminalSnapshot::links`] when this cell is part of an OSC 8
+    /// hyperlink, else `None`. The TUI wraps the cell symbol in an OSC 8 open/close
+    /// pair so a host terminal that supports hyperlinks renders it clickable.
+    pub link: Option<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +94,9 @@ pub struct TerminalSnapshot {
     pub scrollback_total: usize,
     pub cursor: Option<SnapshotCursor>,
     pub cells: Vec<SnapshotCell>,
+    /// Interned OSC 8 hyperlink URIs referenced by `cells[..].link`. A per-snapshot
+    /// table so a link spanning many cells stores its URI once.
+    pub links: Vec<String>,
 }
 
 impl TerminalSnapshot {
@@ -102,6 +109,7 @@ impl TerminalSnapshot {
             scrollback_total: 0,
             cursor: None,
             cells: Vec::new(),
+            links: Vec::new(),
         }
     }
 }
@@ -1460,6 +1468,7 @@ impl TerminalState {
         };
 
         target.cells.clear();
+        target.links.clear();
         for indexed in renderable.display_iter {
             let cell = indexed.cell;
             if cell
@@ -1481,6 +1490,24 @@ impl TerminalState {
                 }
             }
 
+            // Intern this cell's OSC 8 hyperlink URI (if any) into the per-snapshot
+            // table, deduplicating so a link spanning many cells stores its URI
+            // once. `u16` indices keep the cell small; a snapshot with more than
+            // 65k distinct links is not a real terminal, so such a cell drops its
+            // link rather than growing the index type.
+            let link = cell.hyperlink().and_then(|hyperlink| {
+                let uri = hyperlink.uri();
+                let idx = target
+                    .links
+                    .iter()
+                    .position(|existing| existing == uri)
+                    .unwrap_or_else(|| {
+                        target.links.push(uri.to_string());
+                        target.links.len() - 1
+                    });
+                u16::try_from(idx).ok()
+            });
+
             target.cells.push(SnapshotCell {
                 row: point.line as u16,
                 col: point.column.0 as u16,
@@ -1488,6 +1515,7 @@ impl TerminalState {
                 fg: convert_terminal_color(cell.fg, colors),
                 bg: convert_terminal_color(cell.bg, colors),
                 modifier: cell_modifier(cell),
+                link,
             });
         }
 
@@ -2312,6 +2340,31 @@ mod tests {
             replay.contains("\x1b[0m\r\n"),
             "a reset must precede the newline after a colored line, got:\n{replay:?}"
         );
+    }
+
+    #[test]
+    fn snapshot_interns_osc8_hyperlinks() {
+        let mut terminal = TerminalState::with_scrollback(3, 40, 100);
+        // An OSC 8 hyperlink wrapping the letter "X", then a plain "Y".
+        terminal.process(b"\x1b]8;;https://example.com\x1b\\X\x1b]8;;\x1b\\Y");
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(snapshot.links, vec!["https://example.com".to_string()]);
+        let x = snapshot
+            .cells
+            .iter()
+            .find(|c| c.symbol == "X")
+            .expect("cell X");
+        assert_eq!(x.link, Some(0));
+        let y = snapshot
+            .cells
+            .iter()
+            .find(|c| c.symbol == "Y")
+            .expect("cell Y");
+        assert_eq!(y.link, None);
+
+        // empty() clears the links table.
+        assert!(TerminalSnapshot::empty().links.is_empty());
     }
 
     #[test]
@@ -3489,6 +3542,7 @@ mod tests {
                 reversed: false,
                 crossed_out: false,
             },
+            link: None,
         }
     }
 
@@ -3504,6 +3558,7 @@ mod tests {
                 repaint_cell(0, 0, "H", CellColor::Red),
                 repaint_cell(0, 1, "i", CellColor::Red),
             ],
+            links: Vec::new(),
         };
         let bytes = synthesize_repaint(&snapshot, true);
         let text = String::from_utf8(bytes).expect("utf8");
@@ -3531,6 +3586,7 @@ mod tests {
             scrollback_total: 0,
             cursor: None,
             cells: vec![repaint_cell(0, 0, "x", CellColor::Reset)],
+            links: Vec::new(),
         };
         let bytes = synthesize_repaint(&snapshot, false);
         let text = String::from_utf8(bytes).expect("utf8");
