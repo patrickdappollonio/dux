@@ -38,7 +38,6 @@ import {
 import type { CSSProperties } from "react"
 import { Suspense } from "react"
 
-import { AttentionDot } from "@/components/AttentionDot"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
@@ -332,16 +331,30 @@ function SessionRow({
         >
           {/* While the agent streams output the icon bobs (motion-safe); the
               transition settles it back to rest (translateY(0)) when streaming
-              stops mid-bounce instead of freezing at the top or bottom. */}
-          <Bot
+              stops mid-bounce instead of freezing at the top or bottom.
+
+              The icon doubles as the attention indicator: amber + the shared
+              double-pulse-then-hold blink while the agent needs the user. Blink
+              (opacity) on this wrapper, bob (transform) on the inner icon, so
+              the two Tailwind `animate-*` utilities never fight over the
+              `animation` property and the cues mix cleanly. Steady amber under
+              reduced motion. COLOR PAIRING: amber-400, matching `AttentionDot`
+              and `ATTENTION_DOT_FILL` in lib/favicon.ts. */}
+          <span
+            aria-label={attention ? "Needs attention" : undefined}
             className={cn(
-              "motion-safe:transition-transform motion-safe:duration-300",
-              shimmer && "motion-safe:animate-agent-working"
+              "inline-flex shrink-0",
+              attention &&
+                "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
             )}
-          />
-          {/* Amber attention dot: the agent needs the user (a permission prompt
-              or a finished turn). No tooltip on a touch surface (no hover). */}
-          {attention && <AttentionDot withTooltip={false} />}
+          >
+            <Bot
+              className={cn(
+                "motion-safe:transition-transform motion-safe:duration-300",
+                shimmer && "motion-safe:animate-agent-working"
+              )}
+            />
+          </span>
           {/* Its name also dims with a soft white highlight sweeping through (see
               .agent-name-shimmer), a second working cue alongside the bob. The
               base class is always applied so the fill cross-fades back to solid

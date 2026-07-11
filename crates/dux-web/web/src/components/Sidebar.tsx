@@ -47,7 +47,6 @@ import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { ConnDot } from "@/components/ConnDot"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { AttentionDot } from "@/components/AttentionDot"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -301,16 +300,32 @@ function SessionSubItem({
               While the agent streams output the icon bobs (motion-safe) so the
               "working" state is unmistakable at a glance. The transition lets it
               settle back to rest (translateY(0)) when streaming stops mid-bounce
-              instead of freezing at the top or bottom of the bob. */}
-          <Bot
+              instead of freezing at the top or bottom of the bob.
+
+              The icon doubles as the attention indicator: when the agent needs
+              the user it turns amber and blinks in the same double-pulse-then-
+              hold rhythm as the favicon-adjacent web chrome. The blink lives on
+              this WRAPPER (opacity) while the bob lives on the inner icon
+              (transform), because two Tailwind `animate-*` utilities on one
+              element would fight over the `animation` property; nested, the two
+              cues mix cleanly. Under reduced motion the icon holds steady amber.
+              COLOR PAIRING: amber-400, matching `AttentionDot` and
+              `ATTENTION_DOT_FILL` in lib/favicon.ts. */}
+          <span
+            aria-label={attention ? "Needs attention" : undefined}
             className={cn(
-              "motion-safe:transition-transform motion-safe:duration-300",
-              shimmer && "motion-safe:animate-agent-working"
+              "inline-flex shrink-0",
+              attention &&
+                "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
             )}
-          />
-          {/* Amber attention dot: the agent needs the user (a permission prompt
-              or a finished turn). */}
-          {attention && <AttentionDot side="right" />}
+          >
+            <Bot
+              className={cn(
+                "motion-safe:transition-transform motion-safe:duration-300",
+                shimmer && "motion-safe:animate-agent-working"
+              )}
+            />
+          </span>
           {/* Its name also dims with a soft white highlight sweeping through (see
               .agent-name-shimmer), a second working cue alongside the bob. The
               base class is always applied so the fill cross-fades back to solid
