@@ -68,7 +68,7 @@ below rather than starting a second process.
 ### Flip a running TUI into the browser
 
 Already in the TUI with agents running and want a browser instead? Open the
-command palette (`Ctrl-K`) and run **start-web-server**. It is a palette-only
+command palette (`Ctrl-p`) and run **start-web-server**. It is a palette-only
 command with no default keybinding, on purpose, because it is not something you
 want to trigger by accident.
 
