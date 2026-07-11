@@ -839,6 +839,23 @@ pub(crate) fn branch_drifted(current: &str, initial: &str) -> bool {
     !initial.is_empty() && current != initial
 }
 
+/// The attention glyph's blink rhythm as a pure function of elapsed wall-clock
+/// milliseconds: two quick blinks, a longer steady hold, one separator hide,
+/// repeat. Mirrors the web dot's double-pulse-then-hold animation
+/// (`--animate-attention-pulse` in the web `index.css`). Every window is a
+/// multiple of 200ms, two full event-loop ticks at the 100ms poll cadence, so
+/// no phase can fall between redraws and get swallowed.
+pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
+    match elapsed_ms % 2000 {
+        0..=199 => true,    // blink 1: show
+        200..=399 => false, // blink 1: hide
+        400..=599 => true,  // blink 2: show
+        600..=799 => false, // blink 2: hide
+        800..=1799 => true, // hold visible
+        _ => false,         // separator hide before the next pair
+    }
+}
+
 /// Build the body lines of the Agent Info modal from a session: name, provider,
 /// the current/original/forked-from branches, a drift note when the current
 /// branch differs from the branch the agent was created on, then the worktree,
@@ -2417,13 +2434,12 @@ impl App {
         ((self.start_time.elapsed().as_millis() / 80) as usize) % crate::theme::SPINNER_FRAMES.len()
     }
 
-    /// Whether the sidebar attention glyph is in its "on" (visible) half of the
-    /// blink cycle right now. Wall-clock based (like the spinner) so the blink
-    /// cadence stays constant regardless of event-loop frequency, per the
-    /// "animations use wall-clock time" tenet. 600ms period, on for the first
-    /// half.
+    /// Whether the sidebar attention glyph is visible at this point of its
+    /// blink cycle. Wall-clock based (like the spinner) so the blink cadence
+    /// stays constant regardless of event-loop frequency, per the "animations
+    /// use wall-clock time" tenet.
     pub(crate) fn attention_blink_on(&self) -> bool {
-        (self.start_time.elapsed().as_millis() / 300).is_multiple_of(2)
+        attention_blink_phase(self.start_time.elapsed().as_millis())
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
@@ -4043,6 +4059,27 @@ pub(crate) fn runtime_project_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attention_blink_phase_double_blinks_then_holds() {
+        // Blink 1: show then hide.
+        assert!(attention_blink_phase(0));
+        assert!(attention_blink_phase(199));
+        assert!(!attention_blink_phase(200));
+        assert!(!attention_blink_phase(399));
+        // Blink 2: show then hide.
+        assert!(attention_blink_phase(400));
+        assert!(!attention_blink_phase(600));
+        // Hold: a full second of steady visibility.
+        assert!(attention_blink_phase(800));
+        assert!(attention_blink_phase(1300));
+        assert!(attention_blink_phase(1799));
+        // Separator hide, then the cycle repeats from the first blink.
+        assert!(!attention_blink_phase(1800));
+        assert!(!attention_blink_phase(1999));
+        assert!(attention_blink_phase(2000));
+        assert!(!attention_blink_phase(2000 + 250));
+    }
 
     fn test_project(id: &str) -> Project {
         Project {
