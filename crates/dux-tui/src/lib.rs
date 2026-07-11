@@ -104,7 +104,11 @@ pub fn run() -> Result<TuiExit> {
 /// owns the live providers and the single-instance lock, so this rebuilds the
 /// App view state around it (no session relaunch) and runs the loop. A resumed
 /// TUI can flip to the server again, so the flip↔serve cycle repeats.
-pub fn resume_after_server(engine: Box<Engine>) -> Result<TuiExit> {
+pub fn resume_after_server(mut engine: Box<Engine>) -> Result<TuiExit> {
+    // Back under the TUI: `auto`/`mirror` identity resolves against the real host
+    // terminal again. Already-running PTYs keep their spawn-time env until they
+    // are relaunched.
+    engine.surface_kind = dux_core::term_identity::SurfaceKind::Tui;
     let app = app::App::resume(*engine)?;
     run_app(app)
 }
@@ -117,11 +121,18 @@ pub fn resume_after_server(engine: Box<Engine>) -> Result<TuiExit> {
 fn run_app(mut app: app::App) -> Result<TuiExit> {
     match app.run()? {
         app::RunExit::Quit => Ok(TuiExit::Done),
-        app::RunExit::FlipToServer { listeners, urls } => Ok(TuiExit::FlipToServer {
-            engine: Box::new(app.into_engine()),
-            listeners,
-            urls,
-        }),
+        app::RunExit::FlipToServer { listeners, urls } => {
+            // Serving headless: `auto` identity now resolves to the forced
+            // ghostty identity for agents launched under the server. Existing
+            // PTYs keep their spawn-time env until relaunch.
+            let mut engine = app.into_engine();
+            engine.surface_kind = dux_core::term_identity::SurfaceKind::WebHeadless;
+            Ok(TuiExit::FlipToServer {
+                engine: Box::new(engine),
+                listeners,
+                urls,
+            })
+        }
     }
 }
 

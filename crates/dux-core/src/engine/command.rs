@@ -546,6 +546,7 @@ impl Engine {
                 self.pending_create_ops.insert(op_id.clone(), op);
                 let paths = self.paths.clone();
                 let config = self.config.clone();
+                let identity = self.resolved_identity();
                 Ok(self.spawn_command_worker(
                     CommandWorkerSpec {
                         label: "create-agent".into(),
@@ -567,6 +568,7 @@ impl Engine {
                             tx,
                             term_size,
                             op_id_for_job,
+                            identity,
                         );
                     },
                 ))

@@ -643,6 +643,69 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.ui.theme.clone()),
         },
         ConfigEntry::Blank,
+        ConfigEntry::Section("capabilities"),
+        ConfigEntry::Comment(
+            "# Terminal capability controls: the identity dux presents to an agent,\n\
+             # and which escape sequences the agent emits are forwarded onward.\n\
+             # Agents pick their notification channel from the terminal they detect,\n\
+             # so presenting a real identity is what makes desktop notifications work.",
+        ),
+        ConfigEntry::Field {
+            key: "terminal_identity",
+            comment: Some(CommentSource::Static(
+                "# What terminal dux pretends to be when it launches an agent:\n\
+                 #   \"auto\"    mirror your real terminal in the TUI (seeing through tmux),\n\
+                 #             and present ghostty on the headless web server. The default.\n\
+                 #   \"mirror\"  always mirror the real host terminal, seeing through tmux.\n\
+                 #   \"ghostty\" / \"iterm2\"  force that identity (works well with the web UI).\n\
+                 #   \"kitty\"   force kitty; this also sets TERM=xterm-kitty, which needs the\n\
+                 #             kitty terminfo entry present or some programs may misrender.\n\
+                 #   \"none\"    change nothing; the agent inherits dux's environment as-is.\n\
+                 # Under tmux, \"auto\"/\"mirror\" strip TMUX so agents emit unwrapped\n\
+                 # sequences that dux re-wraps itself. For forwarded notifications to reach\n\
+                 # your terminal, tmux needs `set -g allow-passthrough on`.",
+            )),
+            value_fn: |c| FieldValue::Str(c.capabilities.terminal_identity.clone()),
+        },
+        ConfigEntry::Field {
+            key: "passthrough",
+            comment: Some(CommentSource::Static(
+                "# Forward the agent's notification, progress, and clipboard escape\n\
+                 # sequences to your host terminal (TUI). The master switch for outbound\n\
+                 # passthrough; set false to keep everything the agent emits inside dux.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.capabilities.passthrough),
+        },
+        ConfigEntry::Field {
+            key: "clipboard_passthrough",
+            comment: Some(CommentSource::Static(
+                "# Whose OSC 52 clipboard writes reach your host clipboard:\n\
+                 #   \"focused\"  only the agent tab you are currently viewing (the default),\n\
+                 #   \"always\"   any agent, even one running in the background,\n\
+                 #   \"off\"      never.\n\
+                 # Clipboard READ requests are never forwarded (a reply would be typed\n\
+                 # back into dux). Requires passthrough = true.",
+            )),
+            value_fn: |c| FieldValue::Str(c.capabilities.clipboard_passthrough.clone()),
+        },
+        ConfigEntry::Field {
+            key: "hyperlinks",
+            comment: Some(CommentSource::Static(
+                "# Render OSC 8 hyperlinks: clickable links in the TUI (when your host\n\
+                 # terminal supports them) and in the web terminal (http/https only).",
+            )),
+            value_fn: |c| FieldValue::Bool(c.capabilities.hyperlinks),
+        },
+        ConfigEntry::Field {
+            key: "web_notifications",
+            comment: Some(CommentSource::Static(
+                "# In the web UI, bridge an agent's notification sequences to a browser\n\
+                 # desktop notification. Fires only when the tab is in the background and\n\
+                 # only after you grant permission from the web UI (dux never auto-prompts).",
+            )),
+            value_fn: |c| FieldValue::Bool(c.capabilities.web_notifications),
+        },
+        ConfigEntry::Blank,
         ConfigEntry::Section("editor"),
         ConfigEntry::Field {
             key: "default",
@@ -1397,6 +1460,12 @@ mod tests {
         assert!(rendered.contains("attention_on_bell = true"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
+        assert!(rendered.contains("[capabilities]"));
+        assert!(rendered.contains("terminal_identity = \"auto\""));
+        assert!(rendered.contains("passthrough = true"));
+        assert!(rendered.contains("clipboard_passthrough = \"focused\""));
+        assert!(rendered.contains("hyperlinks = true"));
+        assert!(rendered.contains("web_notifications = true"));
         assert!(rendered.contains("[editor]"));
         assert!(rendered.contains("default = \"cursor\""));
         assert!(rendered.contains("[server]"));

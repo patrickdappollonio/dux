@@ -491,7 +491,8 @@ impl PtyClient {
     /// Spawn with an explicit environment. Agent signal tracking (the OSC / bell
     /// [`crate::attention::AttentionScanner`]) is ON: this is the path agent tabs
     /// use. Companion terminals want it off and go through
-    /// [`PtyClient::spawn_with_env_opts`].
+    /// [`PtyClient::spawn_with_env_opts`]. No terminal-identity mutation is applied
+    /// (the caller env is the only override).
     pub fn spawn_with_env(
         command: &str,
         args: &[String],
@@ -501,16 +502,28 @@ impl PtyClient {
         scrollback_lines: usize,
         env: &[(String, String)],
     ) -> Result<Self> {
-        Self::spawn_with_env_opts(command, args, cwd, rows, cols, scrollback_lines, env, true)
+        Self::spawn_with_env_opts(
+            command,
+            args,
+            cwd,
+            rows,
+            cols,
+            scrollback_lines,
+            PtySpawnOptions {
+                env,
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
     }
 
-    /// Spawn with an explicit environment and control over agent signal tracking.
-    /// When `track_agent_signals` is false the reader loop skips the attention
-    /// scanner entirely, so `take_attention` stays `false` and `progress_report`
-    /// stays `None` for the life of the client. Companion terminals pass `false`:
-    /// they are plain shells, not agents, so scanning their every byte for OSC /
-    /// bell signals only burns cycles and could raise spurious attention.
-    #[allow(clippy::too_many_arguments)]
+    /// Spawn with an explicit environment and control over agent signal tracking
+    /// plus the terminal-identity mutation. When `opts.track_agent_signals` is
+    /// false the reader loop skips the attention scanner entirely, so
+    /// `take_attention` stays `false` and `progress_report` stays `None` for the
+    /// life of the client. Companion terminals pass `false`: they are plain shells,
+    /// not agents, so scanning their every byte for OSC / bell signals only burns
+    /// cycles and could raise spurious attention.
     pub fn spawn_with_env_opts(
         command: &str,
         args: &[String],
@@ -518,9 +531,13 @@ impl PtyClient {
         rows: u16,
         cols: u16,
         scrollback_lines: usize,
-        env: &[(String, String)],
-        track_agent_signals: bool,
+        opts: PtySpawnOptions<'_>,
     ) -> Result<Self> {
+        let PtySpawnOptions {
+            env,
+            track_agent_signals,
+            identity,
+        } = opts;
         let pty_system = NativePtySystem::default();
         let pair = pty_system
             .openpty(PtySize {
@@ -537,6 +554,11 @@ impl PtyClient {
         }
         cmd.cwd(cwd);
         apply_terminal_env(&mut cmd);
+        // Apply the resolved terminal identity between the baseline TERM/COLORTERM
+        // and the caller's `[env]`: remove first (a trailing `*` scrubs a whole
+        // prefix family against the real environment), then set, so the user's own
+        // `[env]` overrides below always win.
+        apply_identity_env(&mut cmd, identity);
         for (name, value) in env {
             cmd.env(name, value);
         }
@@ -1760,6 +1782,43 @@ fn named_color_to_tui(color: NamedColor) -> CellColor {
     }
 }
 
+/// The bundle of optional spawn inputs for [`PtyClient::spawn_with_env_opts`],
+/// folded into a struct so the argument list stays readable as it grows.
+/// Borrows so the common `spawn_with_env` path passes a temporary empty identity
+/// with no allocation.
+pub struct PtySpawnOptions<'a> {
+    /// The caller's `[env]` overrides, applied last so a user value always wins.
+    pub env: &'a [(String, String)],
+    /// Whether the reader loop runs the attention/passthrough scanner (agents:
+    /// true; companion shells: false).
+    pub track_agent_signals: bool,
+    /// The terminal-identity env mutation to apply before the caller env.
+    pub identity: &'a crate::term_identity::TerminalIdentity,
+}
+
+/// Apply a resolved terminal identity to a spawn command: remove first, then set.
+/// A `remove` entry ending in `*` scrubs every inherited variable whose name
+/// starts with the prefix (expanded here against the real process environment,
+/// since `env_remove` takes a concrete name).
+fn apply_identity_env(cmd: &mut CommandBuilder, identity: &crate::term_identity::TerminalIdentity) {
+    for name in &identity.remove {
+        if let Some(prefix) = name.strip_suffix('*') {
+            for (key, _) in env::vars_os() {
+                if let Some(key) = key.to_str()
+                    && key.starts_with(prefix)
+                {
+                    cmd.env_remove(key);
+                }
+            }
+        } else {
+            cmd.env_remove(name);
+        }
+    }
+    for (name, value) in &identity.set {
+        cmd.env(name, value);
+    }
+}
+
 fn apply_terminal_env(cmd: &mut CommandBuilder) {
     apply_terminal_env_from_parent(
         cmd,
@@ -1956,9 +2015,20 @@ mod tests {
         // path all three land: a bare bell/notification arms `take_attention` and
         // a progress report populates `progress_report`.
         let args = vec!["-c".to_string(), SIGNAL_EMITTER.to_string()];
-        let client =
-            PtyClient::spawn_with_env_opts("/bin/sh", &args, Path::new("."), 5, 40, 100, &[], true)
-                .expect("spawn pty");
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            PtySpawnOptions {
+                env: &[],
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn pty");
         wait_for_viewport(&client, "X");
 
         let report = client.progress_report().expect("a progress report");
@@ -1974,9 +2044,20 @@ mod tests {
         // A bare bell (no notification) must only arm attention when the caller
         // opts to count bells, mirroring the `attention_on_bell` preference.
         let args = vec!["-c".to_string(), "printf '\\007X'".to_string()];
-        let client =
-            PtyClient::spawn_with_env_opts("/bin/sh", &args, Path::new("."), 5, 40, 100, &[], true)
-                .expect("spawn pty");
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            PtySpawnOptions {
+                env: &[],
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn pty");
         wait_for_viewport(&client, "X");
 
         // count_bell = false: the bell does not arm attention (and it is drained).
@@ -1999,8 +2080,11 @@ mod tests {
             5,
             40,
             100,
-            &[],
-            false,
+            PtySpawnOptions {
+                env: &[],
+                track_agent_signals: false,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
         )
         .expect("spawn pty");
         wait_for_viewport(&client, "X");
@@ -2415,6 +2499,32 @@ mod tests {
             cmd.get_env("COLORTERM").and_then(|value| value.to_str()),
             Some("truecolor")
         );
+    }
+
+    #[test]
+    fn apply_identity_env_sets_and_removes() {
+        // SAFETY: single-threaded test; set a var the scrub prefix should strip.
+        unsafe {
+            std::env::set_var("KITTY_TEST_MARKER", "1");
+        }
+        let mut cmd = CommandBuilder::new("printf");
+        let identity = crate::term_identity::TerminalIdentity {
+            set: vec![("TERM_PROGRAM".to_string(), "ghostty".to_string())],
+            remove: vec!["KITTY_*".to_string()],
+        };
+        // The builder seeds its env from the current process, so the prefix scrub
+        // has a concrete `KITTY_TEST_MARKER` to remove.
+        assert!(cmd.get_env("KITTY_TEST_MARKER").is_some());
+        apply_identity_env(&mut cmd, &identity);
+        assert_eq!(
+            cmd.get_env("TERM_PROGRAM").and_then(|v| v.to_str()),
+            Some("ghostty")
+        );
+        // The prefix `KITTY_*` scrubbed the concrete inherited variable.
+        assert!(cmd.get_env("KITTY_TEST_MARKER").is_none());
+        unsafe {
+            std::env::remove_var("KITTY_TEST_MARKER");
+        }
     }
 
     #[test]

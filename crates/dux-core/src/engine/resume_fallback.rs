@@ -97,6 +97,7 @@ impl Engine {
             provider,
             provider_config,
             env,
+            identity: self.resolved_identity(),
             resume,
             pty_size,
             scrollback_lines: self.config.ui.agent_scrollback_lines,

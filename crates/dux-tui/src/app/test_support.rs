@@ -132,6 +132,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         terminal_counter: 0,
         github_integration_enabled: false,
         single_instance_lock,
+        surface_kind: dux_core::term_identity::SurfaceKind::Tui,
+        host_env: dux_core::term_identity::HostEnvProbe::default(),
         worker_tx,
         worker_rx,
         config_writer,

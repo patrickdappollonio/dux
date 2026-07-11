@@ -18,6 +18,7 @@ use crate::worker::{
 };
 use crate::{gh, git, logger};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
     paths: DuxPaths,
@@ -25,6 +26,7 @@ pub fn run_create_agent_job(
     worker_tx: Sender<WorkerEvent>,
     term_size: (u16, u16),
     status_op_id: String,
+    identity: crate::term_identity::TerminalIdentity,
 ) {
     // The opaque id of the shared create-agent `HandlerStatusOp` keys every
     // progress/failure event and is carried in `AgentLaunchKind::Create` so the
@@ -666,6 +668,7 @@ pub fn run_create_agent_job(
         session,
         provider_config: provider_cfg,
         env,
+        identity,
         resume: launch_with_resume,
         pty_size: (rows, cols),
         scrollback_lines: config.ui.agent_scrollback_lines,
@@ -717,14 +720,18 @@ pub fn run_agent_launch_job(request: AgentLaunchRequest, worker_tx: Sender<Worke
         return;
     }
 
-    let client = match crate::pty::PtyClient::spawn_with_env(
+    let client = match crate::pty::PtyClient::spawn_with_env_opts(
         &request.provider_config.command,
         &launch_args,
         Path::new(&request.session.worktree_path),
         rows,
         cols,
         request.scrollback_lines,
-        &request.env,
+        crate::pty::PtySpawnOptions {
+            env: &request.env,
+            track_agent_signals: true,
+            identity: &request.identity,
+        },
     ) {
         Ok(client) => client,
         Err(err) => {
@@ -835,6 +842,7 @@ mod tests {
             tx,
             (80, 24),
             "op-1".to_string(),
+            crate::term_identity::TerminalIdentity::default(),
         );
         let mut session = None;
         while let Ok(event) = rx.try_recv() {

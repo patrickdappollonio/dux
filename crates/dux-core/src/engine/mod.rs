@@ -68,6 +68,15 @@ pub struct Engine {
     pub terminal_counter: usize,
     pub github_integration_enabled: bool,
     pub single_instance_lock: SingleInstanceLock,
+    /// Which surface currently owns this engine. Decides how a `terminal_identity`
+    /// of `auto` resolves (mirror on the TUI, ghostty on the headless server). The
+    /// in-process TUI to server flip flips this to `WebHeadless` before serving so
+    /// agents launched under the server get the headless identity; PTYs already
+    /// running keep their spawn-time env until they are relaunched.
+    pub surface_kind: crate::term_identity::SurfaceKind,
+    /// Snapshot of the identity-relevant environment dux inherited, taken once at
+    /// construction so [`Engine::resolved_identity`] stays a pure function of it.
+    pub host_env: crate::term_identity::HostEnvProbe,
 
     // Batch B fields
     pub worker_tx: Sender<WorkerEvent>,
@@ -800,6 +809,16 @@ impl Engine {
             .get(tab_id)
             .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW);
         !typing
+    }
+
+    /// The terminal identity dux should apply when launching an agent, resolved
+    /// from the configured mode, the owning surface, and the inherited-env probe.
+    /// Companion terminals reuse it too so a plain shell sees the same identity.
+    pub fn resolved_identity(&self) -> crate::term_identity::TerminalIdentity {
+        let mode = crate::term_identity::TerminalIdentityMode::from_config_str(
+            &self.config.capabilities.terminal_identity,
+        );
+        crate::term_identity::resolve_identity(mode, self.surface_kind, &self.host_env)
     }
 
     /// Poll every provider for attention and progress signals once per tick,
@@ -2700,9 +2719,20 @@ mod tests {
     fn seed_signaling_provider(engine: &mut Engine, tab: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("worktree dir");
         let args = vec!["-c".to_string(), EMIT_SIGNALS.to_string()];
-        let client =
-            PtyClient::spawn_with_env_opts("/bin/sh", &args, tmp.path(), 5, 40, 100, &[], true)
-                .expect("spawn signaling pty");
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            tmp.path(),
+            5,
+            40,
+            100,
+            crate::pty::PtySpawnOptions {
+                env: &[],
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn signaling pty");
         engine.providers.insert(tab.to_string(), client);
         for _ in 0..200 {
             if engine

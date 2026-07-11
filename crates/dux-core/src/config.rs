@@ -459,6 +459,45 @@ pub struct UiConfig {
     pub theme: String,
 }
 
+/// Terminal capability controls: what identity dux presents to an agent, and
+/// which of the escape sequences the agent emits (notifications, progress,
+/// clipboard, hyperlinks) dux forwards to the host terminal or the browser.
+///
+/// `terminal_identity` and `clipboard_passthrough` are stored as strings and
+/// parsed at use so a typo degrades gracefully (warn and fall back) instead of
+/// failing the whole config load, mirroring the theme/color-config convention.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CapabilitiesConfig {
+    /// How dux presents itself to the agent: `auto` (mirror the host terminal in
+    /// the TUI, force ghostty on the headless server), `mirror`, `ghostty`,
+    /// `kitty`, `iterm2`, or `none` (inherit dux's own env unchanged).
+    pub terminal_identity: String,
+    /// Forward notification/progress/clipboard sequences from the agent to the
+    /// host terminal (TUI). Master switch for outbound passthrough.
+    pub passthrough: bool,
+    /// Which agents' OSC 52 clipboard-SET sequences reach the host clipboard:
+    /// `focused` (only the tab you are viewing), `always` (any tab), or `off`.
+    /// Clipboard READ queries are never forwarded.
+    pub clipboard_passthrough: String,
+    /// Render OSC 8 hyperlinks (TUI host embed and web click handler).
+    pub hyperlinks: bool,
+    /// Bridge agent notification sequences to a browser Notification in the web UI.
+    pub web_notifications: bool,
+}
+
+impl Default for CapabilitiesConfig {
+    fn default() -> Self {
+        Self {
+            terminal_identity: "auto".to_string(),
+            passthrough: true,
+            clipboard_passthrough: "focused".to_string(),
+            hyperlinks: true,
+            web_notifications: true,
+        }
+    }
+}
+
 impl Default for Defaults {
     fn default() -> Self {
         let start_directory = home::home_dir().map(|p| p.to_string_lossy().to_string());
@@ -990,6 +1029,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub projects: Vec<ProjectConfig>,
     pub ui: UiConfig,
+    #[serde(default)]
+    pub capabilities: CapabilitiesConfig,
     pub editor: EditorConfig,
     #[serde(default)]
     pub server: ServerConfig,
@@ -1060,6 +1101,7 @@ impl Default for Config {
                 pr_banner_position: "bottom".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },
+            capabilities: CapabilitiesConfig::default(),
             editor: EditorConfig::default(),
             server: ServerConfig::default(),
             keys: KeysConfig::default(),

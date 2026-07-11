@@ -295,6 +295,38 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         &current.ui.theme,
     );
 
+    // [capabilities]
+    diff_str(
+        &mut changes,
+        "capabilities.terminal_identity",
+        &defaults.capabilities.terminal_identity,
+        &current.capabilities.terminal_identity,
+    );
+    diff_bool(
+        &mut changes,
+        "capabilities.passthrough",
+        defaults.capabilities.passthrough,
+        current.capabilities.passthrough,
+    );
+    diff_str(
+        &mut changes,
+        "capabilities.clipboard_passthrough",
+        &defaults.capabilities.clipboard_passthrough,
+        &current.capabilities.clipboard_passthrough,
+    );
+    diff_bool(
+        &mut changes,
+        "capabilities.hyperlinks",
+        defaults.capabilities.hyperlinks,
+        current.capabilities.hyperlinks,
+    );
+    diff_bool(
+        &mut changes,
+        "capabilities.web_notifications",
+        defaults.capabilities.web_notifications,
+        current.capabilities.web_notifications,
+    );
+
     // [editor]
     diff_str(
         &mut changes,

@@ -187,6 +187,10 @@ pub struct AgentLaunchRequest {
     pub provider: ProviderKind,
     pub provider_config: ProviderCommandConfig,
     pub env: Vec<(String, String)>,
+    /// The terminal identity (env add/remove) applied at spawn so the agent sees a
+    /// useful terminal name. Resolved from engine state at build time. Empty for
+    /// `terminal_identity = "none"` (the pre-capabilities behavior).
+    pub identity: crate::term_identity::TerminalIdentity,
     pub resume: bool,
     pub pty_size: (u16, u16),
     pub scrollback_lines: usize,

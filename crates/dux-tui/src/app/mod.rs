@@ -1718,6 +1718,8 @@ impl App {
             terminal_counter: 0,
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
+            surface_kind: dux_core::term_identity::SurfaceKind::Tui,
+            host_env: dux_core::term_identity::HostEnvProbe::from_env(),
             worker_tx,
             worker_rx,
             config_writer,

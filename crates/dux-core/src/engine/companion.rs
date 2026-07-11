@@ -50,8 +50,13 @@ impl Engine {
             24,
             80,
             self.config.ui.agent_scrollback_lines,
-            &env,
-            false,
+            crate::pty::PtySpawnOptions {
+                env: &env,
+                track_agent_signals: false,
+                // A companion shell still gets the terminal identity so it sees the
+                // same terminal an agent would.
+                identity: &self.resolved_identity(),
+            },
         )?;
 
         self.terminal_counter += 1;

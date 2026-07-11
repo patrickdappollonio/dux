@@ -891,14 +891,21 @@ impl App {
                 crate::config::resolve_agent_env(&self.engine.config.env, &project.env).ok()
             })
             .unwrap_or_default();
-        PtyClient::spawn_with_env(
+        PtyClient::spawn_with_env_opts(
             &self.engine.config.terminal.command,
             &self.engine.config.terminal.args,
             Path::new(&session.worktree_path),
             rows,
             cols,
             self.engine.config.ui.agent_scrollback_lines,
-            &env,
+            dux_core::pty::PtySpawnOptions {
+                env: &env,
+                // A companion is a plain shell, not an agent, so it never scans
+                // for OSC/bell signals, but it still gets the terminal identity so
+                // a shell sees the same terminal an agent would.
+                track_agent_signals: false,
+                identity: &self.engine.resolved_identity(),
+            },
         )
     }
 
@@ -3394,6 +3401,8 @@ mod tests {
             terminal_counter: 0,
             github_integration_enabled: false,
             single_instance_lock,
+            surface_kind: dux_core::term_identity::SurfaceKind::Tui,
+            host_env: dux_core::term_identity::HostEnvProbe::default(),
             worker_tx,
             worker_rx,
             config_writer,
@@ -3597,6 +3606,8 @@ mod tests {
             terminal_counter: 0,
             github_integration_enabled: false,
             single_instance_lock,
+            surface_kind: dux_core::term_identity::SurfaceKind::Tui,
+            host_env: dux_core::term_identity::HostEnvProbe::default(),
             worker_tx,
             worker_rx,
             config_writer,

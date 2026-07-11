@@ -304,6 +304,38 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
     );
     patch_table_str(doc, "ui", "theme", &config.ui.theme);
 
+    // --- [capabilities] ---
+    patch_table_str(
+        doc,
+        "capabilities",
+        "terminal_identity",
+        &config.capabilities.terminal_identity,
+    );
+    patch_table_bool(
+        doc,
+        "capabilities",
+        "passthrough",
+        config.capabilities.passthrough,
+    );
+    patch_table_str(
+        doc,
+        "capabilities",
+        "clipboard_passthrough",
+        &config.capabilities.clipboard_passthrough,
+    );
+    patch_table_bool(
+        doc,
+        "capabilities",
+        "hyperlinks",
+        config.capabilities.hyperlinks,
+    );
+    patch_table_bool(
+        doc,
+        "capabilities",
+        "web_notifications",
+        config.capabilities.web_notifications,
+    );
+
     // --- [editor] ---
     patch_table_str(doc, "editor", "default", &config.editor.default);
 

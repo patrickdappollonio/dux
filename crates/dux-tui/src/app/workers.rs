@@ -1714,6 +1714,7 @@ mod tests {
             pty_size: (24, 80),
             scrollback_lines: 1_000,
             env: Vec::new(),
+            identity: Default::default(),
             kind: AgentLaunchKind::Reconnect {
                 status_message: "reconnect".to_string(),
             },
@@ -1812,6 +1813,7 @@ mod tests {
             worker_tx,
             (80, 24),
             "op-test".to_string(),
+            dux_core::term_identity::TerminalIdentity::default(),
         );
 
         match worker_rx.recv().expect("worker event") {
@@ -1862,6 +1864,7 @@ mod tests {
             worker_tx,
             (80, 24),
             "op-create-1".to_string(),
+            dux_core::term_identity::TerminalIdentity::default(),
         );
 
         match worker_rx.recv().expect("worker event") {
