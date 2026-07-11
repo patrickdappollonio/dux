@@ -96,6 +96,9 @@ same store), so switching a tab in one surface is remembered by the other. A
 tab you'd closed since is never resurrected by this; you just land on the
 agent's default tab instead. An explicit deep link always wins over the
 remembered tab, so a link someone hands you always opens exactly what it says.
+Following that link just focuses the tab it names; it doesn't overwrite what
+dux remembers, so a coworker sending you a link to their tab never changes
+which tab you land on next time you (or anyone else) simply reopen the agent.
 
 In the terminal UI, switching is keyboard-driven and the keys are yours to rebind
 (the `?` overlay always shows your current bindings). One deliberate quirk: tab
