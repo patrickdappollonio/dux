@@ -59,6 +59,7 @@ class FakePtySocket {
   close = vi.fn()
   sendResize = vi.fn()
   sendInput = vi.fn()
+  sendViewed = vi.fn()
   onConnected: (id: string) => void = () => {}
   onOpen: () => void = () => {}
   onReconnecting: () => void = () => {}

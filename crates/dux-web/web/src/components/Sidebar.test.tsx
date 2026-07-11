@@ -219,6 +219,48 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
   })
 })
 
+describe("AppSidebar attention dot", () => {
+  it("renders the attention dot when the agent needs attention", () => {
+    const spine = makeSessionSpine(1) as unknown as {
+      sessions: { needs_attention: boolean }[]
+    }
+    spine.sessions[0].needs_attention = true
+    mockState = makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    expect(screen.getAllByLabelText("Needs attention").length).toBeGreaterThan(0)
+  })
+
+  it("renders no attention dot when the agent does not need attention", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    expect(screen.queryByLabelText("Needs attention")).toBeNull()
+  })
+})
+
 describe("AppSidebar resize affordances", () => {
   // The agents panel resizes by dragging only — matching the changes panel. The
   // old shadcn `SidebarRail` doubled as a click-near-the-edge collapse target; it

@@ -636,6 +636,11 @@ impl App {
                     // preference. Rolled up across the agent's tabs.
                     let needs_attention = self.engine.config.ui.attention_indicator
                         && self.engine.session_needs_attention(&session.id);
+                    // The plain per-status dot and its color, derived exactly once
+                    // so the "off" attention-blink dot and the label fallback below
+                    // can reuse it without calling `session_dot` again (which must
+                    // stay in sync).
+                    let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
                     let (dot, dot_color) = if needs_attention {
                         let glyph = if self.attention_blink_on() {
                             crate::theme::ATTENTION_GLYPH
@@ -652,8 +657,7 @@ impl App {
                             self.theme.session_active,
                         )
                     } else {
-                        let (d, c) = self.theme.session_dot(&session.status);
-                        (d.to_string(), c)
+                        (steady_dot.to_string(), steady_color)
                     };
                     // While a background delete is in flight for this session,
                     // dim the row text and italicize it so the user sees the
@@ -668,7 +672,7 @@ impl App {
                     // stay a steady color rather than flicker with it, so it falls
                     // back to the plain status-dot color in that case.
                     let label_fallback_color = if needs_attention {
-                        self.theme.session_dot(&session.status).1
+                        steady_color
                     } else {
                         dot_color
                     };

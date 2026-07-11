@@ -517,6 +517,43 @@ fn attention_engaged(
             .is_some_and(|t| now.duration_since(*t) < AGENT_INPUT_SUPPRESSION_WINDOW)
 }
 
+/// The pure per-tick attention decision, factored out of
+/// [`Engine::poll_agent_signals`] so it is testable without a live PTY. Given the
+/// tabs whose attention signal fired this tick (`fired`, already gated by the
+/// `attention_on_bell` preference at drain time), whether the feature is enabled,
+/// and an `engaged` predicate, it updates `needs_attention` in place:
+///
+/// - Feature off: clear everything (never accumulate; drop anything left over
+///   from before a runtime toggle).
+/// - Otherwise: clear the flag on any tab the user is now engaged with, then set
+///   it for each freshly-fired tab the user is NOT engaged with. Each outcome is
+///   logged at debug level so the whole pipeline is diagnosable from `dux.log`
+///   without adding default-level noise.
+fn apply_attention_decision(
+    needs_attention: &mut HashSet<String>,
+    fired: &[String],
+    enabled: bool,
+    engaged: impl Fn(&str) -> bool,
+) {
+    if !enabled {
+        needs_attention.clear();
+        return;
+    }
+    // Looking at (or typing into) a tab clears its flag.
+    needs_attention.retain(|tab| !engaged(tab));
+    // A newly-fired signal sets the flag unless the user is engaged with it.
+    for tab in fired {
+        if engaged(tab) {
+            crate::logger::debug(&format!(
+                "attention signal for tab {tab} suppressed: user is engaged"
+            ));
+        } else {
+            crate::logger::debug(&format!("attention flagged for tab {tab}"));
+            needs_attention.insert(tab.clone());
+        }
+    }
+}
+
 /// How often [`Engine::refresh_terminal_foregrounds`] actually probes companion
 /// terminals for their foreground command. Calls more frequent than this are
 /// no-ops, so every surface can invoke the refresh once per (sub-second) tick
@@ -800,27 +837,12 @@ impl Engine {
             self.pty_progress.insert(tab_id, report);
         }
 
-        if !enabled {
-            // Feature off: never accumulate, and drop anything left over from
-            // before a runtime toggle so nothing lingers.
-            self.needs_attention.clear();
-            return;
-        }
-
         // Direct field borrows (not a `self` method) so the disjoint mutable
         // borrow of `needs_attention` below is allowed alongside these reads.
         let viewed = &self.agent_viewed;
         let typed = &self.pty_input;
         let engaged = |tab: &str| attention_engaged(viewed, typed, tab, now);
-
-        // Looking at (or typing into) a tab clears its flag.
-        self.needs_attention.retain(|tab| !engaged(tab));
-        // A newly-fired signal sets the flag unless the user is engaged with it.
-        for tab in fired {
-            if !engaged(&tab) {
-                self.needs_attention.insert(tab);
-            }
-        }
+        apply_attention_decision(&mut self.needs_attention, &fired, enabled, engaged);
     }
 
     /// Record that the user is actively looking at the given tab's live view
@@ -830,6 +852,18 @@ impl Engine {
     pub fn note_agent_viewed(&mut self, tab_id: &str) {
         self.agent_viewed.insert(tab_id.to_string(), Instant::now());
         self.needs_attention.remove(tab_id);
+    }
+
+    /// Like [`Engine::note_agent_viewed`], but only when `tab_id` resolves to a
+    /// real agent tab. This is the entry point for surface transports that take an
+    /// unvalidated id from a client (the web PTY-subscribe and viewed-ping paths):
+    /// gating here, in core, keeps `agent_viewed` from accumulating entries for
+    /// stale deep links, retries, or bogus ids, and keeps the check in one place
+    /// rather than reimplemented per surface.
+    pub fn note_agent_viewed_if_known(&mut self, tab_id: &str) {
+        if self.owning_session_for_tab(tab_id).is_some() {
+            self.note_agent_viewed(tab_id);
+        }
     }
 
     /// Whether the given tab currently has an unacknowledged attention signal.
@@ -2586,6 +2620,166 @@ mod tests {
         assert!(!engine.tab_needs_attention("s1"));
         assert!(!engine.pty_progress.contains_key("s1"));
         assert!(!engine.agent_viewed.contains_key("s1"));
+    }
+
+    #[test]
+    fn note_agent_viewed_if_known_gates_on_a_real_tab() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        engine.needs_attention.insert("s1".to_string());
+
+        // A bogus id (stale deep link, race, retry) is a no-op: it neither stamps
+        // `agent_viewed` nor touches the flag.
+        engine.note_agent_viewed_if_known("does-not-exist");
+        assert!(
+            engine.agent_viewed.is_empty(),
+            "a bogus id must not leak an agent_viewed entry"
+        );
+        assert!(engine.tab_needs_attention("s1"));
+
+        // A real session id both stamps engagement and clears the flag.
+        engine.note_agent_viewed_if_known("s1");
+        assert!(engine.agent_viewed.contains_key("s1"));
+        assert!(!engine.tab_needs_attention("s1"));
+    }
+
+    #[test]
+    fn apply_attention_decision_sets_flag_when_not_engaged() {
+        let mut set = HashSet::new();
+        apply_attention_decision(&mut set, &["s1".to_string()], true, |_| false);
+        assert!(set.contains("s1"), "a fired, unengaged tab must be flagged");
+    }
+
+    #[test]
+    fn apply_attention_decision_suppresses_and_clears_when_engaged() {
+        let mut set = HashSet::new();
+        set.insert("s1".to_string());
+        // Engaged: the fired signal is suppressed AND the existing flag is cleared.
+        apply_attention_decision(&mut set, &["s1".to_string()], true, |_| true);
+        assert!(
+            !set.contains("s1"),
+            "engagement must both suppress the new signal and clear the old flag"
+        );
+    }
+
+    #[test]
+    fn apply_attention_decision_clears_stale_flag_without_a_new_signal() {
+        let mut set = HashSet::new();
+        set.insert("s1".to_string());
+        // No new signal this tick, but the user is now engaged → clear.
+        apply_attention_decision(&mut set, &[], true, |tab| tab == "s1");
+        assert!(!set.contains("s1"));
+    }
+
+    #[test]
+    fn apply_attention_decision_retains_flag_while_unengaged() {
+        let mut set = HashSet::new();
+        set.insert("s1".to_string());
+        apply_attention_decision(&mut set, &[], true, |_| false);
+        assert!(
+            set.contains("s1"),
+            "an unviewed flag must persist across ticks"
+        );
+    }
+
+    #[test]
+    fn apply_attention_decision_disabled_clears_everything() {
+        let mut set = HashSet::new();
+        set.insert("s1".to_string());
+        apply_attention_decision(&mut set, &["s2".to_string()], false, |_| false);
+        assert!(set.is_empty(), "the feature being off must drop every flag");
+    }
+
+    // A one-shot child that emits, in stream order: a bell, an OSC 9 notification,
+    // then an OSC 9;4 working progress report (progress LAST so observing it means
+    // the earlier signals were already scanned). Used by the real-PTY smoke tests.
+    const EMIT_SIGNALS: &str = "printf '\\007\\033]9;hi\\007\\033]9;4;1;50\\007X'";
+
+    /// Spawn a tracked PTY that emits all three signals under `tab` and block until
+    /// its progress report lands (proving the reader thread scanned the payload).
+    fn seed_signaling_provider(engine: &mut Engine, tab: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("worktree dir");
+        let args = vec!["-c".to_string(), EMIT_SIGNALS.to_string()];
+        let client =
+            PtyClient::spawn_with_env_opts("/bin/sh", &args, tmp.path(), 5, 40, 100, &[], true)
+                .expect("spawn signaling pty");
+        engine.providers.insert(tab.to_string(), client);
+        for _ in 0..200 {
+            if engine
+                .providers
+                .get(tab)
+                .and_then(|p| p.progress_report())
+                .is_some()
+            {
+                return tmp;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for a progress report on {tab}");
+    }
+
+    #[test]
+    fn poll_agent_signals_flags_attention_and_records_progress() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.attention_indicator = true;
+        engine.config.ui.attention_on_bell = true;
+        let _wt = seed_signaling_provider(&mut engine, "s1");
+
+        engine.poll_agent_signals();
+
+        assert!(
+            engine.tab_needs_attention("s1"),
+            "an unengaged agent that signalled must be flagged"
+        );
+        assert!(
+            engine
+                .pty_progress
+                .get("s1")
+                .expect("progress recorded")
+                .working,
+            "the 9;4;1 progress report must feed the working override"
+        );
+    }
+
+    #[test]
+    fn poll_agent_signals_suppresses_when_engaged() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.attention_indicator = true;
+        engine.config.ui.attention_on_bell = true;
+        let _wt = seed_signaling_provider(&mut engine, "s1");
+
+        // The user is looking at this tab right now.
+        engine.note_agent_viewed("s1");
+        engine.poll_agent_signals();
+
+        assert!(
+            !engine.tab_needs_attention("s1"),
+            "a tab the user is viewing must not be flagged"
+        );
+        // Progress is still captured regardless of engagement.
+        assert!(engine.pty_progress.contains_key("s1"));
+    }
+
+    #[test]
+    fn poll_agent_signals_disabled_records_progress_but_not_attention() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.attention_indicator = false;
+        let _wt = seed_signaling_provider(&mut engine, "s1");
+
+        engine.poll_agent_signals();
+
+        assert!(
+            !engine.tab_needs_attention("s1"),
+            "attention_indicator=false must record no attention"
+        );
+        assert!(
+            engine
+                .pty_progress
+                .get("s1")
+                .expect("progress recorded")
+                .working,
+            "progress still feeds the working indicator even with attention off"
+        );
     }
 
     #[test]

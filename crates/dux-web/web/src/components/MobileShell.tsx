@@ -38,6 +38,7 @@ import {
 import type { CSSProperties } from "react"
 import { Suspense } from "react"
 
+import { AttentionDot } from "@/components/AttentionDot"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
@@ -339,13 +340,8 @@ function SessionRow({
             )}
           />
           {/* Amber attention dot: the agent needs the user (a permission prompt
-              or a finished turn). Gently pulses; static under reduced motion. */}
-          {attention && (
-            <span
-              aria-label="Needs attention"
-              className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-pulse motion-reduce:animate-none"
-            />
-          )}
+              or a finished turn). No tooltip on a touch surface (no hover). */}
+          {attention && <AttentionDot withTooltip={false} />}
           {/* Its name also dims with a soft white highlight sweeping through (see
               .agent-name-shimmer), a second working cue alongside the bob. The
               base class is always applied so the fill cross-fades back to solid

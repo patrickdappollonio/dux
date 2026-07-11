@@ -62,6 +62,13 @@ pub enum EngineRequest {
     SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
     WritePty(String, Vec<u8>),
     ResizePty(String, u16, u16),
+    /// A "user is looking at this tab" ping from a foregrounded, input-owning
+    /// browser terminal. Fire-and-forget; routed to
+    /// [`dux_core::engine::Engine::note_agent_viewed_if_known`] so continuous
+    /// viewing keeps a tab's attention flag down even without typing, mirroring
+    /// the TUI's per-tick focus stamp. The engine self-gates on the id being a
+    /// real tab, so a stale/bogus id is a harmless no-op.
+    NoteViewed(String),
     /// Subscribe to an existing companion terminal (no launch; replies immediately).
     SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
     /// Create a companion terminal for a session, replying `(terminal_id, label)`.
@@ -572,6 +579,13 @@ impl EngineHandle {
         let _ = self
             .req_tx
             .try_send(EngineRequest::ResizePty(session_id, rows, cols));
+    }
+
+    pub fn note_viewed(&self, pty_id: String) {
+        // `try_send`: a viewed ping is a periodic best-effort hint. Dropping one
+        // under overload is harmless: the next ping (every ~2s while the tab is
+        // foregrounded) re-stamps the engagement window.
+        let _ = self.req_tx.try_send(EngineRequest::NoteViewed(pty_id));
     }
 
     pub async fn subscribe_terminal(&self, terminal_id: String) -> Result<PtySubscription, String> {
@@ -1685,6 +1699,12 @@ fn handle_request(
                 let _ = client.resize(rows, cols);
             }
         }
+        EngineRequest::NoteViewed(id) => {
+            // The engine gates on the id resolving to a real agent tab, so a
+            // companion-terminal id or a stale/bogus id is a harmless no-op and
+            // `agent_viewed` never accumulates junk entries.
+            engine.note_agent_viewed_if_known(&id);
+        }
         EngineRequest::SubscribeTerminal(terminal_id, reply) => {
             let res = match engine.companion_terminals.get(&terminal_id) {
                 Some(terminal) => Ok(terminal.client.subscribe_with_repaint()),
@@ -1892,9 +1912,12 @@ fn handle_subscribe(
     }
     // Opening a tab's live view is the web's "looking at it" signal: clear and
     // briefly suppress its attention flag. Stamp the subscribed TAB id (which may
-    // be an extra tab), not the owning session. Typing then keeps it cleared via
-    // `note_pty_input` on `WritePty`.
-    engine.note_agent_viewed(&session_id);
+    // be an extra tab), not the owning session. Gated on the id resolving to a
+    // real tab so a stale deep link, a race, or a retry can never leak an
+    // `agent_viewed` entry that is never cleaned up. Typing then keeps it cleared
+    // via `note_pty_input` on `WritePty`, and the client's periodic viewed ping
+    // keeps it down while foregrounded.
+    engine.note_agent_viewed_if_known(&session_id);
     if let Some(client) = engine.providers.get(&session_id) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;
@@ -2733,6 +2756,51 @@ mod tests {
         engine.needs_attention.clear();
         poll_attention_transitions(&engine, &mut prev, &mut version);
         assert_eq!(version, 2, "clearing the flag must bump the version");
+    }
+
+    #[tokio::test]
+    async fn note_viewed_request_clears_attention_for_a_known_tab() {
+        // The web "user is looking at it" ping must route through the actor to the
+        // core `note_agent_viewed_if_known`, clearing a flagged tab's attention.
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        // The agent is flagged for attention before anyone opens it.
+        engine.needs_attention.insert("s1".to_string());
+        let (handle, _join) = spawn_engine_thread(engine);
+
+        // It starts flagged in the spine projection.
+        let spine = handle.spine().await.expect("spine");
+        assert_eq!(
+            spine
+                .sessions
+                .iter()
+                .find(|s| s.id == "s1")
+                .map(|s| s.needs_attention),
+            Some(true),
+            "the seeded flag must show in the spine"
+        );
+
+        // A viewed ping for the real tab clears it.
+        handle.note_viewed("s1".to_string());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let spine = handle.spine().await.expect("spine");
+            let flagged = spine
+                .sessions
+                .iter()
+                .find(|s| s.id == "s1")
+                .map(|s| s.needs_attention);
+            if flagged == Some(false) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "note_viewed did not clear the attention flag in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[test]

@@ -190,6 +190,17 @@ export class PtySocket extends ReconnectingSocket {
       this.ws.send(JSON.stringify({ rows, cols }))
     }
   }
+
+  // Send a "user is looking at this tab" ping as a Text frame. Unlike a resize,
+  // it NEVER claims sizing ownership server-side; it only stamps the engine's
+  // engagement window so an agent the user is actively watching keeps its
+  // attention flag down without requiring keystrokes. The caller gates this to
+  // the foregrounded input-owner (see `TerminalPane`'s viewed-ping effect).
+  sendViewed(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ viewed: true }))
+    }
+  }
 }
 
 // The PTY socket the focused center pane is currently driving, or null when no

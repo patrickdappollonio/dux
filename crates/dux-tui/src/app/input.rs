@@ -1896,13 +1896,19 @@ impl App {
     }
 
     /// Clear (and suppress) the attention flag on the agent tab the user is
-    /// actively looking at: the Center pane has focus, an agent is selected, and
-    /// the Center is showing that agent's PTY rather than a companion terminal.
-    /// Called once per tick so continuous viewing keeps the flag down. This is
-    /// the TUI half of the "looking at an agent clears its attention" rule
-    /// (typing is handled separately via `note_pty_input`).
+    /// actively looking at: the Center pane has focus, it is showing that agent's
+    /// PTY (Agent mode, not a diff), an agent is selected, and the Center is not a
+    /// companion terminal. Called once per tick so continuous viewing keeps the
+    /// flag down. This is the TUI half of the "looking at an agent clears its
+    /// attention" rule (typing is handled separately via `note_pty_input`).
+    ///
+    /// The `CenterMode::Agent` guard matters: while the Center shows a diff the
+    /// agent's live terminal is off-screen, so viewing the diff must NOT be taken
+    /// as looking at the agent, or attention would be suppressed for a prompt the
+    /// user cannot see.
     pub(crate) fn note_focused_agent_viewed(&mut self) {
         if self.focus == FocusPane::Center
+            && matches!(self.center_mode, CenterMode::Agent)
             && self.active_terminal_id.is_none()
             && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
         {
@@ -9450,6 +9456,83 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.selected_left, 2);
         assert!(matches!(app.center_mode, CenterMode::Agent));
+    }
+
+    /// Seed an attention flag on the selected session's focused tab so the
+    /// `note_focused_agent_viewed` guard tests can assert whether it is cleared.
+    fn seed_selected_attention(app: &mut App) -> String {
+        let session_id = app
+            .selected_session()
+            .map(|s| s.id.clone())
+            .expect("a selected session");
+        let tab_id = app.focused_tab_id(&session_id);
+        app.engine.needs_attention.insert(tab_id.clone());
+        tab_id
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_clears_in_center_agent_mode() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.active_terminal_id = None;
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            !app.engine.tab_needs_attention(&tab_id),
+            "looking at the agent's PTY in Center must clear its attention flag"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_does_not_clear_in_diff_mode() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        open_fake_diff(&mut app);
+        app.active_terminal_id = None;
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            app.engine.tab_needs_attention(&tab_id),
+            "reading a diff must not suppress attention for the off-screen PTY"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_does_not_clear_with_companion_focused() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // A companion terminal is focused, not the agent PTY.
+        app.active_terminal_id = Some("term-1".to_string());
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            app.engine.tab_needs_attention(&tab_id),
+            "a focused companion terminal is not the agent, so it must not clear"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_does_not_clear_from_left_pane() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Left;
+        app.center_mode = CenterMode::Agent;
+        app.active_terminal_id = None;
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            app.engine.tab_needs_attention(&tab_id),
+            "the Left pane having focus is not looking at the agent"
+        );
     }
 
     #[test]

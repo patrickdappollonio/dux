@@ -51,14 +51,21 @@ Some agents need a one-line setting before they emit anything dux can see:
   dux catches the bell it then rings on a permission prompt or a finished turn.
 - **Codex**: set `tui.notification_method` in its config (any value works). dux
   captures both the bell and the richer notification form.
-- **OpenCode** and **Copilot**: no capturable signal out of the box today, so
-  their rows will not light up on their own. This is expected, not a bug. If a
-  future version starts emitting a bell or notification, dux picks it up with no
-  change on your side.
+- **Copilot**: it already ships a truer "working" spinner for free. Copilot CLI
+  emits OSC 9;4 progress by default (its `terminalProgress` setting, on since
+  v1.0.55), which dux reads with zero setup. Its turn-completion bell, on the
+  other hand, went quiet by default in v1.0.60 ("terminal bell no longer sounds on
+  turn completion unless explicitly enabled via config"), so flip the terminal
+  bell back on in Copilot's config if you want dux to flag a finished turn.
+- **OpenCode**: no capturable signal out of the box today (its notifications go
+  through plugins), so its rows will not light up on their own. This is expected,
+  not a bug. If a future version starts ringing a bell or emitting a notification,
+  dux picks it up with no change on your side.
 
 Because a bonus of the same detector: any agent that continuously reports its
-busy/idle status (Claude Code does, through a progress escape code) gets a truer
-"working" spinner for free, whether or not you turn on notifications.
+busy/idle status (Claude Code and Copilot both do, through a progress escape code)
+gets a truer "working" spinner for free, whether or not you turn on
+notifications.
 
 ## Settings
 
@@ -83,3 +90,17 @@ Turn `attention_indicator` off to silence the whole feature everywhere.
 Nothing about this makes dux noisier in your real terminal: bells rung inside an
 agent's session are consumed by dux's embedded terminal and never re-forwarded to
 the terminal you are running dux in.
+
+## Limitations
+
+These signals are just bytes in the agent's terminal output, so anything the
+agent chooses to display (a file it prints, a tool's output) that happens to
+contain the same escape codes can forge or mask a signal: a printed notification
+code can flash a false "needs you," and a printed progress code can briefly say
+"idle" or "working" when the opposite is true. This is inherent to terminal escape
+codes, not specific to dux. A normal terminal pops the very same desktop
+notification for the very same bytes. The blast radius is small and bounded: a
+forged progress report only holds sway for a few seconds before dux falls back to
+watching real output, and the whole feature is behind the two switches above, so
+`attention_on_bell = false` or `attention_indicator = false` narrows or closes it
+entirely.

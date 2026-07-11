@@ -706,6 +706,19 @@ struct PtyResizeFrame {
     cols: u16,
 }
 
+/// A "user is looking at this tab" control frame on a PTY socket: the Text frame
+/// `{"viewed":true}`, distinct from the resize frame and the Binary stdin frames.
+/// The frontend terminal sends it periodically (every ~2s, under the engine's
+/// engagement window) while it is the input owner and its document is visible, so
+/// an agent the user is actively watching keeps its attention flag down without
+/// requiring keystrokes. Routed to `engine.note_viewed`, which self-gates on the
+/// pty id being a real agent tab.
+#[derive(serde::Deserialize)]
+struct PtyViewedFrame {
+    #[allow(dead_code)]
+    viewed: bool,
+}
+
 /// Tracks which connection currently owns sizing for each PTY, keyed by pty id
 /// (the session id for an agent PTY, the terminal id for a companion). The most
 /// recently ATTACHED connection owns sizing; a resize from a non-owner is ignored,
@@ -1316,6 +1329,11 @@ async fn handle_pty_socket(
                         ));
                     }
                     engine.resize_pty(target.pty_id().to_string(), frame.rows, frame.cols);
+                } else if serde_json::from_str::<PtyViewedFrame>(text.as_str()).is_ok() {
+                    // A viewed ping never claims sizing ownership; it only stamps
+                    // the engine's engagement window for this pty's tab. The engine
+                    // ignores it for a non-tab (companion) or unknown id.
+                    engine.note_viewed(target.pty_id().to_string());
                 }
             }
             Message::Close(_) => break,

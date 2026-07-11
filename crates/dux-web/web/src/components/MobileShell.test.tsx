@@ -172,6 +172,38 @@ describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
   })
 })
 
+describe("MobileShell attention dot", () => {
+  it("renders the attention dot when the agent needs attention", () => {
+    const spine = makeSessionSpine(1) as unknown as {
+      sessions: { needs_attention: boolean }[]
+    }
+    spine.sessions[0].needs_attention = true
+    mockState = makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+    })
+    render(<MobileShell />)
+    expect(screen.getAllByLabelText("Needs attention").length).toBeGreaterThan(0)
+  })
+
+  it("renders no attention dot when the agent does not need attention", () => {
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+    })
+    render(<MobileShell />)
+    expect(screen.queryByLabelText("Needs attention")).toBeNull()
+  })
+})
+
 describe("MobileShell drawer header", () => {
   it("renders the configured instance title above the 'agent sessions' subtitle", () => {
     mockState = makeState()

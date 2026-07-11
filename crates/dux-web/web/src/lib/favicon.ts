@@ -201,7 +201,11 @@ function setIconLink(href: string, type: string): void {
 }
 
 // The amber attention dot and its dark rim (for contrast against the duck).
-const ATTENTION_DOT_FILL = "#f59e0b"
+// COLOR PAIRING: this is Tailwind amber-400 (#fbbf24), the SAME amber the
+// `AttentionDot` component paints via `bg-amber-400`. The canvas compositor can't
+// read a Tailwind class, so the hex is duplicated here by necessity; keep the two
+// in lockstep (change both, or the sidebar dot and the favicon dot drift apart).
+const ATTENTION_DOT_FILL = "#fbbf24"
 const ATTENTION_DOT_RIM = "#1a1a1a"
 
 // Composed "base icon + dot" data URLs, keyed by the base href. A given base is
@@ -263,8 +267,10 @@ export function applyAttentionFavicon(
         appliedDottedIcon = composed
       }
     })
-    .catch(() => {
-      /* leave the clean icon in place on any compositing failure */
+    .catch((err) => {
+      // Leave the clean icon in place on any compositing failure; the browser-tab
+      // count still conveys the state. Warn per the codebase convention.
+      console.warn("[dux] favicon attention dot failed; keeping clean icon", err)
     })
 }
 
@@ -302,11 +308,15 @@ function composeFaviconWithDot(href: string): Promise<string | null> {
         ctx.fillStyle = ATTENTION_DOT_FILL
         ctx.fill()
         resolve(canvas.toDataURL("image/png"))
-      } catch {
+      } catch (err) {
+        console.warn("[dux] favicon dot compositing failed", err)
         resolve(null)
       }
     }
-    img.onerror = () => resolve(null)
+    img.onerror = (err) => {
+      console.warn("[dux] favicon base image failed to load for dot compositing", err)
+      resolve(null)
+    }
     img.src = href
   })
 }

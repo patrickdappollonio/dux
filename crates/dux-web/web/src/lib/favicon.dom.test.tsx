@@ -110,6 +110,8 @@ describe("applyFavicon legacy migration notice", () => {
 describe("applyAttentionFavicon", () => {
   afterEach(() => {
     document.head.innerHTML = ""
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it("restores the clean base icon when there is no attention", () => {
@@ -119,14 +121,69 @@ describe("applyAttentionFavicon", () => {
     expect(links[0].getAttribute("href")).toBe("/favicon.png")
   })
 
-  it("does not throw when canvas is unavailable (jsdom) and leaves the base icon", () => {
-    // jsdom has no real <canvas> 2d context, so the dot compositor resolves to a
-    // no-op. The clean base icon must remain and nothing must throw.
+  it("keeps the clean base icon when compositing cannot run (jsdom canvas)", async () => {
+    // jsdom has no real <canvas> 2d context, so `composeFaviconWithDot` fails and
+    // resolves/rejects to a no-op. The meaningful guarantee: the icon stays the
+    // clean base PNG, with no half-composed or dotted data-URL icon ever applied.
+    vi.spyOn(console, "warn").mockImplementation(() => {})
     applyAttentionFavicon("", false)
-    expect(() => applyAttentionFavicon("", true)).not.toThrow()
+    applyAttentionFavicon("", true)
+    // Flush the compose promise chain.
+    await Promise.resolve()
+    await Promise.resolve()
     const links = iconLinks()
     expect(links).toHaveLength(1)
     expect(links[0].getAttribute("href")).toBe("/favicon.png")
+  })
+
+  it("does not apply a stale composed icon after attention clears mid-compose", async () => {
+    // The out-of-order guard (`wantedDotBase`): if attention clears while a
+    // compose is still in flight, the compose must NOT stomp the restored clean
+    // icon when it finally resolves.
+    vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    // A minimal fake 2D context so `composeFaviconWithDot` runs to completion.
+    const fakeCtx = {
+      clearRect: () => {},
+      drawImage: () => {},
+      beginPath: () => {},
+      arc: () => {},
+      fill: () => {},
+      fillStyle: "",
+    } as unknown as CanvasRenderingContext2D
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(fakeCtx)
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(
+      "data:image/png;base64,COMPOSED",
+    )
+
+    // Stub Image so we control exactly when onload fires (the compose resolves).
+    const createdImages: Array<{ onload?: () => void; onerror?: () => void }> = []
+    vi.stubGlobal(
+      "Image",
+      class {
+        onload?: () => void
+        onerror?: () => void
+        set src(_v: string) {}
+        constructor() {
+          createdImages.push(this)
+        }
+      },
+    )
+
+    applyAttentionFavicon("", false) // clean base established
+    applyAttentionFavicon("", true) // request a dot: compose starts, in flight
+    applyAttentionFavicon("", false) // attention clears BEFORE the compose resolves
+
+    // Now let the in-flight compose finish. It resolves the composed data URL, but
+    // the dot is no longer wanted, so it must be dropped.
+    createdImages[0]?.onload?.()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const links = iconLinks()
+    expect(links).toHaveLength(1)
+    expect(links[0].getAttribute("href")).toBe("/favicon.png")
+    expect(links[0].getAttribute("href")).not.toContain("COMPOSED")
   })
 
   it("restores the base after attention clears", () => {

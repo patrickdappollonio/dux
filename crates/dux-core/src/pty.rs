@@ -443,8 +443,10 @@ pub struct PtyClient {
     /// Handle to the background reader thread. Joined in `Drop` (after the
     /// child is killed and reaped) so the thread does not outlive the client.
     reader_thread: Option<thread::JoinHandle<()>>,
-    /// Consuming flag set when the terminal parser reported a `Bell` (shared with
-    /// the `EventProxy`). Drained by [`PtyClient::take_attention`].
+    /// Consuming flag set by the reader loop's raw-byte scanner when it sees a
+    /// bare terminal bell (`0x07` outside any escape sequence). Drained by
+    /// [`PtyClient::take_attention`]. Never set for companion terminals, which
+    /// spawn with signal tracking off.
     attention_bell: Arc<AtomicBool>,
     /// Consuming flag set by the reader loop's raw-byte scanner when an `OSC 9` /
     /// `OSC 777` notification is seen. Drained by [`PtyClient::take_attention`].
@@ -486,6 +488,10 @@ impl PtyClient {
         Self::spawn_with_env(command, args, cwd, rows, cols, scrollback_lines, &[])
     }
 
+    /// Spawn with an explicit environment. Agent signal tracking (the OSC / bell
+    /// [`crate::attention::AttentionScanner`]) is ON: this is the path agent tabs
+    /// use. Companion terminals want it off and go through
+    /// [`PtyClient::spawn_with_env_opts`].
     pub fn spawn_with_env(
         command: &str,
         args: &[String],
@@ -494,6 +500,26 @@ impl PtyClient {
         cols: u16,
         scrollback_lines: usize,
         env: &[(String, String)],
+    ) -> Result<Self> {
+        Self::spawn_with_env_opts(command, args, cwd, rows, cols, scrollback_lines, env, true)
+    }
+
+    /// Spawn with an explicit environment and control over agent signal tracking.
+    /// When `track_agent_signals` is false the reader loop skips the attention
+    /// scanner entirely, so `take_attention` stays `false` and `progress_report`
+    /// stays `None` for the life of the client. Companion terminals pass `false`:
+    /// they are plain shells, not agents, so scanning their every byte for OSC /
+    /// bell signals only burns cycles and could raise spurious attention.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_env_opts(
+        command: &str,
+        args: &[String],
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        scrollback_lines: usize,
+        env: &[(String, String)],
+        track_agent_signals: bool,
     ) -> Result<Self> {
         let pty_system = NativePtySystem::default();
         let pair = pty_system
@@ -554,10 +580,11 @@ impl PtyClient {
         };
 
         let terminal_state = TerminalState::new(rows, cols, scrollback_lines);
-        // Grab the shared bell flag before the terminal moves behind the mutex,
-        // so the client can consume bell events the parser reports.
-        let attention_bell = terminal_state.bell_flag();
         let terminal = Arc::new(Mutex::new(terminal_state));
+        // The bell flag is driven by the raw-byte scanner in the reader loop (the
+        // single bell-detection path), not by the terminal emulator, so it is an
+        // independent flag like `attention_notify`.
+        let attention_bell = Arc::new(AtomicBool::new(false));
         let writer = PtyWriter::spawn(pty_writer);
         let writer_tx = writer.sender();
         let exited = Arc::new(AtomicBool::new(false));
@@ -578,6 +605,7 @@ impl PtyClient {
         let scroll_paused_ref = Arc::clone(&scroll_paused);
         let pending_bytes_ref = Arc::clone(&pending_bytes);
         let subscribers_ref = Arc::clone(&subscribers);
+        let attention_bell_ref = Arc::clone(&attention_bell);
         let attention_notify_ref = Arc::clone(&attention_notify);
         let progress_ref = Arc::clone(&progress);
         let reader_thread = thread::spawn(move || {
@@ -592,8 +620,10 @@ impl PtyClient {
                 scroll_paused_ref,
                 pending_bytes_ref,
                 subscribers_ref,
+                attention_bell_ref,
                 attention_notify_ref,
                 progress_ref,
+                track_agent_signals,
             );
         });
 
@@ -630,15 +660,21 @@ impl PtyClient {
         scroll_paused: Arc<AtomicBool>,
         pending_bytes: Arc<Mutex<PendingIngest>>,
         subscribers: SubscriberList,
+        attention_bell: Arc<AtomicBool>,
         attention_notify: Arc<AtomicBool>,
         progress: Arc<Mutex<Option<ProgressReport>>>,
+        track_agent_signals: bool,
     ) {
         let mut buf = [0u8; 4096];
-        // Raw-byte scanner for OSC notifications and progress reports. Lives on
-        // the reader thread's stack so its cross-chunk carry persists between
-        // reads. Runs on every chunk regardless of scroll-pause, so a
-        // notification is never lost while the user browses scrollback.
+        // Raw-byte scanner for bell / OSC notifications and progress reports. Lives
+        // on the reader thread's stack so its cross-chunk carry persists between
+        // reads. It is the SINGLE detection path for all three signals (the
+        // emulator's own `Event::Bell` is intentionally not used), and it runs on
+        // every chunk before the scroll-pause branch, so no signal is lost while
+        // the user browses scrollback. Only agent tabs track signals; companion
+        // terminals leave the scanner unused.
         let mut scanner = crate::attention::AttentionScanner::new();
+        let mut overflow_seen = 0u64;
         loop {
             match crate::io_retry::retry_on_interrupt(|| reader.read(&mut buf)) {
                 Ok(0) => {
@@ -649,20 +685,34 @@ impl PtyClient {
                     let data = &buf[..n];
 
                     // Scan for attention/progress signals before any pause branch
-                    // so both are detected even while ingestion is paused.
-                    for event in scanner.scan(data) {
-                        match event {
-                            crate::attention::AttentionEvent::Notify => {
-                                attention_notify.store(true, Ordering::Release);
-                            }
-                            crate::attention::AttentionEvent::Progress { working } => {
-                                if let Ok(mut slot) = progress.lock() {
-                                    *slot = Some(ProgressReport {
-                                        working,
-                                        at: Instant::now(),
-                                    });
+                    // so all are detected even while ingestion is paused.
+                    if track_agent_signals {
+                        for event in scanner.scan(data) {
+                            match event {
+                                crate::attention::AttentionEvent::Bell => {
+                                    attention_bell.store(true, Ordering::Release);
+                                }
+                                crate::attention::AttentionEvent::Notify => {
+                                    attention_notify.store(true, Ordering::Release);
+                                }
+                                crate::attention::AttentionEvent::Progress { working } => {
+                                    if let Ok(mut slot) = progress.lock() {
+                                        *slot = Some(ProgressReport {
+                                            working,
+                                            at: Instant::now(),
+                                        });
+                                    }
                                 }
                             }
+                        }
+                        // A runaway unterminated sequence was dropped: surface it
+                        // at debug level (the scanner stays pure and only counts).
+                        let drops = scanner.overflow_drops();
+                        if drops != overflow_seen {
+                            overflow_seen = drops;
+                            logger::debug(
+                                "attention scanner dropped an over-long unterminated escape sequence",
+                            );
                         }
                     }
 
@@ -1246,12 +1296,6 @@ impl TerminalState {
             .any(|indexed| !indexed.cell.c.is_whitespace())
     }
 
-    /// Clone the shared bell flag so the owning [`PtyClient`] can consume bell
-    /// events the parser reported.
-    fn bell_flag(&self) -> Arc<AtomicBool> {
-        self.event_proxy.bell_flag()
-    }
-
     /// Count the number of distinct viewport rows that contain at least one
     /// non-whitespace character.
     fn visible_line_count(&self) -> usize {
@@ -1538,12 +1582,6 @@ impl TerminalState {
 struct EventProxy {
     pending: Arc<Mutex<PendingEvents>>,
     size: Arc<Mutex<(u16, u16)>>,
-    /// Set whenever the terminal parser reports a `Bell` event (the classic
-    /// terminal ding, `0x07`). Consumed by [`PtyClient::take_attention`] via the
-    /// clone the client holds. The emulator delivers `Event::Bell` for every
-    /// ding but dux otherwise drops it; capturing it here is how a bell becomes
-    /// an attention signal.
-    bell: Arc<AtomicBool>,
 }
 
 impl EventProxy {
@@ -1551,13 +1589,7 @@ impl EventProxy {
         Self {
             pending: Arc::new(Mutex::new(PendingEvents::default())),
             size: Arc::new(Mutex::new((rows, cols))),
-            bell: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    /// Clone the shared bell flag so the owning [`PtyClient`] can consume it.
-    fn bell_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.bell)
     }
 
     fn push_bytes(&self, bytes: &[u8]) {
@@ -1592,9 +1624,11 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => self.push_bytes(text.as_bytes()),
-            // The terminal ding: record it as an attention signal. The owning
-            // client consumes and config-gates it (`attention_on_bell`).
-            Event::Bell => self.bell.store(true, Ordering::Release),
+            // The terminal ding (`Event::Bell`) is deliberately NOT handled here.
+            // The raw-byte `AttentionScanner` in the reader loop is the single
+            // bell-detection path (it sees a bare `0x07` even while ingestion is
+            // scroll-paused); handling it here as well would double-fire when
+            // `resume_ingestion` replays paused bytes through `process`.
             Event::ColorRequest(index, formatter) => self.push_color_request(index, formatter),
             Event::TextAreaSizeRequest(formatter) => {
                 let (rows, cols) = self.size.lock().map(|size| *size).unwrap_or((24, 80));
@@ -1895,18 +1929,89 @@ mod tests {
         rows
     }
 
+    /// Wait until the PTY viewport shows `needle` (proving the reader thread has
+    /// consumed the child's output), or panic after a bounded wait.
+    fn wait_for_viewport(client: &PtyClient, needle: &str) {
+        for _ in 0..50 {
+            let snapshot = client.snapshot();
+            if viewport_lines(&snapshot)
+                .iter()
+                .any(|line| line.contains(needle))
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {needle:?} in the PTY viewport");
+    }
+
+    // A one-shot child that emits, in order: an OSC 9;4 working progress report, an
+    // OSC 9 notification, a bare bell, then a visible "X" sync marker.
+    const SIGNAL_EMITTER: &str = "printf '\\033]9;4;1;50\\007\\033]9;hi\\007\\007X'";
+
     #[test]
-    fn bell_event_sets_attention_flag() {
-        // The emulator must deliver `Event::Bell` for a `0x07` byte and our
-        // `EventProxy` must capture it into the shared bell flag. This guards the
-        // one-line bell hook the attention feature relies on.
-        let mut terminal = TerminalState::with_scrollback(3, 12, 100);
-        let bell = terminal.bell_flag();
-        assert!(!bell.load(Ordering::Acquire));
-        terminal.process(b"\x07");
+    fn agent_signals_are_scanned_on_the_tracked_path() {
+        // The raw-byte scanner (not the emulator) is the single detection path for
+        // the bell, OSC notifications, and progress. On the agent (tracked) spawn
+        // path all three land: a bare bell/notification arms `take_attention` and
+        // a progress report populates `progress_report`.
+        let args = vec!["-c".to_string(), SIGNAL_EMITTER.to_string()];
+        let client =
+            PtyClient::spawn_with_env_opts("/bin/sh", &args, Path::new("."), 5, 40, 100, &[], true)
+                .expect("spawn pty");
+        wait_for_viewport(&client, "X");
+
+        let report = client.progress_report().expect("a progress report");
+        assert!(report.working, "9;4;1 is a working progress state");
         assert!(
-            bell.load(Ordering::Acquire),
-            "a 0x07 byte should raise the bell flag"
+            client.take_attention(true),
+            "the notification and bell must arm attention"
+        );
+    }
+
+    #[test]
+    fn bell_alone_is_gated_by_count_bell() {
+        // A bare bell (no notification) must only arm attention when the caller
+        // opts to count bells, mirroring the `attention_on_bell` preference.
+        let args = vec!["-c".to_string(), "printf '\\007X'".to_string()];
+        let client =
+            PtyClient::spawn_with_env_opts("/bin/sh", &args, Path::new("."), 5, 40, 100, &[], true)
+                .expect("spawn pty");
+        wait_for_viewport(&client, "X");
+
+        // count_bell = false: the bell does not arm attention (and it is drained).
+        assert!(
+            !client.take_attention(false),
+            "a bell must be ignored when bells are not counted"
+        );
+    }
+
+    #[test]
+    fn companion_terminals_never_scan_agent_signals() {
+        // Companion terminals spawn with tracking OFF: the very same bytes must
+        // leave `take_attention` and `progress_report` inert, so a plain shell can
+        // never raise a spurious attention flag or working override.
+        let args = vec!["-c".to_string(), SIGNAL_EMITTER.to_string()];
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            &[],
+            false,
+        )
+        .expect("spawn pty");
+        wait_for_viewport(&client, "X");
+
+        assert!(
+            client.progress_report().is_none(),
+            "an untracked companion must record no progress"
+        );
+        assert!(
+            !client.take_attention(true),
+            "an untracked companion must never arm attention"
         );
     }
 

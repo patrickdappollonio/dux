@@ -1,6 +1,7 @@
 import { Bot, Check, ChevronDown, Ellipsis, Plus, Replace, X } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { AttentionDot } from "@/components/AttentionDot"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -161,16 +162,8 @@ function TabPill({
         )}
       />
       {/* Amber attention dot on the flagged tab's pill (a permission prompt or a
-          finished turn on this specific tab). Gently pulses; static under
-          reduced motion. */}
-      {tab.needs_attention && (
-        <SimpleTooltip content="Needs attention">
-          <span
-            aria-label="Needs attention"
-            className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-pulse motion-reduce:animate-none"
-          />
-        </SimpleTooltip>
-      )}
+          finished turn on this specific tab). */}
+      {tab.needs_attention && <AttentionDot />}
       <span className="max-w-40 truncate">{label}</span>
       {/* The ⋯ trigger consumes NO layout space at rest: the wrapper's max-width
           collapses to zero (not opacity-only, which would still reserve the

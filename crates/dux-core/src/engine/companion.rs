@@ -39,7 +39,11 @@ impl Engine {
             })
             .unwrap_or_default();
 
-        let client = PtyClient::spawn_with_env(
+        // A companion terminal is a plain shell, not an agent, so it opts out of
+        // agent-signal tracking: its bytes are never scanned for OSC/bell
+        // attention signals (which it does not consume) and it can never raise a
+        // spurious attention flag.
+        let client = PtyClient::spawn_with_env_opts(
             &self.config.terminal.command,
             &self.config.terminal.args,
             Path::new(&session.worktree_path),
@@ -47,6 +51,7 @@ impl Engine {
             80,
             self.config.ui.agent_scrollback_lines,
             &env,
+            false,
         )?;
 
         self.terminal_counter += 1;

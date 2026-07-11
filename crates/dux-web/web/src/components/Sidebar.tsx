@@ -47,6 +47,7 @@ import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { ConnDot } from "@/components/ConnDot"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { AttentionDot } from "@/components/AttentionDot"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -308,15 +309,8 @@ function SessionSubItem({
             )}
           />
           {/* Amber attention dot: the agent needs the user (a permission prompt
-              or a finished turn). Gently pulses; static under reduced motion. */}
-          {attention && (
-            <SimpleTooltip content="Needs attention" side="right">
-              <span
-                aria-label="Needs attention"
-                className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-pulse motion-reduce:animate-none"
-              />
-            </SimpleTooltip>
-          )}
+              or a finished turn). */}
+          {attention && <AttentionDot side="right" />}
           {/* Its name also dims with a soft white highlight sweeping through (see
               .agent-name-shimmer), a second working cue alongside the bob. The
               base class is always applied so the fill cross-fades back to solid

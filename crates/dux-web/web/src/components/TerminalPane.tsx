@@ -52,6 +52,7 @@ import {
   onPtyOwner,
 } from "@/lib/ptyOwnership"
 import { deviceLabel } from "@/lib/deviceLabel"
+import { VIEWED_PING_INTERVAL_MS, shouldSendViewed } from "@/lib/viewedPing"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
@@ -904,9 +905,32 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // streaming in, and resizing mid-replay corrupts the scroll position. The
     // empty-write callback fires only once the queued writes have drained, so we
     // fit + resize against a settled buffer.
+    // Periodic "user is looking at this tab" ping (see viewedPing.ts). While we
+    // own input AND the document is visible, tell the server we are watching so
+    // the agent's attention flag stays down without keystrokes, mirroring the
+    // TUI's per-tick focus stamp. A read-only observer or a backgrounded owner
+    // never pings (which would suppress attention for everyone on the shared
+    // engine, or on a tab whose PTY socket is merely open). Ownership-gain is
+    // handled by the [isOwner] effect below; becoming-visible is handled in
+    // `resyncToForeground`; this covers the steady-state case.
+    const pingViewed = () => {
+      if (
+        shouldSendViewed({
+          isOwner: isOwnerRef.current,
+          visible: document.visibilityState === "visible",
+        })
+      ) {
+        pty.sendViewed()
+      }
+    }
+    const viewedTimer = setInterval(pingViewed, VIEWED_PING_INTERVAL_MS)
+
     let resyncTimer: ReturnType<typeof setTimeout> | undefined
     const resyncToForeground = () => {
       if (document.visibilityState !== "visible") return
+      // Becoming visible is a fresh "looking at it" moment: ping immediately so
+      // the flag drops without waiting for the next interval tick.
+      pingViewed()
       clearTimeout(resyncTimer)
       resyncTimer = setTimeout(() => {
         term.write("", () => {
@@ -927,6 +951,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       clearTimeout(jiggleTimer)
       clearTimeout(resyncTimer)
       clearTimeout(longPressTimer)
+      clearInterval(viewedTimer)
       container.removeEventListener("mousedown", onMouseDown)
       container.removeEventListener("mouseup", onMouseUp)
       container.removeEventListener("contextmenu", onContextMenuPasteGuard)
@@ -973,6 +998,15 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       setTakeoverDevice(mine ? null : (device ?? null))
     })
   }, [id])
+
+  // Gaining ownership is a fresh "looking at it" moment: ping the server at once
+  // (when visible) so the agent's attention flag drops immediately, rather than
+  // waiting up to one interval for the periodic viewed ping in the mount effect.
+  useEffect(() => {
+    if (shouldSendViewed({ isOwner, visible: document.visibilityState === "visible" })) {
+      ptyRef.current?.sendViewed()
+    }
+  }, [isOwner])
 
   // Reclaim ownership from another device. Sending our current size IS the claim
   // server-side (most-recent claim wins), so the PTY snaps back to this viewport

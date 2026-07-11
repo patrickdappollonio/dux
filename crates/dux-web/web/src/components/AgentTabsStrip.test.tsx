@@ -107,4 +107,16 @@ describe("AgentTabsStrip", () => {
     fireEvent.click(menu.getByText("opencode"))
     expect(addTabMock).toHaveBeenCalledWith("s1", "opencode")
   })
+
+  it("marks the flagged tab's pill with an attention dot", () => {
+    const s = session()
+    s.tabs[1].needs_attention = true
+    render(<AgentTabsStrip session={s} activeTabId="s1" maxTabs={20} />)
+    expect(screen.getAllByLabelText("Needs attention")).toHaveLength(1)
+  })
+
+  it("renders no attention dot when no tab needs attention", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    expect(screen.queryByLabelText("Needs attention")).toBeNull()
+  })
 })
