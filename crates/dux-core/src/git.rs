@@ -791,18 +791,20 @@ pub fn remove_worktree(
     })
 }
 
-/// Server-side cap on the number of entries returned by [`worktree_files`].
-/// Above this a `truncated` flag is set so the client can show a banner.
-/// 50 000 entries is ~5 MB of JSON at 100 bytes/path — reasonable for a
-/// single HTTP response. Most repos are well under 10 000.
+/// Default cap on the number of entries returned by [`worktree_files`]. This
+/// backs the web editor's file-SEARCH index only (the tree is a lazy,
+/// per-directory [`list_dir`] browser with no cap); the effective value comes
+/// from the `[server] search_index_max_files` config key, for which this is
+/// the default. 50 000 entries is ~5 MB of JSON at 100 bytes/path — reasonable
+/// for a single HTTP response. Most repos are well under 10 000.
 pub const WORKTREE_FILES_CAP: usize = 50_000;
 
 /// The file listing returned by [`worktree_files`].
 #[derive(Debug, Clone)]
 pub struct WorktreeFileList {
     pub files: Vec<String>,
-    /// `true` when the walk hit [`WORKTREE_FILES_CAP`] and some entries were
-    /// omitted. The client should surface a banner.
+    /// `true` when the walk hit the caller's `max_files` cap and some entries
+    /// were omitted. The client may surface a subtle hint.
     pub truncated: bool,
 }
 
@@ -812,9 +814,11 @@ pub struct WorktreeFileList {
 /// The rest of `.git/` is included so the editor can open `.git/config`,
 /// `.git/HEAD`, hooks, etc. as read-only. Symlinked directories are NOT
 /// recursed (`follow_links(false)`); a symlinked dir appears as a leaf entry.
-/// Returns at most [`WORKTREE_FILES_CAP`] entries; sets `truncated` if
-/// more exist.
-pub fn worktree_files(worktree_path: &Path) -> Result<WorktreeFileList> {
+///
+/// This feeds the web editor's file-SEARCH index, not its tree (the tree uses
+/// [`list_dir`]). Returns at most `max_files` entries and sets `truncated` if
+/// more exist; `max_files == 0` disables the cap entirely.
+pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<WorktreeFileList> {
     use walkdir::WalkDir;
 
     let wt = worktree_path.to_path_buf();
@@ -859,7 +863,7 @@ pub fn worktree_files(worktree_path: &Path) -> Result<WorktreeFileList> {
             continue;
         }
         if let Ok(rel) = entry.path().strip_prefix(worktree_path) {
-            if files.len() >= WORKTREE_FILES_CAP {
+            if max_files > 0 && files.len() >= max_files {
                 truncated = true;
                 break;
             }
@@ -1932,7 +1936,7 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "d").unwrap();
         std::fs::write(p.join("src/debug.log"), "e").unwrap();
 
-        let result = worktree_files(p).unwrap();
+        let result = worktree_files(p, WORKTREE_FILES_CAP).unwrap();
         let files = result.files;
         assert!(files.contains(&"tracked.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
@@ -1982,7 +1986,7 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "x").unwrap();
         // .git/config always exists in an initialized repo.
 
-        let result = worktree_files(p).unwrap();
+        let result = worktree_files(p, WORKTREE_FILES_CAP).unwrap();
 
         // Tracked file is included.
         assert!(
@@ -2165,17 +2169,35 @@ mod tests {
     fn worktree_files_walk_sets_truncated_when_cap_exceeded() {
         let repo = init_test_repo();
         let p = repo.path();
-        // Create enough files to exceed the cap.
+        // Create enough files to exceed a small explicit cap.
         std::fs::create_dir(p.join("bulk")).unwrap();
-        for i in 0..WORKTREE_FILES_CAP + 5 {
+        for i in 0..25 {
             std::fs::write(p.join(format!("bulk/f{i}.txt")), "x").unwrap();
         }
-        let result = worktree_files(p).unwrap();
+        let result = worktree_files(p, 20).unwrap();
         assert!(result.truncated, "must set truncated when walk exceeds cap");
-        assert_eq!(
-            result.files.len(),
-            WORKTREE_FILES_CAP,
-            "must return exactly cap entries"
+        assert_eq!(result.files.len(), 20, "must return exactly cap entries");
+    }
+
+    #[test]
+    fn worktree_files_zero_cap_never_truncates() {
+        let repo = init_test_repo();
+        let p = repo.path();
+        std::fs::create_dir(p.join("bulk")).unwrap();
+        for i in 0..50 {
+            std::fs::write(p.join(format!("bulk/f{i}.txt")), "x").unwrap();
+        }
+        let result = worktree_files(p, 0).unwrap();
+        assert!(!result.truncated, "max_files == 0 must disable the cap");
+        assert!(
+            result
+                .files
+                .iter()
+                .filter(|f| f.starts_with("bulk/"))
+                .count()
+                == 50,
+            "all bulk files must be listed: {}",
+            result.files.len()
         );
     }
 

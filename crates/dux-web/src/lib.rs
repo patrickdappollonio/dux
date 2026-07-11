@@ -326,6 +326,7 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
         engine.config.server.max_websocket_tab_connections,
         engine.config.server.max_websocket_tabs_per_agent,
     );
+    let search_index_max_files = engine.config.server.search_index_max_files;
     let engine_allowed_hosts = engine.config.server.allowed_hosts.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -392,6 +393,7 @@ fn run_plain_http(paths: DuxPaths, addrs: Vec<PlanAddr>, version: String) -> Res
                     max_ws_caps.3,
                     max_ws_caps.4,
                 )
+                .with_search_index_max_files(search_index_max_files)
                 .with_host_allowlist(bound_ips, engine_allowed_hosts.clone()),
         );
 
@@ -643,6 +645,7 @@ pub fn serve_with_engine(
         engine.config.server.max_websocket_tab_connections,
         engine.config.server.max_websocket_tabs_per_agent,
     );
+    let flip_search_index_max_files = engine.config.server.search_index_max_files;
 
     // The std listeners travel through the flip (the TUI bound them BEFORE tearing
     // down, so there is no rebind race); tokio needs them non-blocking. Adoption
@@ -714,6 +717,7 @@ pub fn serve_with_engine(
                     flip_max_ws.3,
                     flip_max_ws.4,
                 )
+                .with_search_index_max_files(flip_search_index_max_files)
                 .with_host_allowlist(flip_bound_ips, flip_allowed_hosts),
         )
     };

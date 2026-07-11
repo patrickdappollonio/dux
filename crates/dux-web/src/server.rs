@@ -77,6 +77,11 @@ pub struct AppState {
     /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
     /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
     pub max_ws_tabs_per_agent: u32,
+    /// Cap on the editor's file-search index flat walk
+    /// (`[server] search_index_max_files`). Bounds only `/files/list` (the
+    /// search index); the lazy `/files/tree` browser is never capped. `0`
+    /// disables the cap.
+    pub search_index_max_files: usize,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -184,6 +189,11 @@ pub struct RouterParams {
     /// Per-agent live-tab-socket sub-quota (`[server] max_websocket_tabs_per_agent`).
     /// Defaults to [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT`].
     pub max_websocket_tabs_per_agent: u32,
+    /// Cap on the editor's file-search index flat walk
+    /// (`[server] search_index_max_files`). Defaults to
+    /// [`dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES`]; the serve paths
+    /// override it from config via [`with_search_index_max_files`].
+    pub search_index_max_files: usize,
     /// The IPs the server actually bound to. When non-empty, `build_app` wraps
     /// the router with the Host allowlist (DNS-rebinding defense). An empty vec
     /// disables the guard; used by tests that do not exercise the host guard.
@@ -211,9 +221,18 @@ impl RouterParams {
                 dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
             max_websocket_tab_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
             max_websocket_tabs_per_agent: dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
+            search_index_max_files: dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
         }
+    }
+
+    /// Set the file-search index cap from `[server] search_index_max_files`.
+    /// The serve paths call this so the configured value (not just the default)
+    /// bounds the flat walk behind `/files/list`.
+    pub fn with_search_index_max_files(mut self, max_files: usize) -> Self {
+        self.search_index_max_files = max_files;
+        self
     }
 
     /// Attach a real console + the access-log toggle. The CLI serve paths call
@@ -359,6 +378,7 @@ pub fn build_app(
         )),
         tab_ws_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         max_ws_tabs_per_agent: params.max_websocket_tabs_per_agent,
+        search_index_max_files: params.search_index_max_files,
         event_bus,
         changes,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),

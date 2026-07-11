@@ -10,10 +10,11 @@
 //! escape, `worktree_file::{read,write}_file` additionally refuse symlinks and
 //! (on create) validate the parent stays inside the tree. There is deliberately
 //! NO git-tracked/changed-file gate here — that is the changes pane's concern;
-//! the editor works against the worktree itself. The `list` endpoint returns
-//! git's file set (tracked, untracked-not-ignored, AND loose gitignored files —
-//! fully-ignored directories like node_modules are collapsed out) purely so the
-//! tree is a clean, finite browse surface — it does not bound what is editable.
+//! the editor works against the worktree itself. The `tree` endpoint lazily
+//! lists exactly ONE directory per request (no recursion, no cap) and backs the
+//! editor's file tree; the `list` endpoint is a flat filesystem walk capped by
+//! `[server] search_index_max_files` that backs ONLY the "Search files…" box.
+//! Neither bounds what is editable.
 //! `open-in-editor` only spawns an editor (no extra capability beyond read/write
 //! given the single-tenant trusted-access model); it is gated to local-access
 //! clients in the UI and is a harmless no-op when spawned on a headless server.
@@ -127,7 +128,10 @@ async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>)
         Ok(w) => w,
         Err(r) => return r,
     };
-    match tokio::task::spawn_blocking(move || dux_core::git::worktree_files(&worktree)).await {
+    let max_files = state.search_index_max_files;
+    match tokio::task::spawn_blocking(move || dux_core::git::worktree_files(&worktree, max_files))
+        .await
+    {
         Ok(Ok(listing)) => Json(FileList {
             files: listing.files,
             truncated: listing.truncated,
