@@ -79,6 +79,9 @@ class FakePtySocket {
 vi.mock("@xterm/xterm", () => ({ Terminal: TermStub }))
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FitStub }))
 vi.mock("@/lib/suppressViewerReports", () => ({ suppressViewerReports: () => {} }))
+vi.mock("@/lib/agentNotifications", () => ({
+  registerAgentNotifications: () => () => {},
+}))
 vi.mock("@/components/MacroPopover", () => ({ MacroPopover: () => null }))
 vi.mock("@/lib/ptySocket", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ptySocket")>()

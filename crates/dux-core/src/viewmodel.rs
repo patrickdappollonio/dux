@@ -69,6 +69,15 @@ pub struct BootstrapView {
     /// terminal auto-copies it (default true). Read by the terminal pane and the
     /// web command palette's toggle.
     pub copy_on_select: bool,
+    /// Mirrors `config.capabilities.web_notifications`: whether the web UI bridges
+    /// an agent's notification sequences to a browser desktop Notification (default
+    /// true). The browser still only fires after the visitor grants permission and
+    /// only while the tab is backgrounded. Older servers omit it (treated as true).
+    pub web_notifications: bool,
+    /// Mirrors `config.capabilities.hyperlinks`: whether the web terminal renders
+    /// OSC 8 hyperlinks as clickable (http/https only). Older servers omit it
+    /// (treated as true).
+    pub hyperlinks: bool,
     /// Mirrors `config.ui.pr_banner_position` ("top" | "bottom"). Desktop web
     /// places the PR banner lane above the terminal when "top" and below it when
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
@@ -549,6 +558,8 @@ impl Engine {
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
+            web_notifications: self.config.capabilities.web_notifications,
+            hyperlinks: self.config.capabilities.hyperlinks,
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
@@ -1227,6 +1238,8 @@ mod tests {
             "gh_available",
             "github_integration",
             "copy_on_select",
+            "web_notifications",
+            "hyperlinks",
             "pr_banner_position",
             "agent_scrollback_lines",
             "show_changes_pane",

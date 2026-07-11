@@ -76,6 +76,32 @@ pub enum AttentionEvent {
     Progress { working: bool },
 }
 
+/// The class of a captured passthrough sequence, so the engine can gate each kind
+/// independently (clipboard writes are forwarded more conservatively than
+/// notifications).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapturedKind {
+    /// An `OSC 9` / `OSC 777` desktop notification.
+    Notify,
+    /// An `OSC 99` kitty-notification-protocol sequence (any part, including `d=0`
+    /// continuations and `p=close`, so a multi-part notification stays intact).
+    KittyNotify,
+    /// An `OSC 9;4` progress report.
+    Progress,
+    /// An `OSC 52` clipboard SET (never a `?` read).
+    ClipboardSet,
+}
+
+/// A whitelisted escape sequence captured verbatim (in canonical `ESC ] … ESC \`
+/// form) for forwarding to the host terminal. Distinct from [`AttentionEvent`]:
+/// events drive dux's own in-app attention chrome, captures are the raw bytes
+/// replayed to the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedSeq {
+    pub kind: CapturedKind,
+    pub bytes: Vec<u8>,
+}
+
 /// Which kind of sequence the scanner is mid-way through when it carries an
 /// incomplete tail across a chunk boundary. Recorded alongside the resume offset
 /// so the offset is only reapplied when the next chunk re-derives the same kind.
@@ -134,6 +160,17 @@ impl AttentionScanner {
     /// Scan the next chunk of raw output and return every complete signal found.
     /// Any trailing partial sequence is carried to the next call.
     pub fn scan(&mut self, data: &[u8]) -> Vec<AttentionEvent> {
+        self.scan_full(data, None)
+    }
+
+    /// Like [`AttentionScanner::scan`], but additionally appends every whitelisted
+    /// passthrough sequence (in canonical form) to `capture` when it is `Some`.
+    /// The `capture = None` path is byte-for-byte identical to `scan`.
+    pub fn scan_full(
+        &mut self,
+        data: &[u8],
+        capture: Option<&mut Vec<CapturedSeq>>,
+    ) -> Vec<AttentionEvent> {
         let mut events = Vec::new();
 
         // Prepend the carried partial (if any) to this chunk.
@@ -141,7 +178,7 @@ impl AttentionScanner {
         let resume = self.resume.take();
         buf.extend_from_slice(data);
 
-        let (consumed, carry_state) = scan_buf(&buf, &mut events, resume);
+        let (consumed, carry_state) = scan_buf(&buf, &mut events, resume, capture);
         let tail = &buf[consumed..];
 
         // Retain the unconsumed tail as the new carry, unless it has grown past
@@ -178,6 +215,7 @@ fn scan_buf(
     buf: &[u8],
     events: &mut Vec<AttentionEvent>,
     resume: Option<CarryResume>,
+    mut capture: Option<&mut Vec<CapturedSeq>>,
 ) -> (usize, Option<CarryResume>) {
     let mut i = 0;
     while i < buf.len() {
@@ -210,6 +248,11 @@ fn scan_buf(
                         if let Some(ev) = classify_osc(payload) {
                             events.push(ev);
                         }
+                        if let Some(cap) = capture.as_deref_mut()
+                            && let Some(seq) = capture_osc(payload)
+                        {
+                            cap.push(seq);
+                        }
                         i += 2 + payload_len + term_len;
                     }
                     TermScan::Incomplete { safe_offset } => {
@@ -234,7 +277,9 @@ fn scan_buf(
                         if let Some(unwrapped) = tmux_unwrap(inner) {
                             // The unwrapped payload is complete (bounded by the DCS
                             // terminator), so scan it fully and ignore its carry.
-                            scan_buf(&unwrapped, events, None);
+                            // Capture from the unwrapped bytes so what we record is
+                            // canonical/unwrapped (dux re-wraps on forward).
+                            scan_buf(&unwrapped, events, None, capture.as_deref_mut());
                         }
                         i += 2 + inner_len + term_len;
                     }
@@ -373,12 +418,136 @@ fn classify_osc(payload: &[u8]) -> Option<AttentionEvent> {
                 Some(AttentionEvent::Notify)
             }
         }
+        b"99" => {
+            // OSC 99 is the kitty notification protocol: `99;<metadata>;<body>`
+            // with colon-separated `key=value` metadata. It counts as attention
+            // only for a FINAL notification (`d` absent or `d=1`) whose payload is
+            // displayable text (`p` absent, `p=title`, or `p=body`); continuations
+            // (`d=0`) and control parts (`p=close`/`?`/`icon`/`buttons`) are not.
+            let rest = rest?;
+            let (metadata, _body) = split_once(rest, b';');
+            kitty_notify_is_attention(metadata).then_some(AttentionEvent::Notify)
+        }
         b"777" => match rest {
             Some(r) if r.starts_with(b"notify") => Some(AttentionEvent::Notify),
             _ => None,
         },
         _ => None,
     }
+}
+
+/// Whether an OSC 99 metadata field (the colon-separated `key=value` part between
+/// the `99;` and the body) denotes a final, displayable notification: `d` absent or
+/// `d=1`, and `p` absent or `title`/`body`.
+fn kitty_notify_is_attention(metadata: &[u8]) -> bool {
+    let mut d_final = true;
+    let mut p_ok = true;
+    for token in metadata.split(|&b| b == b':') {
+        let (key, value) = split_once(token, b'=');
+        match key {
+            b"d" => d_final = value != Some(b"0"),
+            b"p" => p_ok = matches!(value, None | Some(b"title") | Some(b"body")),
+            _ => {}
+        }
+    }
+    d_final && p_ok
+}
+
+/// Whether an OSC 99 metadata field is a `p=?` query (which must never be captured
+/// or forwarded, since a reply would be typed back into dux).
+fn kitty_notify_is_query(metadata: &[u8]) -> bool {
+    metadata.split(|&b| b == b':').any(|token| {
+        let (key, value) = split_once(token, b'=');
+        key == b"p" && value == Some(b"?")
+    })
+}
+
+/// Classify an OSC payload for host PASSTHROUGH capture. Broader than
+/// [`classify_osc`]: it also captures progress reports, clipboard SETs, and every
+/// non-query OSC 99 part (including `d=0` continuations and `p=close`, for protocol
+/// integrity). Returns the canonical `ESC ] <payload> ESC \` bytes to forward.
+fn capture_osc(payload: &[u8]) -> Option<CapturedSeq> {
+    let (cmd, rest) = split_once(payload, b';');
+    let kind = match cmd {
+        b"9" => {
+            let rest = rest?;
+            let (first, prog_rest) = split_once(rest, b';');
+            if first == b"4" {
+                match prog_rest.map(|r| split_once(r, b';').0) {
+                    Some(state) if is_progress_state(state) => CapturedKind::Progress,
+                    // A `9;4` that is not a well-formed progress report is a
+                    // notification whose text merely begins `4;`.
+                    _ => CapturedKind::Notify,
+                }
+            } else if rest.is_empty() {
+                return None;
+            } else {
+                CapturedKind::Notify
+            }
+        }
+        b"99" => {
+            // Capture every OSC 99 part except a `p=?` query, so a multi-part
+            // notification (continuations, then close) reaches the host intact.
+            let rest = rest?;
+            let (metadata, _body) = split_once(rest, b';');
+            if kitty_notify_is_query(metadata) {
+                return None;
+            }
+            CapturedKind::KittyNotify
+        }
+        b"777" => match rest {
+            Some(r) if r.starts_with(b"notify") => CapturedKind::Notify,
+            _ => return None,
+        },
+        b"52" => {
+            // `52;<selection>;<data>`. Forward SET only; never a `?` read, whose
+            // reply would land in dux's own stdin and be typed at the prompt.
+            let rest = rest?;
+            let (_selection, data) = split_once(rest, b';');
+            match data {
+                Some(d) if d != b"?" => CapturedKind::ClipboardSet,
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(CapturedSeq {
+        kind,
+        bytes: canonical_osc(payload),
+    })
+}
+
+/// Rebuild an OSC payload into its canonical `ESC ] <payload> ESC \` byte form,
+/// regardless of the terminator the agent originally used, so forwarded sequences
+/// are uniform.
+fn canonical_osc(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 4);
+    out.push(ESC);
+    out.push(b']');
+    out.extend_from_slice(payload);
+    out.push(ESC);
+    out.push(b'\\');
+    out
+}
+
+/// Wrap raw escape-sequence bytes in a tmux passthrough envelope: the inverse of
+/// [`tmux_unwrap`]. `ESC P tmux ;` + the payload with every `ESC` doubled + `ESC \`.
+/// dux uses this to re-wrap the sequences it captured (and unwrapped) so they pass
+/// through the tmux dux itself runs under.
+pub fn tmux_wrap(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 9);
+    out.extend_from_slice(b"\x1bPtmux;");
+    for &b in bytes {
+        if b == ESC {
+            out.push(ESC);
+            out.push(ESC);
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(ESC);
+    out.push(b'\\');
+    out
 }
 
 /// Whether `s` is a well-formed OSC 9;4 progress state: a 1-2 character ASCII-digit
@@ -657,5 +826,128 @@ mod tests {
         // OSC 0 (window title) and OSC 11 (color query) must not flag attention.
         assert_eq!(scan_once(b"\x1b]0;my title\x07"), vec![]);
         assert_eq!(scan_once(b"\x1b]11;?\x07"), vec![]);
+    }
+
+    // --- OSC 99 (kitty notification protocol) classification ---
+
+    #[test]
+    fn osc99_bare_body_is_notify() {
+        assert_eq!(
+            scan_once(b"\x1b]99;;Build finished\x07"),
+            vec![AttentionEvent::Notify]
+        );
+    }
+
+    #[test]
+    fn osc99_title_and_body_are_notify() {
+        assert_eq!(
+            scan_once(b"\x1b]99;p=title;Hi\x1b\\"),
+            vec![AttentionEvent::Notify]
+        );
+        assert_eq!(
+            scan_once(b"\x1b]99;d=1:p=body;Details\x07"),
+            vec![AttentionEvent::Notify]
+        );
+    }
+
+    #[test]
+    fn osc99_continuation_and_control_are_not_notify() {
+        // d=0 is a continuation, not the final notification.
+        assert_eq!(scan_once(b"\x1b]99;d=0;partial\x07"), vec![]);
+        // p=close tears down a notification; p=? is a query. Neither is attention.
+        assert_eq!(scan_once(b"\x1b]99;p=close;\x07"), vec![]);
+        assert_eq!(scan_once(b"\x1b]99;p=?;\x07"), vec![]);
+    }
+
+    #[test]
+    fn osc99_inside_tmux_envelope_is_notify() {
+        let bytes = b"\x1bPtmux;\x1b\x1b]99;;wrapped\x07\x1b\\";
+        assert_eq!(scan_once(bytes), vec![AttentionEvent::Notify]);
+    }
+
+    // --- capture sink ---
+
+    fn capture_once(bytes: &[u8]) -> Vec<CapturedSeq> {
+        let mut cap = Vec::new();
+        AttentionScanner::new().scan_full(bytes, Some(&mut cap));
+        cap
+    }
+
+    #[test]
+    fn capture_notify_progress_and_clipboard() {
+        let caps =
+            capture_once(b"\x1b]9;done\x07\x1b]9;4;1;50\x07\x1b]52;c;aGVsbG8=\x07\x1b]99;;hi\x07");
+        let kinds: Vec<CapturedKind> = caps.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                CapturedKind::Notify,
+                CapturedKind::Progress,
+                CapturedKind::ClipboardSet,
+                CapturedKind::KittyNotify,
+            ]
+        );
+        // Canonical ST-terminated form regardless of the original terminator.
+        assert_eq!(caps[0].bytes, b"\x1b]9;done\x1b\\");
+    }
+
+    #[test]
+    fn capture_canonicalizes_bel_to_st() {
+        let caps = capture_once(b"\x1b]9;ping\x07");
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].bytes, b"\x1b]9;ping\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn capture_never_records_clipboard_read() {
+        // OSC 52 read (`?`) must never be captured (a reply would misroute).
+        assert!(capture_once(b"\x1b]52;c;?\x07").is_empty());
+    }
+
+    #[test]
+    fn capture_never_records_kitty_query() {
+        assert!(capture_once(b"\x1b]99;p=?;\x07").is_empty());
+    }
+
+    #[test]
+    fn capture_records_kitty_continuation_and_close() {
+        // Continuations and close are captured for protocol integrity even though
+        // they are not attention events.
+        let caps = capture_once(b"\x1b]99;d=0;part\x07\x1b]99;p=close;\x07");
+        assert_eq!(caps.len(), 2);
+        assert!(caps.iter().all(|c| c.kind == CapturedKind::KittyNotify));
+    }
+
+    #[test]
+    fn capture_ignores_unrelated_osc() {
+        // Title, color query, and hyperlinks are not passthrough-captured.
+        assert!(capture_once(b"\x1b]0;title\x07").is_empty());
+        assert!(capture_once(b"\x1b]8;;https://x\x07").is_empty());
+    }
+
+    #[test]
+    fn capture_from_inside_tmux_envelope_is_unwrapped() {
+        let caps = capture_once(b"\x1bPtmux;\x1b\x1b]9;msg\x07\x1b\\");
+        assert_eq!(caps.len(), 1);
+        // Captured bytes are the canonical unwrapped sequence.
+        assert_eq!(caps[0].bytes, b"\x1b]9;msg\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn capture_none_path_matches_scan() {
+        // The capture=None path must be byte-identical to plain scan.
+        let mut a = AttentionScanner::new();
+        let mut b = AttentionScanner::new();
+        let data = b"\x1b]9;hi\x07\x1b]9;4;1;0\x07text";
+        assert_eq!(a.scan(data), b.scan_full(data, None));
+    }
+
+    #[test]
+    fn tmux_wrap_is_inverse_of_unwrap() {
+        let payload = b"\x1b]9;hello\x1b\\".to_vec();
+        let wrapped = tmux_wrap(&payload);
+        // Strip the ESC P and trailing ESC \ to get the DCS inner content.
+        let inner = &wrapped[2..wrapped.len() - 2];
+        assert_eq!(tmux_unwrap(inner), Some(payload));
     }
 }

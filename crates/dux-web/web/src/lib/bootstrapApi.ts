@@ -39,6 +39,15 @@ export interface Bootstrap {
   /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
    * terminal auto-copies it to the clipboard (default true). */
   copy_on_select: boolean
+  /** Mirrors `config.capabilities.web_notifications`: whether the web UI bridges
+   * an agent's notification sequences to a browser desktop Notification. Still
+   * gated on visitor permission and a backgrounded tab. Older servers omit it,
+   * so consumers fall back to true. */
+  web_notifications?: boolean
+  /** Mirrors `config.capabilities.hyperlinks`: whether the web terminal renders
+   * OSC 8 hyperlinks as clickable (http/https only). Older servers omit it, so
+   * consumers fall back to true. */
+  hyperlinks?: boolean
   /** Mirrors `config.ui.pr_banner_position`: "bottom" places the PR lane below
    * the terminal, anything else above. (Server sends a free string; the two
    * known values are the only ones the UI branches on.) */

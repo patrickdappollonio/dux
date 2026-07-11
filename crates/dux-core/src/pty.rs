@@ -4,6 +4,7 @@
 //! `CellColor`/`CellModifier` let each surface convert to its own medium (the
 //! TUI to `ratatui` types; the web to CSS) at its render boundary.
 
+use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsStr;
 use std::io::Write;
@@ -455,7 +456,23 @@ pub struct PtyClient {
     /// emitted one. Read (not consumed) by the engine's working predicate; the
     /// engine applies its own staleness window.
     progress: Arc<Mutex<Option<ProgressReport>>>,
+    /// Bounded ring of whitelisted passthrough sequences the reader loop captured
+    /// (notifications, progress, clipboard SETs, kitty notifications) awaiting
+    /// forwarding to the host terminal. Drained by [`PtyClient::take_passthrough`].
+    /// Capped ([`PASSTHROUGH_RING_CAP`] entries, [`PASSTHROUGH_SEQ_MAX`] bytes each)
+    /// so a headless server that never drains, or an agent that floods sequences,
+    /// cannot grow it without bound; the oldest entries are dropped. Empty for
+    /// companion terminals (signal tracking off).
+    passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>>,
 }
+
+/// Maximum number of captured passthrough sequences retained before the oldest is
+/// dropped. Small: the host is expected to drain every tick, so this only bounds a
+/// burst or a never-draining headless server.
+const PASSTHROUGH_RING_CAP: usize = 64;
+/// Maximum size of a single captured passthrough sequence. A larger one (a huge
+/// OSC 52 clipboard payload, say) is dropped rather than buffered.
+const PASSTHROUGH_SEQ_MAX: usize = 8 * 1024;
 
 #[derive(Default)]
 struct PendingIngest {
@@ -618,6 +635,8 @@ impl PtyClient {
         let subscribers: SubscriberList = Arc::new(Mutex::new(Vec::new()));
         let attention_notify = Arc::new(AtomicBool::new(false));
         let progress: Arc<Mutex<Option<ProgressReport>>> = Arc::new(Mutex::new(None));
+        let passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
 
         let terminal_ref = Arc::clone(&terminal);
         let exited_ref = Arc::clone(&exited);
@@ -630,6 +649,7 @@ impl PtyClient {
         let attention_bell_ref = Arc::clone(&attention_bell);
         let attention_notify_ref = Arc::clone(&attention_notify);
         let progress_ref = Arc::clone(&progress);
+        let passthrough_ref = Arc::clone(&passthrough);
         let reader_thread = thread::spawn(move || {
             Self::reader_loop(
                 reader,
@@ -645,6 +665,7 @@ impl PtyClient {
                 attention_bell_ref,
                 attention_notify_ref,
                 progress_ref,
+                passthrough_ref,
                 track_agent_signals,
             );
         });
@@ -667,6 +688,7 @@ impl PtyClient {
             attention_bell,
             attention_notify,
             progress,
+            passthrough,
         })
     }
 
@@ -685,6 +707,7 @@ impl PtyClient {
         attention_bell: Arc<AtomicBool>,
         attention_notify: Arc<AtomicBool>,
         progress: Arc<Mutex<Option<ProgressReport>>>,
+        passthrough: Arc<Mutex<VecDeque<crate::attention::CapturedSeq>>>,
         track_agent_signals: bool,
     ) {
         let mut buf = [0u8; 4096];
@@ -707,9 +730,14 @@ impl PtyClient {
                     let data = &buf[..n];
 
                     // Scan for attention/progress signals before any pause branch
-                    // so all are detected even while ingestion is paused.
+                    // so all are detected even while ingestion is paused. The same
+                    // pass captures whitelisted passthrough sequences into the ring
+                    // (unconditionally: the host decides whether to forward them at
+                    // drain time, so a live config toggle applies immediately and a
+                    // never-draining headless server keeps the ring bounded).
                     if track_agent_signals {
-                        for event in scanner.scan(data) {
+                        let mut captures: Vec<crate::attention::CapturedSeq> = Vec::new();
+                        for event in scanner.scan_full(data, Some(&mut captures)) {
                             match event {
                                 crate::attention::AttentionEvent::Bell => {
                                     attention_bell.store(true, Ordering::Release);
@@ -735,6 +763,30 @@ impl PtyClient {
                             logger::debug(
                                 "attention scanner dropped an over-long unterminated escape sequence",
                             );
+                        }
+                        // Push captured passthrough sequences into the bounded ring,
+                        // dropping the oldest on overflow and any single sequence
+                        // that exceeds the per-seq cap.
+                        if !captures.is_empty()
+                            && let Ok(mut ring) = passthrough.lock()
+                        {
+                            let mut dropped = 0u64;
+                            for seq in captures {
+                                if seq.bytes.len() > PASSTHROUGH_SEQ_MAX {
+                                    dropped += 1;
+                                    continue;
+                                }
+                                if ring.len() >= PASSTHROUGH_RING_CAP {
+                                    ring.pop_front();
+                                    dropped += 1;
+                                }
+                                ring.push_back(seq);
+                            }
+                            if dropped != 0 {
+                                logger::debug(
+                                    "passthrough ring dropped captured sequence(s) (over cap or too large)",
+                                );
+                            }
                         }
                     }
 
@@ -1097,6 +1149,16 @@ impl PtyClient {
         let notify = self.attention_notify.swap(false, Ordering::AcqRel);
         let bell = self.attention_bell.swap(false, Ordering::AcqRel);
         notify || (count_bell && bell)
+    }
+
+    /// Drain and return every captured passthrough sequence, oldest first. Mirrors
+    /// [`PtyClient::take_attention`]: the caller (the engine) decides which kinds to
+    /// forward. Companion terminals never capture, so this is always empty for them.
+    pub fn take_passthrough(&self) -> Vec<crate::attention::CapturedSeq> {
+        self.passthrough
+            .lock()
+            .map(|mut ring| ring.drain(..).collect())
+            .unwrap_or_default()
     }
 
     /// The most recent `OSC 9;4` progress report, if the agent emitted one. This
@@ -2037,6 +2099,82 @@ mod tests {
             client.take_attention(true),
             "the notification and bell must arm attention"
         );
+    }
+
+    #[test]
+    fn agent_captures_passthrough_sequences() {
+        // A clipboard SET plus a notification, then a sync marker.
+        let emit = "printf '\\033]52;c;aGk=\\007\\033]9;hi\\007X'";
+        let args = vec!["-c".to_string(), emit.to_string()];
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            PtySpawnOptions {
+                env: &[],
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn pty");
+        wait_for_viewport(&client, "X");
+
+        let caps = client.take_passthrough();
+        let kinds: Vec<_> = caps.iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&crate::attention::CapturedKind::ClipboardSet));
+        assert!(kinds.contains(&crate::attention::CapturedKind::Notify));
+        // Draining consumed the ring.
+        assert!(client.take_passthrough().is_empty());
+    }
+
+    #[test]
+    fn companion_captures_no_passthrough() {
+        // With signal tracking off (a companion shell), nothing is captured.
+        let emit = "printf '\\033]9;hi\\007\\033]52;c;aGk=\\007X'";
+        let args = vec!["-c".to_string(), emit.to_string()];
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            PtySpawnOptions {
+                env: &[],
+                track_agent_signals: false,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn pty");
+        wait_for_viewport(&client, "X");
+        assert!(client.take_passthrough().is_empty());
+    }
+
+    #[test]
+    fn passthrough_ring_is_capped_drop_oldest() {
+        // Emit far more sequences than the ring holds; the ring must cap at
+        // PASSTHROUGH_RING_CAP, dropping the oldest.
+        let emit = "for i in $(seq 1 200); do printf '\\033]9;n\\007'; done; printf X";
+        let args = vec!["-c".to_string(), emit.to_string()];
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            Path::new("."),
+            5,
+            40,
+            100,
+            PtySpawnOptions {
+                env: &[],
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn pty");
+        wait_for_viewport(&client, "X");
+        assert!(client.take_passthrough().len() <= PASSTHROUGH_RING_CAP);
     }
 
     #[test]

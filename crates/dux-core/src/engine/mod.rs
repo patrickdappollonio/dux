@@ -864,6 +864,62 @@ impl Engine {
         apply_attention_decision(&mut self.needs_attention, &fired, enabled, engaged);
     }
 
+    /// Drain every provider's captured passthrough ring and return the bytes to
+    /// forward to the host terminal, honoring the capability gates. Called once per
+    /// tick by the TUI (the web bridges these client-side instead).
+    ///
+    /// Every ring is drained on every call regardless of the gates ("always drain,
+    /// discard when gated") so toggling a switch never replays a stale backlog and
+    /// the rings stay bounded. Gating: the `passthrough` master switch drops
+    /// everything when off; a `ClipboardSet` is additionally gated by
+    /// `clipboard_passthrough` (`focused` forwards only the tab the user is viewing,
+    /// `always` forwards any, `off` never); notifications and progress forward from
+    /// every tab so a background agent can still raise a desktop notification. When
+    /// `wrap_for_tmux` the canonical bytes are re-wrapped in a tmux passthrough
+    /// envelope so they survive the tmux dux itself runs under.
+    pub fn take_host_passthrough(
+        &mut self,
+        focused_tab: Option<&str>,
+        wrap_for_tmux: bool,
+    ) -> Vec<u8> {
+        let master = self.config.capabilities.passthrough;
+        let clipboard_mode = self
+            .config
+            .capabilities
+            .clipboard_passthrough
+            .trim()
+            .to_ascii_lowercase();
+        let mut out = Vec::new();
+        for (tab_id, provider) in &self.providers {
+            // Always drain (keeps the ring bounded even for a headless server).
+            let seqs = provider.take_passthrough();
+            if !master {
+                continue;
+            }
+            for seq in seqs {
+                let forward = match seq.kind {
+                    crate::attention::CapturedKind::ClipboardSet => match clipboard_mode.as_str() {
+                        "always" => true,
+                        "off" => false,
+                        // "focused" (the default, and any unrecognized value).
+                        _ => focused_tab == Some(tab_id.as_str()),
+                    },
+                    // Notifications and progress forward from every tab.
+                    _ => true,
+                };
+                if !forward {
+                    continue;
+                }
+                if wrap_for_tmux {
+                    out.extend_from_slice(&crate::attention::tmux_wrap(&seq.bytes));
+                } else {
+                    out.extend_from_slice(&seq.bytes);
+                }
+            }
+        }
+        out
+    }
+
     /// Record that the user is actively looking at the given tab's live view
     /// (TUI: the focused, interactive agent tab; web: a PTY subscribe). This both
     /// clears an existing attention flag immediately and suppresses a new one for
@@ -2809,6 +2865,119 @@ mod tests {
                 .expect("progress recorded")
                 .working,
             "progress still feeds the working indicator even with attention off"
+        );
+    }
+
+    // A clipboard SET, a notification, and a progress report in one payload. The
+    // trailing progress lets the seed helper wait for the reader thread to have
+    // scanned (and thus filled the passthrough ring).
+    const EMIT_PASSTHROUGH: &str =
+        "printf '\\033]52;c;aGVsbG8=\\007\\033]9;hi\\007\\033]9;4;1;50\\007X'";
+
+    fn seed_passthrough_provider(engine: &mut Engine, tab: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("worktree dir");
+        let args = vec!["-c".to_string(), EMIT_PASSTHROUGH.to_string()];
+        let client = PtyClient::spawn_with_env_opts(
+            "/bin/sh",
+            &args,
+            tmp.path(),
+            5,
+            40,
+            100,
+            crate::pty::PtySpawnOptions {
+                env: &[],
+                track_agent_signals: true,
+                identity: &crate::term_identity::TerminalIdentity::default(),
+            },
+        )
+        .expect("spawn passthrough pty");
+        engine.providers.insert(tab.to_string(), client);
+        for _ in 0..200 {
+            if engine
+                .providers
+                .get(tab)
+                .and_then(|p| p.progress_report())
+                .is_some()
+            {
+                return tmp;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for the passthrough emitter on {tab}");
+    }
+
+    #[test]
+    fn take_host_passthrough_master_switch_drains_and_discards() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = false;
+        let _wt = seed_passthrough_provider(&mut engine, "s1");
+
+        let out = engine.take_host_passthrough(Some("s1"), false);
+        assert!(out.is_empty(), "master off forwards nothing");
+        // The ring was still drained, so a later enable does not replay the backlog.
+        engine.config.capabilities.passthrough = true;
+        assert!(
+            engine.take_host_passthrough(Some("s1"), false).is_empty(),
+            "no stale replay after toggling the master switch on"
+        );
+    }
+
+    #[test]
+    fn take_host_passthrough_clipboard_focused_gating() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = true;
+        engine.config.capabilities.clipboard_passthrough = "focused".to_string();
+        let _wt = seed_passthrough_provider(&mut engine, "s1");
+
+        // Not the focused tab: notify + progress forward, clipboard does not.
+        let bg = engine.take_host_passthrough(Some("other"), false);
+        assert!(bg.windows(4).any(|w| w == b"]9;h"), "notify forwarded");
+        assert!(
+            !bg.windows(4).any(|w| w == b"]52;"),
+            "background clipboard must not forward under focused"
+        );
+
+        // Focused tab: clipboard forwards too.
+        let _wt2 = seed_passthrough_provider(&mut engine, "s1");
+        let fg = engine.take_host_passthrough(Some("s1"), false);
+        assert!(
+            fg.windows(4).any(|w| w == b"]52;"),
+            "focused clipboard must forward"
+        );
+    }
+
+    #[test]
+    fn take_host_passthrough_clipboard_off_and_always() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = true;
+
+        engine.config.capabilities.clipboard_passthrough = "off".to_string();
+        let _a = seed_passthrough_provider(&mut engine, "s1");
+        let off = engine.take_host_passthrough(Some("s1"), false);
+        assert!(
+            !off.windows(4).any(|w| w == b"]52;"),
+            "clipboard off never forwards even for the focused tab"
+        );
+
+        engine.config.capabilities.clipboard_passthrough = "always".to_string();
+        let _b = seed_passthrough_provider(&mut engine, "s1");
+        let always = engine.take_host_passthrough(Some("other"), false);
+        assert!(
+            always.windows(4).any(|w| w == b"]52;"),
+            "clipboard always forwards even for a background tab"
+        );
+    }
+
+    #[test]
+    fn take_host_passthrough_tmux_wraps() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.capabilities.passthrough = true;
+        let _wt = seed_passthrough_provider(&mut engine, "s1");
+
+        let out = engine.take_host_passthrough(Some("s1"), true);
+        assert!(
+            out.starts_with(b"\x1bPtmux;"),
+            "wrap_for_tmux must emit a tmux passthrough envelope"
         );
     }
 

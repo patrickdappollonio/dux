@@ -3492,6 +3492,7 @@ mod tests {
             clipboard: Clipboard::new(),
             active_terminal_id: None,
             focused_tabs: std::collections::HashMap::new(),
+            host_is_tmux: false,
             agent_tab_regions: Vec::new(),
             agent_tab_add_region: None,
             terminal_return_to_list: false,

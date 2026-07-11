@@ -1,4 +1,5 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
+import { toast } from "sonner"
 import {
   CommandDialog,
   CommandEmpty,
@@ -18,6 +19,38 @@ const PR_BANNER_POSITION_COMMAND = "toggle-pr-banner-position"
 
 export function CommandPalette() {
   const { paletteOpen, bootstrap } = useDux()
+
+  // Browser-notification permission is a purely client-side, browser-local
+  // concern (not a dux config value), so this affordance lives here rather than
+  // in the server-driven palette registry. dux never auto-prompts; the visitor
+  // opts in explicitly. The item is offered only while notifications are enabled
+  // in config, the Notification API exists, and permission is still "default".
+  const notificationsEnabled = bootstrap?.web_notifications ?? true
+  const notificationApiAvailable = typeof Notification !== "undefined"
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermission>(
+      notificationApiAvailable ? Notification.permission : "denied"
+    )
+  const canEnableNotifications =
+    notificationsEnabled &&
+    notificationApiAvailable &&
+    notificationPermission === "default"
+
+  async function enableBrowserNotifications() {
+    if (!notificationApiAvailable) return
+    close()
+    try {
+      const result = await Notification.requestPermission()
+      setNotificationPermission(result)
+      if (result === "granted") {
+        toast.success("Browser notifications enabled for dux.")
+      } else {
+        toast.info("Browser notifications were not granted.")
+      }
+    } catch {
+      toast.error("Could not request notification permission.")
+    }
+  }
 
   // Global ⌘K / Ctrl-K handler.
   useEffect(() => {
@@ -107,6 +140,23 @@ export function CommandPalette() {
             ))}
           </CommandGroup>
         ))}
+
+        {canEnableNotifications && (
+          <CommandGroup heading="Notifications">
+            <CommandItem
+              value="enable-browser-notifications Enable browser notifications for agent alerts"
+              className="grid cursor-pointer grid-cols-[12rem_minmax(0,1fr)_auto] items-center gap-3"
+              onSelect={() => void enableBrowserNotifications()}
+            >
+              <span className="truncate font-mono text-xs">
+                enable-browser-notifications
+              </span>
+              <span className="truncate text-sm text-muted-foreground">
+                Enable browser notifications for agent alerts…
+              </span>
+            </CommandItem>
+          </CommandGroup>
+        )}
       </CommandList>
     </CommandDialog>
   )

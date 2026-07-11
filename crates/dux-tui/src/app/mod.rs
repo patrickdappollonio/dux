@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::stdout;
+use std::io::{Write as _, stdout};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -99,6 +99,10 @@ pub struct App {
     /// center pane resolves the focused tab; sidebar/session labels stay
     /// Main-scoped. Pruned when a session is torn down.
     pub(crate) focused_tabs: HashMap<String, String>,
+    /// Whether dux itself runs under tmux (`TMUX` set), cached at construction.
+    /// When true, forwarded passthrough sequences are re-wrapped in a tmux
+    /// passthrough envelope so they survive tmux (requires `allow-passthrough on`).
+    pub(crate) host_is_tmux: bool,
     /// Click hit-boxes for the agent tab strip, rebuilt each frame while the
     /// strip is drawn: (tab_id, cell rect) for each tab, plus the `+` add rect.
     /// Kept out of `MouseLayoutState` (which is `Copy`); reset by the strip
@@ -1845,6 +1849,7 @@ impl App {
             clipboard: Clipboard::new(),
             active_terminal_id: None,
             focused_tabs: HashMap::new(),
+            host_is_tmux: std::env::var_os("TMUX").is_some(),
             agent_tab_regions: Vec::new(),
             agent_tab_add_region: None,
             terminal_return_to_list: false,
@@ -2029,6 +2034,27 @@ impl App {
                     self.report_runtime_error("terminal draw failed", &err);
                     thread::sleep(Duration::from_millis(100));
                     continue;
+                }
+
+                // Forward any captured agent passthrough sequences (notifications,
+                // progress, clipboard writes) to the host terminal. Done AFTER a
+                // successful draw and only here on the single-threaded run loop, so
+                // nothing interleaves mid-frame; every whitelisted sequence is
+                // non-printing and non-positional, so it cannot corrupt the frame.
+                let focused_tab = if matches!(self.center_mode, CenterMode::Agent)
+                    && self.active_terminal_id.is_none()
+                {
+                    self.selected_session().map(|s| self.focused_tab_id(&s.id))
+                } else {
+                    None
+                };
+                let fwd = self
+                    .engine
+                    .take_host_passthrough(focused_tab.as_deref(), self.host_is_tmux);
+                if !fwd.is_empty() {
+                    let mut out = stdout();
+                    let _ = out.write_all(&fwd);
+                    let _ = out.flush();
                 }
 
                 // The `StartWebServer` palette action stashes a pre-bound

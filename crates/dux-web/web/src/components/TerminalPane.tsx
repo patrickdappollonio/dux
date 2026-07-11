@@ -55,6 +55,7 @@ import { deviceLabel } from "@/lib/deviceLabel"
 import { VIEWED_PING_INTERVAL_MS, shouldSendViewed } from "@/lib/viewedPing"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { suppressViewerReports } from "@/lib/suppressViewerReports"
+import { registerAgentNotifications } from "@/lib/agentNotifications"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
 interface TerminalPaneProps {
@@ -198,6 +199,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   useEffect(() => {
     copyOnSelectRef.current = bootstrap?.copy_on_select ?? true
   }, [bootstrap?.copy_on_select])
+  // Whether agent notification sequences bridge to a browser Notification (the
+  // `capabilities.web_notifications` bit, default on). Read lazily in the OSC
+  // handlers so toggling it never recreates the terminal.
+  const webNotificationsRef = useRef(bootstrap?.web_notifications ?? true)
+  useEffect(() => {
+    webNotificationsRef.current = bootstrap?.web_notifications ?? true
+  }, [bootstrap?.web_notifications])
   // Always resolve the owning session by `sessionId` (for an agent, `id` is the
   // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
   // tab's does not, so a lookup by `id` would miss). The focused tab, when this
@@ -208,6 +216,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       : spine?.sessions.find((s) => s.terminals.some((t) => t.id === id))
   const focusedTab =
     kind === "agent" ? session?.tabs.find((t) => t.id === id) : undefined
+  // Title for a bridged desktop notification: the agent's name (or its branch),
+  // read lazily in the OSC handler so a rename never recreates the terminal.
+  const notifyTitle = session?.title || session?.branch_name || "Agent"
+  const notifyTitleRef = useRef(notifyTitle)
+  useEffect(() => {
+    notifyTitleRef.current = notifyTitle
+  }, [notifyTitle])
   const isSessionSlotTab = kind === "agent" && id === sessionId
   const hasOutput =
     kind === "agent"
@@ -394,6 +409,13 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // (and injecting duplicate replies back into the shared PTY via onData); see
     // suppressViewerReports. Install before open so it is armed before any byte.
     suppressViewerReports(term)
+    // Bridge the agent's notification/clipboard OSC sequences to the browser,
+    // mirroring the TUI host passthrough. Registered next to suppressViewerReports
+    // so both viewer hooks are armed before the first byte.
+    const disposeAgentNotifications = registerAgentNotifications(term, {
+      enabled: () => webNotificationsRef.current,
+      title: () => notifyTitleRef.current,
+    })
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
@@ -972,6 +994,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       if (ptyRef.current === pty) ptyRef.current = null
       if (getActivePtySocket() === pty) setActivePtySocket(null)
       termRef.current = null
+      disposeAgentNotifications()
       term.dispose()
     }
   }, [kind, id, sessionId])
