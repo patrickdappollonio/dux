@@ -1230,14 +1230,40 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .areas(area);
 
-        // Add button occupies the rightmost columns.
+        // Add button occupies the rightmost columns. A closing separator sits
+        // just left of it so the last tab reads as boxed-in, matching the
+        // leading separator every tab carries (see `seg_content` below).
         let add_text = " + ";
         let add_w = add_text.chars().count() as u16;
-        let avail = strip_area.width.saturating_sub(add_w);
+        let add_total_w = add_w + 1;
+        let avail = strip_area.width.saturating_sub(add_total_w);
 
-        // Segment text/width per tab. All tabs are generic — no per-tab marker.
-        let seg_text: Vec<String> = labels.iter().map(|l| format!(" {l} ")).collect();
-        let seg_w: Vec<u16> = seg_text.iter().map(|t| t.chars().count() as u16).collect();
+        // Segment text/width per tab. All tabs are generic — no per-tab marker
+        // — except the focused tab, which is prefixed with a solid dot so the
+        // active tab is unambiguous even without color (matches the "●" =
+        // active/present convention used by `session_dot`/`ATTENTION_GLYPH`
+        // elsewhere in the theme). Each segment carries a leading `│`
+        // separator so adjacent tabs read as bordered/boxed rather than a
+        // bare run of text; the separator is drawn in its own style, not
+        // counted as part of the label content.
+        const TAB_SEP: &str = "│";
+        const TAB_ACTIVE_DOT: &str = "●";
+        let seg_content: Vec<String> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if tab_ids[i] == focused_id {
+                    format!(" {TAB_ACTIVE_DOT} {l} ")
+                } else {
+                    format!(" {l} ")
+                }
+            })
+            .collect();
+        // +1 per segment for the leading separator column.
+        let seg_w: Vec<u16> = seg_content
+            .iter()
+            .map(|t| t.chars().count() as u16 + 1)
+            .collect();
 
         // Choose a start index so the focused tab is visible within `avail`.
         let focused_idx = tab_ids.iter().position(|i| *i == focused_id).unwrap_or(0);
@@ -1265,17 +1291,26 @@ impl App {
         }
 
         let buf = frame.buffer_mut();
-        // Base fill for the strip row.
-        let base_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        // Base fill for the strip row. Painted with the shared bar background
+        // (the same token the footer hint bar uses) so unfocused tabs, which
+        // set only a foreground, read against a deliberate panel color
+        // instead of whatever was left behind in the buffer.
+        let base_style = Style::default().bg(self.theme.hint_bar_bg);
         for x in strip_area.x..strip_area.x + strip_area.width {
             buf[(x, strip_area.y)].set_symbol(" ").set_style(base_style);
         }
 
+        // Separator style: a quiet chrome divider, matching the semantic
+        // meaning of `border_normal` elsewhere (pane/box borders).
+        let sep_style = Style::default()
+            .fg(self.theme.border_normal)
+            .bg(self.theme.hint_bar_bg);
+
         let mut x = strip_area.x;
-        for i in start..seg_text.len() {
+        for i in start..seg_content.len() {
             if x + seg_w[i] > strip_area.x + avail {
                 // No more room; show an overflow marker if any remain.
-                if i < seg_text.len() {
+                if i < seg_content.len() {
                     let ell_style = Style::default().fg(self.theme.hint_dim_desc_fg);
                     if x < strip_area.x + avail {
                         buf[(x, strip_area.y)].set_symbol("…").set_style(ell_style);
@@ -1284,15 +1319,21 @@ impl App {
                 break;
             }
             let active = tab_ids[i] == focused_id;
+            // Focused tab: the same legible selection combo used everywhere
+            // else in the UI (selection_fg on selection_bg) — not
+            // `title_focused`, which in the default theme is the same color
+            // as `selection_bg` and made the label invisible against its own
+            // highlight. Unfocused tabs use `title_normal`, the semantic
+            // "quiet but legible" pane-title color, on the strip's base fill.
             let style = if active {
-                Style::default()
-                    .fg(self.theme.title_focused)
-                    .bg(self.theme.selection_bg)
-                    .add_modifier(Modifier::BOLD)
+                self.theme.selection_style()
             } else {
-                Style::default().fg(self.theme.hint_dim_desc_fg)
+                Style::default().fg(self.theme.title_normal)
             };
-            buf.set_string(x, strip_area.y, &seg_text[i], style);
+            buf[(x, strip_area.y)]
+                .set_symbol(TAB_SEP)
+                .set_style(sep_style);
+            buf.set_string(x + 1, strip_area.y, &seg_content[i], style);
             if record_clicks {
                 self.agent_tab_regions
                     .push((tab_ids[i].clone(), Rect::new(x, strip_area.y, seg_w[i], 1)));
@@ -1300,8 +1341,12 @@ impl App {
             x += seg_w[i];
         }
 
-        // Trailing add button.
+        // Trailing add button, with a closing separator immediately to its
+        // left so the last tab is boxed in on both sides.
         let add_x = strip_area.x + strip_area.width - add_w;
+        buf[(add_x - 1, strip_area.y)]
+            .set_symbol(TAB_SEP)
+            .set_style(sep_style);
         let add_style = if at_cap {
             Style::default().fg(self.theme.hint_dim_desc_fg)
         } else {
@@ -7996,6 +8041,159 @@ mod tests {
             1,
             "the sole session-slot tab should be recorded as a clickable region"
         );
+    }
+
+    /// Seeds an extra provider tab for `session_id` so tests can exercise the
+    /// two-or-more-tab strip layout. Mirrors the private helpers in
+    /// `sessions.rs`/`input.rs` (there is no shared test util for this).
+    fn seed_render_tab(app: &mut App, session_id: &str, tab_id: &str, provider: &str, order: i64) {
+        app.engine.agent_tabs.insert(
+            tab_id.to_string(),
+            dux_core::model::AgentTab {
+                id: tab_id.to_string(),
+                session_id: session_id.to_string(),
+                provider: dux_core::model::ProviderKind::new(provider),
+                sort_order: order,
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    /// Reads the strip row (y = `area.y`) of the test backend buffer back as
+    /// `(symbol, fg, bg)` triples, so tests can assert on rendered glyphs and
+    /// styles without reaching into private layout math.
+    fn strip_row_cells(
+        terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        area: Rect,
+    ) -> Vec<(String, Color, Color)> {
+        let buf = terminal.backend().buffer();
+        (area.x..area.x + area.width)
+            .map(|x| {
+                let cell = &buf[(x, area.y)];
+                (cell.symbol().to_string(), cell.fg, cell.bg)
+            })
+            .collect()
+    }
+
+    /// The focused tab must carry the active-dot glyph and the shared
+    /// selection style (selection_fg on selection_bg) so it is legible even
+    /// in the default theme, where `title_focused` and `selection_bg` are the
+    /// same color and would otherwise make focused-tab text disappear against
+    /// its own highlight. Unfocused tabs must stay legible too, using
+    /// `title_normal` rather than the near-invisible `hint_dim_desc_fg`.
+    #[test]
+    fn tab_strip_marks_focused_tab_with_dot_and_selection_style() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        // The session-slot tab defaults to "codex" (see test_support); give
+        // the extra tab a distinct provider so labels don't get a
+        // disambiguating " 2" suffix and stay simple to assert on.
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.set_focused_tab(&session_id, "tab-2");
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, 80, 24);
+        let strip_area = Rect::new(area.x, area.y, area.width, 1);
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+
+        let rendered: String = strip_row_cells(&terminal, strip_area)
+            .into_iter()
+            .map(|(sym, _, _)| sym)
+            .collect();
+        assert!(
+            rendered.contains('●'),
+            "the focused tab must carry the active-dot glyph, got: {rendered}"
+        );
+        assert!(
+            rendered.contains('│'),
+            "tabs must be separated by border glyphs, got: {rendered}"
+        );
+
+        let cells = strip_row_cells(&terminal, strip_area);
+        let selection_style = app.theme.selection_style();
+        let dot_cell = cells
+            .iter()
+            .find(|(sym, _, _)| sym == "●")
+            .expect("dot glyph must be rendered");
+        assert_eq!(
+            (dot_cell.1, dot_cell.2),
+            (
+                selection_style.fg.expect("selection fg"),
+                selection_style.bg.expect("selection bg")
+            ),
+            "the active-dot glyph must use the shared selection style, not a color that \
+             matches its own background"
+        );
+        assert_ne!(
+            dot_cell.1, dot_cell.2,
+            "focused tab foreground and background must differ so the label is legible"
+        );
+
+        // "o" only appears in the unfocused session-slot tab's "codex" label,
+        // not in the focused "claude" tab, so it unambiguously identifies an
+        // unfocused-tab cell.
+        let unfocused_fg = app.theme.title_normal;
+        assert!(
+            cells
+                .iter()
+                .any(|(sym, fg, _)| sym == "o" && *fg == unfocused_fg),
+            "unfocused tab labels must use the legible title_normal color"
+        );
+    }
+
+    /// Width/truncation math: the strip must never draw past the pane width,
+    /// even once separators and the active dot widen each tab beyond a bare
+    /// label, and the trailing add button (with its own closing separator)
+    /// must still fit.
+    #[test]
+    fn tab_strip_width_math_stays_within_pane_with_many_tabs() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        for i in 0..6 {
+            seed_render_tab(
+                &mut app,
+                &session_id,
+                &format!("tab-{i}"),
+                "codex",
+                i as i64,
+            );
+        }
+        // Focus the last tab so the scroll-into-view logic is exercised too.
+        app.set_focused_tab(&session_id, "tab-5");
+
+        let width = 40u16;
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let area = Rect::new(0, 0, width, 24);
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+
+        for (tab_id, rect) in &app.agent_tab_regions {
+            assert!(
+                rect.x + rect.width <= area.x + area.width,
+                "tab region for {tab_id} must stay within the pane width: {rect:?}"
+            );
+        }
+        if let Some(add_region) = app.agent_tab_add_region {
+            assert!(
+                add_region.x + add_region.width <= area.x + area.width,
+                "the add-tab region must stay within the pane width: {add_region:?}"
+            );
+        }
     }
 
     /// Regression test for issue #258: while the interactive agent terminal is
