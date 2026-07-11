@@ -33,8 +33,9 @@ describe("fetchSpine", () => {
 
     const result = await fetchSpine()
     // A session that omits `tabs`/`initial_branch`/`source_branch`/
-    // `needs_attention` (an older server) is coerced to `tabs: []`, empty-string
-    // branch fields, and `needs_attention: false`.
+    // `needs_attention`/`last_focused_tab` (an older server) is coerced to
+    // `tabs: []`, empty-string branch fields, `needs_attention: false`, and
+    // `last_focused_tab: null`.
     expect(result).toEqual({
       ...body,
       sessions: [
@@ -45,12 +46,34 @@ describe("fetchSpine", () => {
           initial_branch: "",
           source_branch: "",
           needs_attention: false,
+          last_focused_tab: null,
         },
       ],
     })
     expect(fetchMock).toHaveBeenCalledWith("/api/v1/spine", {
       credentials: "same-origin",
     })
+  })
+
+  it("passes a session's last_focused_tab through verbatim when the server sends one", async () => {
+    const body = {
+      projects: [],
+      sessions: [{ id: "s1", project_id: "p1", last_focused_tab: "tab-1" }],
+      sidebar: { groups: [], agentless_start: null },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => "",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+
+    const result = await fetchSpine()
+    expect(result.sessions[0].last_focused_tab).toBe("tab-1")
   })
 
   it("coerces missing initial_branch/source_branch to empty strings at ingestion", async () => {

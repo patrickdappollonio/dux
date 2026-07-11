@@ -122,6 +122,14 @@ export interface SessionView {
   created_at: string
   /** RFC 3339 / ISO 8601 last-update time. Backs the sort-by-last-update command. */
   updated_at: string
+  /** The tab id the user last focused on this agent, remembered so navigating
+   * away and back (sidebar click, or the bare `#/agent/:id` route) restores it.
+   * `null`/undefined (or a value naming a tab no longer in `tabs`) means "no
+   * memory": resolve to the session-slot tab (`id`). See `resolveFocusedTab` in
+   * `lib/agentTabs.ts`. An older server that predates this field omits it;
+   * `applySpine` normalizes a missing value to `null`. An explicit deep link
+   * (`#/agent/:id/tab/:t`) always wins over this — see `restoreDeepLink`. */
+  last_focused_tab?: string | null
 }
 
 /** One startup-command log file for an agent (see `GET /sessions/:id/startup-logs`). */

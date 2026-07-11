@@ -101,4 +101,19 @@ export const tabsApi = {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
       { provider },
     ),
+  // Remember the tab the user just focused on this agent (J4: a dedicated
+  // verb, matching the one-route-per-action style of the other tab REST
+  // calls). `tabId` of `null` clears the memory. Fire-and-forget: this is a
+  // high-frequency, user-paced write with no status/toast on the server side
+  // (J3), so a failure here is logged and otherwise swallowed rather than
+  // surfaced to the user or allowed to block the (already-applied) local
+  // selection change.
+  setFocusedTab: (sessionId: string, tabId: string | null) =>
+    request<void>(
+      "PUT",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/focused-tab`,
+      { tab_id: tabId },
+    ).catch((err: unknown) => {
+      console.error("Failed to persist the focused tab.", err)
+    }),
 }

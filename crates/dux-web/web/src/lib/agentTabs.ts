@@ -78,6 +78,27 @@ export function branchDrift(
   }
 }
 
+// Resolve the tab id a session should focus when the user navigates to it via
+// the sidebar or the bare `#/agent/:id` route (an explicit `#/agent/:id/tab/:t`
+// deep link always wins over this — see `restoreDeepLink` in `store.ts`, which
+// is intentionally untouched by this helper). Mirrors the shared resolution rule
+// (`AgentSession::resolved_focused_tab` in dux-core): the remembered
+// `last_focused_tab` wins only when it is present AND still names a live tab in
+// `session.tabs`; otherwise (no memory, it equals the session-slot id, or it
+// names a tab that has since closed) falls back to the session-slot tab
+// (`session.id`).
+export function resolveFocusedTab(session: SessionView): string {
+  const remembered = session.last_focused_tab
+  if (
+    remembered &&
+    remembered !== session.id &&
+    session.tabs.some((t) => t.id === remembered)
+  ) {
+    return remembered
+  }
+  return session.id
+}
+
 // The provider a plain (no-provider-arg) `addTab(session.id)` actually launches:
 // the session's owning project's `default_provider`, mirroring the server's own
 // resolution (`CreateTabBody.provider` omitted → project default). Falls back to

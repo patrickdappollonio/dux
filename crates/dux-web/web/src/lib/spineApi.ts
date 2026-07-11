@@ -68,11 +68,15 @@ export async function fetchSpine(): Promise<Spine> {
   // "Unknown"/no-drift fallbacks in the info dialog and header still apply).
   const raw = (await resp.json()) as Omit<Spine, "sessions"> & {
     sessions: Array<
-      Omit<SessionView, "tabs" | "initial_branch" | "source_branch" | "needs_attention"> & {
+      Omit<
+        SessionView,
+        "tabs" | "initial_branch" | "source_branch" | "needs_attention" | "last_focused_tab"
+      > & {
         tabs?: AgentTabView[]
         initial_branch?: string
         source_branch?: string
         needs_attention?: boolean
+        last_focused_tab?: string | null
       }
     >
   }
@@ -86,6 +90,9 @@ export async function fetchSpine(): Promise<Spine> {
       // An older server that predates attention omits the field; treat missing
       // as "no attention" so the dot/count/favicon stay quiet.
       needs_attention: s.needs_attention ?? false,
+      // An older server that predates tab-focus memory omits the field; treat
+      // missing the same as an explicit null ("no memory recorded").
+      last_focused_tab: s.last_focused_tab ?? null,
     })),
   }
 }

@@ -27,6 +27,7 @@ import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
+import { resolveFocusedTab } from "./agentTabs"
 import type {
   BranchWarningView,
   ChangedFileView,
@@ -1271,6 +1272,14 @@ function restoreDeepLink(spine: Spine): void {
 
 // Select an agent session as the streamed target. Signature kept stable so
 // existing callers continue to work unchanged.
+//
+// Restores the agent's remembered tab-focus (`resolveFocusedTab`, backed by
+// `SessionView.last_focused_tab`): when the spine has the session and its
+// remembered tab is still a live extra tab, this routes through `selectTab`
+// (so the hash/changes wiring is identical to an explicit tab click) instead
+// of always landing on the session-slot tab. This is a READ of the memory,
+// not a write — no persistence call happens here; `selectTab` below owns
+// persisting an actual tab switch.
 export function selectSession(id: string | null): void {
   const prev = state.selectedSessionId
   if (id === null) {
@@ -1288,6 +1297,15 @@ export function selectSession(id: string | null): void {
     switchChangesSubscription(prev, null)
     writeSelectionHash()
     unwindMobileSpoke()
+    return
+  }
+  const session = state.spine?.sessions.find((s) => s.id === id)
+  const focusedTab = session ? resolveFocusedTab(session) : id
+  if (focusedTab !== id) {
+    // A remembered extra tab is still live: select it directly so the
+    // hash/changes wiring and the persistence write match an explicit tab
+    // click exactly.
+    selectTab(id, focusedTab)
     return
   }
   setState({
@@ -1309,6 +1327,11 @@ export function selectSession(id: string | null): void {
 // Focus a specific provider tab of a session. `tabId === sessionId` focuses the
 // session-slot tab (equivalent to `selectSession`). The changed files belong to the
 // SESSION, so the subscription/fetch key off `sessionId` regardless of tab.
+//
+// Persists the choice as the agent's remembered tab-focus (J3: fire-and-forget,
+// no status/toast) so a later `selectSession` restores it, on this client or
+// any other sharing the same server. `tabsApi.setFocusedTab` itself normalizes
+// `tabId === sessionId` to "clear the memory" server-side.
 export function selectTab(sessionId: string, tabId: string): void {
   const prev = state.selectedSessionId
   setState({
@@ -1319,6 +1342,7 @@ export function selectTab(sessionId: string, tabId: string): void {
   switchChangesSubscription(prev, sessionId)
   writeSelectionHash()
   if (prev !== sessionId) loadChanges(sessionId)
+  void tabsApi.setFocusedTab(sessionId, tabId === sessionId ? null : tabId)
 }
 
 // Select one of a session's companion terminals as the streamed target. The
