@@ -192,6 +192,13 @@ pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
     configured
 }
 
+/// Default cap on the file-search index flat walk (see
+/// [`crate::git::worktree_files`]). The web editor's file TREE is a lazy,
+/// per-directory browser and is never capped; this only bounds the flat list
+/// that backs the editor's "Search files…" box, where an incomplete result on
+/// a giant repo (e.g. a built `target/`) is acceptable. `0` disables the cap.
+pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
+
 /// Default seconds to wait for SIGTERMed agents/terminals to exit before
 /// force-killing them on shutdown. Shared by the top-level
 /// [`Config::shutdown_timeout_seconds`] (TUI quit) and
@@ -355,6 +362,14 @@ pub struct ServerConfig {
     /// during the wait forces an immediate exit. The TUI quit path uses the
     /// top-level `shutdown_timeout_seconds` instead. Default 30.
     pub shutdown_timeout_seconds: u16,
+    /// Maximum number of files the web editor's "Search files…" index will
+    /// collect in a single flat walk of the worktree. The file TREE is a lazy,
+    /// per-directory browser and is never capped; this bounds only the search
+    /// index, where an incomplete result on a very large repo (e.g. a built
+    /// `target/`) is an acceptable tradeoff for a bounded response. `0`
+    /// disables the cap. Default 50000. Takes effect on the next search-index
+    /// fetch after a server restart.
+    pub search_index_max_files: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -653,6 +668,7 @@ impl Default for ServerConfig {
             title: "dux".to_string(),
             favicon: String::new(),
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+            search_index_max_files: DEFAULT_SEARCH_INDEX_MAX_FILES,
         }
     }
 }

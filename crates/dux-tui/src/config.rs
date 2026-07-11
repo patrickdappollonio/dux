@@ -911,6 +911,18 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::U16(c.server.shutdown_timeout_seconds),
         },
+        ConfigEntry::Field {
+            key: "search_index_max_files",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of files the web editor's \"Search files...\" index will\n\
+                 # collect in a single flat walk of the worktree. The file tree is a lazy,\n\
+                 # per-directory browser and is never capped; this bounds only the search\n\
+                 # index, where an incomplete result on a very large repo (for example a\n\
+                 # built target/ directory) is an acceptable tradeoff for a bounded\n\
+                 # response. Set to 0 to disable the cap entirely.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.search_index_max_files),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -1496,6 +1508,7 @@ mod tests {
         assert!(rendered.contains("max_websocket_agent_connections = 32"));
         assert!(rendered.contains("max_websocket_terminal_connections = 64"));
         assert!(rendered.contains("max_websocket_tab_connections = 64"));
+        assert!(rendered.contains("search_index_max_files = 50000"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that

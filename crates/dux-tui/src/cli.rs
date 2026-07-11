@@ -398,6 +398,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         defaults.server.shutdown_timeout_seconds,
         current.server.shutdown_timeout_seconds,
     );
+    diff_usize(
+        &mut changes,
+        "server.search_index_max_files",
+        defaults.server.search_index_max_files,
+        current.server.search_index_max_files,
+    );
 
     // [terminal]
     diff_str(
