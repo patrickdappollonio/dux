@@ -791,14 +791,6 @@ pub fn remove_worktree(
     })
 }
 
-/// Default cap on the number of entries returned by [`worktree_files`]. This
-/// backs the web editor's file-SEARCH index only (the tree is a lazy,
-/// per-directory [`list_dir`] browser with no cap); the effective value comes
-/// from the `[server] search_index_max_files` config key, for which this is
-/// the default. 50 000 entries is ~5 MB of JSON at 100 bytes/path — reasonable
-/// for a single HTTP response. Most repos are well under 10 000.
-pub const WORKTREE_FILES_CAP: usize = 50_000;
-
 /// The file listing returned by [`worktree_files`].
 #[derive(Debug, Clone)]
 pub struct WorktreeFileList {
@@ -969,6 +961,25 @@ pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
             expandable,
         });
     }
+
+    // `file_name().to_string_lossy()` replaces invalid UTF-8 bytes with U+FFFD,
+    // so two distinct non-UTF-8 names can collide onto the same lossy `path`
+    // (the client keys tree rows by path, so a collision would make one of
+    // them unreachable). Drop later duplicates and warn rather than build an
+    // escaping scheme — graceful degradation, not full fidelity for names that
+    // aren't valid UTF-8 to begin with.
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entries.retain(|e| {
+        if seen_paths.insert(e.path.clone()) {
+            true
+        } else {
+            logger::warn(&format!(
+                "list_dir: dropping duplicate entry after lossy UTF-8 name conversion: {}",
+                e.path
+            ));
+            false
+        }
+    });
 
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
@@ -1936,7 +1947,7 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "d").unwrap();
         std::fs::write(p.join("src/debug.log"), "e").unwrap();
 
-        let result = worktree_files(p, WORKTREE_FILES_CAP).unwrap();
+        let result = worktree_files(p, crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES).unwrap();
         let files = result.files;
         assert!(files.contains(&"tracked.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
@@ -1986,7 +1997,7 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "x").unwrap();
         // .git/config always exists in an initialized repo.
 
-        let result = worktree_files(p, WORKTREE_FILES_CAP).unwrap();
+        let result = worktree_files(p, crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES).unwrap();
 
         // Tracked file is included.
         assert!(
@@ -2044,8 +2055,10 @@ mod tests {
         }
     }
 
-    /// The regression that proves the cap-mid-walk bug is gone: a sibling
-    /// subtree with many files must not affect the root listing at all.
+    /// list_dir is structurally immune to a huge sibling subtree: it does a
+    /// single `read_dir` on exactly the requested directory, never recurses,
+    /// and never caps. A 1000-file sibling can't discriminate that property
+    /// on its own (any number would pass); it just exercises the shape.
     #[test]
     fn list_dir_root_is_unaffected_by_a_huge_sibling_subtree() {
         let dir = tempfile::tempdir().unwrap();
@@ -2121,6 +2134,36 @@ mod tests {
         assert!(list_dir(dir.path(), "..").is_err());
         assert!(list_dir(dir.path(), "../etc").is_err());
         assert!(list_dir(dir.path(), "/etc").is_err());
+    }
+
+    #[test]
+    fn list_dir_dedupes_names_that_collide_after_lossy_utf8_conversion() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Two distinct single-byte names, both invalid UTF-8 on their own, that
+        // `to_string_lossy()` both collapse to the same single replacement
+        // character (U+FFFD) — a real filesystem collision the tree UI (which
+        // keys rows by path) must never see duplicated.
+        let name_a = OsString::from_vec(vec![0xFF]);
+        let name_b = OsString::from_vec(vec![0xFE]);
+        std::fs::write(dir.path().join(&name_a), "a").unwrap();
+        std::fs::write(dir.path().join(&name_b), "b").unwrap();
+
+        let entries = list_dir(dir.path(), "").unwrap();
+        let mut paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort_unstable();
+        let unique_count = {
+            let mut deduped = paths.clone();
+            deduped.dedup();
+            deduped.len()
+        };
+        assert_eq!(
+            entries.len(),
+            unique_count,
+            "list_dir must never return two entries with the same path: {entries:?}"
+        );
     }
 
     #[test]

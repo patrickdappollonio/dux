@@ -801,11 +801,14 @@ mod tests {
     fn search_index_max_files_user_value_survives_patch() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("config.toml");
+        // Seed a DIFFERENT value than the patch target below, so the assertion
+        // can only pass if patch_config_file_with actually wrote the new value
+        // rather than leaving the seeded file untouched.
         fs::write(&path, "[server]\nsearch_index_max_files = 777\n").expect("seed config");
 
         let config = Config {
             server: crate::config::ServerConfig {
-                search_index_max_files: 777,
+                search_index_max_files: 4321,
                 ..Default::default()
             },
             ..Default::default()
@@ -813,7 +816,7 @@ mod tests {
         patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
         let saved = fs::read_to_string(&path).expect("read back");
         let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
-        assert_eq!(parsed.server.search_index_max_files, 777, "saved:\n{saved}");
+        assert_eq!(parsed.server.search_index_max_files, 4321, "saved:\n{saved}");
     }
 
     #[test]
