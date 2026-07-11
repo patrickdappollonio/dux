@@ -1,4 +1,6 @@
 import { Info } from "lucide-react"
+
+import { paletteShortcutLabel } from "@/lib/platform"
 import { useState } from "react"
 
 import CodeEditor from "@/components/CodeEditor"
@@ -22,7 +24,7 @@ import {
 // `useState` initializer seeds the editor from a settled value (no
 // set-state-in-effect). The user's in-progress edits live in `text` and survive
 // a failed save (the server's parse error is shown inline and the modal stays
-// open). Ctrl/Cmd+S inside Monaco saves the current draft too.
+// open). Ctrl/Cmd+s inside Monaco saves the current draft too.
 function ConfigEditorForm({
   initial,
   error,
@@ -52,7 +54,7 @@ function ConfigEditorForm({
         <span>
           Saving writes <span className="font-mono">config.toml</span> to disk but
           does not apply it. Run <span className="font-medium">Reload config</span>{" "}
-          from the command palette (Ctrl-K) to apply your changes.
+          from the command palette ({paletteShortcutLabel()}) to apply your changes.
         </span>
       </div>
       <DialogFooter>
@@ -65,7 +67,7 @@ function ConfigEditorForm({
   )
 }
 
-// The Monaco config.toml editor (Ctrl+K "edit-config"). The server validates the
+// The Monaco config.toml editor (Ctrl+k "edit-config"). The server validates the
 // TOML before writing; saving PERSISTS the file but does not apply it (the
 // running config is unchanged until the user runs "Reload config"). A callout in
 // the form states this.

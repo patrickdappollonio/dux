@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn mixed_buffer() {
-        // 'a' + Ctrl-G + CSI Up + UTF-8 ñ
+        // 'a' + Ctrl-g + CSI Up + UTF-8 ñ
         let mut input = Vec::new();
         input.push(b'a');
         input.push(0x07);

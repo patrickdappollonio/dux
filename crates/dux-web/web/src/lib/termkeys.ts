@@ -14,9 +14,9 @@ export const ESC = "\x1b"
 // The horizontal-tab byte.
 export const TAB = "\x09"
 
-// The line-feed byte (LF, 0x0A) — the byte Ctrl-J produces. dux maps Shift-Enter
+// The line-feed byte (LF, 0x0A) — the byte Ctrl-j produces. dux maps Shift-Enter
 // to it so a "soft" newline can be inserted into an agent prompt without a
-// dedicated Ctrl-J reflex. Interactive CLIs (Claude, Codex, ...) treat a bare LF
+// dedicated Ctrl-j reflex. Interactive CLIs (Claude, Codex, ...) treat a bare LF
 // as a literal newline and a carriage return (CR, 0x0D — what a plain Enter
 // sends) as submit, so the two must stay distinct.
 //
@@ -24,7 +24,7 @@ export const TAB = "\x09"
 // (ESC + CR), see `macros.ts` `macroPayloadBytes`. That path replays a whole
 // prewritten prompt as one wholesale write, where Alt+Enter is the reliable
 // "newline, don't submit" signal; this path is a single live keystroke, where
-// Ctrl-J/LF is the natural chord. Different contexts, deliberately different bytes.
+// Ctrl-j/LF is the natural chord. Different contexts, deliberately different bytes.
 export const LF = "\x0a"
 
 // Punctuation/whitespace that map to a control byte. Letters are handled
@@ -73,7 +73,7 @@ const CTRL_DIGIT: Record<string, number> = {
  * Maps a single character to its control byte, or `null` when the character has
  * no control mapping.
  *
- * - `a`-`z` and `A`-`Z` map to `0x01`-`0x1A` (Ctrl-A .. Ctrl-Z), case-folded.
+ * - `a`-`z` and `A`-`Z` map to `0x01`-`0x1A` (Ctrl-a .. Ctrl-z), case-folded.
  * - The standard control punctuation (`@ [ \ ] ^ _` and Space) map per the
  *   table above.
  * - Digits `2`-`8` map to their control aliases (see `CTRL_DIGIT`); `0`, `1`,
@@ -188,7 +188,7 @@ export function applyModifiers(
 /**
  * Decides whether a terminal keydown should be rewritten to a "soft" newline.
  *
- * Shift-Enter — with no other modifier held — returns `LF` (0x0A, the Ctrl-J
+ * Shift-Enter — with no other modifier held — returns `LF` (0x0A, the Ctrl-j
  * byte). Every other event returns `null`, signalling the caller to let xterm
  * encode the key normally (a plain Enter becomes CR, which the agent treats as
  * submit).
@@ -289,7 +289,7 @@ export type ClipboardKeyAction = "copy" | "paste" | "passthrough"
 
 /**
  * The minimal slice of a `KeyboardEvent` the clipboard classifier reads. We
- * deliberately omit `key`: xterm decides `Ctrl-V`->`\x16` POSITIONALLY by
+ * deliberately omit `key`: xterm decides `Ctrl-v`->`\x16` POSITIONALLY by
  * `keyCode`, so we must match the same physical-key signal it uses. Keying off
  * `key` would silently miss on non-Latin layouts (where the V key types e.g.
  * Cyrillic `м`) and let xterm leak `\x16` to the remote agent — the original
@@ -308,9 +308,9 @@ export interface ClipboardKeyEvent {
 /**
  * Classifies a keydown into a clipboard action for the web terminal.
  *
- * - `copy`        -> the caller copies `term.getSelection()` (Ctrl-Shift-C, Ctrl-Insert).
- * - `paste`       -> the caller lets the browser's native paste event flow (Ctrl-V, Ctrl-Shift-V).
- * - `passthrough` -> xterm handles the key normally (Ctrl-C stays SIGINT, plain
+ * - `copy`        -> the caller copies `term.getSelection()` (Ctrl-Shift-c, Ctrl-Insert).
+ * - `paste`       -> the caller lets the browser's native paste event flow (Ctrl-v, Ctrl-Shift-v).
+ * - `passthrough` -> xterm handles the key normally (Ctrl-c stays SIGINT, plain
  *                    typing is untouched, mac Cmd/Control fall through to the app/browser).
  *
  * Matching is by physical key (`code`, falling back to `keyCode` when `code` is
@@ -337,7 +337,7 @@ export function classifyClipboardKey(ev: ClipboardKeyEvent): ClipboardKeyAction 
   if (ev.ctrlKey && ev.shiftKey && isC) return "copy"
   if (ev.ctrlKey && ev.shiftKey && isV) return "paste"
   if (ev.ctrlKey && !ev.shiftKey && isV) return "paste"
-  // Ctrl-C without Shift stays SIGINT (`\x03`) — explicit for intent.
+  // Ctrl-c without Shift stays SIGINT (`\x03`) — explicit for intent.
   if (ev.ctrlKey && !ev.shiftKey && isC) return "passthrough"
   if (ev.ctrlKey && isInsert) return "copy"
 

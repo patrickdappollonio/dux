@@ -1176,7 +1176,7 @@ impl Engine {
         let message = if next {
             "Copy-on-select enabled. Selecting terminal text now copies it to the clipboard."
         } else {
-            "Copy-on-select disabled. Use Ctrl-Shift-C, the right-click menu, or Ctrl-Insert to copy."
+            "Copy-on-select disabled. Use Ctrl-Shift-c, the right-click menu, or Ctrl-Insert to copy."
         };
         WireStatus::new("info", message.to_string())
     }

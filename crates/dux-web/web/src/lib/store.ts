@@ -276,12 +276,12 @@ export interface DuxState {
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
   paletteOpen: boolean
-  // The kill-running modal (the Ctrl+K "kill-running" command). Lists every
+  // The kill-running modal (the Ctrl+k "kill-running" command). Lists every
   // active agent and live companion terminal and force-kills each on demand
   // (agents detach and can be reconnected; terminals are destroyed). The list is
   // derived live from the spine, so it needs no state beyond this open flag.
   killRunningOpen: boolean
-  // The Monaco config.toml editor (Ctrl+K "edit-config"). `configEditorOpen`
+  // The Monaco config.toml editor (Ctrl+k "edit-config"). `configEditorOpen`
   // gates the modal; the raw text is fetched into `configEditorContent` on open
   // so the editor seeds from a settled value (no set-state-in-effect).
   // `configEditorLoading` drives the load spinner; `configEditorError` shows the
@@ -291,7 +291,7 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
-  // The customize-webapp dialog (the Ctrl+K "customize-webapp" command). Gates the
+  // The customize-webapp dialog (the Ctrl+k "customize-webapp" command). Gates the
   // modal that sets the browser tab title + favicon colour + Changes pane
   // visibility; the dialog seeds its fields from the bootstrap document, so it
   // needs no state beyond this flag.
@@ -2544,13 +2544,13 @@ export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
     })
 }
 
-// Toggle the Changes pane (the Ctrl+K "toggle-remove-git-pane" command and the
+// Toggle the Changes pane (the Ctrl+k "toggle-remove-git-pane" command and the
 // Changes actions menu).
 export function toggleChangesPane(): void {
   setChangesPaneVisibility(!changesPaneVisible(state))
 }
 
-// The three Ctrl+K preference toggles (random pet-name default, PR banner
+// The three Ctrl+k preference toggles (random pet-name default, PR banner
 // position, GitHub integration). Each is a parameterless server-side flip: the
 // server owns the value, persists it, and emits `config.changed` so the
 // refetched bootstrap reflects the new state. The success toast is the engine's
@@ -2591,7 +2591,7 @@ export function toggleAlwaysShowTabs(): void {
   )
 }
 
-// The kill-running modal (Ctrl+K "kill-running"). Open/close just flip the gate;
+// The kill-running modal (Ctrl+k "kill-running"). Open/close just flip the gate;
 // the dialog derives its rows from the spine.
 export function openKillRunning(): void {
   setState({ killRunningOpen: true })
@@ -2601,7 +2601,7 @@ export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
 }
 
-// The customize-webapp dialog (Ctrl+K "customize-webapp"). Open/close just flip the
+// The customize-webapp dialog (Ctrl+k "customize-webapp"). Open/close just flip the
 // gate; the dialog seeds its title, favicon, and Changes pane fields from the
 // bootstrap document.
 export function openCustomizeWebapp(): void {
@@ -2648,7 +2648,7 @@ export function killSessionPty(sessionId: string): void {
     )
 }
 
-// The Monaco config.toml editor (Ctrl+K "edit-config"). Open fetches the raw
+// The Monaco config.toml editor (Ctrl+k "edit-config"). Open fetches the raw
 // file text into the store so the editor seeds from a settled value. The
 // monotonic epoch makes each open session unique: a fetch reply is applied only
 // if its epoch still matches, so an open-close-open (or Retry) within the fetch

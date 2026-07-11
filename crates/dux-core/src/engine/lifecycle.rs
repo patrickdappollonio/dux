@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(terminal_id, "term-1");
         assert!(engine.companion_terminals.contains_key("term-1"));
 
-        // Ctrl-D (EOF) in canonical mode causes `cat` to exit.
+        // Ctrl-d (EOF) in canonical mode causes `cat` to exit.
         engine
             .companion_terminals
             .get("term-1")
@@ -657,7 +657,7 @@ mod tests {
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_input.insert("s1".to_string(), Instant::now());
 
-        // Ctrl-D (EOF) makes cat exit with status 0.
+        // Ctrl-d (EOF) makes cat exit with status 0.
         engine
             .providers
             .get_mut("s1")
@@ -1345,7 +1345,7 @@ mod tests {
             .providers
             .insert("tab-2".to_string(), spawn_cat(worktree.path()));
 
-        // Make the extra tab's PTY exit (Ctrl-D EOF).
+        // Make the extra tab's PTY exit (Ctrl-d EOF).
         engine
             .providers
             .get("tab-2")

@@ -71,7 +71,7 @@ interface TerminalPaneProps {
   sessionId: string
 }
 
-// A soft newline (LF / Ctrl-J) written straight to the PTY, plus the view side
+// A soft newline (LF / Ctrl-j) written straight to the PTY, plus the view side
 // effects a typed key would get through xterm's data pipeline — which both the
 // physical Shift-Enter handler and the accessory bar's ⇧↵ key deliberately
 // bypass: snap to the live edge and drop any stale selection so the user sees
@@ -118,20 +118,20 @@ function copyTermSelection(term: Terminal): void {
 // `readText` needs a secure context (HTTPS/localhost) and THROWS synchronously
 // when `navigator.clipboard` is undefined (plain-HTTP) or `readText` is missing
 // (Firefox web content), so we must guard the call — a bare `.catch` cannot
-// catch a synchronous throw. The plain-HTTP/Ctrl-V path (handled by xterm's
+// catch a synchronous throw. The plain-HTTP/Ctrl-v path (handled by xterm's
 // native paste event) stays the secure-context-free fallback. `term.paste`
 // applies bracketed-paste (DECSET 2004) and newline normalization.
 function pasteIntoTerm(term: Terminal): void {
   const read = navigator.clipboard?.readText?.()
   if (!read) {
-    toast.error("Couldn't read clipboard — use Ctrl+V to paste", { id: "term-paste" })
+    toast.error("Couldn't read clipboard — use Ctrl+v to paste", { id: "term-paste" })
     term.focus()
     return
   }
   void read
     .then((text) => term.paste(text))
     .catch(() =>
-      toast.error("Couldn't read clipboard — use Ctrl+V to paste", { id: "term-paste" }),
+      toast.error("Couldn't read clipboard — use Ctrl+v to paste", { id: "term-paste" }),
     )
     .finally(() => term.focus())
 }
@@ -529,7 +529,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // keys (bare Shift-Enter vs Ctrl-based clipboard chords), so soft-newline is
     // checked first and clipboard classification handles the rest.
     //
-    // Shift-Enter inserts a "soft" newline (LF / Ctrl-J) instead of submitting.
+    // Shift-Enter inserts a "soft" newline (LF / Ctrl-j) instead of submitting.
     // xterm collapses both Enter and Shift-Enter to a carriage return before
     // `onData` can see them, so the two are indistinguishable at the data layer —
     // we must intercept at the key-event layer instead. `softNewlineAction` owns
@@ -537,9 +537,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // closure is the thin applicator that turns that decision into DOM/PTY effects.
     //
     // Clipboard chords: xterm's defaults don't bridge the browser clipboard on
-    // Linux/Windows — Ctrl+V emits \x16 to the REMOTE agent (pasting the server's
-    // clipboard) and Ctrl+C / a selection never reach the system clipboard. We
-    // intercept only the clipboard chords; everything else (Ctrl+C SIGINT, plain
+    // Linux/Windows — Ctrl+v emits \x16 to the REMOTE agent (pasting the server's
+    // clipboard) and Ctrl+c / a selection never reach the system clipboard. We
+    // intercept only the clipboard chords; everything else (Ctrl+c SIGINT, plain
     // typing, mac Control/Cmd) passes through to xterm unchanged. `isMac` is stable
     // for this mount.
     const isMac = isApplePlatform()
@@ -594,7 +594,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
         return false
       }
       // Owner: return false WITHOUT preventDefault so xterm emits no \x16 and the
-      // browser's default Ctrl+V fires a native `paste` event, which xterm's own
+      // browser's default Ctrl+v fires a native `paste` event, which xterm's own
       // handler reads from clipboardData (secure-context-free) and forwards as
       // (bracketed) onData.
       return false
@@ -1105,7 +1105,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // Right-click pastes the browser clipboard (classic terminal: selecting copies
   // via copy-on-select, right-click pastes). Gated on ownership (a read-only
   // viewer can't drive input). Needs a secure context for `readText`;
-  // pasteIntoTerm toasts a "use Ctrl+V" hint when the clipboard can't be read
+  // pasteIntoTerm toasts a "use Ctrl+v" hint when the clipboard can't be read
   // (plain-HTTP).
   function onRightClickPaste() {
     const term = termRef.current

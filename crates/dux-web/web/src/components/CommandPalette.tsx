@@ -52,7 +52,7 @@ export function CommandPalette() {
     }
   }
 
-  // Global ⌘K / Ctrl-K handler.
+  // Global ⌘K / Ctrl-k handler.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {

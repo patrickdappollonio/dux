@@ -45,7 +45,7 @@ pub enum ServerScreenTick {
     Continue,
     /// `q`/`Q`/`Esc` — stop the server and flip back to the TUI.
     ReturnToTui,
-    /// `Ctrl-C` — quit dux entirely.
+    /// `Ctrl-c` — quit dux entirely.
     QuitProcess,
 }
 
@@ -66,7 +66,7 @@ enum Role {
     /// The non-loopback security warning — warning-styled, bold.
     Warning,
     /// An exit hint's key, rendered as a `<…>` keycap badge matching the TUI
-    /// footer (e.g. `<q>`, `<Esc>`, `<Ctrl-C>`).
+    /// footer (e.g. `<q>`, `<Esc>`, `<Ctrl-c>`).
     Key,
     /// An exit hint's description portion.
     HintDesc,
@@ -361,7 +361,7 @@ fn wrapped_row_count(segments: &ScreenLine, inner_width: u16) -> u16 {
 /// These keys are NOT user-configurable bindings: the TUI keybinding system
 /// isn't running in server mode, so naming them literally here (and in the
 /// on-screen hints) is correct rather than a tenet violation. `q`/`Q` and `Esc`
-/// return to the TUI; `Ctrl-C` quits the process; everything else is ignored.
+/// return to the TUI; `Ctrl-c` quits the process; everything else is ignored.
 fn action_for_key(key: KeyEvent) -> Option<ServerScreenTick> {
     // Ignore key-release events so a single press maps to a single action on
     // terminals that report them (kitty protocol). Repeat events are not
@@ -433,7 +433,7 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
     lines
 }
 
-/// The two exit-hint rows shown in the footer (`<q>`/`<Esc>` return, `<Ctrl-C>`
+/// The two exit-hint rows shown in the footer (`<q>`/`<Esc>` return, `<Ctrl-c>`
 /// quit). These keys are NOT user-configurable bindings: the TUI keybinding
 /// system isn't running in server mode, so naming them literally is correct.
 fn footer_hint_lines() -> Vec<ScreenLine> {
@@ -447,7 +447,7 @@ fn footer_hint_lines() -> Vec<ScreenLine> {
             ),
         ],
         vec![
-            ("Ctrl-C".to_string(), Role::Key),
+            ("Ctrl-c".to_string(), Role::Key),
             (" quit dux entirely".to_string(), Role::HintDesc),
         ],
     ]
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn uppercase_q_returns_to_tui() {
-        // Shift-Q arrives as Char('Q'); accept it too so a capslocked user
+        // Shift-q arrives as Char('Q'); accept it too so a capslocked user
         // isn't stuck.
         assert!(matches!(
             action_for_key(key(KeyCode::Char('Q'), KeyModifiers::SHIFT)),
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn plain_c_is_ignored() {
-        // Only Ctrl-C quits; a bare 'c' must not.
+        // Only Ctrl-c quits; a bare 'c' must not.
         assert!(action_for_key(key(KeyCode::Char('c'), KeyModifiers::NONE)).is_none());
     }
 
@@ -756,7 +756,7 @@ mod tests {
             .collect();
         assert!(keys.contains(&"q"));
         assert!(keys.contains(&"Esc"));
-        assert!(keys.contains(&"Ctrl-C"));
+        assert!(keys.contains(&"Ctrl-c"));
     }
 
     #[test]

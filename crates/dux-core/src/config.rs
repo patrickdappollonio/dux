@@ -366,7 +366,7 @@ pub struct ServerConfig {
     /// waits for agents and companion terminals to exit after SIGTERM on
     /// shutdown, before force-killing (SIGKILL) any stragglers. `0` skips the
     /// wait and force-kills immediately; values above
-    /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`] are clamped. A second Ctrl-C/SIGTERM
+    /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`] are clamped. A second Ctrl-c/SIGTERM
     /// during the wait forces an immediate exit. The TUI quit path uses the
     /// top-level `shutdown_timeout_seconds` instead. Default 30.
     pub shutdown_timeout_seconds: u16,
@@ -1112,7 +1112,7 @@ pub struct Config {
     /// SIGTERM when quitting, before force-killing (SIGKILL) any stragglers.
     /// `0` skips the wait and force-kills immediately; values above
     /// [`MAX_SHUTDOWN_TIMEOUT_SECONDS`] are clamped (the unit is seconds, not
-    /// milliseconds). A second Ctrl-C/SIGTERM during the wait cuts it short. A
+    /// milliseconds). A second Ctrl-c/SIGTERM during the wait cuts it short. A
     /// top-level (not `[ui]`/`[server]`) key because it is a global lifecycle
     /// knob. This governs the plain TUI quit; once the TUI is flipped into server
     /// mode, that shutdown uses `[server].shutdown_timeout_seconds` instead (even

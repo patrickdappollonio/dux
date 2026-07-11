@@ -40,7 +40,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     },
     WelcomeTip {
         web: Some(
-            "Need every keystroke? The `fullscreen` button on a terminal captures even `Ctrl+T`. Focus mode: activated.",
+            "Need every keystroke? The `fullscreen` button on a terminal captures even `Ctrl+t`. Focus mode: activated.",
         ),
         tui: Some(|resolve| {
             format!(

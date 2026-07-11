@@ -17,7 +17,7 @@ import {
 } from "@/lib/store"
 import { terminalForeground } from "@/lib/terminals"
 
-// The kill-running modal (Ctrl+K "kill-running"), the web counterpart to the
+// The kill-running modal (Ctrl+k "kill-running"), the web counterpart to the
 // TUI's kill-running modal. It lists every RUNNING runtime — active agents
 // (those with a live PTY) and live companion terminals — and force-kills each on
 // demand. Killing an agent only DETACHES it (the worktree and session survive,

@@ -11322,7 +11322,7 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
         assert_eq!(app.input_target, InputTarget::Terminal);
 
-        // Simulate ExitInteractive via the raw input path: feed Ctrl-G
+        // Simulate ExitInteractive via the raw input path: feed Ctrl-g
         // (0x07) into the raw input buffer and process sequences.
         app.raw_input_buf = vec![0x07];
         let (sequences, _) = crate::raw_input::split_sequences(&app.raw_input_buf);
@@ -11423,7 +11423,7 @@ cyan = "#00ffff"
             .expect("spawn pty"),
         );
 
-        // Ctrl+G from non-interactive center pane should enter interactive mode.
+        // Ctrl+g from non-interactive center pane should enter interactive mode.
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .unwrap();
 
@@ -12917,7 +12917,7 @@ cyan = "#00ffff"
         let mut app = app_with_scrolled_back_pty();
         assert_eq!(app.input_target, InputTarget::Agent);
 
-        // Feed Ctrl-G (0x07) — ExitInteractive should still work.
+        // Feed Ctrl-g (0x07) — ExitInteractive should still work.
         let result = app.process_raw_input_bytes(&[0x07]).unwrap();
         assert!(!result);
         assert_eq!(
@@ -13406,12 +13406,12 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // Default ExitInteractive is Ctrl-G (0x07). Put it in loading_input_buf
+        // Default ExitInteractive is Ctrl-g (0x07). Put it in loading_input_buf
         // as scan_loading_phase_exit reads from there.
         app.loading_input_buf = vec![0x07];
         assert!(
             app.scan_loading_phase_exit(),
-            "scan_loading_phase_exit must detect Ctrl-G"
+            "scan_loading_phase_exit must detect Ctrl-g"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -13541,13 +13541,13 @@ cyan = "#00ffff"
     #[test]
     fn loading_phase_cap_still_matches_exit_interactive_at_tail() {
         // Ensure that after a large paste, a trailing single-byte
-        // ExitInteractive (Ctrl-G) still triggers exit.
+        // ExitInteractive (Ctrl-g) still triggers exit.
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
 
-        // Fill the buffer with filler past the cap, then put Ctrl-G at the
+        // Fill the buffer with filler past the cap, then put Ctrl-g at the
         // tail. append_capped would have done the same; we prepare the
         // post-cap state directly here.
         let mut filler: Vec<u8> = vec![b'x'; super::LOADING_INPUT_BUF_MAX - 1];
@@ -13555,7 +13555,7 @@ cyan = "#00ffff"
         app.loading_input_buf = filler;
         assert!(
             app.scan_loading_phase_exit(),
-            "Ctrl-G at the tail of a capped buffer must still trigger exit"
+            "Ctrl-g at the tail of a capped buffer must still trigger exit"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -13802,7 +13802,7 @@ cyan = "#00ffff"
 
         assert!(
             matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
-            "Ctrl+D in terminal list should show confirm delete terminal dialog"
+            "Ctrl+d in terminal list should show confirm delete terminal dialog"
         );
     }
 
@@ -13885,7 +13885,7 @@ cyan = "#00ffff"
 
     #[test]
     fn bracket_paste_skips_intercept_matching() {
-        // Ctrl-G (0x07) normally triggers ExitInteractive. Inside a
+        // Ctrl-g (0x07) normally triggers ExitInteractive. Inside a
         // bracket paste it should be forwarded, not intercepted.
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
@@ -13907,21 +13907,21 @@ cyan = "#00ffff"
         // Wait for the shell to produce output so has_output() is true.
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Build input: ESC[200~ + Ctrl-G + ESC[201~
+        // Build input: ESC[200~ + Ctrl-g + ESC[201~
         let mut input = Vec::new();
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
-        input.push(0x07); // Ctrl-G — would be ExitInteractive outside paste
+        input.push(0x07); // Ctrl-g — would be ExitInteractive outside paste
         input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
 
         let result = app.process_raw_input_bytes(&input).unwrap();
         assert!(!result, "should not request exit");
 
         // The key assertion: we should still be in interactive mode.
-        // If the Ctrl-G was intercepted, input_target would be None.
+        // If the Ctrl-g was intercepted, input_target would be None.
         assert_eq!(
             app.input_target,
             InputTarget::Agent,
-            "Ctrl-G inside bracket paste must not exit interactive mode"
+            "Ctrl-g inside bracket paste must not exit interactive mode"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
     }
@@ -13991,7 +13991,7 @@ cyan = "#00ffff"
         // Enter bracket paste state.
         app.in_bracket_paste = true;
 
-        // Now send ExitInteractive (Ctrl-G) outside of paste context.
+        // Now send ExitInteractive (Ctrl-g) outside of paste context.
         // Reset in_bracket_paste first to simulate that the end marker
         // was never received (e.g. malformed paste), but we exit.
         app.in_bracket_paste = false;

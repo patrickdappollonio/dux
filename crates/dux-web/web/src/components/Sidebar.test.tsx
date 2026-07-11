@@ -265,7 +265,7 @@ describe("AppSidebar resize affordances", () => {
   // The agents panel resizes by dragging only — matching the changes panel. The
   // old shadcn `SidebarRail` doubled as a click-near-the-edge collapse target; it
   // was removed so a stray click by the splitter can no longer collapse the panel.
-  // Collapse now happens only through the footer button or the Ctrl/Cmd-B shortcut
+  // Collapse now happens only through the footer button or the Ctrl/Cmd-b shortcut
   // (the latter lives in SidebarProvider), and the edge offers drag-to-resize when
   // expanded and click-to-expand when collapsed.
   it("exposes the drag handle but not the click-to-collapse rail", () => {

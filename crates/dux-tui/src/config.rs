@@ -419,7 +419,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Seconds the TUI waits for running agents and companion terminals to exit\n\
                  # after SIGTERM when you quit, before force-killing (SIGKILL) any that ignore\n\
                  # it. Set to 0 to skip the wait and force-kill immediately; values above 600\n\
-                 # are clamped (the unit is SECONDS, not milliseconds). Press Ctrl-C again\n\
+                 # are clamped (the unit is SECONDS, not milliseconds). Press Ctrl-c again\n\
                  # during the wait to force an immediate exit.\n\
                  # The web server has its own [server].shutdown_timeout_seconds.",
             )),
@@ -593,7 +593,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "copy_on_select",
             comment: Some(CommentSource::Static(
-                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; a right-click menu and Ctrl-Shift-C /\n# Ctrl-Insert copy regardless. Toggle at runtime from the web command palette.",
+                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; a right-click menu and Ctrl-Shift-c /\n# Ctrl-Insert copy regardless. Toggle at runtime from the web command palette.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
         },
@@ -906,7 +906,7 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # waits for agents and companion terminals to exit after SIGTERM on\n\
                  # shutdown, before force-killing (SIGKILL) any stragglers. Set to 0 to\n\
                  # skip the wait and force-kill immediately; values above 600 are clamped.\n\
-                 # A second Ctrl-C/SIGTERM during the wait forces an immediate exit.\n\
+                 # A second Ctrl-c/SIGTERM during the wait forces an immediate exit.\n\
                  # The TUI quit path uses the top-level shutdown_timeout_seconds instead.",
             )),
             value_fn: |c| FieldValue::U16(c.server.shutdown_timeout_seconds),

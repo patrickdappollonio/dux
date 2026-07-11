@@ -393,7 +393,7 @@ export function ChangedFiles() {
                   Pull
                 </DropdownMenuItem>
                 {/* Hide the Changes pane entirely (desktop only) — mirrors the
-                    TUI's remove-git-pane and the Ctrl+K "toggle-remove-git-pane"
+                    TUI's remove-git-pane and the Ctrl+k "toggle-remove-git-pane"
                     command; the default comes from config.ui.show_changes_pane. */}
                 {!isMobile ? (
                   <>

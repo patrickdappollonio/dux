@@ -353,10 +353,10 @@ impl TextInput {
     ///
     /// Handled keys:
     /// - `Char(c)` (without Ctrl) → insert
-    /// - `Backspace` → delete char backward; `Alt+Backspace` / `Ctrl+W` → delete word backward
+    /// - `Backspace` → delete char backward; `Alt+Backspace` / `Ctrl+w` → delete word backward
     /// - `Delete` → delete char forward; `Alt+Delete` / `Ctrl+Delete` → delete word forward
     /// - `Left` / `Right` → move char; `Alt+Left/Right` / `Ctrl+Left/Right` → move word
-    /// - `Alt+B` / `Alt+F` → terminal Meta aliases for word-left / word-right
+    /// - `Alt+b` / `Alt+f` → terminal Meta aliases for word-left / word-right
     /// - `Home` / `End` → jump to start/end of line (multiline) or text (single-line)
     ///
     /// In multiline mode, additionally:
@@ -992,7 +992,7 @@ mod tests {
     #[test]
     fn handle_key_ctrl_char_not_inserted() {
         let mut ti = TextInput::new();
-        // Ctrl+A should not insert 'a'
+        // Ctrl+a should not insert 'a'
         assert!(!ti.handle_key(key_ctrl(KeyCode::Char('a'))));
         assert!(ti.text.is_empty());
     }

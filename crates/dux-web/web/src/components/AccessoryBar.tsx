@@ -26,7 +26,7 @@ interface AccessoryBarProps {
   // applying any latched Alt prefix and consulting cursor-key mode for arrows.
   onEsc: () => void
   onTab: () => void
-  // Insert a soft newline (LF / Ctrl-J) — the touch equivalent of Shift-Enter,
+  // Insert a soft newline (LF / Ctrl-j) — the touch equivalent of Shift-Enter,
   // which no soft keyboard can produce.
   onNewline: () => void
   onArrow: (dir: "up" | "down" | "left" | "right") => void

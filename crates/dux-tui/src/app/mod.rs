@@ -509,7 +509,7 @@ struct SignalHandles {
 
 /// Register the SIGWINCH handler (terminal resize) plus the shutdown handlers
 /// (SIGTERM/SIGINT/SIGHUP) that let the TUI wind agents down gracefully before
-/// exit. SIGINT is included for an external `kill -INT`; an interactive Ctrl-C
+/// exit. SIGINT is included for an external `kill -INT`; an interactive Ctrl-c
 /// is delivered as a key event in raw mode, not as SIGINT. Each handler only
 /// sets its atomic flag (async-signal-safe); the run loop polls both flags.
 ///

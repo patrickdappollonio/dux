@@ -113,7 +113,7 @@ them, on purpose:
    for an agent whose tab you are already staring at.
 2. **You have to opt in.** dux never auto-prompts for notification permission,
    because a surprise permission popup is nobody's idea of a good time. Open the
-   command palette (`Ctrl-K` / `Cmd-K`) and run **Enable browser notifications**
+   command palette (`Ctrl-k` / `Cmd-k`) and run **Enable browser notifications**
    once; your browser asks, you say yes, and you are set. The action only appears
    while notifications are enabled in config and you have not granted permission
    yet.

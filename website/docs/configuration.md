@@ -109,6 +109,6 @@ colors — `violet`, `blue`, `sky`, `cyan`, `teal`, `green`, `amber`, `orange`,
 distinguishable at a glance.
 
 You don't have to edit the file: from the web UI, open the command palette
-(`Ctrl/Cmd+K`) and run **Rename this instance** to set the title and pick a
+(`Ctrl/Cmd+k`) and run **Rename this instance** to set the title and pick a
 favicon color. The change is written to `[server]` in `config.toml` and applies
 to every open tab immediately, so it sticks across restarts.

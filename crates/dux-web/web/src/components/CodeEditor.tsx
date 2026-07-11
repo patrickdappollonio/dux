@@ -19,7 +19,7 @@ export default function CodeEditor({
   onChange,
   onSave,
 }: CodeEditorProps) {
-  // Ctrl/Cmd+S is bound once on mount, but `onSave` is a fresh closure each
+  // Ctrl/Cmd+s is bound once on mount, but `onSave` is a fresh closure each
   // render (it reads the latest draft). Route the keybinding through a ref so it
   // always calls the current handler, never a stale one that saves old content.
   // The ref is updated in an effect (not during render) so re-renders stay pure.

@@ -52,10 +52,10 @@ warning and the server carries on.
 
 #### Stopping it
 
-`Ctrl-C` (or a `SIGTERM`) starts a graceful shutdown, not an instant kill. dux
+`Ctrl-c` (or a `SIGTERM`) starts a graceful shutdown, not an instant kill. dux
 drains open connections and sends `SIGTERM` to every running agent so its CLI
 gets a chance to save state, waiting up to `[server] shutdown_timeout_seconds`
-(30 seconds by default) before force-killing whatever is left. A second `Ctrl-C`
+(30 seconds by default) before force-killing whatever is left. A second `Ctrl-c`
 during that wait skips the grace period and exits immediately.
 
 Only one `dux server` (or `dux` TUI) can run against a given config directory at
@@ -77,7 +77,7 @@ no lost conversations), the live engine is simply handed to the web server
 in-process. Your terminal turns into a themed dux status screen showing the serve
 URLs and an activity panel. Press `q` or `Esc` there to drop back into the TUI
 around the same still-running engine, so you can bounce between the two surfaces
-as much as you like. `Ctrl-C` quits the whole process.
+as much as you like. `Ctrl-c` quits the whole process.
 
 One difference worth filing away: **`dux server` honors your configured
 `[server] host` and `--bind`, but the in-app flip always serves loopback plus
@@ -148,7 +148,7 @@ The rest tune presentation and limits:
 | `access_log` | `true` | Print a per-request access log line to the `dux server` console (never to `dux.log`, so pipe stdout to capture it). `/healthz` is always skipped. |
 | `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. Set `"dux (prod)"` to tell tabs apart. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. Empty keeps the yellow duck; otherwise a curated color (violet, blue, sky, cyan, teal, green, amber, orange, red, pink, rose). |
-| `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-C during the wait exits immediately. |
+| `shutdown_timeout_seconds` | `30` | Seconds the server waits for agents and terminals to save state after SIGTERM before force-killing. A second Ctrl-c during the wait exits immediately. |
 | `max_websocket_events_connections` | `32` | Cap on the status/event sockets (one per browser tab). |
 | `max_websocket_agent_connections` | `32` | Cap on agent-PTY sockets. |
 | `max_websocket_terminal_connections` | `64` | Cap on companion-terminal PTY sockets. |

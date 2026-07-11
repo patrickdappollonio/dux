@@ -1364,7 +1364,7 @@ impl RuntimeBindings {
 
     /// Find the action for a key event in the given scope.
     /// Plain bindings (no modifiers) reject Ctrl/Alt combos so that e.g.
-    /// Ctrl+D does not accidentally match a plain `d` binding.
+    /// Ctrl+d does not accidentally match a plain `d` binding.
     pub fn lookup(&self, key: &KeyEvent, scope: BindingScope) -> Option<Action> {
         let incoming =
             normalize_ctrl_punct(normalize_backtab(KeyCombination::from(*key).normalized()));
@@ -2520,7 +2520,7 @@ mod tests {
 
     #[test]
     fn lookup_plain_key_ignores_shift_variant() {
-        // A plain 'p' binding should NOT match Shift+P.
+        // A plain 'p' binding should NOT match Shift+p.
         let bindings = RuntimeBindings::new(
             |action| {
                 if action == Action::Quit {
@@ -2539,7 +2539,7 @@ mod tests {
         assert_ne!(
             bindings.lookup(&shift_p, BindingScope::Global),
             Some(Action::Quit),
-            "plain 'p' binding should not match Shift+P"
+            "plain 'p' binding should not match Shift+p"
         );
     }
 
@@ -2715,7 +2715,7 @@ mod tests {
     fn interactive_byte_patterns_matches_defaults() {
         let bindings = default_bindings();
         let patterns = bindings.interactive_byte_patterns();
-        // ExitInteractive default is Ctrl-G → 0x07
+        // ExitInteractive default is Ctrl-g → 0x07
         let result = patterns.match_sequence(&[0x07]);
         assert!(result.is_some());
         assert_eq!(result.unwrap().0, Action::ExitInteractive);

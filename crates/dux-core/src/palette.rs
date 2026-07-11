@@ -1,5 +1,5 @@
 //! Surface-aware command-palette registry: the single source of truth for
-//! every command the `Ctrl-P` palette can run.
+//! every command the `Ctrl-p` palette can run.
 //!
 //! Each [`PaletteCommand`] carries the action it dispatches, the dashed command
 //! name and description shown in the palette, and the [`PaletteSurface`] that

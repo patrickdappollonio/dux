@@ -16,7 +16,7 @@ On a desktop-width screen it is three panes, same as the TUI:
 
 - A collapsible **left sidebar** lists your projects and the agents under each,
   grouped into projects that have agents and projects that do not. Drag rows to
-  reorder projects and sessions. Toggle the sidebar with `Ctrl-B`.
+  reorder projects and sessions. Toggle the sidebar with `Ctrl-b`.
 - The **center pane** is the focused agent's live terminal, or a welcome screen
   when nothing is selected.
 - The **right Changes pane** shows what the focused agent has changed. You can
@@ -26,7 +26,7 @@ On a desktop-width screen it is three panes, same as the TUI:
 A slim header up top shows breadcrumbs (agent, provider, project, branch) and a
 **Commands…** button that opens the command palette. There is no in-app `?` help
 overlay in the browser the way there is in the TUI. Instead, the command palette
-(`Ctrl-K` or `Cmd-K`) is your map: it lists the global commands, each with a short
+(`Ctrl-k` or `Cmd-k`) is your map: it lists the global commands, each with a short
 description, and per-agent or per-file actions live in the `⋯` menu on the row
 itself.
 
@@ -82,10 +82,10 @@ The web terminal copies and pastes the way a real terminal does, no menu require
   command palette.
 - **Right-click to paste** (with a mouse or pen). It reads your browser clipboard
   and sends it to the agent. On plain HTTP, where the browser blocks clipboard
-  reads, dux nudges you toward `Ctrl+V` instead.
-- A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+C`,
-  `Ctrl+Insert`, or `Cmd+C` to copy, and `Ctrl+V`, `Ctrl+Shift+V`, or `Cmd+V` to
-  paste, with `Ctrl+C` staying SIGINT as it should.
+  reads, dux nudges you toward `Ctrl+v` instead.
+- A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+c`,
+  `Ctrl+Insert`, or `Cmd+c` to copy, and `Ctrl+v`, `Ctrl+Shift+v`, or `Cmd+v` to
+  paste, with `Ctrl+c` staying SIGINT as it should.
 
 There is deliberately no right-click context menu, because select-to-copy and
 right-click-paste already cover both directions and a menu would only fight the

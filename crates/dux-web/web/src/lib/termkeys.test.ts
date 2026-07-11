@@ -67,7 +67,7 @@ describe("constants", () => {
     expect(TAB.charCodeAt(0)).toBe(0x09)
   })
 
-  it("LF is the line-feed (Ctrl-J) byte", () => {
+  it("LF is the line-feed (Ctrl-j) byte", () => {
     expect(LF).toBe("\x0a")
     expect(LF.charCodeAt(0)).toBe(0x0a)
   })
@@ -307,13 +307,13 @@ describe("classifyClipboardKey", () => {
     ...over,
   })
 
-  it("keeps Ctrl-C as passthrough so it still sends SIGINT (non-mac)", () => {
+  it("keeps Ctrl-c as passthrough so it still sends SIGINT (non-mac)", () => {
     expect(classifyClipboardKey(ev({ ctrlKey: true, code: "KeyC", keyCode: 67 }))).toBe(
       "passthrough",
     )
   })
 
-  it("copies on Ctrl-Shift-C (non-mac)", () => {
+  it("copies on Ctrl-Shift-c (non-mac)", () => {
     expect(
       classifyClipboardKey(ev({ ctrlKey: true, shiftKey: true, code: "KeyC", keyCode: 67 })),
     ).toBe("copy")
@@ -325,13 +325,13 @@ describe("classifyClipboardKey", () => {
     )
   })
 
-  it("pastes on Ctrl-V (non-mac)", () => {
+  it("pastes on Ctrl-v (non-mac)", () => {
     expect(classifyClipboardKey(ev({ ctrlKey: true, code: "KeyV", keyCode: 86 }))).toBe(
       "paste",
     )
   })
 
-  it("pastes on Ctrl-Shift-V (non-mac)", () => {
+  it("pastes on Ctrl-Shift-v (non-mac)", () => {
     expect(
       classifyClipboardKey(ev({ ctrlKey: true, shiftKey: true, code: "KeyV", keyCode: 86 })),
     ).toBe("paste")
@@ -343,7 +343,7 @@ describe("classifyClipboardKey", () => {
     )
   })
 
-  it("passes Cmd-C and Cmd-V through so the browser does native copy/paste", () => {
+  it("passes Cmd-c and Cmd-v through so the browser does native copy/paste", () => {
     expect(classifyClipboardKey(ev({ metaKey: true, code: "KeyC", keyCode: 67 }))).toBe(
       "passthrough",
     )
@@ -365,7 +365,7 @@ describe("classifyClipboardKey", () => {
       ).toBe("passthrough")
     })
 
-    it("still copies on mac Ctrl-Shift-C", () => {
+    it("still copies on mac Ctrl-Shift-c", () => {
       expect(
         classifyClipboardKey(
           ev({ ctrlKey: true, shiftKey: true, code: "KeyC", keyCode: 67, isMac: true }),
@@ -373,7 +373,7 @@ describe("classifyClipboardKey", () => {
       ).toBe("copy")
     })
 
-    it("still pastes on mac Ctrl-Shift-V", () => {
+    it("still pastes on mac Ctrl-Shift-v", () => {
       expect(
         classifyClipboardKey(
           ev({ ctrlKey: true, shiftKey: true, code: "KeyV", keyCode: 86, isMac: true }),
@@ -385,7 +385,7 @@ describe("classifyClipboardKey", () => {
   it("passes plain keys and non-clipboard chords through", () => {
     expect(classifyClipboardKey(ev({ code: "KeyV", keyCode: 86 }))).toBe("passthrough")
     expect(classifyClipboardKey(ev({ code: "KeyC", keyCode: 67 }))).toBe("passthrough")
-    // Ctrl-Alt-V is excluded so AltGr/Meta chords reach the app.
+    // Ctrl-Alt-v is excluded so AltGr/Meta chords reach the app.
     expect(
       classifyClipboardKey(ev({ ctrlKey: true, altKey: true, code: "KeyV", keyCode: 86 })),
     ).toBe("passthrough")

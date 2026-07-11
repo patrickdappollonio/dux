@@ -1,5 +1,5 @@
 // Whether the client is an Apple platform. Drives the command-palette shortcut
-// label (Cmd+K vs Ctrl+K, both wired) and the terminal clipboard policy: on Mac
+// label (Cmd+k vs Ctrl+k, both wired) and the terminal clipboard policy: on Mac
 // the native Cmd shortcuts own copy/paste, so a lone Control modifier passes
 // through to the app instead of being hijacked (see `classifyClipboardKey`).
 export function isApplePlatform(): boolean {
@@ -11,7 +11,7 @@ export function isApplePlatform(): boolean {
 }
 
 export function paletteShortcutLabel(): string {
-  return isApplePlatform() ? "\u2318K" : "Ctrl K"
+  return isApplePlatform() ? "\u2318K" : "Ctrl-k"
 }
 
 // The shortcut as discrete key tokens, so UI can render each as its own element
