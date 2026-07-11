@@ -148,5 +148,6 @@ pub(crate) fn sample_session(id: &str, project_id: &str, branch: &str) -> AgentS
         status: SessionStatus::Detached,
         created_at: now,
         updated_at: now,
+        last_focused_tab: None,
     }
 }

@@ -257,6 +257,43 @@ describe("store agent-tab lifecycle", () => {
     expect(del).toBeDefined()
   })
 
+  it("closeTab on the focused extra tab never re-selects the dead tab via a stale remembered value", async () => {
+    // The spine still remembers the just-closed tab as `last_focused_tab`
+    // (the DELETE resolved, but no `sessions.changed` refetch has pruned the
+    // spine yet), AND the tab is still listed in `session.tabs` (also stale).
+    // `closeTab`'s fallback must land on the session-slot tab directly,
+    // without consulting that stale memory, or it would try to re-select the
+    // tab it just deleted.
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          terminals: [],
+          tabs: [{ id: "s1" }, { id: "b2" }],
+          last_focused_tab: "b2",
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.selectTab("s1", "b2")
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "b2",
+    })
+    mod.closeTab("s1", "b2")
+    await tick()
+    // Selection landed on the session-slot tab, never bounced back to "b2".
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+  })
+
   it("closeTab on the focused session-slot tab moves focus to a live sibling", async () => {
     // Closing the focused session-slot tab while a sibling is live must move
     // focus off it, so the pane doesn't re-subscribe the just-closed tab (which

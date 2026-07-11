@@ -17,13 +17,19 @@
 //!   owned by `:id` is a 404.
 //! - `PATCH  /api/v1/sessions/:id/tabs/:tab`       — retarget the tab's provider
 //!   `{ "provider" }`. 200 on success; 400 when the provider is not configured.
+//! - `PUT    /api/v1/sessions/:id/focused-tab`     — remember the tab the user
+//!   last focused on this agent, so a later sidebar/bare-route navigation to
+//!   this agent restores it. `{ "tab_id": string | null }`. A `tab_id` equal to
+//!   `:id`, or naming a tab that isn't a live extra tab of `:id`, is normalized
+//!   to "no memory" (resolves to the session-slot tab) rather than rejected.
+//!   Fire-and-forget on the client side; 200 on success.
 
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, patch, post},
+    routing::{delete, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +44,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/sessions/{id}/tabs", post(create_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", delete(delete_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", patch(retarget_tab))
+        .route(
+            "/api/v1/sessions/{id}/focused-tab",
+            put(set_focused_tab_route),
+        )
 }
 
 #[derive(Deserialize, Default)]
@@ -64,6 +74,11 @@ struct DetachedTab {
 #[derive(Deserialize)]
 struct RetargetBody {
     provider: String,
+}
+
+#[derive(Deserialize)]
+struct SetFocusedTabBody {
+    tab_id: Option<String>,
 }
 
 /// `POST /api/v1/sessions/:id/tabs` — create an extra tab. Direct-return through
@@ -233,6 +248,41 @@ async fn retarget_tab(
         // A concurrent close removed the row between the ownership check and the
         // command: "gone" is 404, not a validation error (mirrors kill_session).
         Err(e) if e.contains("unknown tab") => (StatusCode::NOT_FOUND, e).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// `PUT /api/v1/sessions/:id/focused-tab` — remember the tab the user last
+/// focused on this agent (J4: a dedicated route rather than piggybacking on an
+/// existing verb, matching the one-verb-per-action style above). Silent
+/// (`SetLastFocusedTab` carries no status/toast, J3): the engine itself
+/// normalizes an id equal to `:id`, or a tab not owned by `:id`, down to "no
+/// memory" rather than erroring, so this handler only needs to validate the
+/// session exists.
+async fn set_focused_tab_route(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<SetFocusedTabBody>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
+        return resp;
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::SetLastFocusedTab {
+                session_id: id,
+                tab_id: body.tab_id,
+            },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }

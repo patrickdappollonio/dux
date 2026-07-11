@@ -99,4 +99,40 @@ describe("tabsApi", () => {
     expect(err.status).toBe(400)
     expect(err.message).toBe('provider "nope" is not configured')
   })
+
+  it("setFocusedTab PUTs the focused-tab endpoint with the tab id", async () => {
+    const fetchMock = stubOkFetch(200, {})
+    await tabsApi.setFocusedTab("s1", "b1")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/sessions/s1/focused-tab")
+    expect(c.method).toBe("PUT")
+    expect(c.headers["x-connection-id"]).toBe("conn-7")
+    expect(JSON.parse(c.body ?? "{}")).toEqual({ tab_id: "b1" })
+  })
+
+  it("setFocusedTab sends a null tab_id to clear the memory", async () => {
+    const fetchMock = stubOkFetch(200, {})
+    await tabsApi.setFocusedTab("s1", null)
+    expect(JSON.parse(lastCall(fetchMock).body ?? "{}")).toEqual({
+      tab_id: null,
+    })
+  })
+
+  it("setFocusedTab swallows a failure rather than throwing (fire-and-forget)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        text: async () => "boom",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {})
+    await expect(tabsApi.setFocusedTab("s1", "b1")).resolves.toBeUndefined()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
 })

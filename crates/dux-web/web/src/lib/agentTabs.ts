@@ -78,6 +78,42 @@ export function branchDrift(
   }
 }
 
+// Resolve the tab id a session should focus when the user navigates to it via
+// the sidebar or the bare `#/agent/:id` route (an explicit `#/agent/:id/tab/:t`
+// deep link always wins over this — see `restoreDeepLink` in `store.ts`, which
+// is intentionally untouched by this helper). Mirrors the shared resolution rule
+// (`AgentSession::resolved_focused_tab` in dux-core): the remembered
+// `last_focused_tab` wins only when it is present AND still names a live tab in
+// `session.tabs`; otherwise (no memory, it equals the session-slot id, or it
+// names a tab that has since closed) falls back to the session-slot tab
+// (`session.id`).
+export function resolveFocusedTab(session: SessionView): string {
+  const remembered = session.last_focused_tab
+  if (
+    remembered &&
+    remembered !== session.id &&
+    session.tabs.some((t) => t.id === remembered)
+  ) {
+    return remembered
+  }
+  return session.id
+}
+
+// Decide whether a fire-and-forget `PUT .../focused-tab` response must trigger
+// a corrective re-issue. `selectTab` may be called in rapid succession (fast
+// tab switching), and network responses can settle out of order, so each
+// session keeps only its LATEST intended `(generation, tabId)`. When a
+// response settles for a stale generation, its ordering at the server tells
+// us nothing, so we only re-fire when the settled value actually differs from
+// the current intent (matching generations, or a stale generation that
+// happens to already carry the right value, need no correction).
+export function shouldRefireFocusPut(
+  latest: { generation: number; tabId: string | null },
+  settled: { generation: number; tabId: string | null },
+): boolean {
+  return latest.generation !== settled.generation && latest.tabId !== settled.tabId
+}
+
 // The provider a plain (no-provider-arg) `addTab(session.id)` actually launches:
 // the session's owning project's `default_provider`, mirroring the server's own
 // resolution (`CreateTabBody.provider` omitted → project default). Falls back to

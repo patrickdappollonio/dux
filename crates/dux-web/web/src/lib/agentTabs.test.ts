@@ -5,6 +5,8 @@ import {
   defaultProviderForSession,
   isExtraTabDormant,
   isTabGone,
+  resolveFocusedTab,
+  shouldRefireFocusPut,
   shouldShowTabStrip,
   tabLabels,
 } from "./agentTabs"
@@ -162,5 +164,75 @@ describe("tabLabels", () => {
         tab("claude"),
       ]),
     ).toEqual(["codex", "claude", "codex 2", "codex 3", "claude 2"])
+  })
+})
+
+// A minimal SessionView for resolveFocusedTab (only `id`, `tabs`, and
+// `last_focused_tab` matter here).
+function sessionWithTabs(
+  id: string,
+  tabs: AgentTabView[],
+  lastFocusedTab: string | null | undefined,
+): SessionView {
+  return {
+    id,
+    tabs,
+    last_focused_tab: lastFocusedTab,
+  } as unknown as SessionView
+}
+
+describe("resolveFocusedTab", () => {
+  it("returns the session-slot tab when there is no remembered tab", () => {
+    const s = sessionWithTabs("s1", [extraTab("t1", true)], null)
+    expect(resolveFocusedTab(s)).toBe("s1")
+  })
+
+  it("returns the session-slot tab when the remembered value equals the session id", () => {
+    const s = sessionWithTabs("s1", [extraTab("t1", true)], "s1")
+    expect(resolveFocusedTab(s)).toBe("s1")
+  })
+
+  it("returns the session-slot tab when the remembered tab is no longer present", () => {
+    const s = sessionWithTabs("s1", [extraTab("t1", true)], "gone")
+    expect(resolveFocusedTab(s)).toBe("s1")
+  })
+
+  it("returns the remembered tab when it is a live extra tab of this session", () => {
+    const s = sessionWithTabs(
+      "s1",
+      [extraTab("t1", true), extraTab("t2", true)],
+      "t2",
+    )
+    expect(resolveFocusedTab(s)).toBe("t2")
+  })
+
+  it("returns the session-slot tab when last_focused_tab is undefined", () => {
+    const s = sessionWithTabs("s1", [extraTab("t1", true)], undefined)
+    expect(resolveFocusedTab(s)).toBe("s1")
+  })
+})
+
+describe("shouldRefireFocusPut", () => {
+  it("does not refire when the settled response matches the latest intent", () => {
+    const latest = { generation: 2, tabId: "t2" }
+    const settled = { generation: 2, tabId: "t2" }
+    expect(shouldRefireFocusPut(latest, settled)).toBe(false)
+  })
+
+  it("does not refire a stale response whose value happens to already match the latest intent", () => {
+    // Generation is stale, but the tab id it settled with is coincidentally
+    // the same as the current intent, so there is nothing to correct.
+    const latest = { generation: 3, tabId: "t2" }
+    const settled = { generation: 2, tabId: "t2" }
+    expect(shouldRefireFocusPut(latest, settled)).toBe(false)
+  })
+
+  it("refires when a stale response settles with a value different from the latest intent", () => {
+    // A→B switch fired two PUTs; B's response settled first, A's settled
+    // after with a different tab id — re-issue B so the server's last write
+    // matches the user's last click regardless of response ordering.
+    const latest = { generation: 2, tabId: "t2" }
+    const settled = { generation: 1, tabId: "t1" }
+    expect(shouldRefireFocusPut(latest, settled)).toBe(true)
   })
 })

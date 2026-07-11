@@ -364,6 +364,16 @@ pub enum WireCommand {
         tab_id: String,
         provider: String,
     },
+    /// Remember the tab the user last focused on this agent, so switching away
+    /// and back (either surface, and across restarts) restores it. `tab_id` of
+    /// `None` (or equal to `session_id`, or naming a tab that doesn't belong to
+    /// the session) clears the memory, resolving to the session-slot tab. High
+    /// frequency and user-paced: dispatched with no status/toast (`status: None`)
+    /// and the TUI/web writers treat it as fire-and-forget.
+    SetLastFocusedTab {
+        session_id: String,
+        tab_id: Option<String>,
+    },
     /// Switch a project's SOURCE checkout back to its default branch, mirroring
     /// the TUI's `checkout-project-default-branch`.
     ///
@@ -1012,6 +1022,15 @@ impl Engine {
                 let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    created_op_id: None,
+                });
+            }
+            WireCommand::SetLastFocusedTab { session_id, tab_id } => {
+                self.set_last_focused_tab(&session_id, tab_id.as_deref())?;
+                // Silent: focus changes are high-frequency and user-paced, so no
+                // toast/status is surfaced (see J3 in the tab-focus-memory plan).
+                return Ok(WireCommandOutcome {
+                    status: None,
                     created_op_id: None,
                 });
             }
@@ -3216,9 +3235,10 @@ impl Engine {
             | WireCommand::KillSessionPty { .. }
             | WireCommand::DetachAgent { .. }
             | WireCommand::CloseAgentTab { .. }
-            | WireCommand::ChangeAgentTabProvider { .. } => {
+            | WireCommand::ChangeAgentTabProvider { .. }
+            | WireCommand::SetLastFocusedTab { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -5591,6 +5611,59 @@ mod tests {
             .expect("git diff");
         let names = String::from_utf8_lossy(&staged.stdout);
         assert!(names.contains("a.txt"), "staged names: {names}");
+    }
+
+    #[test]
+    fn apply_wire_set_last_focused_tab_is_silent_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = crate::model::AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: crate::model::ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+
+        let outcome = engine
+            .apply_wire(WireCommand::SetLastFocusedTab {
+                session_id: "s1".to_string(),
+                tab_id: Some("tab-1".to_string()),
+            })
+            .expect("apply_wire");
+
+        // J3: no toast for a focus-memory write, high frequency and user-paced.
+        assert!(outcome.status.is_none());
+        assert_eq!(
+            engine.sessions[0].last_focused_tab.as_deref(),
+            Some("tab-1")
+        );
+
+        // Survives projection into the spine's SessionView.
+        let spine = engine.spine();
+        let view = spine
+            .sessions
+            .iter()
+            .find(|s| s.id == "s1")
+            .expect("session view");
+        assert_eq!(view.last_focused_tab.as_deref(), Some("tab-1"));
+    }
+
+    #[test]
+    fn apply_wire_set_last_focused_tab_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .apply_wire(WireCommand::SetLastFocusedTab {
+                session_id: "ghost".to_string(),
+                tab_id: None,
+            })
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
     }
 
     #[test]

@@ -116,6 +116,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         status: SessionStatus::Detached,
         created_at: now,
         updated_at: now,
+        last_focused_tab: None,
     };
     let (worker_tx, worker_rx) = mpsc::channel();
     let single_instance_lock = crate::lockfile::SingleInstanceLock::acquire(&paths.lock_path)

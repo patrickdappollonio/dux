@@ -3569,6 +3569,7 @@ mod tests {
             status: SessionStatus::Detached,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         }
     }
 
@@ -3701,10 +3702,80 @@ mod tests {
         app.focused_tabs
             .insert("s1".to_string(), "gone".to_string());
         assert_eq!(app.focused_tab_id("s1"), "s1");
-        // Teardown prune drops the entry.
+        // Teardown prune drops the LOCAL entry. `set_focused_tab` also wrote the
+        // choice through to the engine's persisted `last_focused_tab`, so the
+        // resolver now falls back to that remembered value rather than Main
+        // (see `focused_tab_id_falls_back_to_the_engine_remembered_tab_when_the_map_has_no_entry`).
+        // In production this is harmless: the real teardown caller
+        // (session delete) removes the whole `agent_sessions` row, taking
+        // `last_focused_tab` with it.
         app.set_focused_tab("s1", "t1");
         app.clear_focused_tab_for_session("s1");
+        assert_eq!(app.focused_tab_id("s1"), "t1");
+        // With no engine memory either, it clamps to Main.
+        app.engine.sessions[0].last_focused_tab = None;
         assert_eq!(app.focused_tab_id("s1"), "s1");
+    }
+
+    #[test]
+    fn focused_tab_id_falls_back_to_the_engine_remembered_tab_when_the_map_has_no_entry() {
+        // Simulates a post-restart App: the in-process `focused_tabs` HashMap is
+        // empty, but the engine session (loaded from SQLite) carries a
+        // remembered `last_focused_tab`.
+        let mut app =
+            test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        seed_tab(&mut app, "t1", "s1", "claude", 1);
+        app.engine.sessions[0].last_focused_tab = Some("t1".to_string());
+        assert!(!app.focused_tabs.contains_key("s1"));
+
+        assert_eq!(app.focused_tab_id("s1"), "t1");
+    }
+
+    #[test]
+    fn focused_tab_id_falls_back_to_main_when_the_remembered_engine_tab_is_gone() {
+        let mut app =
+            test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        app.engine.sessions[0].last_focused_tab = Some("gone".to_string());
+        assert_eq!(app.focused_tab_id("s1"), "s1");
+    }
+
+    #[test]
+    fn focused_tab_id_prefers_the_live_hashmap_entry_over_the_engine_remembered_tab() {
+        let mut app =
+            test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        seed_tab(&mut app, "t1", "s1", "claude", 1);
+        seed_tab(&mut app, "t2", "s1", "codex", 2);
+        app.engine.sessions[0].last_focused_tab = Some("t1".to_string());
+        app.set_focused_tab("s1", "t2");
+
+        assert_eq!(app.focused_tab_id("s1"), "t2");
+    }
+
+    #[test]
+    fn set_focused_tab_writes_through_to_the_engine_and_persists() {
+        let mut app =
+            test_app_with_sessions(vec![make_session("s1", "codex", "/tmp/w1")], Vec::new());
+        app.engine
+            .session_store
+            .upsert_session(&app.engine.sessions[0].clone())
+            .expect("seed session row");
+        seed_tab(&mut app, "t1", "s1", "claude", 1);
+
+        app.set_focused_tab("s1", "t1");
+        assert_eq!(
+            app.engine.sessions[0].last_focused_tab.as_deref(),
+            Some("t1")
+        );
+        let reloaded = app.engine.session_store.load_sessions().expect("reload");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
+        assert_eq!(s.last_focused_tab.as_deref(), Some("t1"));
+
+        // Switching back to Main clears the remembered engine value too.
+        app.set_focused_tab("s1", "s1");
+        assert_eq!(app.engine.sessions[0].last_focused_tab, None);
+        let reloaded = app.engine.session_store.load_sessions().expect("reload");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
+        assert_eq!(s.last_focused_tab, None);
     }
 
     #[test]

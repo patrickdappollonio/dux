@@ -150,6 +150,16 @@ pub struct AgentSession {
     pub status: SessionStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The tab id the user last focused on this agent, remembered so switching
+    /// away and back (either surface, and across restarts) restores it. `None`
+    /// means "no memory recorded" and resolves to the session-slot tab (id ==
+    /// `self.id`). A remembered value equal to `self.id`, or one that no longer
+    /// names a live extra tab, also resolves to the session-slot tab — see
+    /// [`AgentSession::resolved_focused_tab`]. Derived runtime/UI state: kept in
+    /// SQLite via a dedicated setter, never in portable config, and deliberately
+    /// excluded from `upsert_session`'s hot-path SET/INSERT lists so status
+    /// churn can never clobber it.
+    pub last_focused_tab: Option<String>,
 }
 
 impl AgentSession {
@@ -165,6 +175,20 @@ impl AgentSession {
         }
         self.started_providers.push(provider.as_str().to_string());
         true
+    }
+
+    /// Resolve the tab to focus: the remembered tab when it is a real, still-open
+    /// extra tab of this session; the session-slot tab (== session id) otherwise.
+    /// `None`, the session id itself, and a closed/foreign tab id all resolve to
+    /// the session-slot tab.
+    pub fn resolved_focused_tab<'a>(
+        &'a self,
+        live_extra_tab_ids: impl IntoIterator<Item = &'a str>,
+    ) -> &'a str {
+        match self.last_focused_tab.as_deref() {
+            Some(id) if id != self.id && live_extra_tab_ids.into_iter().any(|t| t == id) => id,
+            _ => &self.id,
+        }
     }
 }
 
@@ -196,4 +220,62 @@ pub struct CompanionTerminal {
     pub label: String,
     pub foreground_cmd: Option<String>,
     pub client: PtyClient,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_with_focus(last_focused_tab: Option<&str>) -> AgentSession {
+        let now = Utc::now();
+        AgentSession {
+            id: "s1".to_string(),
+            project_id: "p1".to_string(),
+            project_path: None,
+            provider: ProviderKind::new("claude"),
+            source_branch: "main".to_string(),
+            branch_name: "s1".to_string(),
+            initial_branch: "s1".to_string(),
+            worktree_path: "/tmp/s1".to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: true,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: last_focused_tab.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn resolved_focused_tab_none_falls_back_to_session_slot() {
+        let session = session_with_focus(None);
+        assert_eq!(session.resolved_focused_tab(["t1"]), "s1");
+    }
+
+    #[test]
+    fn resolved_focused_tab_session_id_falls_back_to_session_slot() {
+        let session = session_with_focus(Some("s1"));
+        assert_eq!(session.resolved_focused_tab(["t1"]), "s1");
+    }
+
+    #[test]
+    fn resolved_focused_tab_gone_tab_falls_back_to_session_slot() {
+        let session = session_with_focus(Some("gone"));
+        assert_eq!(session.resolved_focused_tab(["t1"]), "s1");
+    }
+
+    #[test]
+    fn resolved_focused_tab_live_extra_tab_wins() {
+        let session = session_with_focus(Some("t1"));
+        assert_eq!(session.resolved_focused_tab(["t1", "t2"]), "t1");
+    }
+
+    #[test]
+    fn resolved_focused_tab_empty_live_set_falls_back() {
+        let session = session_with_focus(Some("t1"));
+        let empty: Vec<&str> = Vec::new();
+        assert_eq!(session.resolved_focused_tab(empty), "s1");
+    }
 }

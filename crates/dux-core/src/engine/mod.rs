@@ -2510,6 +2510,41 @@ impl Engine {
             resume_available,
         })
     }
+
+    /// Remember (or clear) the tab the user last focused on `session_id`.
+    /// Normalizes `tab_id` to `None` when it is absent, equal to `session_id`
+    /// (the session-slot tab, represented as absence), or does not name a live
+    /// extra tab belonging to this session — so a stale/foreign id can never be
+    /// persisted. DB-first (mirroring `ToggleAgentAutoReopen`): the storage
+    /// write happens before the in-memory session is updated, so a persistence
+    /// failure leaves memory and SQLite in sync.
+    pub fn set_last_focused_tab(
+        &mut self,
+        session_id: &str,
+        tab_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if !self.sessions.iter().any(|s| s.id == session_id) {
+            anyhow::bail!("unknown session: {session_id}");
+        }
+        let normalized = match tab_id {
+            Some(id)
+                if id != session_id
+                    && self
+                        .agent_tabs
+                        .get(id)
+                        .is_some_and(|t| t.session_id == session_id) =>
+            {
+                Some(id.to_string())
+            }
+            _ => None,
+        };
+        self.session_store
+            .set_last_focused_tab(session_id, normalized.as_deref())?;
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.last_focused_tab = normalized;
+        }
+        Ok(())
+    }
 }
 
 /// Result of [`Engine::change_agent_provider`]: the data a surface needs to
@@ -3820,6 +3855,93 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("unknown session"), "err: {err}");
     }
+
+    #[test]
+    fn set_last_focused_tab_persists_a_live_extra_tab() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+
+        engine
+            .set_last_focused_tab("s1", Some("tab-1"))
+            .expect("persist focus");
+
+        assert_eq!(
+            engine.sessions[0].last_focused_tab.as_deref(),
+            Some("tab-1")
+        );
+        let reloaded = engine.session_store.load_sessions().expect("reload");
+        let s = reloaded.iter().find(|s| s.id == "s1").expect("row");
+        assert_eq!(s.last_focused_tab.as_deref(), Some("tab-1"));
+    }
+
+    #[test]
+    fn set_last_focused_tab_normalizes_session_id_to_none() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        engine.set_last_focused_tab("s1", Some("tab-1")).ok();
+        engine
+            .set_last_focused_tab("s1", Some("s1"))
+            .expect("normalize session-slot id");
+
+        assert_eq!(engine.sessions[0].last_focused_tab, None);
+        let reloaded = engine.session_store.load_sessions().expect("reload");
+        assert_eq!(reloaded[0].last_focused_tab, None);
+    }
+
+    #[test]
+    fn set_last_focused_tab_normalizes_a_foreign_or_unknown_tab_to_none() {
+        let (mut engine, _tmp) = test_engine();
+        let session = sample_session("s1", "p1", "feat");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let other_session = sample_session("s2", "p1", "other");
+        engine.session_store.upsert_session(&other_session).unwrap();
+        engine.sessions.push(other_session);
+        let foreign_tab = AgentTab {
+            id: "tab-2".to_string(),
+            session_id: "s2".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
+        engine.session_store.insert_agent_tab(&foreign_tab).unwrap();
+        engine
+            .agent_tabs
+            .insert(foreign_tab.id.clone(), foreign_tab);
+
+        engine
+            .set_last_focused_tab("s1", Some("tab-2"))
+            .expect("foreign tab normalizes, does not error");
+        assert_eq!(engine.sessions[0].last_focused_tab, None);
+
+        engine
+            .set_last_focused_tab("s1", Some("does-not-exist"))
+            .expect("unknown tab normalizes, does not error");
+        assert_eq!(engine.sessions[0].last_focused_tab, None);
+    }
+
+    #[test]
+    fn set_last_focused_tab_unknown_session_errors() {
+        let (mut engine, _tmp) = test_engine();
+        let err = engine
+            .set_last_focused_tab("ghost", Some("tab-1"))
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown session"), "err: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -3851,7 +3973,13 @@ mod tab_ops_tests {
         // Both providers have run in this worktree, so both are resume-eligible.
         session.started_providers = vec!["codex".into(), "claude".into()];
         engine.sessions.push(session.clone());
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(tab.id.clone(), tab);
 
@@ -4144,7 +4272,13 @@ mod tab_ops_tests {
     fn close_tab_deletes_the_row_and_clears_runtime_maps() {
         let (mut engine, _tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(tab.id.clone(), tab);
         engine
@@ -4170,7 +4304,13 @@ mod tab_ops_tests {
         session.status = SessionStatus::Active;
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(tab.id.clone(), tab);
         engine
@@ -4197,7 +4337,13 @@ mod tab_ops_tests {
         session.status = SessionStatus::Active;
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(tab.id.clone(), tab);
         engine
@@ -4228,7 +4374,13 @@ mod tab_ops_tests {
     fn support_tab_launch_ready_does_not_flip_session_state() {
         let (mut engine, tmp) = test_engine();
         engine.sessions.push(sample_session("s1", "p1", "feat"));
-        let tab = support_tab("tab-1", "s1", "codex");
+        let tab = AgentTab {
+            id: "tab-1".to_string(),
+            session_id: "s1".to_string(),
+            provider: ProviderKind::new("codex"),
+            sort_order: 1,
+            created_at: chrono::Utc::now(),
+        };
         engine.session_store.insert_agent_tab(&tab).unwrap();
         engine.agent_tabs.insert(tab.id.clone(), tab);
         let session = engine.sessions[0].clone();

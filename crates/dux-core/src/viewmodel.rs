@@ -234,6 +234,14 @@ pub struct SessionView {
     /// Session last-update time as an RFC 3339 / ISO 8601 string. Mirror of
     /// `created_at`; backs the web's `sort-agents-by-updated` parity command.
     pub updated_at: String,
+    /// The tab id the user last focused on this agent, verbatim from
+    /// [`crate::model::AgentSession::last_focused_tab`]. `None` (or a value
+    /// naming a tab no longer in `tabs`) means "no memory" and callers should
+    /// resolve to the session-slot tab (`id`) — see
+    /// `crates/dux-web/web/src/lib/agentTabs.ts`'s `resolveFocusedTab` for the
+    /// web-side resolver and [`crate::model::AgentSession::resolved_focused_tab`]
+    /// for the shared rule.
+    pub last_focused_tab: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -358,6 +366,7 @@ impl SessionView {
             needs_attention,
             created_at: s.created_at.to_rfc3339(),
             updated_at: s.updated_at.to_rfc3339(),
+            last_focused_tab: s.last_focused_tab.clone(),
         }
     }
 }

@@ -575,6 +575,7 @@ pub fn run_create_agent_job(
         status: SessionStatus::Active,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        last_focused_tab: None,
     };
     let provider_cfg = provider_config(&config, &session.provider);
     if let Err(hint) = check_provider_available(&provider_cfg) {
@@ -899,6 +900,7 @@ mod tests {
             status: SessionStatus::Detached,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            last_focused_tab: None,
         }
     }
 

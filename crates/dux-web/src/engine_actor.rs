@@ -2140,6 +2140,7 @@ mod tests {
             status: dux_core::model::SessionStatus::Detached,
             created_at: now,
             updated_at: now,
+            last_focused_tab: None,
         }
     }
 
