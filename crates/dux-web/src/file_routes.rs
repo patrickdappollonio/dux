@@ -10,10 +10,11 @@
 //! escape, `worktree_file::{read,write}_file` additionally refuse symlinks and
 //! (on create) validate the parent stays inside the tree. There is deliberately
 //! NO git-tracked/changed-file gate here — that is the changes pane's concern;
-//! the editor works against the worktree itself. The `list` endpoint returns
-//! git's file set (tracked, untracked-not-ignored, AND loose gitignored files —
-//! fully-ignored directories like node_modules are collapsed out) purely so the
-//! tree is a clean, finite browse surface — it does not bound what is editable.
+//! the editor works against the worktree itself. The `tree` endpoint lazily
+//! lists exactly ONE directory per request (no recursion, no cap) and backs the
+//! editor's file tree; the `list` endpoint is a flat filesystem walk capped by
+//! `[server] search_index_max_files` that backs ONLY the "Search files…" box.
+//! Neither bounds what is editable.
 //! `open-in-editor` only spawns an editor (no extra capability beyond read/write
 //! given the single-tenant trusted-access model); it is gated to local-access
 //! clients in the UI and is a harmless no-op when spawned on a headless server.
@@ -22,6 +23,8 @@
 //! and same-origin guard applied app-wide, and run the file I/O OFF the async reactor
 //! (`spawn_blocking`). After a write, the changed-files cache is invalidated so a
 //! `session.changes` event reaches subscribed clients on `/ws/events`.
+
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -81,6 +84,21 @@ struct FileList {
     truncated: bool,
 }
 
+/// Request for the lazy tree listing: one worktree-relative directory
+/// (`""` = the worktree root).
+#[derive(Deserialize)]
+struct TreeOp {
+    #[serde(default)]
+    dir: String,
+}
+
+/// One directory's children for the lazy file tree, pre-sorted dirs-first.
+#[derive(Serialize)]
+struct TreeList {
+    dir: String,
+    entries: Vec<dux_core::git::DirEntryInfo>,
+}
+
 #[derive(Serialize)]
 struct OpenedEditor {
     /// Human-readable editor label (e.g. "VS Code") for the success toast.
@@ -96,6 +114,7 @@ pub fn routes() -> Router<AppState> {
     let prefix = "/api/v1/sessions/{id}/files";
     Router::new()
         .route(&format!("{prefix}/list"), post(list_files))
+        .route(&format!("{prefix}/tree"), post(list_tree))
         .route(&format!("{prefix}/read"), post(read_file))
         .route(&format!("{prefix}/diff"), post(diff_contents))
         .route(&format!("{prefix}/raw"), get(read_raw))
@@ -111,7 +130,10 @@ async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>)
         Ok(w) => w,
         Err(r) => return r,
     };
-    match tokio::task::spawn_blocking(move || dux_core::git::worktree_files(&worktree)).await {
+    let max_files = state.search_index_max_files;
+    match tokio::task::spawn_blocking(move || dux_core::git::worktree_files(&worktree, max_files))
+        .await
+    {
         Ok(Ok(listing)) => Json(FileList {
             files: listing.files,
             truncated: listing.truncated,
@@ -121,6 +143,59 @@ async fn list_files(State(state): State<AppState>, ApiPath(id): ApiPath<String>)
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("list task failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Lazy tree listing: one directory per request, no recursion, no cap. The
+/// blocking `read_dir` runs off the async reactor via `spawn_blocking`, bounded
+/// by `state.tree_list_semaphore` (`[server] tree_list_max_concurrency`) so a
+/// burst of tree requests cannot exhaust the server's blocking-thread pool. A
+/// request beyond the limit WAITS for a free permit (`acquire_owned().await`)
+/// rather than being rejected — this is a small, fast unit of background work,
+/// not a long-lived connection like the `ws_*_semaphore` classes, which 503 on
+/// exhaustion instead.
+async fn list_tree(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<TreeOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    // `None` means the config value is 0 (unlimited): skip the permit entirely.
+    let _permit = match &state.tree_list_semaphore {
+        Some(sem) => match Arc::clone(sem).acquire_owned().await {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "tree listing semaphore closed unexpectedly",
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let dir = op.dir;
+    let dir_echo = dir.clone();
+    match tokio::task::spawn_blocking(move || dux_core::git::list_dir(&worktree, &dir)).await {
+        Ok(Ok(entries)) => Json(TreeList {
+            dir: dir_echo,
+            entries,
+        })
+        .into_response(),
+        // list_dir errors are containment/traversal/missing-dir conditions the
+        // client caused — surface them as a 400, not a server error.
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("tree task failed: {e}"),
         )
             .into_response(),
     }

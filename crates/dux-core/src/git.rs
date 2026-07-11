@@ -791,18 +791,12 @@ pub fn remove_worktree(
     })
 }
 
-/// Server-side cap on the number of entries returned by [`worktree_files`].
-/// Above this a `truncated` flag is set so the client can show a banner.
-/// 50 000 entries is ~5 MB of JSON at 100 bytes/path — reasonable for a
-/// single HTTP response. Most repos are well under 10 000.
-pub const WORKTREE_FILES_CAP: usize = 50_000;
-
 /// The file listing returned by [`worktree_files`].
 #[derive(Debug, Clone)]
 pub struct WorktreeFileList {
     pub files: Vec<String>,
-    /// `true` when the walk hit [`WORKTREE_FILES_CAP`] and some entries were
-    /// omitted. The client should surface a banner.
+    /// `true` when the walk hit the caller's `max_files` cap and some entries
+    /// were omitted. The client may surface a subtle hint.
     pub truncated: bool,
 }
 
@@ -812,9 +806,11 @@ pub struct WorktreeFileList {
 /// The rest of `.git/` is included so the editor can open `.git/config`,
 /// `.git/HEAD`, hooks, etc. as read-only. Symlinked directories are NOT
 /// recursed (`follow_links(false)`); a symlinked dir appears as a leaf entry.
-/// Returns at most [`WORKTREE_FILES_CAP`] entries; sets `truncated` if
-/// more exist.
-pub fn worktree_files(worktree_path: &Path) -> Result<WorktreeFileList> {
+///
+/// This feeds the web editor's file-SEARCH index, not its tree (the tree uses
+/// [`list_dir`]). Returns at most `max_files` entries and sets `truncated` if
+/// more exist; `max_files == 0` disables the cap entirely.
+pub fn worktree_files(worktree_path: &Path, max_files: usize) -> Result<WorktreeFileList> {
     use walkdir::WalkDir;
 
     let wt = worktree_path.to_path_buf();
@@ -859,7 +855,7 @@ pub fn worktree_files(worktree_path: &Path) -> Result<WorktreeFileList> {
             continue;
         }
         if let Ok(rel) = entry.path().strip_prefix(worktree_path) {
-            if files.len() >= WORKTREE_FILES_CAP {
+            if max_files > 0 && files.len() >= max_files {
                 truncated = true;
                 break;
             }
@@ -869,6 +865,128 @@ pub fn worktree_files(worktree_path: &Path) -> Result<WorktreeFileList> {
 
     files.sort();
     Ok(WorktreeFileList { files, truncated })
+}
+
+/// One entry in a single-directory listing for the web editor's lazy file tree.
+/// Produced by [`list_dir`]; unlike [`worktree_files`] this never recurses and
+/// never caps — it reflects exactly one directory's children as they are on disk.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DirEntryInfo {
+    /// The child's own name (final path segment), never a full path.
+    pub name: String,
+    /// The child's worktree-relative path (`parent_rel/name`, or `name` at root).
+    pub path: String,
+    /// True when the entry is a directory (a real dir, OR a symlink that
+    /// resolves to a directory that is still inside the worktree — those are
+    /// expandable).
+    pub is_dir: bool,
+    /// True when the entry is a symlink (of any kind). The UI may badge it; a
+    /// symlinked dir that escapes the worktree is reported with `is_dir = false`
+    /// and `expandable = false` so it can never be walked out of the tree.
+    pub is_symlink: bool,
+    /// True when the UI may request this entry's children via [`list_dir`].
+    /// False for files and for symlinked dirs whose target is outside the
+    /// worktree.
+    pub expandable: bool,
+}
+
+/// List exactly one directory of the worktree for the web editor's lazy file
+/// tree: a single `read_dir`, no recursion, no cap. `rel_dir` is worktree
+/// relative; `""` lists the worktree root. Containment reuses the
+/// read-permissive resolver (`.git/` is listable; traversal, absolute paths,
+/// and symlinks that escape the worktree are refused).
+pub fn list_dir(worktree: &Path, rel_dir: &str) -> Result<Vec<DirEntryInfo>> {
+    let abs_dir = if rel_dir.is_empty() {
+        worktree.to_path_buf()
+    } else {
+        let (abs, _is_git_dir, is_outside) =
+            crate::worktree_file::resolve_worktree_path_for_read(worktree, rel_dir)?;
+        if is_outside {
+            return Err(anyhow!(
+                "directory resolves outside the worktree: {rel_dir}"
+            ));
+        }
+        abs
+    };
+
+    let mut entries: Vec<DirEntryInfo> = Vec::new();
+    for entry in std::fs::read_dir(&abs_dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                logger::warn(&format!("list_dir: skipping entry: {e}"));
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = if rel_dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_dir}/{name}")
+        };
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                logger::warn(&format!("list_dir: skipping entry {name}: {e}"));
+                continue;
+            }
+        };
+        let is_symlink = ft.is_symlink();
+        let (is_dir, expandable) = if is_symlink {
+            // Follow the link to learn whether the target is a directory; a
+            // dangling symlink is a plain non-expandable leaf.
+            let target_is_dir = std::fs::metadata(entry.path())
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if target_is_dir {
+                // Expandable only when the resolved target stays inside the
+                // worktree — an escaping symlinked dir is shown but can never
+                // be walked out of the tree.
+                let in_tree = crate::worktree_file::resolve_worktree_path_for_read(worktree, &path)
+                    .map(|(_, _, is_outside)| !is_outside)
+                    .unwrap_or(false);
+                (in_tree, in_tree)
+            } else {
+                (false, false)
+            }
+        } else {
+            let d = ft.is_dir();
+            (d, d)
+        };
+        entries.push(DirEntryInfo {
+            name,
+            path,
+            is_dir,
+            is_symlink,
+            expandable,
+        });
+    }
+
+    // `file_name().to_string_lossy()` replaces invalid UTF-8 bytes with U+FFFD,
+    // so two distinct non-UTF-8 names can collide onto the same lossy `path`
+    // (the client keys tree rows by path, so a collision would make one of
+    // them unreachable). Drop later duplicates and warn rather than build an
+    // escaping scheme — graceful degradation, not full fidelity for names that
+    // aren't valid UTF-8 to begin with.
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entries.retain(|e| {
+        if seen_paths.insert(e.path.clone()) {
+            true
+        } else {
+            logger::warn(&format!(
+                "list_dir: dropping duplicate entry after lossy UTF-8 name conversion: {}",
+                e.path
+            ));
+            false
+        }
+    });
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+    Ok(entries)
 }
 
 pub fn changed_files(worktree_path: &Path) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
@@ -1829,7 +1947,7 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "d").unwrap();
         std::fs::write(p.join("src/debug.log"), "e").unwrap();
 
-        let result = worktree_files(p).unwrap();
+        let result = worktree_files(p, crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES).unwrap();
         let files = result.files;
         assert!(files.contains(&"tracked.txt".to_string()));
         assert!(files.contains(&"untracked.txt".to_string()));
@@ -1879,7 +1997,7 @@ mod tests {
         std::fs::write(p.join("node_modules/dep.js"), "x").unwrap();
         // .git/config always exists in an initialized repo.
 
-        let result = worktree_files(p).unwrap();
+        let result = worktree_files(p, crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES).unwrap();
 
         // Tracked file is included.
         assert!(
@@ -1914,20 +2032,215 @@ mod tests {
     }
 
     #[test]
+    fn list_dir_root_lists_every_child_including_dotfiles_and_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        std::fs::write(wt.join("Cargo.toml"), "x").unwrap();
+        std::fs::write(wt.join("CLAUDE.md"), "x").unwrap();
+        std::fs::create_dir(wt.join(".git")).unwrap();
+        std::fs::write(wt.join(".git/config"), "[core]\n").unwrap();
+        std::fs::create_dir(wt.join(".superpowers")).unwrap();
+        std::fs::create_dir(wt.join("crates")).unwrap();
+
+        let names: Vec<String> = list_dir(wt, "")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        for expected in ["Cargo.toml", "CLAUDE.md", ".git", ".superpowers", "crates"] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing {expected} in {names:?}"
+            );
+        }
+    }
+
+    /// list_dir is structurally immune to a huge sibling subtree: it does a
+    /// single `read_dir` on exactly the requested directory, never recurses,
+    /// and never caps. A 1000-file sibling can't discriminate that property
+    /// on its own (any number would pass); it just exercises the shape.
+    #[test]
+    fn list_dir_root_is_unaffected_by_a_huge_sibling_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        std::fs::write(wt.join("Cargo.toml"), "x").unwrap();
+        let big = wt.join("target");
+        std::fs::create_dir(&big).unwrap();
+        for i in 0..1000 {
+            std::fs::write(big.join(format!("f{i}")), "x").unwrap();
+        }
+        // list_dir("") reads ONLY the root dir, so `target`'s size is
+        // irrelevant and Cargo.toml is always present, whatever readdir order.
+        let names: Vec<String> = list_dir(wt, "")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"Cargo.toml".to_string()));
+        assert!(names.contains(&"target".to_string()));
+        assert_eq!(
+            names.len(),
+            2,
+            "root listing must not include descendants: {names:?}"
+        );
+    }
+
+    #[test]
+    fn list_dir_sorts_dirs_first_then_files_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        std::fs::write(wt.join("Zoo.txt"), "x").unwrap();
+        std::fs::write(wt.join("apple.txt"), "x").unwrap();
+        std::fs::create_dir(wt.join("Beta")).unwrap();
+        std::fs::create_dir(wt.join("alpha")).unwrap();
+        let names: Vec<String> = list_dir(wt, "")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["alpha", "Beta", "apple.txt", "Zoo.txt"]);
+    }
+
+    #[test]
+    fn list_dir_reports_child_paths_relative_to_the_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        std::fs::create_dir_all(wt.join("a/b")).unwrap();
+        std::fs::write(wt.join("a/b/c.rs"), "x").unwrap();
+        let entries = list_dir(wt, "a/b").unwrap();
+        let c = entries.iter().find(|e| e.name == "c.rs").unwrap();
+        assert_eq!(c.path, "a/b/c.rs");
+        assert!(!c.is_dir && !c.expandable);
+    }
+
+    #[test]
+    fn list_dir_lists_under_dot_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path();
+        std::fs::create_dir_all(wt.join(".git/objects")).unwrap();
+        std::fs::write(wt.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let names: Vec<String> = list_dir(wt, ".git")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"HEAD".to_string()));
+        assert!(names.contains(&"objects".to_string()));
+    }
+
+    #[test]
+    fn list_dir_rejects_traversal_and_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(list_dir(dir.path(), "..").is_err());
+        assert!(list_dir(dir.path(), "../etc").is_err());
+        assert!(list_dir(dir.path(), "/etc").is_err());
+    }
+
+    #[test]
+    fn list_dir_dedupes_names_that_collide_after_lossy_utf8_conversion() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Two distinct single-byte names, both invalid UTF-8 on their own, that
+        // `to_string_lossy()` both collapse to the same single replacement
+        // character (U+FFFD) — a real filesystem collision the tree UI (which
+        // keys rows by path) must never see duplicated.
+        let name_a = OsString::from_vec(vec![0xFF]);
+        let name_b = OsString::from_vec(vec![0xFE]);
+        std::fs::write(dir.path().join(&name_a), "a").unwrap();
+        std::fs::write(dir.path().join(&name_b), "b").unwrap();
+
+        let entries = list_dir(dir.path(), "").unwrap();
+        let mut paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort_unstable();
+        let unique_count = {
+            let mut deduped = paths.clone();
+            deduped.dedup();
+            deduped.len()
+        };
+        assert_eq!(
+            entries.len(),
+            unique_count,
+            "list_dir must never return two entries with the same path: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn list_dir_symlinked_dir_escaping_worktree_is_not_expandable() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("secret")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("escape"))
+            .unwrap();
+        let e = list_dir(dir.path(), "")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "escape")
+            .unwrap();
+        assert!(e.is_symlink);
+        assert!(
+            !e.expandable,
+            "an escaping symlinked dir must not be expandable"
+        );
+        // And listing THROUGH it must be refused.
+        assert!(list_dir(dir.path(), "escape").is_err());
+    }
+
+    #[test]
+    fn list_dir_in_worktree_symlinked_dir_is_expandable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/x.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let e = list_dir(dir.path(), "")
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "link")
+            .unwrap();
+        assert!(e.is_symlink && e.is_dir && e.expandable);
+        // Listing through the in-tree symlink works.
+        let names: Vec<String> = list_dir(dir.path(), "link")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.contains(&"x.txt".to_string()));
+    }
+
+    #[test]
     fn worktree_files_walk_sets_truncated_when_cap_exceeded() {
         let repo = init_test_repo();
         let p = repo.path();
-        // Create enough files to exceed the cap.
+        // Create enough files to exceed a small explicit cap.
         std::fs::create_dir(p.join("bulk")).unwrap();
-        for i in 0..WORKTREE_FILES_CAP + 5 {
+        for i in 0..25 {
             std::fs::write(p.join(format!("bulk/f{i}.txt")), "x").unwrap();
         }
-        let result = worktree_files(p).unwrap();
+        let result = worktree_files(p, 20).unwrap();
         assert!(result.truncated, "must set truncated when walk exceeds cap");
-        assert_eq!(
-            result.files.len(),
-            WORKTREE_FILES_CAP,
-            "must return exactly cap entries"
+        assert_eq!(result.files.len(), 20, "must return exactly cap entries");
+    }
+
+    #[test]
+    fn worktree_files_zero_cap_never_truncates() {
+        let repo = init_test_repo();
+        let p = repo.path();
+        std::fs::create_dir(p.join("bulk")).unwrap();
+        for i in 0..50 {
+            std::fs::write(p.join(format!("bulk/f{i}.txt")), "x").unwrap();
+        }
+        let result = worktree_files(p, 0).unwrap();
+        assert!(!result.truncated, "max_files == 0 must disable the cap");
+        assert!(
+            result
+                .files
+                .iter()
+                .filter(|f| f.starts_with("bulk/"))
+                .count()
+                == 50,
+            "all bulk files must be listed: {}",
+            result.files.len()
         );
     }
 

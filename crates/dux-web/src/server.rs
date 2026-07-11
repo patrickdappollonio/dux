@@ -77,6 +77,21 @@ pub struct AppState {
     /// The per-agent live-tab-socket ceiling (`[server] max_websocket_tabs_per_agent`).
     /// `0` permanently blocks all tab sockets (matching the WS-connection-cap family).
     pub max_ws_tabs_per_agent: u32,
+    /// Cap on the editor's file-search index flat walk
+    /// (`[server] search_index_max_files`). Bounds only `/files/list` (the
+    /// search index); the lazy `/files/tree` browser is never capped. `0`
+    /// disables the cap.
+    pub search_index_max_files: usize,
+    /// Bounds concurrent `/files/tree` directory listings across all sessions
+    /// (`[server] tree_list_max_concurrency`). Protects the server's
+    /// blocking-thread pool (`spawn_blocking`) from a burst of tree requests
+    /// exhausting it and starving other blocking work. `None` when the
+    /// configured value is `0` (unlimited): the route skips acquiring a
+    /// permit entirely. A request beyond the limit WAITS for a free permit
+    /// (`acquire().await`) rather than being rejected — unlike the
+    /// `ws_*_semaphore` connection caps, this bounds a small, fast unit of
+    /// background work, not a long-lived connection.
+    pub tree_list_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -184,6 +199,17 @@ pub struct RouterParams {
     /// Per-agent live-tab-socket sub-quota (`[server] max_websocket_tabs_per_agent`).
     /// Defaults to [`dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT`].
     pub max_websocket_tabs_per_agent: u32,
+    /// Cap on the editor's file-search index flat walk
+    /// (`[server] search_index_max_files`). Defaults to
+    /// [`dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES`]; the serve paths
+    /// override it from config via [`with_search_index_max_files`].
+    pub search_index_max_files: usize,
+    /// Cap on concurrent `/files/tree` directory listings
+    /// (`[server] tree_list_max_concurrency`). Defaults to
+    /// [`dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY`]; the serve
+    /// paths override it from config via
+    /// [`with_tree_list_max_concurrency`]. `0` means unlimited.
+    pub tree_list_max_concurrency: u32,
     /// The IPs the server actually bound to. When non-empty, `build_app` wraps
     /// the router with the Host allowlist (DNS-rebinding defense). An empty vec
     /// disables the guard; used by tests that do not exercise the host guard.
@@ -211,9 +237,27 @@ impl RouterParams {
                 dux_core::config::DEFAULT_MAX_WEBSOCKET_TERMINAL_CONNECTIONS,
             max_websocket_tab_connections: dux_core::config::DEFAULT_MAX_WEBSOCKET_TAB_CONNECTIONS,
             max_websocket_tabs_per_agent: dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
+            search_index_max_files: dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES,
+            tree_list_max_concurrency: dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
         }
+    }
+
+    /// Set the file-search index cap from `[server] search_index_max_files`.
+    /// The serve paths call this so the configured value (not just the default)
+    /// bounds the flat walk behind `/files/list`.
+    pub fn with_search_index_max_files(mut self, max_files: usize) -> Self {
+        self.search_index_max_files = max_files;
+        self
+    }
+
+    /// Set the concurrent tree-listing cap from `[server]
+    /// tree_list_max_concurrency`. The serve paths call this so the
+    /// configured value (not just the default) bounds `/files/tree`.
+    pub fn with_tree_list_max_concurrency(mut self, max_concurrency: u32) -> Self {
+        self.tree_list_max_concurrency = max_concurrency;
+        self
     }
 
     /// Attach a real console + the access-log toggle. The CLI serve paths call
@@ -359,6 +403,17 @@ pub fn build_app(
         )),
         tab_ws_counts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         max_ws_tabs_per_agent: params.max_websocket_tabs_per_agent,
+        search_index_max_files: params.search_index_max_files,
+        // `0` means unlimited: skip the semaphore entirely rather than build a
+        // zero-permit one, which would block every request forever (the
+        // opposite of the ws_*_semaphore "0 = block all" convention).
+        tree_list_semaphore: if params.tree_list_max_concurrency == 0 {
+            None
+        } else {
+            Some(Arc::new(tokio::sync::Semaphore::new(
+                params.tree_list_max_concurrency as usize,
+            )))
+        },
         event_bus,
         changes,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
@@ -2461,6 +2516,51 @@ mod tests {
             status,
             StatusCode::BAD_REQUEST,
             "reading a missing file in the resolved worktree is a 400 client condition"
+        );
+    }
+
+    /// `/files/tree` bounds concurrent directory listings via
+    /// `tree_list_semaphore`, but UNLIKE the ws_*_semaphore connection caps it
+    /// must WAIT for a free permit rather than reject with 503: at capacity 1,
+    /// two requests fired concurrently must both eventually succeed, serialized
+    /// onto the single permit rather than one being refused outright.
+    #[tokio::test]
+    async fn tree_list_at_capacity_one_waits_instead_of_rejecting() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory with enough entries that the first request's blocking
+        // `read_dir` stays in flight long enough for the second, concurrently
+        // fired request to genuinely contend on the capacity-1 semaphore.
+        for i in 0..4000 {
+            std::fs::write(tmp.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let handle = seeded_engine_handle(tmp.path());
+        let app = build_app(
+            handle,
+            Router::new(),
+            RouterParams::plain_http().with_tree_list_max_concurrency(1),
+        );
+
+        let req = || {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/sessions/s1/files/tree")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"dir":""}"#))
+                .unwrap()
+        };
+
+        let app_a = app.clone();
+        let app_b = app.clone();
+        let (resp_a, resp_b) = tokio::join!(app_a.oneshot(req()), app_b.oneshot(req()));
+        assert_eq!(
+            resp_a.unwrap().status(),
+            StatusCode::OK,
+            "a request beyond the capacity-1 semaphore must wait, not 503"
+        );
+        assert_eq!(
+            resp_b.unwrap().status(),
+            StatusCode::OK,
+            "a request beyond the capacity-1 semaphore must wait, not 503"
         );
     }
 

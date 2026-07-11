@@ -192,6 +192,21 @@ pub fn normalized_agent_tabs_max(configured: u16) -> u16 {
     configured
 }
 
+/// Default cap on the file-search index flat walk (see
+/// [`crate::git::worktree_files`]). The web editor's file TREE is a lazy,
+/// per-directory browser and is never capped; this only bounds the flat list
+/// that backs the editor's "Search files…" box, where an incomplete result on
+/// a giant repo (e.g. a built `target/`) is acceptable. `0` disables the cap.
+pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
+
+/// Default cap on concurrent `/files/tree` directory listings (see
+/// [`crate::git::list_dir`]). Each listing does one blocking `read_dir` off
+/// the async reactor; this bounds how many can run at once so a burst of tree
+/// requests can't exhaust the server's blocking-thread pool. `0` disables the
+/// bound entirely (unlimited concurrency), unlike the `0 = block everything`
+/// convention used by the `max_websocket_*_connections` family.
+pub const DEFAULT_TREE_LIST_MAX_CONCURRENCY: u32 = 8;
+
 /// Default seconds to wait for SIGTERMed agents/terminals to exit before
 /// force-killing them on shutdown. Shared by the top-level
 /// [`Config::shutdown_timeout_seconds`] (TUI quit) and
@@ -355,6 +370,25 @@ pub struct ServerConfig {
     /// during the wait forces an immediate exit. The TUI quit path uses the
     /// top-level `shutdown_timeout_seconds` instead. Default 30.
     pub shutdown_timeout_seconds: u16,
+    /// Maximum number of files the web editor's "Search files…" index will
+    /// collect in a single flat walk of the worktree. The file TREE is a lazy,
+    /// per-directory browser and is never capped; this bounds only the search
+    /// index, where an incomplete result on a very large repo (e.g. a built
+    /// `target/`) is an acceptable tradeoff for a bounded response. `0`
+    /// disables the cap. Default 50000. Takes effect on the next search-index
+    /// fetch after a server restart.
+    pub search_index_max_files: usize,
+    /// Maximum number of `/files/tree` directory listings the web editor may
+    /// run concurrently across all sessions. Each listing does one blocking
+    /// `read_dir` off the async reactor (`spawn_blocking`); this protects the
+    /// server's blocking-thread pool from a burst of tree requests (e.g. many
+    /// tabs expanding directories at once) starving other blocking work like
+    /// git operations and file reads/writes. A request beyond the limit WAITS
+    /// for a free slot rather than being rejected — unlike the
+    /// `max_websocket_*_connections` family, this bounds a small, fast unit of
+    /// background work, not a long-lived connection. `0` disables the bound
+    /// entirely. Default 8. Takes effect on the next server restart.
+    pub tree_list_max_concurrency: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -653,6 +687,8 @@ impl Default for ServerConfig {
             title: "dux".to_string(),
             favicon: String::new(),
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
+            search_index_max_files: DEFAULT_SEARCH_INDEX_MAX_FILES,
+            tree_list_max_concurrency: DEFAULT_TREE_LIST_MAX_CONCURRENCY,
         }
     }
 }

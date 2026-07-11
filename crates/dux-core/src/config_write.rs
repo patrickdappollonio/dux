@@ -406,6 +406,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "shutdown_timeout_seconds",
         config.server.shutdown_timeout_seconds,
     );
+    patch_table_usize(
+        doc,
+        "server",
+        "search_index_max_files",
+        config.server.search_index_max_files,
+    );
+    patch_table_usize(
+        doc,
+        "server",
+        "tree_list_max_concurrency",
+        config.server.tree_list_max_concurrency as usize,
+    );
 
     // --- [terminal] ---
     patch_table_str(doc, "terminal", "command", &config.terminal.command);
@@ -766,6 +778,102 @@ mod tests {
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
         assert_eq!(parsed.shutdown_timeout_seconds, 0);
         assert_eq!(parsed.server.shutdown_timeout_seconds, 0);
+    }
+
+    #[test]
+    fn search_index_max_files_defaults_and_round_trips() {
+        // The default renders and re-parses to 50 000.
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(
+            parsed.server.search_index_max_files,
+            crate::config::DEFAULT_SEARCH_INDEX_MAX_FILES
+        );
+
+        // A user-set value survives a regenerate.
+        let config = Config {
+            server: crate::config::ServerConfig {
+                search_index_max_files: 1234,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.server.search_index_max_files, 1234);
+    }
+
+    #[test]
+    fn search_index_max_files_user_value_survives_patch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // Seed a DIFFERENT value than the patch target below, so the assertion
+        // can only pass if patch_config_file_with actually wrote the new value
+        // rather than leaving the seeded file untouched.
+        fs::write(&path, "[server]\nsearch_index_max_files = 777\n").expect("seed config");
+
+        let config = Config {
+            server: crate::config::ServerConfig {
+                search_index_max_files: 4321,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+        let saved = fs::read_to_string(&path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(
+            parsed.server.search_index_max_files, 4321,
+            "saved:\n{saved}"
+        );
+    }
+
+    #[test]
+    fn tree_list_max_concurrency_defaults_and_round_trips() {
+        // The default renders and re-parses to 8.
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(
+            parsed.server.tree_list_max_concurrency,
+            crate::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY
+        );
+
+        // A user-set value survives a regenerate.
+        let config = Config {
+            server: crate::config::ServerConfig {
+                tree_list_max_concurrency: 123,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.server.tree_list_max_concurrency, 123);
+    }
+
+    #[test]
+    fn tree_list_max_concurrency_user_value_survives_patch() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        // Seed a DIFFERENT value than the patch target below, so the assertion
+        // can only pass if patch_config_file_with actually wrote the new value
+        // rather than leaving the seeded file untouched.
+        fs::write(&path, "[server]\ntree_list_max_concurrency = 3\n").expect("seed config");
+
+        let config = Config {
+            server: crate::config::ServerConfig {
+                tree_list_max_concurrency: 16,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        patch_config_file_with(&path, &config, Durability::NoFsync).expect("patch");
+        let saved = fs::read_to_string(&path).expect("read back");
+        let parsed: Config = toml::from_str(&saved).expect("patched file re-parses");
+        assert_eq!(
+            parsed.server.tree_list_max_concurrency, 16,
+            "saved:\n{saved}"
+        );
     }
 
     #[test]

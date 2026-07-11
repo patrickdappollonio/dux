@@ -911,6 +911,31 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::U16(c.server.shutdown_timeout_seconds),
         },
+        ConfigEntry::Field {
+            key: "search_index_max_files",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of files the web editor's \"Search files...\" index will\n\
+                 # collect in a single flat walk of the worktree. The file tree is a lazy,\n\
+                 # per-directory browser and is never capped; this bounds only the search\n\
+                 # index, where an incomplete result on a very large repo (for example a\n\
+                 # built target/ directory) is an acceptable tradeoff for a bounded\n\
+                 # response. Set to 0 to disable the cap entirely.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.search_index_max_files),
+        },
+        ConfigEntry::Field {
+            key: "tree_list_max_concurrency",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of /files/tree directory listings the web editor may run\n\
+                 # concurrently across all sessions. Each listing does one blocking read_dir\n\
+                 # off the server's async reactor; this protects the server's blocking-thread\n\
+                 # pool from a burst of tree requests (for example several tabs expanding\n\
+                 # directories at once) starving other blocking work such as git operations\n\
+                 # and file reads/writes. A request beyond the limit waits for a free slot\n\
+                 # rather than being refused. Set to 0 to disable the bound entirely.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.tree_list_max_concurrency as usize),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -1496,6 +1521,8 @@ mod tests {
         assert!(rendered.contains("max_websocket_agent_connections = 32"));
         assert!(rendered.contains("max_websocket_terminal_connections = 64"));
         assert!(rendered.contains("max_websocket_tab_connections = 64"));
+        assert!(rendered.contains("search_index_max_files = 50000"));
+        assert!(rendered.contains("tree_list_max_concurrency = 8"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that

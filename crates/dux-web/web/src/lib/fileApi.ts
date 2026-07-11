@@ -9,6 +9,8 @@
 // triggers an engine changed-files recompute that reaches every client over the
 // WebSocket.
 
+import type { DirEntry } from "@/lib/fileTree"
+
 export interface WorktreeFile {
   path: string
   // True when the file is binary — `content` is empty and the editor refuses it.
@@ -64,15 +66,24 @@ const fileUrl = (sessionId: string, action: string) =>
   `/api/v1/sessions/${encodeURIComponent(sessionId)}/files/${action}`
 
 export const fileApi = {
-  // The worktree's browsable files for the editor tree: tracked, untracked, and
-  // loose gitignored files (fully-ignored dirs like node_modules are collapsed
-  // out server-side). Editing is NOT limited to this set — any path inside the
-  // worktree can be read/written/created (the server enforces containment).
+  // The flat file list backing ONLY the editor's "Search files…" box: a full
+  // filesystem walk of the worktree (minus .git/objects and .git/logs), capped
+  // by the server's `[server] search_index_max_files` (`truncated` set when the
+  // cap was hit). The TREE does not use this — it browses lazily via `tree`.
+  // Editing is NOT limited to this set — any path inside the worktree can be
+  // read/written/created (the server enforces containment).
   list: (sessionId: string) =>
     postFile<{ files: string[]; truncated?: boolean }>(
       fileUrl(sessionId, "list"),
       {},
     ),
+  // One directory's children for the lazy tree. `dir` is worktree-relative; ""
+  // lists the worktree root. The server lists exactly this directory (no
+  // recursion, no cap). Entries are pre-sorted dirs-first, case-insensitive.
+  tree: (sessionId: string, dir: string) =>
+    postFile<{ dir: string; entries: DirEntry[] }>(fileUrl(sessionId, "tree"), {
+      dir,
+    }),
   read: (sessionId: string, path: string) =>
     postFile<WorktreeFile>(fileUrl(sessionId, "read"), { path }),
   // The two raw sides (HEAD vs working copy) of a changed file for the Monaco
