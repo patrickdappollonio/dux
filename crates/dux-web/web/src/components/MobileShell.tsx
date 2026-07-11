@@ -265,7 +265,10 @@ function TerminalRow({
         onClick={() => selectTerminalAndOpen(terminal.id, sessionId)}
       >
         <SquareTerminal />
-        <SimpleTooltip content={terminal.label}>
+        {/* When no foreground command is running, `title` already equals
+            `terminal.label` (see terminalTitle), so the tooltip would just
+            repeat the visible text — only show it once the two diverge. */}
+        <SimpleTooltip content={title !== terminal.label ? terminal.label : null}>
           <span className="flex-1 truncate text-left">{title}</span>
         </SimpleTooltip>
       </Button>
