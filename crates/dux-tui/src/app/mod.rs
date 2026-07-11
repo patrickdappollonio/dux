@@ -734,6 +734,16 @@ pub(crate) enum ChangeAgentProviderFocus {
     Apply,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeAgentProviderMode {
+    /// The ctrl+p retarget of an existing focused tab (change_tab_provider).
+    Retarget,
+    /// The new-agent-tab picker: create a fresh tab with the chosen provider
+    /// (create_tab). There is no existing tab to retarget yet, so `tab_id` on
+    /// the prompt is unused in this mode.
+    NewTab,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct KillRunningPrompt {
     pub(crate) runtimes: Vec<KillableRuntime>,
@@ -762,12 +772,15 @@ pub(crate) struct ChangeAgentProviderPrompt {
     /// The tab being retargeted. Equals `session_id` for the session-slot tab (which
     /// delegates to the session-level provider change); an extra tab id
     /// otherwise. Lets `ctrl+p` retarget the focused tab, not just the agent.
+    /// Unused (set equal to `session_id` as a harmless placeholder) when
+    /// `mode == ChangeAgentProviderMode::NewTab`, since there is no tab yet.
     pub(crate) tab_id: String,
     pub(crate) session_label: String,
     pub(crate) worktree_path: String,
     pub(crate) options: Vec<ChangeAgentProviderOption>,
     pub(crate) selected: usize,
     pub(crate) focus: ChangeAgentProviderFocus,
+    pub(crate) mode: ChangeAgentProviderMode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2603,7 +2616,7 @@ impl App {
             "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
-            "new-tab" => self.new_tab_for_selected_session(),
+            "new-agent-tab" => self.open_new_tab_provider_prompt(),
             "close-tab" => {
                 self.close_focused_tab_prompt();
                 Ok(())

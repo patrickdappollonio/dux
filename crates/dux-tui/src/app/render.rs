@@ -2923,9 +2923,13 @@ impl App {
                         ),
                     ]),
                 ];
+                let overlay_title = match prompt.mode {
+                    ChangeAgentProviderMode::Retarget => "Change Agent Provider",
+                    ChangeAgentProviderMode::NewTab => "New Tab Provider",
+                };
                 Paragraph::new(detail_lines)
                     .block(
-                        self.themed_overlay_block("Change Agent Provider")
+                        self.themed_overlay_block(overlay_title)
                             .title_bottom(Line::from(bottom_spans)),
                     )
                     .render(details_area, frame.buffer_mut());
@@ -2941,7 +2945,12 @@ impl App {
                     .options
                     .iter()
                     .map(|option| {
-                        let status = if option.is_current {
+                        // In NewTab mode a tab always launches fresh (create_tab
+                        // never resumes), so the retarget-only resume/current
+                        // language would be misleading here.
+                        let status = if prompt.mode == ChangeAgentProviderMode::NewTab {
+                            "will start a fresh tab"
+                        } else if option.is_current {
                             "current"
                         } else if option.resume_available {
                             "a previous session was found; it'll be continued"
@@ -3007,11 +3016,15 @@ impl App {
                     height: 3,
                 };
 
-                let apply_enabled = prompt
-                    .options
-                    .get(prompt.selected)
-                    .map(|option| !option.is_current)
-                    .unwrap_or(false);
+                // In NewTab mode there is no existing tab to compare against,
+                // so `is_current` (which reflects the session's overall
+                // provider, not the new tab) never gates the Apply button.
+                let apply_enabled = prompt.mode == ChangeAgentProviderMode::NewTab
+                    || prompt
+                        .options
+                        .get(prompt.selected)
+                        .map(|option| !option.is_current)
+                        .unwrap_or(false);
 
                 Button::new("Cancel")
                     .kind(ButtonKind::Confirm)

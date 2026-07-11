@@ -711,25 +711,18 @@ impl App {
         }
     }
 
-    /// Add a fresh extra tab to the selected agent, defaulting to the
-    /// project's default provider, and focus it.
-    pub(crate) fn new_tab_for_selected_session(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session() else {
-            return Ok(());
-        };
-        let session_id = session.id.clone();
-        let project_id = session.project_id.clone();
-        let provider = self
-            .engine
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .map(|p| p.default_provider.clone())
-            .unwrap_or_else(|| self.engine.config.default_provider());
+    /// Create a fresh extra tab for `session_id` running `provider`, focus it,
+    /// and report the outcome via the status line. Shared by the
+    /// new-agent-tab picker's single-provider skip and its Apply branch, so
+    /// the status copy and focus behavior never drift between the entry
+    /// points. Every new-tab entry point (palette command, `Action::NewTab`
+    /// key, the tab strip's `+` button) routes through
+    /// `open_new_tab_provider_prompt` first, which calls this.
+    fn spawn_tab_with_provider(&mut self, session_id: &str, provider: ProviderKind) {
         let pty_size = self.pty_size_for_launch();
-        match self.engine.create_tab(&session_id, provider, pty_size) {
+        match self.engine.create_tab(session_id, provider, pty_size) {
             Ok(tab_id) => {
-                self.set_focused_tab(&session_id, &tab_id);
+                self.set_focused_tab(session_id, &tab_id);
                 self.rebuild_left_items();
                 self.set_info(
                     "Added a tab. It starts fresh — a new tab does not resume a prior conversation."
@@ -738,6 +731,73 @@ impl App {
             }
             Err(e) => self.set_error(format!("Could not add tab: {e}")),
         }
+    }
+
+    /// Open the new-agent-tab provider picker (reuses `ChangeAgentProviderPrompt`
+    /// in `NewTab` mode). Refuses at the per-agent tab cap with a keyed error
+    /// status instead of opening the modal (`create_tab` also enforces the cap
+    /// as a backstop). When exactly one provider is configured, skips the
+    /// modal entirely and creates the tab directly with it: a one-option radio
+    /// list is pure friction. That early branch is kept separate and clearly
+    /// commented so it is trivial to flip if that decision changes.
+    pub(crate) fn open_new_tab_provider_prompt(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            self.set_error("Select an agent session first.");
+            return Ok(());
+        };
+        if self.engine.config.providers.commands.is_empty() {
+            self.set_error("No providers are configured.");
+            return Ok(());
+        }
+
+        let max_per_agent = i64::from(self.engine.agent_tabs_max());
+        let current_tabs = self.engine.session_store.count_agent_tabs(&session.id)?;
+        if current_tabs + 1 >= max_per_agent {
+            self.set_error(format!(
+                "This agent already has the maximum of {max_per_agent} tabs. Close a tab before adding another."
+            ));
+            return Ok(());
+        }
+
+        let options = self.change_agent_provider_options(&session);
+
+        // Single-provider skip (judgment call, documented in the doc comment
+        // above): with exactly one configured provider a radio list is pure
+        // friction, so create the tab directly with it.
+        if options.len() == 1 {
+            let provider = options[0].provider.clone();
+            self.spawn_tab_with_provider(&session.id, provider);
+            return Ok(());
+        }
+
+        let project_id = session.project_id.clone();
+        let default_provider = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.default_provider.clone())
+            .unwrap_or_else(|| self.engine.config.default_provider());
+        let selected = options
+            .iter()
+            .position(|option| option.provider == default_provider)
+            .unwrap_or(0);
+
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
+            session_id: session.id.clone(),
+            tab_id: session.id.clone(),
+            session_label: self.session_label(&session),
+            worktree_path: session.worktree_path.clone(),
+            options,
+            selected,
+            focus: ChangeAgentProviderFocus::List,
+            mode: ChangeAgentProviderMode::NewTab,
+        });
+        self.set_info(
+            "Choose a provider for the new tab. It starts fresh; a new tab does not resume a prior conversation.",
+        );
         Ok(())
     }
 
@@ -1432,6 +1492,7 @@ impl App {
             options: self.change_agent_provider_options(&session),
             selected: 0,
             focus: ChangeAgentProviderFocus::List,
+            mode: ChangeAgentProviderMode::Retarget,
         });
         self.set_info(
             "Choose a provider for this worktree. The change takes effect on the next launch; dux resumes each provider's prior session on this worktree when available.",
@@ -1459,6 +1520,13 @@ impl App {
             self.set_error("The selected agent is no longer available.");
             return Ok(());
         };
+
+        if prompt.mode == ChangeAgentProviderMode::NewTab {
+            self.prompt = PromptState::None;
+            let session_id = self.engine.sessions[session_index].id.clone();
+            self.spawn_tab_with_provider(&session_id, selected.provider);
+            return Ok(());
+        }
 
         if selected.is_current {
             self.prompt = PromptState::None;
