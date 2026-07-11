@@ -4788,6 +4788,14 @@ impl App {
             // tab (kill_runtime_targets handles the detach-if-last). Other tabs
             // keep running and the agent stays Active.
             self.kill_runtime_targets(&[RuntimeTargetId::Agent(session_id.clone())]);
+            // Prefer a live sibling tab so the user lands on something
+            // running; fall back to the now-dormant session-slot tab only
+            // when nothing else is live.
+            let target = self
+                .engine
+                .first_live_tab(&session_id)
+                .unwrap_or_else(|| session_id.clone());
+            self.set_focused_tab(&session_id, &target);
             if self.engine.any_tab_active(&session_id) {
                 self.set_info("Tab closed. The agent's other tabs are still running.".to_string());
             } else {
@@ -11557,6 +11565,25 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn reconnect_agent_still_launches_a_dormant_tab() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider inserted: the session-slot tab is dormant.
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(
+            app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "session-1".into()
+                )),
+            "ReconnectAgent (the explicit reconnect action) must still launch a dormant tab"
+        );
+    }
+
+    #[test]
     fn close_top_overlay_closes_terminal_overlay() {
         let mut app = test_app(default_bindings());
 
@@ -15208,6 +15235,42 @@ cyan = "#00ffff"
         assert_eq!(
             app.focused_tab_id(&session_id),
             "tab-2",
+            "focus should land on the live sibling, not the dormant session-slot tab"
+        );
+    }
+
+    #[test]
+    fn closing_main_tab_refocuses_live_sibling_not_dormant_main() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        // The session-slot tab is live; one extra tab is also live. Closing
+        // the session-slot (main) tab should refocus the live extra tab, not
+        // leave focus stuck on the now-dormant session-slot id.
+        let tab_id = "tab-1".to_string();
+        insert_support_tab(&mut app, &session_id, &tab_id);
+        app.engine
+            .providers
+            .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.engine
+            .providers
+            .insert(tab_id.clone(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, &session_id);
+        app.focus = FocusPane::Center;
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: session_id.clone(),
+            provider_label: "Codex".to_string(),
+            is_main: true,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            tab_id,
             "focus should land on the live sibling, not the dormant session-slot tab"
         );
     }
