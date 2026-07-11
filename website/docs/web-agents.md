@@ -12,36 +12,57 @@ uses. If the core ideas of projects, agents, and providers are new to you, start
 with [Creating agents](/docs/creating-agents), then come back for the browser
 specifics.
 
+## Adding a project
+
+Before there is anything to create an agent in, there has to be a project. The
+**Add project** dialog browses the **server's** own disk (not your laptop's),
+starting from its configured start directory, normally the server's home
+directory. Folders that are git repositories carry a small "git" badge so you can
+tell them apart from plain directories at a glance. Pick one, give it an optional
+name, and dux may show a pre-flight step first: if the repo is checked out to
+something other than its default branch it offers to check that branch out before
+adding, and if the repo has no commits yet (a fresh `git init`) it offers to make
+the initial commit for you. The confirm button's label adapts to whichever of
+these applies. Once a project exists, its `⋯` menu carries project settings,
+project info, and remove project, among the agent-creation actions below.
+
 ## Creating an agent
 
-The **New agent** dialog (from a project's `⋯` menu) offers three ways in:
+The **New agent** dialog offers three ways in, reached from a project's `⋯` menu:
 
-- **New** creates a fresh git worktree and branch and launches the agent. The
-  branch name is optional; leave it blank and dux generates a memorable pet name.
-- **Fork** copies the current files of an existing agent into a new worktree and
-  branch, so you can take a running piece of work in a second direction without
-  disturbing the first.
-- **From PR** fetches a pull request's head branch into a new worktree. Give it a
-  PR URL, `#123`, or just `123`. This one appears only when GitHub integration and
-  the `gh` CLI are available.
+- **New agent…** creates a fresh git worktree and branch and launches the agent.
+  The branch name is optional; leave it blank and dux generates a memorable pet
+  name.
+- **New agent from PR…** fetches a pull request's head branch into a new
+  worktree. Give it a PR URL, `#123`, or just `123`. This one appears only when
+  GitHub integration and the `gh` CLI are available.
+- **New agent from existing worktree…** (adopt) lists dux-managed worktrees that
+  have no agent attached and turns one back into a live agent on its existing
+  branch. Handy after a restart, or for reclaiming work a deleted agent left on
+  disk.
 
-Whichever you pick, creating the agent launches it immediately, no separate start
+**Forking** is different: it starts from an *existing agent*, not the project.
+Open that agent's `⋯` menu and pick **Fork agent…**, which opens the same New
+agent dialog locked to fork mode. It copies the current files of that agent into
+a new worktree and branch, so you can take a running piece of work in a second
+direction without disturbing the first.
+
+Whichever way you create an agent, it launches immediately, no separate start
 step. The name input sanitizes itself to valid branch characters as you type.
-
-You can also **adopt an existing worktree**: "New agent from existing worktree…"
-lists dux-managed worktrees that have no agent attached and turns one back into a
-live agent on its existing branch. Handy after a restart, or for reclaiming work a
-deleted agent left on disk.
 
 ## Managing an agent
 
 An agent's `⋯` menu is where the rest lives: rename it (a display title, the
-branch keeps its own name), change its provider (effective the next time it
-launches, never yanking a running session out from under itself), view its info,
-inspect its project's environment and startup command, and read startup-command
-logs. **Change provider** and **Force recreate** are the two knobs around resume:
-changing the provider resumes that provider's prior conversation on the worktree
-when one exists, and Force recreate is the explicit "start clean, abandon the
+branch keeps its own name), change its provider, view its info, inspect its
+project's environment and [startup command](/docs/startup-commands), and read
+startup-command logs. **Change provider** and **Force recreate** are the two
+knobs around resume. Change provider swaps which CLI the agent runs, but only
+takes effect the next time that tab launches, never yanking a running session out
+from under itself; that launch then follows the same per-provider resume rule as
+any other launch, resuming the new provider's prior conversation on the worktree
+only if it supports resume and no other live tab of the agent is already running
+that same provider (Copilot never resumes, so a tab switched to Copilot always
+starts fresh). Force recreate is the explicit "start clean, abandon the
 conversation" button.
 
 ## Provider tabs
@@ -56,9 +77,10 @@ the caret lets you pick), switch with a click, retarget or close from a pill's
 Resume is automatic and decided per provider, never a toggle you flip. A launching
 tab resumes its provider's prior conversation when it is the only live tab of that
 provider, and starts fresh otherwise, so a Claude tab and an OpenCode tab can both
-resume side by side while two Claude tabs would not collide. The full model,
-including how closing a tab works and the per-agent tab cap, is in
-[Agent tabs](/docs/agent-tabs).
+resume side by side while two Claude tabs would not collide. Copilot is the one
+exception: dux excludes it from resume entirely, so a Copilot tab always starts
+fresh no matter what else is running. The full model, including how closing a tab
+works and the per-agent tab cap, is in [Agent tabs](/docs/agent-tabs).
 
 ### Dormant tabs after a restart
 
@@ -74,10 +96,11 @@ conversation if you want a specific one.
 ## Attention and notifications
 
 You do not have to babysit every tab. When an agent needs you (a permission
-prompt, a finished turn), its sidebar icon and tab pill light up amber, the
-browser tab title gains a count like `(2) dux`, and the favicon grows a small
-amber dot. The flag clears the moment you actually look at that agent. The whole
-model, and how to make sure your agents actually emit the signal, is covered in
+prompt, a finished turn), its sidebar icon itself recolors amber and pulses, its
+tab-strip pill gains a small amber dot next to its icon, the browser tab title
+gains a count like `(2) dux`, and the favicon grows a small amber dot. The flag
+clears the moment you actually look at that agent. The whole model, and how to
+make sure your agents actually emit the signal, is covered in
 [Attention indicators](/docs/attention-indicators).
 
 Server mode can go one step further and raise a **real browser desktop
@@ -88,6 +111,12 @@ grant permission, and you are set. It fires only while the tab is in the
 background, so an agent you are watching never nags you. This is governed by the
 `web_notifications` capability, detailed in
 [Terminal capabilities](/docs/terminal-capabilities).
+
+One caveat worth knowing: browsers only allow the notification-permission prompt
+on secure origins, meaning HTTPS or `localhost`. If you reach dux over a plain-HTTP
+Tailscale or LAN URL, **Enable browser notifications** can be silently blocked by
+the browser before it ever shows a prompt. Loopback access or a TLS-terminating
+proxy in front of dux gets you a working prompt.
 
 ## Kill versus delete
 

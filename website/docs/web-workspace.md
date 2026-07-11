@@ -47,10 +47,13 @@ which matters most on the phone.
 ## The browser terminals
 
 Each agent runs its real CLI in a real PTY on the server, and the browser streams
-it live through a WebSocket. The moment you open a terminal, dux subscribes you to
-that PTY and, if the provider is not already running, **launches or resumes it**.
-Opening the view is what starts the agent. The full scrollback replays on connect,
-so you never open into a blank screen mid-session.
+it live through a WebSocket. Closing the tab, losing connectivity, or your phone
+falling asleep does not stop the agent: it keeps running on the server exactly as
+it was until you explicitly kill or delete it (see
+[Agents from the browser](/docs/web-agents)). The moment you open a terminal, dux
+subscribes you to that PTY and, if the provider is not already running,
+**launches or resumes it**. Opening the view is what starts the agent. The full
+scrollback replays on connect, so you never open into a blank screen mid-session.
 
 If the connection blips, dux shows a quiet "Reconnecting…" overlay and keeps your
 buffer. Only after several failed attempts does it fall back to a blocking
@@ -80,8 +83,9 @@ The web terminal copies and pastes the way a real terminal does, no menu require
 - **Right-click to paste** (with a mouse or pen). It reads your browser clipboard
   and sends it to the agent. On plain HTTP, where the browser blocks clipboard
   reads, dux nudges you toward `Ctrl+V` instead.
-- The usual chords work too: `Ctrl+Shift+C` / `Cmd+C` to copy, `Ctrl+V` /
-  `Ctrl+Shift+V` / `Cmd+V` to paste. `Ctrl+C` stays SIGINT, as it should.
+- A fixed set of chords works too, and it is not user-configurable: `Ctrl+Shift+C`,
+  `Ctrl+Insert`, or `Cmd+C` to copy, and `Ctrl+V`, `Ctrl+Shift+V`, or `Cmd+V` to
+  paste, with `Ctrl+C` staying SIGINT as it should.
 
 There is deliberately no right-click context menu, because select-to-copy and
 right-click-paste already cover both directions and a menu would only fight the

@@ -117,7 +117,7 @@ history command to dig the previous one back up.
 
 When dux restarts, tabs come back **dormant**: the pills are there, no processes
 are running, and each tab shows a "start fresh" prompt instead of an old session.
-Press it (or click *Start fresh session* on the web) and a brand-new session spins
+Press it (or click *Start session* on the web) and a brand-new session spins
 up. A tab that comes up alone for its provider may resume automatically, per the rule
 above, which again means the newest conversation in the worktree, not a specific tab's.
 

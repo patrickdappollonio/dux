@@ -32,7 +32,7 @@ vite-style banner listing exactly what bound, one row per address with its
 
 It takes a few flags:
 
-```
+```text
 dux server [OPTIONS]
 
   --bind <ADDR:PORT>   Bind this exact address, overriding [server] host+port.
@@ -49,6 +49,21 @@ otherwise the `[server] host` and `port` from your config apply. When Tailscale 
 enabled, its address is appended as a best-effort extra leg. A required address
 that cannot bind is fatal and says so, the Tailscale leg failing to bind is only a
 warning and the server carries on.
+
+#### Stopping it
+
+`Ctrl-C` (or a `SIGTERM`) starts a graceful shutdown, not an instant kill. dux
+drains open connections and sends `SIGTERM` to every running agent so its CLI
+gets a chance to save state, waiting up to `[server] shutdown_timeout_seconds`
+(30 seconds by default) before force-killing whatever is left. A second `Ctrl-C`
+during that wait skips the grace period and exits immediately.
+
+Only one `dux server` (or `dux` TUI) can run against a given config directory at
+a time: both acquire the same single-instance lock, so starting a second one
+against the same directory fails fast with a clear "already running" message
+instead of two processes fighting over the same SQLite database. If you want
+both the TUI and the browser open on the same live engine, use the in-app flip
+below rather than starting a second process.
 
 ### Flip a running TUI into the browser
 
@@ -152,7 +167,22 @@ touch, and you can set them live from the web itself (see
 Server mode shares the rest of your config with the TUI. The `[capabilities]`
 switches that bridge an agent's notifications and clipboard writes into the
 browser are covered in [Terminal capabilities](/docs/terminal-capabilities), and
-the general config file lives in [Configuration](/docs/configuration).
+the general config file lives in [Configuration](/docs/configuration). One knob
+worth calling out here: on a headless server there is no host terminal to
+mirror, so `terminal_identity = "auto"` (the default) presents **ghostty** to
+every newly launched agent, an identity the browser terminal renders well. See
+[Terminal capabilities](/docs/terminal-capabilities) for the full story,
+including how it differs from the TUI's own mirroring behavior.
+
+### Editing config from the browser
+
+You do not need shell access to the machine to change settings. The command
+palette's **Edit config** command opens a raw Monaco TOML editor over your actual
+`config.toml`, right in the page; saving writes the file but does not apply it
+live, so run **reload-config** afterward to pick up the change. For just the
+environment, **Configure global environment** opens a dedicated dialog for
+workspace-wide environment variables that every project inherits, which any
+project can still override with its own project-level environment settings.
 
 ## Where to go next
 

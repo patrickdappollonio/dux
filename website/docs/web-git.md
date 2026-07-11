@@ -39,11 +39,13 @@ Hover a file row for its `⋯` menu:
   its new group as soon as the engine confirms the change.
 - **Edit** opens the file in the editor (desktop only, and hidden for deleted
   files).
-- **Discard…** throws away a file's uncommitted changes. This one is destructive,
-  so it always confirms first, and the dialog is honest about what it will do:
-  an untracked file is **permanently deleted from disk**, a tracked file is
-  **restored to its last committed state**. The server re-derives which case
-  applies from live git status at the moment you confirm.
+- **Discard…** throws away a file's uncommitted changes. It only shows up on
+  **unstaged** rows, both in the menu and on the server: unstage a file first if
+  you want to discard it. This one is destructive, so it always confirms first,
+  and the dialog is honest about what it will do: an untracked file is
+  **permanently deleted from disk**, a tracked file is **restored to its last
+  committed state**. The server re-derives which case applies from live git
+  status at the moment you confirm.
 
 ## Commit, push, pull
 
@@ -73,6 +75,10 @@ fresh agent, on the other hand, is something the web UI does do, covered in
 
 The Changes pane refreshes itself whenever the engine reports that a file changed,
 so what you see keeps pace with the agent without a manual refresh. If a git
-operation collides with a lock, dux retries rather than showing you an error. All
-of this rides the same engine and the same worktrees the TUI uses, so a commit you
-make in the browser is simply a commit, visible everywhere.
+operation collides with a lock, the background poller keeps retrying on its own,
+so a single blip usually clears itself before you notice. If it does not, dux
+shows a "Couldn't load changes" card with a Refresh button, and a warning toast
+fires once the failures persist across several attempts, so you are never left
+guessing why the pane went quiet. All of this rides the same engine and the same
+worktrees the TUI uses, so a commit you make in the browser is simply a commit,
+visible everywhere.

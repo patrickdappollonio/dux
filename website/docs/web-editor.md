@@ -41,10 +41,12 @@ Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write.
 The file tree lists the files in the worktree, with directories first and
 alphabetical within a level, rendered as a virtualized list so even a large repo
 scrolls smoothly. The ancestors of whatever file you have open expand
-automatically. Changed files carry the same status icon you see in the Changes
-pane, so you can spot your edits at a glance. (The tree currently reflects a
-git-derived listing of the worktree and can omit some entries on very large
-repositories.)
+automatically. Changed files carry the same status icon you see in the [Changes
+pane](/docs/web-git), so you can spot your edits at a glance. (The tree is a
+plain filesystem walk of the worktree, not a git-aware listing: gitignored files
+are included, and so is most of `.git/` itself. It is capped at 50,000 entries,
+with a truncation notice if a repo has more. A filesystem-browser rework is in
+progress, so treat this as the current, not final, behavior.)
 
 The **Search files…** box does a fast, case-insensitive match on file paths across
 the worktree, so you do not have to click through folders to reach a deeply nested
