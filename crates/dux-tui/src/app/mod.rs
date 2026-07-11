@@ -840,19 +840,18 @@ pub(crate) fn branch_drifted(current: &str, initial: &str) -> bool {
 }
 
 /// The attention glyph's blink rhythm as a pure function of elapsed wall-clock
-/// milliseconds: two quick blinks, a longer steady hold, one separator hide,
-/// repeat. Mirrors the web dot's double-pulse-then-hold animation
-/// (`--animate-attention-pulse` in the web `index.css`). Every window is a
-/// multiple of 200ms, two full event-loop ticks at the 100ms poll cadence, so
-/// no phase can fall between redraws and get swallowed.
+/// milliseconds: exactly two quick blinks (two hides), then steady until the
+/// cycle restarts. Deliberately NO separator hide at the end of the cycle: a
+/// hold bounded by hides on both sides reads as a third blink. Mirrors the web
+/// dot's double-pulse-then-hold animation (`--animate-attention-pulse` in the
+/// web `index.css`). Every window is a multiple of 200ms, two full event-loop
+/// ticks at the 100ms poll cadence, so no phase can fall between redraws and
+/// get swallowed.
 pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
     match elapsed_ms % 2000 {
-        0..=199 => true,    // blink 1: show
         200..=399 => false, // blink 1: hide
-        400..=599 => true,  // blink 2: show
         600..=799 => false, // blink 2: hide
-        800..=1799 => true, // hold visible
-        _ => false,         // separator hide before the next pair
+        _ => true,          // leading show, the gap between blinks, and the hold
     }
 }
 
@@ -4070,15 +4069,19 @@ mod tests {
         // Blink 2: show then hide.
         assert!(attention_blink_phase(400));
         assert!(!attention_blink_phase(600));
-        // Hold: a full second of steady visibility.
+        assert!(!attention_blink_phase(799));
+        // Hold: steady visibility until the cycle restarts. No separator hide
+        // at the end (it would read as a third blink).
         assert!(attention_blink_phase(800));
         assert!(attention_blink_phase(1300));
-        assert!(attention_blink_phase(1799));
-        // Separator hide, then the cycle repeats from the first blink.
-        assert!(!attention_blink_phase(1800));
-        assert!(!attention_blink_phase(1999));
+        assert!(attention_blink_phase(1800));
+        assert!(attention_blink_phase(1999));
+        // The next cycle starts with its first hide at the same offset, so
+        // exactly two hides happen per cycle.
         assert!(attention_blink_phase(2000));
         assert!(!attention_blink_phase(2000 + 250));
+        assert!(attention_blink_phase(2000 + 450));
+        assert!(!attention_blink_phase(2000 + 650));
     }
 
     fn test_project(id: &str) -> Project {

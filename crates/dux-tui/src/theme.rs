@@ -15,9 +15,11 @@ use dux_core::theme::DEFAULT_THEME_NAME;
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Glyph shown (blinking, in the `session_attention` color) in the sidebar when
-/// an agent needs attention. Distinct from the round status dots so it reads as
-/// "needs you", not a status.
-pub const ATTENTION_GLYPH: &str = "◆";
+/// an agent needs attention. The same solid round dot the status states use:
+/// attention takes precedence over the status dot while flagged, so the blink
+/// plus the amber `session_attention` color is what reads as "needs you", not
+/// a distinct shape.
+pub const ATTENTION_GLYPH: &str = "●";
 
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
