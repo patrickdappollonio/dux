@@ -654,9 +654,8 @@ impl App {
                         self.update_missing_project_warning();
                     }
                 }
-                Action::FocusAgent | Action::ExitInteractive => {
-                    self.activate_selected_left_item()?
-                }
+                Action::FocusAgent => self.activate_selected_left_item(true)?,
+                Action::ExitInteractive => self.activate_selected_left_item(false)?,
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
@@ -748,8 +747,8 @@ impl App {
         let in_diff = matches!(self.center_mode, CenterMode::Diff { .. });
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Center) {
             match action {
-                Action::FocusAgent if !in_diff => self.activate_center_agent()?,
-                Action::ExitInteractive if !in_diff => self.activate_center_agent()?,
+                Action::FocusAgent if !in_diff => self.activate_center_agent(true)?,
+                Action::ExitInteractive if !in_diff => self.activate_center_agent(false)?,
                 Action::ShowTerminal if !in_diff => self.show_or_open_first_terminal()?,
                 Action::NextTab if !in_diff => self.focus_tab_relative(true),
                 Action::PrevTab if !in_diff => self.focus_tab_relative(false),
@@ -775,7 +774,7 @@ impl App {
                     // mode on a live tab, launch a dormant extra tab fresh, or
                     // relaunch a dormant session-slot tab — resolving the FOCUSED tab so
                     // this never acts on the session-slot tab while an extra tab is shown.
-                    self.activate_center_agent()?;
+                    self.activate_center_agent(true)?;
                 }
                 Action::ScrollPageUp => {
                     if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
@@ -4789,6 +4788,14 @@ impl App {
             // tab (kill_runtime_targets handles the detach-if-last). Other tabs
             // keep running and the agent stays Active.
             self.kill_runtime_targets(&[RuntimeTargetId::Agent(session_id.clone())]);
+            // Prefer a live sibling tab so the user lands on something
+            // running; fall back to the now-dormant session-slot tab only
+            // when nothing else is live.
+            let target = self
+                .engine
+                .first_live_tab(&session_id)
+                .unwrap_or_else(|| session_id.clone());
+            self.set_focused_tab(&session_id, &target);
             if self.engine.any_tab_active(&session_id) {
                 self.set_info("Tab closed. The agent's other tabs are still running.".to_string());
             } else {
@@ -4799,9 +4806,17 @@ impl App {
         } else {
             match self.engine.close_tab(&session_id, &tab_id) {
                 Ok(()) => {
-                    // Return focus to the session-slot tab (also resets the
-                    // snapshot so its PTY renders immediately).
-                    self.set_focused_tab(&session_id, &session_id);
+                    // Prefer a live sibling tab so the user lands on something
+                    // running; fall back to the session-slot tab only when
+                    // nothing else is live. This also resets the snapshot so
+                    // the target tab's PTY renders immediately, and keeps the
+                    // next ExitInteractive (activate) from relaunching a
+                    // dormant tab.
+                    let target = self
+                        .engine
+                        .first_live_tab(&session_id)
+                        .unwrap_or_else(|| session_id.clone());
+                    self.set_focused_tab(&session_id, &target);
                     self.rebuild_left_items();
                     self.set_info("Tab closed.".to_string());
                 }
@@ -5672,7 +5687,14 @@ impl App {
         false
     }
 
-    fn activate_selected_left_item(&mut self) -> Result<()> {
+    /// Activate the selected Projects-pane item. `allow_launch` distinguishes
+    /// the explicit activate action (`FocusAgent`/Enter, always launches a
+    /// dormant agent) from `ExitInteractive` (Ctrl-g by default), which must
+    /// never launch a dormant agent per the Agent Tabs tenet ("focus alone
+    /// never launches — only an explicit action launches"). When
+    /// `allow_launch` is false and the target agent is dormant, this either
+    /// minimizes a (defensively possible) fullscreen overlay or is a no-op.
+    fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Project(project_index)) => {
                 let project = &self.engine.projects[*project_index];
@@ -5706,10 +5728,14 @@ impl App {
                             self.input_target = InputTarget::Agent;
                             self.fullscreen_overlay = FullscreenOverlay::Agent;
                         } else if self.selected_session().is_some() {
-                            self.reconnect_selected_session()?;
+                            if allow_launch {
+                                self.reconnect_selected_session()?;
+                            } else {
+                                self.exit_interactive_without_launch();
+                            }
                         }
                     }
-                } else {
+                } else if allow_launch {
                     self.create_agent_for_selected_project()?;
                 }
             }
@@ -5725,7 +5751,11 @@ impl App {
                     self.input_target = InputTarget::Agent;
                     self.fullscreen_overlay = FullscreenOverlay::Agent;
                 } else if self.selected_session().is_some() {
-                    self.reconnect_selected_session()?;
+                    if allow_launch {
+                        self.reconnect_selected_session()?;
+                    } else {
+                        self.exit_interactive_without_launch();
+                    }
                 }
             }
             Some(LeftItem::EmptyProjectsSpacer) => {}
@@ -5738,12 +5768,19 @@ impl App {
     }
 
     fn activate_selected_left_item_from_mouse(&mut self) {
-        if let Err(err) = self.activate_selected_left_item() {
+        if let Err(err) = self.activate_selected_left_item(true) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
 
-    pub(crate) fn activate_center_agent(&mut self) -> Result<()> {
+    /// Activate the focused tab of the Center pane's selected agent.
+    /// `allow_launch` distinguishes the explicit activate action
+    /// (`FocusAgent`/Enter and `ReconnectAgent`, which always launch a
+    /// dormant tab) from `ExitInteractive` (Ctrl-g by default), which must
+    /// never launch a dormant tab per the Agent Tabs tenet. See
+    /// `activate_selected_left_item` for the same distinction in the
+    /// Projects pane.
+    pub(crate) fn activate_center_agent(&mut self, allow_launch: bool) -> Result<()> {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
         }
@@ -5767,19 +5804,41 @@ impl App {
                 "Interactive mode. Keys forwarded to agent. {exit_key} exits."
             ));
         } else if tab_id != session_id {
-            // Dormant extra tab: launch it. Resume eligibility is decided
-            // dynamically by `tab_resume_decision` inside the launch — this
-            // tab may resume its provider's prior conversation if it is the
-            // sole live/launching tab of that provider, not "never resume".
-            self.launch_focused_support_tab(&session_id, &tab_id)?;
-        } else {
+            // Dormant extra tab: launch it (only when the caller allows it).
+            // Resume eligibility is decided dynamically by
+            // `tab_resume_decision` inside the launch — this tab may resume
+            // its provider's prior conversation if it is the sole
+            // live/launching tab of that provider, not "never resume".
+            if allow_launch {
+                self.launch_focused_support_tab(&session_id, &tab_id)?;
+            } else {
+                self.exit_interactive_without_launch();
+            }
+        } else if allow_launch {
             self.reconnect_selected_session()?;
+        } else {
+            self.exit_interactive_without_launch();
         }
         Ok(())
     }
 
+    /// Shared behavior for `ExitInteractive` landing on a dormant tab: never
+    /// launch it (only an explicit action launches, per the Agent Tabs
+    /// tenet). If the pane happens to be showing a fullscreen overlay,
+    /// minimize it so Ctrl-g still "does something" visible; otherwise this
+    /// is a silent no-op.
+    fn exit_interactive_without_launch(&mut self) {
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            let focus_key = self.bindings.label_for(Action::FocusAgent);
+            self.set_info(format!(
+                "Minimized. The agent stays dormant; press {focus_key} to relaunch it."
+            ));
+        }
+    }
+
     fn activate_center_agent_from_mouse(&mut self) {
-        if let Err(err) = self.activate_center_agent() {
+        if let Err(err) = self.activate_center_agent(true) {
             self.set_error(format!("Mouse activation failed: {err}"));
         }
     }
@@ -11436,6 +11495,99 @@ cyan = "#00ffff"
     }
 
     #[test]
+    fn ctrl_g_on_dormant_tab_windowed_is_noop() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider inserted: the session-slot tab is dormant.
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::None;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "ExitInteractive on a dormant tab must never launch it"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "session-1".into()
+                )),
+            "ExitInteractive must not dispatch a launch for a dormant tab"
+        );
+    }
+
+    #[test]
+    fn ctrl_g_on_dormant_tab_fullscreen_minimizes_without_launching() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider inserted: the session-slot tab is dormant, but the pane
+        // is (defensively) fullscreen.
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "ExitInteractive on a dormant tab should minimize the fullscreen pane"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "session-1".into()
+                )),
+            "ExitInteractive must not dispatch a launch for a dormant tab"
+        );
+    }
+
+    #[test]
+    fn enter_still_launches_a_dormant_tab() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider inserted: the session-slot tab is dormant.
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(
+            app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "session-1".into()
+                )),
+            "Enter (the explicit activate action) must still launch a dormant tab"
+        );
+    }
+
+    #[test]
+    fn reconnect_agent_still_launches_a_dormant_tab() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider inserted: the session-slot tab is dormant.
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(
+            app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                    "session-1".into()
+                )),
+            "ReconnectAgent (the explicit reconnect action) must still launch a dormant tab"
+        );
+    }
+
+    #[test]
     fn close_top_overlay_closes_terminal_overlay() {
         let mut app = test_app(default_bindings());
 
@@ -15052,7 +15204,124 @@ cyan = "#00ffff"
         assert_eq!(
             app.focused_tab_id(&session_id),
             session_id,
-            "focus should return to the session-slot tab after closing an extra tab"
+            "falls back to session-slot when no live sibling remains"
+        );
+    }
+
+    #[test]
+    fn closing_focused_tab_refocuses_live_sibling_not_dormant_main() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        // The session-slot tab is dormant (no provider). Two extra tabs, both live.
+        insert_support_tab(&mut app, &session_id, "tab-1");
+        app.engine
+            .providers
+            .insert("tab-1".to_string(), spawn_test_provider(&worktree));
+        insert_support_tab(&mut app, &session_id, "tab-2");
+        app.engine
+            .providers
+            .insert("tab-2".to_string(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, "tab-1");
+        app.focus = FocusPane::Center;
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: "tab-1".to_string(),
+            provider_label: "Codex".to_string(),
+            is_main: false,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        assert!(!app.engine.agent_tabs.contains_key("tab-1"));
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            "tab-2",
+            "focus should land on the live sibling, not the dormant session-slot tab"
+        );
+    }
+
+    #[test]
+    fn closing_main_tab_refocuses_live_sibling_not_dormant_main() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        // The session-slot tab is live; one extra tab is also live. Closing
+        // the session-slot (main) tab should refocus the live extra tab, not
+        // leave focus stuck on the now-dormant session-slot id.
+        let tab_id = "tab-1".to_string();
+        insert_support_tab(&mut app, &session_id, &tab_id);
+        app.engine
+            .providers
+            .insert(session_id.clone(), spawn_test_provider(&worktree));
+        app.engine
+            .providers
+            .insert(tab_id.clone(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, &session_id);
+        app.focus = FocusPane::Center;
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: session_id.clone(),
+            provider_label: "Codex".to_string(),
+            is_main: true,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            tab_id,
+            "focus should land on the live sibling, not the dormant session-slot tab"
+        );
+    }
+
+    #[test]
+    fn ctrl_g_after_closing_tab_enters_live_sibling_without_relaunch() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = std::path::PathBuf::from(&app.engine.sessions[0].worktree_path);
+        insert_support_tab(&mut app, &session_id, "tab-1");
+        app.engine
+            .providers
+            .insert("tab-1".to_string(), spawn_test_provider(&worktree));
+        insert_support_tab(&mut app, &session_id, "tab-2");
+        app.engine
+            .providers
+            .insert("tab-2".to_string(), spawn_test_provider(&worktree));
+        app.set_focused_tab(&session_id, "tab-1");
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+
+        app.prompt = PromptState::ConfirmCloseTab {
+            session_id: session_id.clone(),
+            tab_id: "tab-1".to_string(),
+            provider_label: "Codex".to_string(),
+            is_main: false,
+            confirm_selected: true,
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .expect("handle close");
+
+        let in_flight_before = app
+            .engine
+            .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch("tab-2".into()));
+        assert!(!in_flight_before, "tab-2 already has a live provider");
+
+        // Ctrl-g in the non-interactive Center pane should enter interactive
+        // mode on the live sibling, not relaunch it.
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.input_target, InputTarget::Agent);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+        assert!(
+            !app.engine
+                .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch("tab-2".into())),
+            "no new launch should have been dispatched for the live sibling"
         );
     }
 

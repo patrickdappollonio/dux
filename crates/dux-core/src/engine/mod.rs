@@ -2224,6 +2224,33 @@ impl Engine {
         })
     }
 
+    /// The first LIVE tab of a session, in display order: the session-slot tab
+    /// first, then extra tabs ordered by `(sort_order, created_at)` (the same
+    /// order the TUI's tab strip renders). A tab counts as live when it has a
+    /// provider PTY or an in-flight `AgentLaunch`. Returns `None` when every
+    /// tab is dormant, so callers know to fall back to the session-slot tab
+    /// rather than land on a dormant tab that would relaunch on the next
+    /// activation. Kept in core (not the TUI) because the liveness predicate
+    /// must stay identical to `any_tab_active`'s.
+    pub fn first_live_tab(&self, session_id: &str) -> Option<String> {
+        let mut extras: Vec<&AgentTab> = self
+            .agent_tabs
+            .values()
+            .filter(|t| t.session_id == session_id)
+            .collect();
+        extras.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        });
+        std::iter::once(session_id.to_string())
+            .chain(extras.into_iter().map(|t| t.id.clone()))
+            .find(|id| {
+                self.providers.contains_key(id)
+                    || self.is_in_flight(&InFlightKey::AgentLaunch(id.clone()))
+            })
+    }
+
     /// Resolve a tab id back to the session that owns it. A Main-tab id resolves
     /// to itself (it has no `agent_tabs` row); a Support-tab id resolves via the
     /// map. Returns `None` for an unknown id.
@@ -4431,5 +4458,76 @@ mod tab_ops_tests {
         });
         // The ghost launch must not resurrect a provider under the dead tab id.
         assert!(!engine.providers.contains_key("tab-1"));
+    }
+
+    #[test]
+    fn first_live_tab_returns_none_when_every_tab_is_dormant() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let tab = support_tab("tab-1", "s1", "codex");
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+
+        assert_eq!(engine.first_live_tab("s1"), None);
+    }
+
+    #[test]
+    fn first_live_tab_skips_a_dormant_session_slot_for_a_live_extra_tab() {
+        let (mut engine, tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let tab = support_tab("tab-1", "s1", "codex");
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        // Session-slot "s1" has no provider; the extra tab does.
+        engine
+            .providers
+            .insert("tab-1".into(), spawn_cat(tmp.path()));
+
+        assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
+    }
+
+    #[test]
+    fn first_live_tab_prefers_session_slot_when_it_is_live() {
+        let (mut engine, tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let tab = support_tab("tab-1", "s1", "codex");
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.providers.insert("s1".into(), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert("tab-1".into(), spawn_cat(tmp.path()));
+
+        assert_eq!(engine.first_live_tab("s1"), Some("s1".to_string()));
+    }
+
+    #[test]
+    fn first_live_tab_honors_sort_order_among_live_extras() {
+        let (mut engine, tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let mut earlier = support_tab("tab-2", "s1", "codex");
+        earlier.sort_order = 2;
+        let mut later = support_tab("tab-1", "s1", "codex");
+        later.sort_order = 1;
+        engine.agent_tabs.insert(earlier.id.clone(), earlier);
+        engine.agent_tabs.insert(later.id.clone(), later);
+        // Both are live; the lower sort_order ("tab-1") should win, not
+        // insertion/HashMap order.
+        engine
+            .providers
+            .insert("tab-2".into(), spawn_cat(tmp.path()));
+        engine
+            .providers
+            .insert("tab-1".into(), spawn_cat(tmp.path()));
+
+        assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
+    }
+
+    #[test]
+    fn first_live_tab_counts_an_in_flight_launch_as_live() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let tab = support_tab("tab-1", "s1", "codex");
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-1".into()));
+
+        assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
     }
 }
