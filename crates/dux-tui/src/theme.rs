@@ -14,12 +14,18 @@ use dux_core::theme::DEFAULT_THEME_NAME;
 /// card, status line, and left-pane streaming indicator.
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// The single shared solid-dot glyph used everywhere dux needs a round dot:
+/// the attention indicator, status dots, and the tab strip's active-tab
+/// marker. One literal, reused by name, so the glyph can never drift between
+/// call sites.
+pub const DOT_GLYPH: &str = "●";
+
 /// Glyph shown (blinking, in the `session_attention` color) in the sidebar when
 /// an agent needs attention. The same solid round dot the status states use:
 /// attention takes precedence over the status dot while flagged, so the blink
 /// plus the amber `session_attention` color is what reads as "needs you", not
 /// a distinct shape.
-pub const ATTENTION_GLYPH: &str = "●";
+pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
