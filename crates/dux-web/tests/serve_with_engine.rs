@@ -143,6 +143,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
                     ServerTick::Continue
                 }
             },
+            |_message| {},
         )
         .expect("serve_with_engine");
 
@@ -235,6 +236,7 @@ async fn serve_with_engine_quit_process_shuts_down_ptys() {
                     ServerTick::Continue
                 }
             },
+            |_message| {},
         )
         .expect("serve_with_engine");
         // After QuitProcess teardown the child should have been SIGTERMed; the
@@ -304,6 +306,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
                     ServerTick::Continue
                 }
             },
+            |_message| {},
         )
         .expect("serve_with_engine");
         // ReturnToTui keeps PTYs alive: the terminal must still be running.

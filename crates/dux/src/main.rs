@@ -75,29 +75,42 @@ fn run_tui_with_flip() -> Result<()> {
                 // TTY, raw-mode error), fall back to a plain line — the server
                 // must still run. `screen` lives outside the tick closure so we
                 // can drop it (restoring the terminal) AFTER serving returns.
-                let mut screen = match dux_tui::ServerStatusScreen::new(
-                    &urls,
-                    safety_note,
-                    &theme_name,
-                    &paths,
-                    activity.clone(),
-                ) {
-                    Ok(screen) => Some(screen),
-                    Err(err) => {
-                        eprintln!(
-                            "dux server running at {} (status screen unavailable: {err}) \
+                //
+                // `serve_with_engine` takes two separate FnMut callbacks (the
+                // per-tick poll and the shutdown-status reporter), so a plain `&mut
+                // screen` capture can't be shared between them — Rust would see two
+                // simultaneous exclusive borrows. A `RefCell` lets both closures
+                // borrow it in turn (they're never called concurrently: the tick
+                // closure and the shutdown callback run one at a time on this same
+                // thread) while still yielding `screen` back afterward for `drop`.
+                let screen = std::cell::RefCell::new(
+                    match dux_tui::ServerStatusScreen::new(
+                        &urls,
+                        safety_note,
+                        &theme_name,
+                        &paths,
+                        activity.clone(),
+                    ) {
+                        Ok(screen) => Some(screen),
+                        Err(err) => {
+                            eprintln!(
+                                "dux server running at {} (status screen unavailable: {err}) \
                                  — press Ctrl-C to stop",
-                            urls.join(", ")
-                        );
-                        None
-                    }
-                };
+                                urls.join(", ")
+                            );
+                            None
+                        }
+                    },
+                );
 
-                let (engine, exit) =
-                    dux_web::serve_with_engine(*engine, listeners, activity, || {
+                let (engine, exit) = dux_web::serve_with_engine(
+                    *engine,
+                    listeners,
+                    activity,
+                    || {
                         // With the screen up, its keys drive the exit; without it,
                         // only SIGINT/SIGTERM (handled inside serve) can stop us.
-                        match screen.as_mut() {
+                        match screen.borrow_mut().as_mut() {
                             Some(screen) => match screen.tick() {
                                 dux_tui::ServerScreenTick::Continue => {
                                     dux_web::ServerTick::Continue
@@ -111,13 +124,25 @@ fn run_tui_with_flip() -> Result<()> {
                             },
                             None => dux_web::ServerTick::Continue,
                         }
-                    })?;
+                    },
+                    |message| {
+                        // Route the teardown message through the status screen so
+                        // it renders on its own themed line instead of raw text
+                        // landing wherever the cursor happens to sit. Without the
+                        // screen (fallback path), echo it plainly like that path
+                        // already does elsewhere.
+                        match screen.borrow_mut().as_mut() {
+                            Some(screen) => screen.show_shutdown_message(message),
+                            None => eprintln!("{message}"),
+                        }
+                    },
+                )?;
 
                 // Serving has stopped. Drop the status screen explicitly to
                 // restore the terminal (leave raw mode + alt screen, show the
                 // cursor) BEFORE resuming the TUI (which re-inits ratatui) or
                 // before any final messages on quit.
-                drop(screen);
+                drop(screen.into_inner());
 
                 match exit {
                     dux_web::ServerExit::QuitProcess => break,

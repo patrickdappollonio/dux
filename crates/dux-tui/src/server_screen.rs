@@ -99,6 +99,10 @@ pub struct ServerStatusScreen {
     /// Activity generation most recently drawn, so [`tick`] redraws when a new
     /// event arrives (not only when the uptime second advances).
     last_drawn_generation: u64,
+    /// Shutdown-in-progress status (e.g. "Stopping 2 agents..."), shown on its
+    /// own muted line under the exit hints once teardown starts. `None` before
+    /// then, so the footer renders exactly as it does today.
+    shutdown_message: Option<String>,
 }
 
 impl ServerStatusScreen {
@@ -140,6 +144,7 @@ impl ServerStatusScreen {
             last_drawn_secs: u64::MAX,
             activity,
             last_drawn_generation: 0,
+            shutdown_message: None,
         };
         let snapshot = screen.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
         screen.last_drawn_generation = snapshot.generation;
@@ -196,13 +201,28 @@ impl ServerStatusScreen {
         ServerScreenTick::Continue
     }
 
+    /// Show a persistent shutdown status line (e.g. "Stopping 2 agents...")
+    /// under the exit hints, styled muted like the uptime line, and redraw
+    /// immediately so it appears without waiting for the next tick. This
+    /// replaces the old raw `eprintln!` teardown message, which landed
+    /// wherever the cursor happened to sit (next to the uptime line) because
+    /// it bypassed ratatui entirely while the alt screen was still active.
+    /// Render errors are swallowed like `tick`'s redraw: the process is about
+    /// to exit either way and a failed final frame must not crash teardown.
+    pub fn show_shutdown_message(&mut self, message: impl Into<String>) {
+        self.shutdown_message = Some(message.into());
+        let secs = self.started.elapsed().as_secs();
+        let snapshot = self.activity.snapshot(dux_core::activity::ACTIVITY_CAP);
+        let _ = self.draw(secs, &snapshot);
+    }
+
     /// Draw one frame: the header (logo + status), the Activity panel, and the
     /// footer hints. `snapshot` is taken by the caller so `tick` can compare the
     /// generation without snapshotting twice.
     fn draw(&mut self, uptime_secs: u64, snapshot: &ActivitySnapshot) -> Result<()> {
         let theme = &self.theme;
         let header = header_lines(&self.urls, self.safety_note.as_deref(), uptime_secs);
-        let footer = footer_hint_lines();
+        let footer = footer_hint_lines(self.shutdown_message.as_deref());
         self.terminal.draw(|frame| {
             let area = frame.area();
             // Pre-fill the whole frame with the theme background so the alt
@@ -434,10 +454,12 @@ fn header_lines(urls: &[String], safety_note: Option<&str>, uptime_secs: u64) ->
 }
 
 /// The two exit-hint rows shown in the footer (`<q>`/`<Esc>` return, `<Ctrl-c>`
-/// quit). These keys are NOT user-configurable bindings: the TUI keybinding
-/// system isn't running in server mode, so naming them literally is correct.
-fn footer_hint_lines() -> Vec<ScreenLine> {
-    vec![
+/// quit), plus an optional trailing shutdown status line (e.g. "Stopping 2
+/// agents...") once teardown has started. These keys are NOT user-configurable
+/// bindings: the TUI keybinding system isn't running in server mode, so naming
+/// them literally is correct.
+fn footer_hint_lines(shutdown_message: Option<&str>) -> Vec<ScreenLine> {
+    let mut lines = vec![
         vec![
             ("q".to_string(), Role::Key),
             ("Esc".to_string(), Role::Key),
@@ -450,7 +472,11 @@ fn footer_hint_lines() -> Vec<ScreenLine> {
             ("Ctrl-c".to_string(), Role::Key),
             (" quit dux entirely".to_string(), Role::HintDesc),
         ],
-    ]
+    ];
+    if let Some(message) = shutdown_message {
+        lines.push(vec![(message.to_string(), Role::Muted)]);
+    }
+    lines
 }
 
 /// Build the activity log rows: the last `max_rows` events, oldest first, each a
@@ -742,7 +768,7 @@ mod tests {
 
     #[test]
     fn footer_hint_lines_carry_both_exit_keys() {
-        let lines = footer_hint_lines();
+        let lines = footer_hint_lines(None);
         let text = plain_text(&lines);
         assert!(text.contains("return to dux"));
         assert!(text.contains("quit dux entirely"));
@@ -757,6 +783,27 @@ mod tests {
         assert!(keys.contains(&"q"));
         assert!(keys.contains(&"Esc"));
         assert!(keys.contains(&"Ctrl-c"));
+    }
+
+    #[test]
+    fn footer_hint_lines_without_shutdown_message_has_no_extra_line() {
+        // No shutdown in progress: exactly the two exit-hint rows, nothing
+        // muted tacked on.
+        let lines = footer_hint_lines(None);
+        assert_eq!(lines.len(), 2);
+        assert!(!lines.iter().flatten().any(|(_, role)| *role == Role::Muted));
+    }
+
+    #[test]
+    fn footer_hint_lines_appends_shutdown_message_as_its_own_muted_line() {
+        // Owner-approved placement: the shutdown status renders on its own
+        // dedicated line, directly under the "Ctrl-c quit dux entirely" row,
+        // styled with the same muted role as the uptime line.
+        let lines = footer_hint_lines(Some("Stopping 2 agents..."));
+        assert_eq!(lines.len(), 3, "the exit hints plus the shutdown line");
+        let last = lines.last().expect("shutdown line present");
+        assert_eq!(last.len(), 1, "the shutdown line is a single segment");
+        assert_eq!(last[0], ("Stopping 2 agents...".to_string(), Role::Muted));
     }
 
     #[test]

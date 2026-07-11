@@ -607,11 +607,19 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 /// - `QuitProcess` (or a SIGINT/SIGTERM during serving) triggers graceful axum
 ///   shutdown, then SIGTERMs the children (`shutdown_ptys`) like the CLI path,
 ///   and returns `(engine, QuitProcess)`.
+///
+/// `on_shutdown_status` is called with a human-readable teardown message (e.g.
+/// "Stopping 2 agents...") once QuitProcess teardown starts. This crate has no
+/// terminal of its own, so it hands the message to the caller instead of
+/// printing it directly; the binary's implementation feeds it to the dux-tui
+/// status screen, which renders it on its own themed line rather than raw text
+/// landing wherever the cursor happens to sit.
 pub fn serve_with_engine(
     mut engine: Engine,
     listeners: Vec<std::net::TcpListener>,
     activity: dux_core::activity::ActivityRing,
     mut on_tick: impl FnMut() -> ServerTick,
+    mut on_shutdown_status: impl FnMut(&str),
 ) -> Result<(Engine, ServerExit)> {
     // The flip owns the terminal with its themed status screen, so this console
     // writes NOTHING to stdout — but it captures every lifecycle event into the
@@ -840,12 +848,11 @@ pub fn serve_with_engine(
         if agents + terminals > 0 {
             let grace =
                 dux_core::config::shutdown_grace(engine.config.server.shutdown_timeout_seconds);
-            eprintln!(
-                "{}",
-                dux_core::engine::format_shutdown_start(agents, terminals, grace)
-            );
+            on_shutdown_status(&dux_core::engine::format_shutdown_start(
+                agents, terminals, grace,
+            ));
             let report = engine.shutdown_ptys(grace);
-            eprintln!("{}", dux_core::engine::format_shutdown_result(&report));
+            on_shutdown_status(&dux_core::engine::format_shutdown_result(&report));
         }
     }
 
