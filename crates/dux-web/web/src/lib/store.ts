@@ -28,6 +28,16 @@ import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { type Spine, fetchSpine } from "./spineApi"
 import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
+import {
+  activateTab as editorActivateTabPure,
+  closeTab as editorCloseTabPure,
+  emptyTabsState,
+  openFile as editorOpenFilePure,
+  pinTab as editorPinTabPure,
+  setTabDirty as editorSetTabDirtyPure,
+  setTabMode as editorSetTabModePure,
+} from "./editorTabs"
+import type { EditorTabsState } from "./editorTabs"
 import type {
   BranchWarningView,
   ChangedFileView,
@@ -356,6 +366,14 @@ export interface DuxState {
     initialPath: string | null
     initialMode: EditorViewMode
   } | null
+  // Per-session editor tab metadata (pure client state; the heavy Monaco
+  // buffers live in the `EditorBody` component, keyed by tab id). Keyed by
+  // session id so reopening a session's editor restores its tab list. A
+  // session absent here has no tabs (not yet opened, or cleared on delete).
+  editorTabs: Record<string, EditorTabsState>
+  // The tab pending the dirty-close confirmation (destructive-confirm
+  // pattern), or null. Closing a NON-dirty tab skips this and closes directly.
+  editorCloseTabTarget: { sessionId: string; tabId: string } | null
   // Changed-files state for the selected session (see `ChangesSlice`). The single
   // source for changed-files data — replaces the global `viewModel.changed_files`
   // broadcast, which a second client could clobber.
@@ -477,6 +495,8 @@ let state: DuxState = {
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
+  editorTabs: {},
+  editorCloseTabTarget: null,
   changes: emptyChanges(),
 }
 
@@ -861,10 +881,25 @@ function applySpine(rawSpine: Spine, seq: number): void {
   restoreDeepLink(spine)
   focusNewlyCreatedSession(spine)
   pruneSelectionIfGone(spine)
+  pruneEditorStateIfGone(spine)
   // The flagged-agent count may have changed with this spine: refresh the
   // browser-tab count prefix and the favicon dot. Backgrounded tabs update too,
   // since spines arrive from server pushes without a visit.
   refreshAttentionChrome()
+}
+
+// Drop editor-tab state for any session that no longer exists in the spine
+// (deleted here or by another client), and close the editor overlay if it was
+// pointed at that now-gone session — the code-editor's own out-of-band-clear
+// path, mirroring `pruneSelectionIfGone` for the main selection.
+function pruneEditorStateIfGone(spine: Spine): void {
+  const liveSessionIds = new Set(spine.sessions.map((s) => s.id))
+  for (const sessionId of Object.keys(state.editorTabs)) {
+    if (!liveSessionIds.has(sessionId)) editorClearSession(sessionId)
+  }
+  if (state.editorTarget && !liveSessionIds.has(state.editorTarget.sessionId)) {
+    closeEditor()
+  }
 }
 
 // The per-connection id now arrives as the `connected` event on `/ws/events`
@@ -1623,8 +1658,13 @@ export function setCommitDraft(text: string): void {
 // Open the code-editor overlay for a session. Selecting the session first points
 // the engine's changed-files watch at its worktree so the editor's file list
 // populates from the same broadcast the changes pane uses. `initialPath` (from a
-// per-file affordance) auto-loads that file; `mode` chooses the opening view —
-// "diff" when a changed file is clicked (show its diff first), "file" otherwise.
+// per-file affordance) auto-loads that file — seeded as a tab via
+// `editorOpenFile`, so external opens (ChangedFiles Edit/Diff, Sidebar) funnel
+// through the same VS Code preview model as the tree/search; `mode` chooses the
+// opening view — "diff" when a changed file is clicked (show its diff first),
+// "file" otherwise. Does NOT clear the session's existing tab list, so reopening
+// the overlay on a session restores its tabs (`editorTabs` persists across
+// `closeEditor`; only `editorClearSession` — on session delete — clears it).
 export function openEditor(
   sessionId: string,
   initialPath: string | null = null,
@@ -1632,10 +1672,103 @@ export function openEditor(
 ): void {
   if (state.selectedSessionId !== sessionId) selectSession(sessionId)
   setState({ editorTarget: { sessionId, initialPath, initialMode: mode } })
+  if (initialPath !== null) editorOpenFile(sessionId, initialPath, mode)
 }
 
 export function closeEditor(): void {
   setState({ editorTarget: null })
+}
+
+// --- Editor tabs: thin store wrappers over the pure reducer (lib/editorTabs.ts).
+// Each mutates only `editorTabs[sessionId]`, leaving every other session's tabs
+// untouched. Components/dialogs call ONLY these — never the pure functions
+// directly — so the store stays the single place that knows how to read/write
+// the per-session slice.
+
+function editorTabsFor(sessionId: string): EditorTabsState {
+  return state.editorTabs[sessionId] ?? emptyTabsState()
+}
+
+function setEditorTabsFor(sessionId: string, next: EditorTabsState): void {
+  setState({ editorTabs: { ...state.editorTabs, [sessionId]: next } })
+}
+
+// Open (or activate, or preview-replace) a file in a session's tab list. See
+// `lib/editorTabs.ts` `openFile` for the exact promotion rules.
+export function editorOpenFile(
+  sessionId: string,
+  path: string,
+  mode: EditorViewMode = "file",
+  opts: { pin?: boolean } = {},
+): void {
+  setEditorTabsFor(
+    sessionId,
+    editorOpenFilePure(editorTabsFor(sessionId), path, mode, {
+      pin: opts.pin,
+      newId: () => crypto.randomUUID(),
+    }),
+  )
+}
+
+export function editorActivateTab(sessionId: string, tabId: string): void {
+  setEditorTabsFor(sessionId, editorActivateTabPure(editorTabsFor(sessionId), tabId))
+}
+
+// Promote a tab to permanent: double-click on the row/pill, or the tab's first
+// edit (a dirty preview tab is promoted so an edit is never silently discarded
+// by a later preview-replace).
+export function editorPinTab(sessionId: string, tabId: string): void {
+  setEditorTabsFor(sessionId, editorPinTabPure(editorTabsFor(sessionId), tabId))
+}
+
+// Mirrors the buffer's dirty state up to the store so the strip's dot and the
+// close-confirm gating read from one place, without putting file contents in
+// the global store (see lib/editorTabs.ts header comment).
+export function editorSetTabDirty(
+  sessionId: string,
+  tabId: string,
+  dirty: boolean,
+): void {
+  setEditorTabsFor(
+    sessionId,
+    editorSetTabDirtyPure(editorTabsFor(sessionId), tabId, dirty),
+  )
+}
+
+export function editorSetTabMode(
+  sessionId: string,
+  tabId: string,
+  mode: EditorViewMode,
+): void {
+  setEditorTabsFor(
+    sessionId,
+    editorSetTabModePure(editorTabsFor(sessionId), tabId, mode),
+  )
+}
+
+// Unconditional close (post-confirm, or the tab was clean). Picks the next
+// active tab via the VS Code right-then-left rule.
+export function editorCloseTab(sessionId: string, tabId: string): void {
+  setEditorTabsFor(sessionId, editorCloseTabPure(editorTabsFor(sessionId), tabId))
+}
+
+// Drop all of a session's editor tabs (session deleted from the spine). See
+// the `editorTabs` prune in `applySpine`, which calls this for any session
+// key no longer present in the live spine.
+export function editorClearSession(sessionId: string): void {
+  if (!(sessionId in state.editorTabs)) return
+  const next = { ...state.editorTabs }
+  delete next[sessionId]
+  setState({ editorTabs: next })
+}
+
+// Open the dirty-tab close confirmation.
+export function openEditorCloseTab(sessionId: string, tabId: string): void {
+  setState({ editorCloseTabTarget: { sessionId, tabId } })
+}
+
+export function closeEditorCloseTab(): void {
+  setState({ editorCloseTabTarget: null })
 }
 
 export function openDelete(sessionId: string): void {
