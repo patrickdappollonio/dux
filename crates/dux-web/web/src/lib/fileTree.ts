@@ -67,6 +67,11 @@ export interface TreeRow {
   // unique React `key`; a real worktree file named `__loading__` or
   // `__error__` still gets `kind: "entry"` and renders as a normal file row.
   kind: "entry" | "loading" | "error"
+  // True for a dir row whose cache entry is `loaded` with zero children.
+  // Independent of `expanded` — the file-tree icon shows a distinct empty
+  // glyph whether the empty dir is expanded or collapsed, as soon as it's
+  // been fetched once. Always false for file rows and for dirs never fetched.
+  empty: boolean
 }
 
 /// The cached dir paths strictly nested under `path` (not `path` itself),
@@ -115,6 +120,10 @@ export function flattenLazy(
       isSymlink: entry.is_symlink,
       state: rowState,
       kind: "entry",
+      empty:
+        entry.is_dir &&
+        childState?.status === "loaded" &&
+        childState.entries.length === 0,
     })
     if (!isExpanded) continue
     if (childState?.status === "loaded") {
@@ -129,6 +138,7 @@ export function flattenLazy(
         isSymlink: false,
         state: "error",
         kind: "error",
+        empty: false,
       })
     } else {
       // Absent or loading → one synthetic placeholder row.
@@ -141,6 +151,7 @@ export function flattenLazy(
         isSymlink: false,
         state: "loading",
         kind: "loading",
+        empty: false,
       })
     }
   }

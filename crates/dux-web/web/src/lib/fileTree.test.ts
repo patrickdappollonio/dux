@@ -149,6 +149,26 @@ describe("flattenLazy", () => {
       "error",
     )
   })
+
+  it("marks a dir row empty when it is loaded with zero children, regardless of expansion", () => {
+    const dirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("src"), dir("empty-dir")] }],
+      ["src", { status: "loaded", entries: [file("src/lib.rs")] }],
+      ["empty-dir", { status: "loaded", entries: [] }],
+    ])
+    // Neither dir is expanded — `empty` must still reflect the loaded cache.
+    const collapsed = flattenLazy(dirs, new Set())
+    expect(collapsed.find((r) => r.path === "src")?.empty).toBe(false)
+    expect(collapsed.find((r) => r.path === "empty-dir")?.empty).toBe(true)
+  })
+
+  it("a dir not yet loaded (never fetched) is not marked empty", () => {
+    const dirs = new Map<string, DirState>([
+      ["", { status: "loaded", entries: [dir("unloaded")] }],
+    ])
+    const rows = flattenLazy(dirs, new Set())
+    expect(rows.find((r) => r.path === "unloaded")?.empty).toBe(false)
+  })
 })
 
 describe("descendantDirPaths", () => {
