@@ -531,7 +531,7 @@ describe("FileTree", () => {
         />,
       )
       await screen.findByText("a.ts")
-      // Right-click the root filler div directly (not a row) — this is the
+      // Right-click the root filler div directly (not a row): this is the
       // "empty area below the rows" trigger.
       const filler = container.querySelector(
         '[data-slot="context-menu-trigger"]',

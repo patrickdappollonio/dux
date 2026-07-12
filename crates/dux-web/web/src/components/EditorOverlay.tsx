@@ -250,7 +250,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // state, not store targets: the file tree is a client-owned lazy cache, not
   // a server-broadcast ViewModel slice, so there is nothing for
   // useVanishedTargetGuard to key against (matches the New-file dialog's
-  // existing precedent — see the plan's stop-condition note).
+  // existing precedent, see the plan's stop-condition note).
   const [newEntryTarget, setNewEntryTarget] = useState<NewEntryTarget | null>(
     null,
   )
@@ -363,7 +363,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Refetch the search index (a capped flat walk of the worktree). Called on
   // mount AND after every create/rename/delete mutation so newly-created or
   // renamed paths become findable via "Search files…" without waiting for the
-  // next overlay open. The TREE never uses this — it browses lazily per
+  // next overlay open. The TREE never uses this: it browses lazily per
   // directory via fileApi.tree, revalidated separately (see `revalidateDirs`).
   function refreshSearchIndex(): Promise<void> {
     return fileApi
@@ -744,10 +744,10 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 
   // New File… / New Folder…, unified: `newEntryTarget.kind` picks the server
   // call. On success the dialog closes; a NEW file is also opened (pinned,
-  // forced to file mode — it can't have a diff since it was just created),
+  // forced to file mode (it can't have a diff since it was just created),
   // matching the header FilePlus button's "New File at root" behavior. On
   // error the dialog stays open (target untouched) so the user can fix the
-  // name and retry — the promise resolves either way so NewEntryDialog's
+  // name and retry: the promise resolves either way so NewEntryDialog's
   // submitting flag always clears.
   function handleNewEntrySubmit(name: string): Promise<void> {
     if (!newEntryTarget) return Promise.resolve()
@@ -801,7 +801,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Delete…: fire-and-forget once confirmed, mirroring
   // ConfirmDiscardFileDialog's handleConfirm (closes immediately rather than
   // waiting on the request; the destructive confirm dialog already gated the
-  // action, and a failure — e.g. another client already deleted it — just
+  // action, and a failure (e.g. another client already deleted it) just
   // toasts, matching the plan's "another client raced us" acceptance).
   function handleDeleteConfirm(): void {
     const target = deleteEntryTarget
@@ -1161,7 +1161,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         </div>
       </div>
 
-      {/* New File… / New Folder…, Rename…, Delete… — driven by the file
+      {/* New File… / New Folder…, Rename…, Delete…: driven by the file
           tree's right-click context menu (and the header FilePlus button,
           which targets the root). Local EditorBody state, not store targets
           (see the newEntryTarget/renameEntryTarget/deleteEntryTarget

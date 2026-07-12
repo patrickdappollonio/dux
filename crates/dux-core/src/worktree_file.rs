@@ -381,7 +381,7 @@ pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Re
 /// Deliberately does NOT call `resolve_worktree_path`: that resolver checks
 /// containment of the FOLLOWED realpath, which is the wrong check for delete.
 /// Deleting a symlink removes the directory entry (the link), never its
-/// target, so an escaping-target symlink is a legitimate delete target — only
+/// target, so an escaping-target symlink is a legitimate delete target: only
 /// the literal path and its PARENT's containment matter here.
 pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
     use std::path::Component;

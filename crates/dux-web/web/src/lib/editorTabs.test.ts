@@ -389,7 +389,7 @@ describe("renameTabPaths", () => {
   })
 
   it("closes a pre-existing tab already holding the destination path (file rename)", () => {
-    // t2 is a stale tab for a path that will become the rename target — e.g.
+    // t2 is a stale tab for a path that will become the rename target, e.g.
     // left open from a file that was deleted and recreated. Retargeting t1
     // onto "b.ts" without closing t2 first would leave two tabs holding the
     // same path, which the Monaco-model disposal effect assumes never happens.

@@ -1,7 +1,7 @@
 // Pure helpers for the file tree's context-menu file management flows (New
 // File, New Folder, Rename, Delete). Kept free of React so they're trivially
 // unit-testable; the server remains the source of truth for containment
-// (resolve_worktree_path / is_under / resolves_into_git_dir) — validation here
+// (resolve_worktree_path / is_under / resolves_into_git_dir); validation here
 // is UX only, to reject an obviously-bad name before a round trip.
 
 // The directory a create (New File / New Folder) should target, given the
@@ -42,7 +42,7 @@ export function renameTarget(from: string, newName: string): string {
 const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
 
 // Validate a single path SEGMENT typed into New File/New Folder/Rename (never
-// a full path — no "/" is ever valid here). Rejects: empty/whitespace-only,
+// a full path: no "/" is ever valid here). Rejects: empty/whitespace-only,
 // a "/" or "\" (would try to create a sub-path or escape), "." or "..", any
 // NUL/control char, and a case-insensitive ".git".
 export function validateEntryName(

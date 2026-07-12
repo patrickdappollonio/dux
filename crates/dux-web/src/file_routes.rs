@@ -925,7 +925,7 @@ mod tests {
 
     /// Endpoint tests for the four VS Code-style file management routes:
     /// create-file, create-dir, rename, delete. Boots a real engine with a
-    /// session pointed at a real worktree directory (not a git repo — these
+    /// session pointed at a real worktree directory (not a git repo: these
     /// operations don't need git, only the containment guards in
     /// `dux_core::worktree_file`), mirroring `changes.rs`'s `boot()` helper but
     /// serving requests through the real axum router.
