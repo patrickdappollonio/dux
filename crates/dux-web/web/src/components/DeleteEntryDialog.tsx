@@ -14,6 +14,13 @@ export interface DeleteEntryTarget {
 
 interface DeleteEntryDialogProps {
   target: DeleteEntryTarget | null
+  // True when a save for `target.path` is currently in flight (the caller
+  // computes this from its `savingPaths` set). When true, Delete is disabled
+  // and a blocking note replaces the usual warning copy, mirroring
+  // RenameEntryDialog's `isDirty` gate: deleting a path whose write hasn't
+  // resolved yet would let that in-flight write silently recreate the file
+  // right after the delete lands (finding 3).
+  blockedBySave?: boolean
   onClose: () => void
   onConfirm: () => void
 }
@@ -24,6 +31,7 @@ interface DeleteEntryDialogProps {
 // confirm). Deletion is permanent: there is no trash on the server.
 export function DeleteEntryDialog({
   target,
+  blockedBySave = false,
   onClose,
   onConfirm,
 }: DeleteEntryDialogProps) {
@@ -41,28 +49,39 @@ export function DeleteEntryDialog({
         <DialogHeader>
           <DialogTitle>Delete {path}?</DialogTitle>
         </DialogHeader>
-        <p className="text-sm text-destructive">
-          {isDir ? (
-            <>
-              <span className="font-mono">{path}</span> and everything inside
-              it will be permanently deleted from disk (recursive). This
-              cannot be undone.
-            </>
-          ) : (
-            <>
-              <span className="font-mono">{path}</span> will be permanently
-              deleted from disk. This cannot be undone.
-            </>
-          )}{" "}
-          There is no trash on the server.
-        </p>
+        {blockedBySave ? (
+          <p className="text-sm text-destructive">
+            <span className="font-mono">{path}</span> is currently being
+            saved. Wait for the save to finish before deleting it.
+          </p>
+        ) : (
+          <p className="text-sm text-destructive">
+            {isDir ? (
+              <>
+                <span className="font-mono">{path}</span> and everything
+                inside it will be permanently deleted from disk (recursive).
+                This cannot be undone.
+              </>
+            ) : (
+              <>
+                <span className="font-mono">{path}</span> will be permanently
+                deleted from disk. This cannot be undone.
+              </>
+            )}{" "}
+            There is no trash on the server.
+          </p>
+        )}
         {/* Misclick-safe spacing between the warning and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
           <Button variant="outline" autoFocus onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="destructive" onClick={onConfirm}>
+          <Button
+            variant="destructive"
+            disabled={blockedBySave}
+            onClick={onConfirm}
+          >
             Delete
           </Button>
         </DialogFooter>

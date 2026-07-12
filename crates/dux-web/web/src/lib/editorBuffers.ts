@@ -17,6 +17,27 @@ export function isBufferStale(
   return buffer === undefined || buffer.path !== currentPath
 }
 
+// Whether `EditorBody`'s file-load effect should skip firing another
+// `fileApi.read` for `currentPath`. Without the `errorPath` check, a failed
+// read left `loadedPath: null` and `loading: false`: the effect's "already
+// loaded?" guard saw neither "loaded" nor "loading" on every render while the
+// tab stayed active, so it fired a fresh read on every render forever
+// (reachable via a delete/rename race, or a plain 404). `errorPath` records
+// which path a load last settled with an error FOR, the same way `loadedPath`
+// records which path last settled successfully; a settled error is treated
+// as "don't auto-retry" and surfaces via the existing error pane instead,
+// with a manual Retry action as the only way to try again for that path.
+export function shouldSkipFileLoad(
+  buffer:
+    | { path: string; loadedPath: string | null; loading: boolean; errorPath: string | null }
+    | undefined,
+  currentPath: string,
+): boolean {
+  if (isBufferStale(buffer, currentPath)) return false
+  const b = buffer!
+  return b.loadedPath === currentPath || b.loading || b.errorPath === currentPath
+}
+
 // Drop every entry whose key is no longer a live tab id. `EditorBody` keys
 // several per-tab caches by tab id (the `buffers` Map, the file/diff
 // request-token maps, the markdown-preview-open Set) and none of them shrink
@@ -63,4 +84,30 @@ export function pruneSetByIds(
     if (liveIds.has(id)) next.add(id)
   }
   return next
+}
+
+// One pending batch of directories `FileTree` must force-refetch, and the
+// nonce it keys its revalidation effect on.
+export interface TreeRevalidateBatch {
+  dirs: string[]
+  nonce: number
+}
+
+// Fold a new batch of dirs into whatever revalidation batch is already
+// pending, deduping, and stamp the latest nonce. `EditorBody.revalidateDirs`
+// must call this via a FUNCTIONAL `setState` update (not a plain assignment):
+// a plain `setTreeRevalidate({ dirs, nonce })` silently drops a same-tick
+// prior batch when two mutations (e.g. a rename touching both its source and
+// destination parent dirs, or a rapid create followed by a rename) each call
+// `revalidateDirs` before React flushes a render in between. React batches
+// the two `setState` calls, so only the LAST plain assignment survives and the
+// first batch's dirs are lost, meaning `FileTree` never re-fetches them. A
+// functional updater's callback runs in call order even within one batch, so
+// unioning here (rather than overwriting) preserves every pending dir.
+export function unionRevalidateBatch(
+  prev: TreeRevalidateBatch | null,
+  dirs: string[],
+  nonce: number,
+): TreeRevalidateBatch {
+  return { dirs: [...new Set([...(prev?.dirs ?? []), ...dirs])], nonce }
 }

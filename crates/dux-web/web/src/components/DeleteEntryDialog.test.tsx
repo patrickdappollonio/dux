@@ -69,4 +69,65 @@ describe("DeleteEntryDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     expect(onConfirm).toHaveBeenCalled()
   })
+
+  // Finding 3: an in-flight save must block deleting the same path, the same
+  // way RenameEntryDialog's `isDirty` gate blocks a dirty rename.
+  describe("blockedBySave", () => {
+    it("disables Delete and does not fire onConfirm when clicked", () => {
+      const onConfirm = vi.fn()
+      render(
+        <DeleteEntryDialog
+          target={{ path: "a.ts", isDir: false }}
+          blockedBySave
+          onClose={() => {}}
+          onConfirm={onConfirm}
+        />,
+      )
+      const confirm = screen.getByRole("button", { name: "Delete" })
+      expect(confirm.hasAttribute("disabled")).toBe(true)
+      fireEvent.click(confirm)
+      expect(onConfirm).not.toHaveBeenCalled()
+    })
+
+    it("shows a blocking note instead of the usual destructive warning", () => {
+      render(
+        <DeleteEntryDialog
+          target={{ path: "a.ts", isDir: false }}
+          blockedBySave
+          onClose={() => {}}
+          onConfirm={() => {}}
+        />,
+      )
+      expect(screen.getByText(/currently being saved/i)).toBeTruthy()
+      expect(screen.queryByText(/permanently deleted/i)).toBeNull()
+    })
+
+    it("Cancel still closes normally while blocked", () => {
+      render(
+        <DeleteEntryDialog
+          target={{ path: "a.ts", isDir: false }}
+          blockedBySave
+          onClose={() => {}}
+          onConfirm={() => {}}
+        />,
+      )
+      const cancel = screen.getByRole("button", { name: "Cancel" })
+      expect(cancel.hasAttribute("disabled")).toBe(false)
+    })
+
+    it("defaults to unblocked when the prop is omitted", () => {
+      const onConfirm = vi.fn()
+      render(
+        <DeleteEntryDialog
+          target={{ path: "a.ts", isDir: false }}
+          onClose={() => {}}
+          onConfirm={onConfirm}
+        />,
+      )
+      const confirm = screen.getByRole("button", { name: "Delete" })
+      expect(confirm.hasAttribute("disabled")).toBe(false)
+      fireEvent.click(confirm)
+      expect(onConfirm).toHaveBeenCalled()
+    })
+  })
 })

@@ -268,3 +268,30 @@ export function dirtyCloseMessage(dirtyCount: number): string {
     ? "You have unsaved changes in 1 tab. They will be lost."
     : `You have unsaved changes in ${dirtyCount} tabs. They will be lost.`
 }
+
+export interface SaveResolution {
+  tone: "success" | "warning"
+  message: string
+}
+
+// What to toast, and whether it is honest to celebrate, once a save's
+// `fileApi.write` resolves. `tabStillOpen` must be checked against the LIVE
+// tabs list AT RESOLVE TIME, not at the moment `save()` was called: a delete
+// confirmed while the write was in flight already reached the server and
+// succeeded there (the write cannot be un-sent), so recreating the just-
+// deleted file on disk is real. Reporting "Saved" in that case would lie
+// about what happened; a warning is the honest outcome. EditorOverlay still
+// applies the write's OWN buffer/dirty bookkeeping only when the tab is still
+// open (there's no tab left to mark clean otherwise).
+export function saveResolutionOutcome(
+  path: string,
+  tabStillOpen: boolean,
+): SaveResolution {
+  if (!tabStillOpen) {
+    return {
+      tone: "warning",
+      message: `${path} was deleted while this save was in flight. The edit was still written back to disk at that path.`,
+    }
+  }
+  return { tone: "success", message: `Saved ${path}` }
+}

@@ -10,6 +10,7 @@ import {
   openFile,
   pinTab,
   renameTabPaths,
+  saveResolutionOutcome,
   setTabDirty,
   setTabMode,
   shouldConfirmClose,
@@ -534,5 +535,30 @@ describe("hasDirtyUnderPath", () => {
       activeId: "t1",
     }
     expect(hasDirtyUnderPath(state, "a.ts")).toBe(false)
+  })
+})
+
+// `saveResolutionOutcome` backs the finding-3 fix: `EditorOverlay`'s `save()`
+// used to unconditionally toast "Saved" and mark the tab clean once
+// `fileApi.write` resolved, even if a delete for that same path landed WHILE
+// the write was in flight (the write itself already reached the server and
+// succeeded, silently recreating the just-deleted file on disk). The caller
+// re-checks whether the tab this save was for still exists in the LIVE tabs
+// list at resolve time (not at call time, since a delete can race the
+// in-flight write) and feeds that into this pure decision: an honest warning
+// instead of a false "Saved" success when the tab is gone.
+describe("saveResolutionOutcome", () => {
+  it("reports success when the tab is still open", () => {
+    expect(saveResolutionOutcome("a.ts", true)).toEqual({
+      tone: "success",
+      message: "Saved a.ts",
+    })
+  })
+
+  it("reports a warning, not success, when the tab vanished mid-save", () => {
+    const outcome = saveResolutionOutcome("a.ts", false)
+    expect(outcome.tone).toBe("warning")
+    expect(outcome.message).toContain("a.ts")
+    expect(outcome.message.toLowerCase()).toContain("deleted")
   })
 })

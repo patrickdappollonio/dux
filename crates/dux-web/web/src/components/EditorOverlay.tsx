@@ -10,6 +10,7 @@ import {
   GitCompare,
   Loader2,
   Pencil,
+  RotateCw,
   Save,
   Search,
   X,
@@ -18,10 +19,17 @@ import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { FileDiffContents } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
-import { isBufferStale, pruneByIds, pruneSetByIds } from "@/lib/editorBuffers"
+import {
+  isBufferStale,
+  pruneByIds,
+  pruneSetByIds,
+  shouldSkipFileLoad,
+  unionRevalidateBatch,
+} from "@/lib/editorBuffers"
 import {
   dirtyCloseMessage,
   hasDirtyUnderPath,
+  saveResolutionOutcome,
   shouldPromoteOnEdit,
 } from "@/lib/editorTabs"
 import {
@@ -162,6 +170,15 @@ interface TabBuffer {
   diffLoadedSignal: string
   fileError: string | null
   diffError: string | null
+  // The path a load last settled with an ERROR for, or null. Mirrors
+  // `loadedPath` (which records a successful load's path) so the load effect
+  // can tell "never fetched" apart from "fetched and failed" via
+  // `shouldSkipFileLoad`: without this, a failed read left `loadedPath: null`
+  // and `loading: false` forever, so the effect refired `fileApi.read` on
+  // every render for as long as the tab stayed active (a delete/rename race,
+  // or a plain 404, would retry-loop). A settled error is "don't
+  // auto-retry"; the error pane below offers a manual Retry action instead.
+  errorPath: string | null
 }
 
 function emptyBuffer(path: string): TabBuffer {
@@ -178,6 +195,7 @@ function emptyBuffer(path: string): TabBuffer {
     diffLoadedSignal: "",
     fileError: null,
     diffError: null,
+    errorPath: null,
   }
 }
 
@@ -212,7 +230,24 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // OLD path of a tab that just preview-replaced onto a new one.
   const prevOpenPathsRef = useRef<Set<string>>(new Set())
 
+  // The latest `tabs` array, kept current every render (see the closeReqRef
+  // effect below for the identical pattern). `save()`'s `.then()` needs the
+  // LIVE tab list at RESOLVE time, not the `tabs` closed over when `save()`
+  // was called: a delete confirmed while the write was in flight closes the
+  // tab, and the save must notice that at resolve time to avoid a false
+  // "Saved" toast (see `saveResolutionOutcome` / finding 3).
+  const tabsRef = useRef<typeof tabs>(tabs)
+  useEffect(() => {
+    tabsRef.current = tabs
+  })
+
   const [savingTabId, setSavingTabId] = useState<string | null>(null)
+  // Paths with a save currently in flight, independent of `savingTabId`
+  // (which is keyed by tab id and only tracks the one tab the Save button UI
+  // reflects). Used to gate the Delete confirm dialog: deleting a path whose
+  // save hasn't resolved yet would let the in-flight write silently recreate
+  // the file right after the delete lands.
+  const [savingPaths, setSavingPaths] = useState<Set<string>>(() => new Set())
   // Markdown preview toggle: render the buffer instead of the Monaco editor.
   // Kept per TAB ID (a Set of tabs currently showing the preview) rather than
   // one shared boolean reset on tab-change via an effect, a Set read is just
@@ -267,7 +302,14 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   const revalidateNonceRef = useRef(0)
   function revalidateDirs(dirs: string[]): void {
     revalidateNonceRef.current += 1
-    setTreeRevalidate({ dirs, nonce: revalidateNonceRef.current })
+    const nonce = revalidateNonceRef.current
+    // Functional update: unions `dirs` into whatever batch is already
+    // pending rather than overwriting it, so two mutations that each call
+    // `revalidateDirs` before React flushes a render between them (e.g. a
+    // rename's source + destination parent dirs) both survive. See
+    // `unionRevalidateBatch`'s doc comment for why a plain assignment drops
+    // the earlier batch under React's same-tick setState batching.
+    setTreeRevalidate((prev) => unionRevalidateBatch(prev, dirs, nonce))
   }
   // The flat file list backing the "Search files…" box (fetched from the
   // editor's session directly, independent of the changed-files watch). The
@@ -444,6 +486,10 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
           next.set(tabId, {
             ...cur,
             loading: false,
+            // Settle this path as errored so the load effect's
+            // `shouldSkipFileLoad` guard stops re-firing `fileApi.read` for
+            // it on every render (see the `errorPath` field doc comment).
+            errorPath: path,
             fileError: e instanceof Error ? e.message : "could not open file",
           })
           return next
@@ -454,18 +500,16 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Load the active tab's file buffer lazily: only in file mode, only when the
   // cached buffer doesn't already hold CURRENT content for this tab (absent,
   // stale per `isBufferStale`, e.g. a preview-replace swapped this tab's
-  // path) AND isn't already mid-fetch for this exact path (`loading`).
-  // Skipped entirely in diff mode. Unlike the diff, the buffer is NOT
-  // auto-refreshed when the file changes on disk under us: re-reading could
-  // silently clobber unsaved edits.
+  // path), isn't already mid-fetch for this exact path (`loading`), AND
+  // hasn't already settled with an error for this exact path (`errorPath`) --
+  // that last check is what stops a failed read (a delete/rename race, a
+  // plain 404) from retry-looping `fileApi.read` on every render forever; see
+  // `shouldSkipFileLoad`'s doc comment. Skipped entirely in diff mode. Unlike
+  // the diff, the buffer is NOT auto-refreshed when the file changes on disk
+  // under us: re-reading could silently clobber unsaved edits.
   useEffect(() => {
     if (!activeTab || activeTab.mode !== "file") return
-    if (
-      activeBuffer &&
-      !isBufferStale(activeBuffer, activeTab.path) &&
-      (activeBuffer.loadedPath === activeTab.path || activeBuffer.loading)
-    )
-      return
+    if (shouldSkipFileLoad(activeBuffer, activeTab.path)) return
     // `loadFileBuffer` synchronously seeds a placeholder buffer (so a stale
     // buffer from a preview-replace never renders even for one frame) before
     // its async fetch resolves, a legitimate, deliberate synchronous
@@ -490,6 +534,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     activeBuffer?.path,
     activeBuffer?.loadedPath,
     activeBuffer?.loading,
+    activeBuffer?.errorPath,
   ])
 
   // Fetch and store a tab's diff cache for `path`. Extracted for the same
@@ -686,29 +731,52 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     const path = activeTab.path
     const body = activeBuffer?.draft ?? ""
     setSavingTabId(tabId)
+    setSavingPaths((prev) => {
+      const next = new Set(prev)
+      next.add(path)
+      return next
+    })
     fileApi
       .write(sessionId, path, body)
       .then(() => {
-        // Stale-save guard: if this tab's buffer no longer belongs to `path` (a
-        // preview-replace reused the tab id for a different file while the save
-        // was in flight), don't resurrect a buffer for a file no longer open in
-        // this tab.
-        setBuffers((prev) => {
-          const cur = prev.get(tabId)
-          if (!cur || isBufferStale(cur, path)) return prev
-          const next = new Map(prev)
-          next.set(tabId, { ...cur, loaded: body, diffLoadedPath: null })
-          return next
-        })
-        editorSetTabDirty(sessionId, tabId, false)
-        toast.success(`Saved ${path}`)
+        // Re-check the LIVE tabs list at RESOLVE time (via `tabsRef`, kept
+        // current every render), not the `tabs` this closure captured when
+        // `save()` was called: a delete confirmed while the write was in
+        // flight already closed the tab, and the write already reached the
+        // server and succeeded there (it cannot be un-sent). Reporting
+        // "Saved" in that case would lie; `saveResolutionOutcome` picks the
+        // honest outcome instead.
+        const tabStillOpen = tabsRef.current.some((t) => t.id === tabId)
+        const outcome = saveResolutionOutcome(path, tabStillOpen)
+        if (tabStillOpen) {
+          // Stale-save guard: if this tab's buffer no longer belongs to `path`
+          // (a preview-replace reused the tab id for a different file while
+          // the save was in flight), don't resurrect a buffer for a file no
+          // longer open in this tab.
+          setBuffers((prev) => {
+            const cur = prev.get(tabId)
+            if (!cur || isBufferStale(cur, path)) return prev
+            const next = new Map(prev)
+            next.set(tabId, { ...cur, loaded: body, diffLoadedPath: null })
+            return next
+          })
+          editorSetTabDirty(sessionId, tabId, false)
+        }
+        if (outcome.tone === "warning") toast.warning(outcome.message)
+        else toast.success(outcome.message)
       })
       .catch((e) => {
         toast.error(e instanceof Error ? e.message : "could not save file")
       })
-      .finally(() =>
-        setSavingTabId((id) => (id === tabId ? null : id)),
-      )
+      .finally(() => {
+        setSavingTabId((id) => (id === tabId ? null : id))
+        setSavingPaths((prev) => {
+          if (!prev.has(path)) return prev
+          const next = new Set(prev)
+          next.delete(path)
+          return next
+        })
+      })
   }
 
   // Reload the diff for the active tab: the "file changed underneath you"
@@ -803,9 +871,15 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // waiting on the request; the destructive confirm dialog already gated the
   // action, and a failure (e.g. another client already deleted it) just
   // toasts, matching the plan's "another client raced us" acceptance).
+  //
+  // Defensively re-checks `savingPaths` even though the Delete button in
+  // `DeleteEntryDialog` is already disabled via `blockedBySave` while a save
+  // for this path is in flight: the dialog computes that from the render at
+  // which it was opened, so this is a belt-and-braces guard against a race
+  // between a save starting and the click handler firing.
   function handleDeleteConfirm(): void {
     const target = deleteEntryTarget
-    if (!target) return
+    if (!target || savingPaths.has(target.path)) return
     setDeleteEntryTarget(null)
     fileApi
       .remove(sessionId, target.path)
@@ -816,6 +890,17 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       })
       .catch((e) => {
         toast.error(e instanceof Error ? e.message : "could not delete")
+        // A failed delete (e.g. a permission error mid-`remove_dir_all`, or
+        // another client racing the same path) can still leave the tree
+        // cache stale relative to whatever is actually left on disk after a
+        // PARTIAL removal. Revalidate the same dir(s) the success path
+        // would, so `FileTree` re-reads the real state instead of showing a
+        // listing from before the attempt.
+        revalidateDirs(
+          target.isDir
+            ? [parentDir(target.path), target.path]
+            : [parentDir(target.path)],
+        )
       })
   }
 
@@ -1105,8 +1190,20 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
               </ChunkBoundary>
             )
           ) : activeBuffer?.fileError && !isBufferStale(activeBuffer, activeTab.path) ? (
-            <div className="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+            <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
               {activeBuffer.fileError}
+              {/* Manual retry: a settled error is never auto-retried (see
+                  `errorPath`/`shouldSkipFileLoad`), so this is the only way
+                  back without switching tabs. Mirrors the diff pane's reload
+                  button above. */}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => loadFileBuffer(activeTab.id, activeTab.path)}
+              >
+                <RotateCw />
+                Retry
+              </Button>
             </div>
           ) : !fileReady ? (
             <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -1186,6 +1283,9 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       />
       <DeleteEntryDialog
         target={deleteEntryTarget}
+        blockedBySave={
+          deleteEntryTarget !== null && savingPaths.has(deleteEntryTarget.path)
+        }
         onClose={() => setDeleteEntryTarget(null)}
         onConfirm={handleDeleteConfirm}
       />
