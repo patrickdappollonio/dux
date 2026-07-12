@@ -6,7 +6,7 @@ import { isBufferStale, pruneByIds, pruneSetByIds } from "./editorBuffers"
 // lib/editorTabs.ts) reuses a preview tab's id while swapping its `path`. Without
 // this check, a replaced preview tab would keep rendering the OLD file's buffer
 // under the new path. `isBufferStale` is the single source of truth EditorBody
-// consults before treating a cached buffer as usable — this test proves the logic
+// consults before treating a cached buffer as usable, this test proves the logic
 // a replaced tab is required to hit, standing in for a component mount test
 // (Monaco cannot mount under vitest; see monacoSetup.ts).
 describe("isBufferStale", () => {

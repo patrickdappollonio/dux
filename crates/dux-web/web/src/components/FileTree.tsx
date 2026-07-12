@@ -28,7 +28,7 @@ interface FileTreeProps {
   initialPath: string | null
   // Single click = preview open (`onOpen(path)`); double-click = permanent
   // open / pin (`onOpen(path, { pin: true })`). A double-click also fires two
-  // preceding `onClick`s — harmless, since `openFile` (lib/editorTabs.ts) is
+  // preceding `onClick`s, harmless since `openFile` (lib/editorTabs.ts) is
   // idempotent for an already-open path (it just activates), so the pin lands
   // cleanly right after.
   onOpen: (path: string, opts?: { pin?: boolean }) => void

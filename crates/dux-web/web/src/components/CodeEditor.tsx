@@ -7,7 +7,7 @@ import { monaco } from "@/lib/monacoSetup"
 
 // The `monaco` instance's type, re-exported so a consumer (EditorOverlay's
 // `EditorBody`, which owns tab lifecycle and disposes closed tabs' models) can
-// type a ref to it WITHOUT importing `@/lib/monacoSetup` itself — that import
+// type a ref to it WITHOUT importing `@/lib/monacoSetup` itself: that import
 // runs the multi-MB self-host bootstrap eagerly, defeating the whole point of
 // lazy-loading `CodeEditor`. A `MonacoInstance` type-only import is erased at
 // build time, so it costs nothing.
@@ -23,7 +23,7 @@ interface CodeEditorProps {
   // the PARENT (EditorBody, which owns the tab lifecycle) can dispose a
   // closed tab's model by URI: `monaco.editor.getModel(monaco.Uri.parse(path))
   // ?.dispose()`. CodeEditor stays a pure active-tab renderer and never
-  // disposes models itself — see EditorOverlay.tsx's "Monaco model lifecycle"
+  // disposes models itself, see EditorOverlay.tsx's "Monaco model lifecycle"
   // comment for the full contract.
   onReady?: (mon: MonacoInstance) => void
 }

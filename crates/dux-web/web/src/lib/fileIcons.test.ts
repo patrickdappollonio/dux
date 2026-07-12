@@ -48,7 +48,7 @@ describe("dirIconKind", () => {
     expect(dirIconKind({ open: false, empty: false })).toBe("folder")
     expect(dirIconKind({ open: false, empty: true })).toBe("folder-empty")
     // An open dir known to have zero children still reads as visibly distinct
-    // ("empty" outranks "open" — nothing to show open or closed).
+    // ("empty" outranks "open": nothing to show open or closed).
     expect(dirIconKind({ open: true, empty: true })).toBe("folder-empty")
   })
 })

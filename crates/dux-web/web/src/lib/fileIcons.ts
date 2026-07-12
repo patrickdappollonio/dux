@@ -1,7 +1,7 @@
 // Pure path -> icon-KIND mapper for the file tree, kept free of any React or
 // lucide import so it is unit-testable in node (mirrors `pathExt.ts`'s reason
 // for staying framework-free). A small component (`FileTreeIcon.tsx`) maps a
-// kind to its lucide glyph. This module is NOT the git-status marker — that
+// kind to its lucide glyph. This module is NOT the git-status marker, that
 // stays `FileStatusIcon`/`fileStatusMeta` (renders on the right of a row); this
 // is the LEFT-side, always-present file-type icon.
 
@@ -21,7 +21,7 @@ export type FileIconKind =
   | "file" // generic fallback
 
 // Directory icon kind. "empty" (a loaded dir with zero children) outranks
-// "open" — an empty dir is visibly distinct whether expanded or collapsed,
+// "open": an empty dir is visibly distinct whether expanded or collapsed,
 // since there is nothing to show open either way.
 export function dirIconKind(opts: { open: boolean; empty: boolean }): FileIconKind {
   if (opts.empty) return "folder-empty"

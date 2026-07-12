@@ -156,7 +156,7 @@ describe("flattenLazy", () => {
       ["src", { status: "loaded", entries: [file("src/lib.rs")] }],
       ["empty-dir", { status: "loaded", entries: [] }],
     ])
-    // Neither dir is expanded — `empty` must still reflect the loaded cache.
+    // Neither dir is expanded, `empty` must still reflect the loaded cache.
     const collapsed = flattenLazy(dirs, new Set())
     expect(collapsed.find((r) => r.path === "src")?.empty).toBe(false)
     expect(collapsed.find((r) => r.path === "empty-dir")?.empty).toBe(true)

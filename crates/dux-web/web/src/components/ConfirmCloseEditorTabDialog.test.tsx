@@ -112,7 +112,7 @@ describe("ConfirmCloseEditorTabDialog", () => {
 
   // Space-activates-focused-button is a real native <button> behavior (the
   // browser fires a click on Space keyup) that jsdom does not implement, so it
-  // can't be exercised via fireEvent here — no dialog test in this codebase
+  // can't be exercised via fireEvent here: no dialog test in this codebase
   // simulates it for that reason. What IS testable, and asserted here, is the
   // precondition the tenet depends on: both footer controls are real
   // `<button>` elements (not divs with onClick), so the browser's native Space

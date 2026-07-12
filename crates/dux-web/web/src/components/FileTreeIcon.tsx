@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils"
 
 // Maps a pure `FileIconKind` (see lib/fileIcons.ts) to its lucide glyph. A
 // `Record` over the full union means adding a kind without adding it here is a
-// compile error — mirrors `FileStatusIcon`'s `ICONS`/`COLORS` Record pattern.
+// compile error, mirrors `FileStatusIcon`'s `ICONS`/`COLORS` Record pattern.
 // This is the LEFT-side, always-present file-TYPE icon; it is additive to (not
 // a replacement for) the git-status marker `FileStatusIcon`, which stays on the
 // right of a row and is untouched by this module.

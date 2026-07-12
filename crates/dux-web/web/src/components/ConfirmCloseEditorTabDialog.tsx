@@ -10,7 +10,7 @@ import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeEditorCloseTab, editorCloseTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a DIRTY editor tab (the per-tab close affordance
-// in the strip). A clean tab closes immediately with no dialog — see
+// in the strip). A clean tab closes immediately with no dialog, see
 // `editorTabs.ts` `shouldConfirmClose`, which the strip consults before
 // routing here. Clones `ConfirmDiscardFileDialog`'s structure, the destructive-
 // confirm template (CLAUDE.md tenet): Cancel defaults focus, a misclick-safe

@@ -68,7 +68,7 @@ export interface TreeRow {
   // `__error__` still gets `kind: "entry"` and renders as a normal file row.
   kind: "entry" | "loading" | "error"
   // True for a dir row whose cache entry is `loaded` with zero children.
-  // Independent of `expanded` — the file-tree icon shows a distinct empty
+  // Independent of `expanded`: the file-tree icon shows a distinct empty
   // glyph whether the empty dir is expanded or collapsed, as soon as it's
   // been fetched once. Always false for file rows and for dirs never fetched.
   empty: boolean

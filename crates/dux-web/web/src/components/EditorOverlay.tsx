@@ -72,7 +72,7 @@ const MAX_SEARCH_RESULTS = 300
 
 // The overlay shell: owns the Dialog and is desktop-only (Monaco is poor on
 // touch, and every entry point is already gated to desktop). The body is keyed
-// by SESSION ONLY (not file/mode) so opening a new file — or a preview-replace —
+// by SESSION ONLY (not file/mode) so opening a new file (or a preview-replace)
 // while the overlay is already open never remounts it and drops the tab list.
 // A ref lets the body intercept Esc/backdrop closes so they run the same dirty
 // guard as the in-body Close button.
@@ -112,7 +112,7 @@ export function EditorOverlay() {
 }
 
 // One tab's Monaco buffer + diff cache, keyed by TAB ID in `EditorBody`'s
-// `buffers` map. `path` is the path this entry was fetched FOR — every read
+// `buffers` map. `path` is the path this entry was fetched FOR: every read
 // must check it against the tab's CURRENT path via `isBufferStale` before
 // trusting `loaded`/`draft`/diff fields, because `openFile` rule 2 (preview-
 // replace) reuses a tab's id while swapping its path out from under it. A
@@ -175,7 +175,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
 
-  // Per-tab Monaco buffers (file content + diff cache), keyed by tab id — kept
+  // Per-tab Monaco buffers (file content + diff cache), keyed by tab id, kept
   // OUT of the global store deliberately (see lib/editorTabs.ts header
   // comment): putting file contents in zustand-style global state would fire
   // a store-wide update on every keystroke.
@@ -185,11 +185,11 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   const activeBuffer = activeTab ? buffers.get(activeTab.id) : undefined
 
   // The `monaco` instance, captured once CodeEditor mounts (see CodeEditor's
-  // `onReady`). EditorBody — not CodeEditor — owns disposal because it owns
+  // `onReady`). EditorBody, not CodeEditor, owns disposal because it owns
   // tab lifecycle; see the model-lifecycle effect below.
   const monacoRef = useRef<MonacoInstance | null>(null)
   // The set of open PATHS as of the last run of the disposal effect. Disposal
-  // diffs by PATH (not tab id) — paths are unique across tabs (openFile rule 1
+  // diffs by PATH (not tab id): paths are unique across tabs (openFile rule 1
   // activates rather than duplicates an already-open path), so a path leaving
   // this set unambiguously means no tab holds it open anymore, including the
   // OLD path of a tab that just preview-replaced onto a new one.
@@ -198,7 +198,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   const [savingTabId, setSavingTabId] = useState<string | null>(null)
   // Markdown preview toggle: render the buffer instead of the Monaco editor.
   // Kept per TAB ID (a Set of tabs currently showing the preview) rather than
-  // one shared boolean reset on tab-change via an effect — a Set read is just
+  // one shared boolean reset on tab-change via an effect, a Set read is just
   // as simple, needs no reset effect (an effect that reset a plain boolean on
   // every tab switch would call `setState` synchronously in its body, which
   // the react-hooks/set-state-in-effect lint flags), and arguably reads better
@@ -218,7 +218,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   }
 
   // The path currently revealed on first mount (deep link / opened-from-
-  // elsewhere) — frozen once, since FileTree only consumes it in a mount-only
+  // elsewhere), frozen once, since FileTree only consumes it in a mount-only
   // effect. Later opens reveal themselves via FileTree's own openPath-change
   // effect, so this doesn't need to track subsequent opens. A lazy `useState`
   // initializer (not a ref) so it's safe to read during render.
@@ -303,7 +303,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
-  // one captured at load means the file changed underneath — surface a reload
+  // one captured at load means the file changed underneath, surface a reload
   // button (diffStale).
   const diffReady =
     activeTab !== null &&
@@ -357,7 +357,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 
   // Fetch and store a tab's file buffer for `path`. Extracted into its own
   // function (rather than inlined in the effect below) so the effect body
-  // never calls `setBuffers` directly — mirrors FileTree.tsx's `fetchDir`. A
+  // never calls `setBuffers` directly, mirrors FileTree.tsx's `fetchDir`. A
   // plain function (not `useCallback`): `eslint-plugin-react-hooks`'
   // compiler-derived manual-memoization lint disagreed with a `[sessionId]`
   // dependency array here even though this mirrors `fetchDir`'s (which DOES
@@ -383,7 +383,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         setBuffers((prev) => {
           const cur = prev.get(tabId)
           // Superseded by a later preview-replace on this same tab id while
-          // the read was in flight — don't resurrect a buffer for a path
+          // the read was in flight, don't resurrect a buffer for a path
           // this tab no longer holds.
           if (!cur || cur.path !== path) return prev
           const next = new Map(prev)
@@ -418,7 +418,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 
   // Load the active tab's file buffer lazily: only in file mode, only when the
   // cached buffer doesn't already hold CURRENT content for this tab (absent,
-  // stale per `isBufferStale` — e.g. a preview-replace swapped this tab's
+  // stale per `isBufferStale`, e.g. a preview-replace swapped this tab's
   // path) AND isn't already mid-fetch for this exact path (`loading`).
   // Skipped entirely in diff mode. Unlike the diff, the buffer is NOT
   // auto-refreshed when the file changes on disk under us: re-reading could
@@ -433,7 +433,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       return
     // `loadFileBuffer` synchronously seeds a placeholder buffer (so a stale
     // buffer from a preview-replace never renders even for one frame) before
-    // its async fetch resolves — a legitimate, deliberate synchronous
+    // its async fetch resolves, a legitimate, deliberate synchronous
     // `setState` at the top of a data-loading effect, matching FileTree.tsx's
     // `fetchDir` (which seeds `{ status: "loading" }` before fetching the
     // same way). The lint's static call-graph tracing flags it here even
@@ -445,7 +445,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadFileBuffer(activeTab.id, activeTab.path)
     // `loadFileBuffer` is a plain function (fresh identity every render, see
-    // its own comment above) — intentionally omitted so this effect is keyed
+    // its own comment above), intentionally omitted so this effect is keyed
     // purely on tab/path/buffer identity, not on that fresh identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -499,7 +499,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Load the active tab's diff lazily: only in diff mode, only when the cache
   // doesn't already hold the tab's current path. Refetches on a tab switch and
   // on manual reload (which clears diffLoadedPath); does NOT refetch on a
-  // change-signal tick — that lights the reload button instead.
+  // change-signal tick, that lights the reload button instead.
   useEffect(() => {
     if (!activeTab || activeTab.mode !== "diff") return
     if (
@@ -520,7 +520,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   ])
 
   // Monaco model disposal: dispose a path's model once no tab holds it open
-  // anymore. Diffs by the SET OF OPEN PATHS (not tab ids) — see the
+  // anymore. Diffs by the SET OF OPEN PATHS (not tab ids), see the
   // `prevOpenPathsRef` comment above for why that's required for a
   // preview-replace's OLD path to get disposed too.
   //
@@ -578,7 +578,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   }, [])
 
   // Preview open (tree single-click, search click). Double-click / new-file
-  // pass { pin: true }. Single source of truth for every open entry point —
+  // pass { pin: true }. Single source of truth for every open entry point,
   // see lib/editorTabs.ts `openFile` for the promotion rules. Deliberately
   // carries no `mode` intent: a tree/search click is a plain activation, not
   // an explicit Edit/Diff action, so re-clicking an already-open path must
@@ -616,7 +616,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 
   // Report the buffer's dirty state up to the store (so the strip's dot and
   // the close-confirm gating read from one place), and promote a preview tab
-  // to permanent on its first edit — so an in-progress edit is never silently
+  // to permanent on its first edit, so an in-progress edit is never silently
   // discarded by a later preview-replace.
   function handleDraftChange(value: string): void {
     if (!activeTab) return
@@ -676,7 +676,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       )
   }
 
-  // Reload the diff for the active tab — the "file changed underneath you"
+  // Reload the diff for the active tab: the "file changed underneath you"
   // reload button. Dropping diffLoadedPath makes the diff-load effect refetch.
   function refreshDiff(): void {
     if (!activeTab) return
@@ -886,7 +886,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         </Button>
       </div>
 
-      {/* Tab strip — only renders once the session has at least one tab. */}
+      {/* Tab strip, only renders once the session has at least one tab. */}
       <EditorTabsStrip sessionId={sessionId} />
 
       {/* Body: worktree file tree (left) + Monaco editor/diff (right). */}

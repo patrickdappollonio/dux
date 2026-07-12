@@ -49,7 +49,7 @@ describe("openFile", () => {
     const newId = idGen()
     let state = openFile(emptyTabsState(), "a.ts", { pin: true, newId })
     state = openFile(state, "b.ts", { pin: true, newId })
-    // Activate b, then reopen a — should just activate the existing a tab.
+    // Activate b, then reopen a: should just activate the existing a tab.
     state = openFile(state, "a.ts", { newId })
     expect(state.tabs).toHaveLength(2)
     expect(state.activeId).toBe("id1")
@@ -81,7 +81,7 @@ describe("openFile", () => {
     expect(state.activeId).toBe("id2")
   })
 
-  it("a DIRTY preview tab is not replaced — a new preview tab is appended instead", () => {
+  it("a DIRTY preview tab is not replaced, a new preview tab is appended instead", () => {
     const newId = idGen()
     let state = openFile(emptyTabsState(), "a.ts", { newId })
     state = setTabDirty(state, "id1", true)

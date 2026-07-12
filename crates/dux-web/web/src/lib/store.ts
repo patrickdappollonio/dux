@@ -891,7 +891,7 @@ function applySpine(rawSpine: Spine, seq: number): void {
 
 // Drop editor-tab state for any session that no longer exists in the spine
 // (deleted here or by another client), and close the editor overlay if it was
-// pointed at that now-gone session — the code-editor's own out-of-band-clear
+// pointed at that now-gone session, the code-editor's own out-of-band-clear
 // path, mirroring `pruneSelectionIfGone` for the main selection.
 function pruneEditorStateIfGone(spine: Spine): void {
   const liveSessionIds = new Set(spine.sessions.map((s) => s.id))
@@ -1659,13 +1659,13 @@ export function setCommitDraft(text: string): void {
 // Open the code-editor overlay for a session. Selecting the session first points
 // the engine's changed-files watch at its worktree so the editor's file list
 // populates from the same broadcast the changes pane uses. `initialPath` (from a
-// per-file affordance) auto-loads that file — seeded as a tab via
+// per-file affordance) auto-loads that file, seeded as a tab via
 // `editorOpenFile`, so external opens (ChangedFiles Edit/Diff, Sidebar) funnel
 // through the same VS Code preview model as the tree/search; `mode` chooses the
-// opening view — "diff" when a changed file is clicked (show its diff first),
+// opening view: "diff" when a changed file is clicked (show its diff first),
 // "file" otherwise. Does NOT clear the session's existing tab list, so reopening
 // the overlay on a session restores its tabs (`editorTabs` persists across
-// `closeEditor`; only `editorClearSession` — on session delete — clears it).
+// `closeEditor`; only `editorClearSession`, on session delete, clears it).
 export function openEditor(
   sessionId: string,
   initialPath: string | null = null,
@@ -1682,8 +1682,8 @@ export function closeEditor(): void {
 
 // --- Editor tabs: thin store wrappers over the pure reducer (lib/editorTabs.ts).
 // Each mutates only `editorTabs[sessionId]`, leaving every other session's tabs
-// untouched. Components/dialogs call ONLY these — never the pure functions
-// directly — so the store stays the single place that knows how to read/write
+// untouched. Components/dialogs call ONLY these, never the pure functions
+// directly, so the store stays the single place that knows how to read/write
 // the per-session slice.
 
 function editorTabsFor(sessionId: string): EditorTabsState {

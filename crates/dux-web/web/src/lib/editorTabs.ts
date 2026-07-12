@@ -6,7 +6,7 @@
 // Editor tabs are pure client state (not server-sourced like agent tabs): the
 // store keeps one `EditorTabsState` per session, keyed by session id. The heavy
 // Monaco buffer (loaded/draft/view-state/diff cache) lives in the `EditorBody`
-// component, keyed by tab id — see `EditorOverlay.tsx`.
+// component, keyed by tab id: see `EditorOverlay.tsx`.
 
 export type EditorTabMode = "file" | "diff" // reuses the EditorViewMode shape
 
@@ -51,7 +51,7 @@ export function openFile(
   const pin = opts.pin ?? false
   const explicitMode = opts.mode
 
-  // Rule 1: already open — activate (and optionally pin), never duplicate.
+  // Rule 1: already open, activate (and optionally pin), never duplicate.
   // Mode is retargeted only when the caller expressed an explicit intent.
   const existing = state.tabs.find((t) => t.path === path)
   if (existing) {
@@ -68,7 +68,7 @@ export function openFile(
 
   const newTabMode = explicitMode ?? "file"
 
-  // Rule 2: a non-dirty preview tab exists — replace it in place.
+  // Rule 2: a non-dirty preview tab exists, replace it in place.
   const previewTab = state.tabs.find((t) => t.preview && !t.dirty)
   if (previewTab) {
     const tabs = state.tabs.map((t) =>
@@ -157,7 +157,7 @@ export function nextActiveId(
 }
 
 // Pure dirty-gating check for the close flow: components never re-implement
-// this — a vanished tab id is not dirty by definition.
+// this: a vanished tab id is not dirty by definition.
 export function shouldConfirmClose(state: EditorTabsState, id: string): boolean {
   return state.tabs.find((t) => t.id === id)?.dirty ?? false
 }

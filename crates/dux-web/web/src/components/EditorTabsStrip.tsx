@@ -14,7 +14,7 @@ import {
 import { cn } from "@/lib/utils"
 
 // The code-editor tab strip (pills), rhymes with `AgentTabsStrip` but is its
-// own component — editor tabs are pure client state (see lib/editorTabs.ts),
+// own component: editor tabs are pure client state (see lib/editorTabs.ts),
 // not server-sourced. Renders only when the session has at least one tab; with
 // zero tabs the body's "Select a file" empty state covers it, so this returns
 // null rather than an empty bar.
@@ -94,7 +94,7 @@ function TabPill({
           {basename}
         </span>
         {/* Dirty dot to the left of the close ✕ (the plan's simpler accepted
-            variant — always show ✕, dot appears alongside it when dirty). */}
+            variant: always show ✕, dot appears alongside it when dirty). */}
         {tab.dirty && (
           <>
             <SimpleTooltip content="Unsaved changes">

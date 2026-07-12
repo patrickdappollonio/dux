@@ -246,7 +246,7 @@ describe("editor tabs store slice", () => {
     const tabs = mod.getSnapshot().editorTabs.s1
     expect(tabs.tabs).toEqual([])
     expect(tabs.activeId).toBeNull()
-    // The overlay itself stays open — only the tab list emptied.
+    // The overlay itself stays open, only the tab list emptied.
     expect(mod.getSnapshot().editorTarget).not.toBeNull()
   })
 

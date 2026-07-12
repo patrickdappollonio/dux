@@ -212,7 +212,7 @@ describe("FileTree", () => {
     )
     const dirRow = await screen.findByText("empty-dir")
     const button = dirRow.closest("button")
-    fireEvent.click(button!) // expand — triggers the fetch that reveals "empty"
+    fireEvent.click(button!) // expand, triggers the fetch that reveals "empty"
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10))
     })
