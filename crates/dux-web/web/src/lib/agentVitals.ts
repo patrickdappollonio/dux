@@ -5,6 +5,7 @@
 // tooltip or a store.
 
 import { statusDotColorClass } from "@/lib/agentRow"
+import type { ChangesSlice } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
 export interface AgentVitalsRow {
@@ -55,6 +56,22 @@ function branchValue(session: SessionView): string {
     return `${session.initial_branch} → ${session.branch_name}`
   }
   return session.branch_name
+}
+
+// The changed-files store slice only ever holds data for the currently
+// SELECTED session (see ChangesSlice in lib/store.ts), so a row for any other
+// session must omit the changes count rather than showing stale/wrong data.
+// This is the one staleness gate shared by both sidebar surfaces (the
+// collapsed rail icon and the expanded row) — extracted here so they can't
+// drift out of sync.
+export function changesCountFor(
+  changes: ChangesSlice | null | undefined,
+  sessionId: string,
+): number | null {
+  if (changes?.sessionId !== sessionId || changes.phase !== "loaded") {
+    return null
+  }
+  return changes.staged.length + changes.unstaged.length
 }
 
 // Builds the vitals row model for one session. `changesCount` is the changed

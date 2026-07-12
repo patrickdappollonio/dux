@@ -678,4 +678,50 @@ describe("AppSidebar expanded agent row vitals tooltip", () => {
     expect(vitalsTooltip?.textContent).toContain("Repo")
     expect(vitalsTooltip?.textContent?.toLowerCase()).toContain("active")
   })
+
+  it("shows the Changes row only for the session the changed-files slice is loaded for", () => {
+    // The changed-files store slice only ever holds data for the currently
+    // SELECTED session (see ChangesSlice in lib/store.ts). Session s1 here is
+    // "loaded" for; session s2 shares the same slice object (it isn't the
+    // selected session), so its vitals tooltip must omit the Changes row
+    // rather than showing s1's count. Both sessions land in expanded rows
+    // (makeTwoProjectSpine's projects both default-open, since each has a
+    // session), so this exercises the shared changesCountFor gate used by the
+    // expanded-row call site. makeTwoProjectSpine's second session reuses s1's
+    // branch/worktree fields (only id/project_id/status differ), so the two
+    // rows are told apart by their tooltip's project name line ("Repo" for
+    // s1/p1, "Other" for s2/p2) rather than the branch/worktree rows.
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+      changes: {
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [{ path: "a.txt" }],
+        unstaged: [{ path: "b.txt" }],
+        error: null,
+      },
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const tooltips = screen.getAllByTestId("tooltip-content")
+    const s1Tooltip = tooltips.find((t) => t.textContent?.includes("Repo"))
+    const s2Tooltip = tooltips.find((t) => t.textContent?.includes("Other"))
+
+    expect(s1Tooltip).toBeTruthy()
+    expect(s2Tooltip).toBeTruthy()
+    expect(s1Tooltip?.textContent).toContain("Changes")
+    expect(s1Tooltip?.textContent).toContain("2 files")
+    expect(s2Tooltip?.textContent).not.toContain("Changes")
+  })
 })

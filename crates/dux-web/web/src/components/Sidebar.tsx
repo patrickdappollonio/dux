@@ -98,6 +98,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { changesCountFor } from "@/lib/agentVitals"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import { projectBranchDisplay } from "@/lib/projectBranch"
 import type { ProjectBranchDisplay } from "@/lib/projectBranch"
@@ -252,10 +253,7 @@ function SessionSubItem({
   // SELECTED session (see ChangesSlice in lib/store.ts), so a non-selected
   // row's vitals tooltip omits the changes count rather than showing stale or
   // wrong data for an agent that isn't loaded.
-  const changesCount =
-    changes?.sessionId === session.id && changes?.phase === "loaded"
-      ? changes.staged.length + changes.unstaged.length
-      : null
+  const changesCount = changesCountFor(changes, session.id)
   const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const atTabCap = session.tabs.length >= tabCap
   const addingTab = createTabInFlight.includes(session.id)
@@ -297,77 +295,87 @@ function SessionSubItem({
           agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground"
         )}
       >
-        <SidebarMenuSubButton
-          {...attributes}
-          {...listeners}
-          isActive={agentSelected}
-          className={cn(
-            "flex-1 touch-manipulation",
-            // The wrapper (group/agent-row) owns the highlight now, so keep this
-            // button transparent — otherwise it paints a second box that stops
-            // short of the trailing ⋯.
-            "hover:bg-transparent active:bg-transparent data-active:bg-transparent",
-            // Non-running agents recede: dim the whole row (name, icon, and the
-            // status indicator) so the running ones read first.
-            dimmed && "opacity-70"
-          )}
-          onClick={() => selectSession(session.id)}
-        >
-          {/* All agents use the same Bot icon; the provider is shown as text.
-              While the agent streams output the icon bobs (motion-safe) so the
-              "working" state is unmistakable at a glance. The transition lets it
-              settle back to rest (translateY(0)) when streaming stops mid-bounce
-              instead of freezing at the top or bottom of the bob.
+        {/* The "full vitals" tooltip anchors to this WHOLE row button, not just
+            the name span: at narrow sidebar widths (min 14rem) a label-anchored
+            trigger let the ~w-64 popup open on top of this same row's PR icon,
+            status badge, and ⋯ trigger, intercepting their hover/click. Anchored
+            to the full-width button, `side="right"` instead opens the popup
+            clear of the row's own controls. SimpleTooltip's TooltipTrigger uses
+            base-ui's `render` prop (a clone, not a wrapper element), so the
+            button's own onClick/attributes/listeners are preserved — the ⋯
+            menu's hover-reveal lives on the group/agent-row wrapper below, which
+            this button remains inside.
 
-              The icon doubles as the attention indicator: when the agent needs
-              the user it turns amber and blinks in the same double-pulse-then-
-              hold rhythm as the favicon-adjacent web chrome. The blink lives on
-              this WRAPPER (opacity) while the bob lives on the inner icon
-              (transform), because two Tailwind `animate-*` utilities on one
-              element would fight over the `animation` property; nested, the two
-              cues mix cleanly. Under reduced motion the icon holds steady amber.
-              COLOR PAIRING: amber-400, matching `AttentionDot` and
-              `ATTENTION_DOT_FILL` in lib/favicon.ts.
-
-              SIZING/COLOR NOTE: wrapping the icon takes it out of reach of the
-              sub-button's direct-child `[&>svg]` selectors, so the icon sizes
-              itself (`size-4.5`, deliberately a step up from the old 16px) and
-              the wrapper carries the color the selector used to apply. */}
-          <span
-            aria-label={attention ? "Needs attention" : undefined}
-            className={cn(
-              "inline-flex shrink-0",
-              attention
-                ? "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
-                : "text-sidebar-accent-foreground"
-            )}
-          >
-            <Bot
-              className={cn(
-                "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-                shimmer && "motion-safe:animate-agent-working"
-              )}
+            The tooltip carries a longer (600ms) hover delay than the default
+            300ms so scanning down the sidebar doesn't strobe a card per row —
+            only a deliberate pause over one agent opens it. */}
+        <SimpleTooltip
+          content={
+            <AgentVitalsTooltip
+              session={session}
+              projectName={projectName}
+              changesCount={changesCount}
             />
-          </span>
-          {/* Its name also dims with a soft white highlight sweeping through (see
-              .agent-name-shimmer), a second working cue alongside the bob. The
-              base class is always applied so the fill cross-fades back to solid
-              text when work stops; `--on` toggles the active sweep.
-
-              The "full vitals" tooltip carries a longer (600ms) hover delay than
-              the default 300ms so scanning down the sidebar doesn't strobe a
-              card per row — only a deliberate pause over one agent opens it. */}
-          <SimpleTooltip
-            content={
-              <AgentVitalsTooltip
-                session={session}
-                projectName={projectName}
-                changesCount={changesCount}
-              />
-            }
-            side="right"
-            delay={600}
+          }
+          side="right"
+          delay={600}
+        >
+          <SidebarMenuSubButton
+            {...attributes}
+            {...listeners}
+            isActive={agentSelected}
+            className={cn(
+              "flex-1 touch-manipulation",
+              // The wrapper (group/agent-row) owns the highlight now, so keep this
+              // button transparent — otherwise it paints a second box that stops
+              // short of the trailing ⋯.
+              "hover:bg-transparent active:bg-transparent data-active:bg-transparent",
+              // Non-running agents recede: dim the whole row (name, icon, and the
+              // status indicator) so the running ones read first.
+              dimmed && "opacity-70"
+            )}
+            onClick={() => selectSession(session.id)}
           >
+            {/* All agents use the same Bot icon; the provider is shown as text.
+                While the agent streams output the icon bobs (motion-safe) so the
+                "working" state is unmistakable at a glance. The transition lets it
+                settle back to rest (translateY(0)) when streaming stops mid-bounce
+                instead of freezing at the top or bottom of the bob.
+
+                The icon doubles as the attention indicator: when the agent needs
+                the user it turns amber and blinks in the same double-pulse-then-
+                hold rhythm as the favicon-adjacent web chrome. The blink lives on
+                this WRAPPER (opacity) while the bob lives on the inner icon
+                (transform), because two Tailwind `animate-*` utilities on one
+                element would fight over the `animation` property; nested, the two
+                cues mix cleanly. Under reduced motion the icon holds steady amber.
+                COLOR PAIRING: amber-400, matching `AttentionDot` and
+                `ATTENTION_DOT_FILL` in lib/favicon.ts.
+
+                SIZING/COLOR NOTE: wrapping the icon takes it out of reach of the
+                sub-button's direct-child `[&>svg]` selectors, so the icon sizes
+                itself (`size-4.5`, deliberately a step up from the old 16px) and
+                the wrapper carries the color the selector used to apply. */}
+            <span
+              aria-label={attention ? "Needs attention" : undefined}
+              className={cn(
+                "inline-flex shrink-0",
+                attention
+                  ? "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                  : "text-sidebar-accent-foreground"
+              )}
+            >
+              <Bot
+                className={cn(
+                  "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
+                  shimmer && "motion-safe:animate-agent-working"
+                )}
+              />
+            </span>
+            {/* Its name also dims with a soft white highlight sweeping through (see
+                .agent-name-shimmer), a second working cue alongside the bob. The
+                base class is always applied so the fill cross-fades back to solid
+                text when work stops; `--on` toggles the active sweep. */}
             <span
               className={cn(
                 "truncate agent-name-shimmer",
@@ -376,54 +384,54 @@ function SessionSubItem({
             >
               {label}
             </span>
-          </SimpleTooltip>
-          <span className="ml-auto flex shrink-0 items-center gap-1">
-            {session.pr ? (
-              // Icon-only PR link: just the state-tinted glyph, with the full
-              // "#N · title" revealed on hover so long PR numbers no longer eat
-              // the row. The explicit hover classes fix the washed-out
-              // (near-white-on-light-green) hover the old badge had.
-              <TooltipProvider delay={300}>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <a
-                        href={session.pr.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
-                        className={cn(
-                          "inline-flex items-center rounded p-0.5 transition-colors",
-                          prIconClass(session.pr.state),
-                          prIconHoverClass(session.pr.state)
-                        )}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          window.open(
-                            session.pr!.url,
-                            "_blank",
-                            "noopener",
-                          )
-                        }}
-                      />
-                    }
-                  >
-                    <GitPullRequest className="size-3.5" />
-                  </TooltipTrigger>
-                  <TooltipContent side="right">
-                    #{session.pr.number} · {session.pr.title} (
-                    {prStateLabel(session.pr.state)})
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            ) : null}
-            <StatusBadge
-              status={session.status}
-              working={session.working}
-              iconOnly
-            />
-          </span>
-        </SidebarMenuSubButton>
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {session.pr ? (
+                // Icon-only PR link: just the state-tinted glyph, with the full
+                // "#N · title" revealed on hover so long PR numbers no longer eat
+                // the row. The explicit hover classes fix the washed-out
+                // (near-white-on-light-green) hover the old badge had.
+                <TooltipProvider delay={300}>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <a
+                          href={session.pr.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+                          className={cn(
+                            "inline-flex items-center rounded p-0.5 transition-colors",
+                            prIconClass(session.pr.state),
+                            prIconHoverClass(session.pr.state)
+                          )}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            window.open(
+                              session.pr!.url,
+                              "_blank",
+                              "noopener",
+                            )
+                          }}
+                        />
+                      }
+                    >
+                      <GitPullRequest className="size-3.5" />
+                    </TooltipTrigger>
+                    <TooltipContent side="right">
+                      #{session.pr.number} · {session.pr.title} (
+                      {prStateLabel(session.pr.state)})
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : null}
+              <StatusBadge
+                status={session.status}
+                working={session.working}
+                iconOnly
+              />
+            </span>
+          </SidebarMenuSubButton>
+        </SimpleTooltip>
 
         <DropdownMenu>
           <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/agent-row:max-w-6 md:group-hover/agent-row:opacity-100 md:group-focus-within/agent-row:max-w-6 md:group-focus-within/agent-row:opacity-100 md:has-[[data-popup-open]]:max-w-6 md:has-[[data-popup-open]]:opacity-100">
@@ -816,10 +824,7 @@ function CollapsedAgentIcon({
   // SELECTED session (see ChangesSlice in lib/store.ts), so a non-selected
   // rail icon's vitals tooltip omits the changes count.
   const { changes } = useDux()
-  const changesCount =
-    changes?.sessionId === session.id && changes?.phase === "loaded"
-      ? changes.staged.length + changes.unstaged.length
-      : null
+  const changesCount = changesCountFor(changes, session.id)
 
   return (
     <SidebarMenuItem>
