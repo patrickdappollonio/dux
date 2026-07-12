@@ -28,11 +28,11 @@ a real keyboard.
 
 ## The layout
 
-The overlay is two panes. On the left, a search box, a **New file** button, and a
-file tree. On the right, the file itself: the editor, a diff view, or a Markdown
-preview, depending on the toggles in the header. The header also carries the file
-path, a dirty dot when you have unsaved edits, a read-only badge where it applies,
-and **Save** and **Close**.
+The overlay is two panes. On the left, a search box, a header shortcut to create a
+file at the worktree root, and a file tree. On the right, the file itself: the
+editor, a diff view, or a Markdown preview, depending on the toggles in the header.
+The header also carries the file path, a dirty dot when you have unsaved edits, a
+read-only badge where it applies, and **Save** and **Close**.
 
 Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write.
 
@@ -52,16 +52,36 @@ The **Search files…** box does a fast, case-insensitive match on file paths ac
 the worktree, so you do not have to click through folders to reach a deeply nested
 file. It matches paths, not file contents.
 
-## Editing, creating, and saving
+## Editing and saving
 
 Any file inside the worktree is editable. Open it, type, and the dirty dot
-appears; save writes it to disk. **New file** takes a worktree-relative path (its
-parent folder must already exist), writes an empty file, and opens it ready to go.
+appears; save writes it to disk.
 
 The server keeps you inside the worktree and refuses to hand back things you
 should not be editing: files outside the worktree, inside `.git`, or binary blobs
 come back read-only or not at all, with a badge explaining why. If you try to
 close or switch away with unsaved changes, dux asks first.
+
+## Creating, renaming, and deleting files
+
+Right-click anywhere in the file tree to manage files and folders without leaving
+the editor:
+
+- **New File…** and **New Folder…** are always on the menu. Right-click a file row
+  and the new entry lands in that file's own folder; right-click a folder row and
+  it lands inside that folder; right-click the empty area below the tree and it
+  lands at the worktree root. A brand-new file opens immediately, ready to type
+  into.
+- **Rename…** works on files and folders alike. If the file has unsaved changes,
+  dux blocks the rename until you save or discard them first, rather than
+  silently reloading your edits away.
+- **Delete…** is permanent. There is no trash on the server: confirming deletes
+  the file, or the folder and everything inside it, straight from disk. If the
+  file you deleted was open, its tab closes along with it.
+
+Renaming or deleting a file that has other open editor tabs pointed at it (or, for
+a folder, tabs pointed anywhere underneath it) keeps everything in sync: a rename
+retargets those tabs to the new path, and a delete closes them.
 
 ## Syntax highlighting and language niceties
 
