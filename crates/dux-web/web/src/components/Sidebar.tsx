@@ -707,11 +707,12 @@ function ProjectItem({
               <SidebarMenuButton className="min-w-0 flex-1 touch-manipulation hover:bg-transparent active:bg-transparent data-active:bg-transparent group-has-data-[sidebar=menu-action]/menu-item:pr-2" />
             }
           >
-            {/* The folder doubles as two signals: it is FILLED when the project
-                has agents and a shallow outline when it has none, and (for
-                projects that do have agents) open vs closed tracks the expand
-                state instead of a chevron. Agent-less projects have nothing to
-                expand, so they simply stay a closed shallow folder. */}
+            {/* The folder carries two signals, both as OUTLINES: open vs closed
+                tracks the expand state instead of a chevron (outline silhouettes
+                keep the two states distinguishable, unlike the old filled
+                variants whose solid shapes read nearly identical), and an
+                agent-less project renders dimmed since it has nothing to
+                expand. The agent count badge carries the "has agents" signal. */}
             {sessions.length > 0 ? (
               // Crossfade the closed↔open folder on expand instead of an instant
               // swap: both icons are stacked in a fixed-size box and their
@@ -720,17 +721,11 @@ function ProjectItem({
               // (not `data-state=open`), so the reveal keys off that. Respects
               // reduced motion.
               <span className="relative inline-flex size-4 shrink-0">
-                <Folder
-                  fill="currentColor"
-                  className="absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out group-data-[open]/collapsible:scale-90 group-data-[open]/collapsible:opacity-0 motion-reduce:transition-none"
-                />
-                <FolderOpen
-                  fill="currentColor"
-                  className="absolute inset-0 size-4 scale-90 opacity-0 transition-[opacity,transform] duration-200 ease-out group-data-[open]/collapsible:scale-100 group-data-[open]/collapsible:opacity-100 motion-reduce:transition-none"
-                />
+                <Folder className="absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out group-data-[open]/collapsible:scale-90 group-data-[open]/collapsible:opacity-0 motion-reduce:transition-none" />
+                <FolderOpen className="absolute inset-0 size-4 scale-90 opacity-0 transition-[opacity,transform] duration-200 ease-out group-data-[open]/collapsible:scale-100 group-data-[open]/collapsible:opacity-100 motion-reduce:transition-none" />
               </span>
             ) : (
-              <Folder />
+              <Folder className="opacity-60" />
             )}
             {/* Name + branch share a baseline-aligned inner flex so the smaller
                 text-xs branch sits on the name's baseline instead of floating

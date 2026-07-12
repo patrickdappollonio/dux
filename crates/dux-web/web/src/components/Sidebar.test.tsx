@@ -287,6 +287,35 @@ describe("AppSidebar attention dot", () => {
   })
 })
 
+describe("AppSidebar project folder icon", () => {
+  it("renders the open/closed crossfade pair as outlines, never filled", () => {
+    // The old filled variants (fill="currentColor") made the open and closed
+    // folder silhouettes nearly indistinguishable; the outline forms are the
+    // visual difference, so a fill regression is a real UX regression.
+    mockState = makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const closed = container.querySelectorAll("svg.lucide-folder")
+    const open = container.querySelectorAll("svg.lucide-folder-open")
+    expect(closed.length).toBeGreaterThan(0)
+    expect(open.length).toBeGreaterThan(0)
+    for (const icon of [...closed, ...open]) {
+      expect(icon.getAttribute("fill")).toBe("none")
+    }
+  })
+})
+
 describe("AppSidebar resize affordances", () => {
   // The agents panel resizes by dragging only — matching the changes panel. The
   // old shadcn `SidebarRail` doubled as a click-near-the-edge collapse target; it
