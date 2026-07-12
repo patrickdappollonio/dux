@@ -1107,6 +1107,12 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            // The refused rename must not overwrite the destination's content
+            // (no partial/silent clobber on a rejected no-overwrite request).
+            assert_eq!(
+                std::fs::read_to_string(wt.join("dst.txt")).unwrap(),
+                "already here\n"
+            );
         }
 
         #[tokio::test]
