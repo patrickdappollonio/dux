@@ -18,6 +18,7 @@ import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
 import { ConfirmForceReconnectDialog } from "@/components/ConfirmForceReconnectDialog"
 import { KillRunningDialog } from "@/components/KillRunningDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
+import { ConfirmCloseEditorTabDialog } from "@/components/ConfirmCloseEditorTabDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
 import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
@@ -69,6 +70,7 @@ function GlobalOverlays() {
       <ConfigEditorDialog />
       <CustomizeWebappDialog />
       <ConfirmDiscardFileDialog />
+      <ConfirmCloseEditorTabDialog />
       <GlobalEnvDialog />
       <MacrosDialog />
       <ProjectInfoDialog />
