@@ -19,18 +19,33 @@ import { fileApi } from "@/lib/fileApi"
 import type { FileDiffContents } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import { isBufferStale, pruneByIds, pruneSetByIds } from "@/lib/editorBuffers"
-import { dirtyCloseMessage, shouldPromoteOnEdit } from "@/lib/editorTabs"
+import {
+  dirtyCloseMessage,
+  hasDirtyUnderPath,
+  shouldPromoteOnEdit,
+} from "@/lib/editorTabs"
+import {
+  joinName,
+  parentDir,
+  renameTarget as computeRenameTarget,
+} from "@/lib/fileTreeOps"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import { isMarkdownPath } from "@/lib/markdown"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import type { MonacoInstance } from "@/components/CodeEditor"
+import { DeleteEntryDialog } from "@/components/DeleteEntryDialog"
+import type { DeleteEntryTarget } from "@/components/DeleteEntryDialog"
 import { EditorIcon } from "@/components/EditorIcon"
 import { EditorTabsStrip } from "@/components/EditorTabsStrip"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { FileTree } from "@/components/FileTree"
+import { NewEntryDialog } from "@/components/NewEntryDialog"
+import type { NewEntryTarget } from "@/components/NewEntryDialog"
+import { RenameEntryDialog } from "@/components/RenameEntryDialog"
+import type { RenameEntryTarget } from "@/components/RenameEntryDialog"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Dialog,
@@ -50,8 +65,10 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   closeEditor,
+  editorCloseTabsUnderPath,
   editorOpenFile,
   editorPinTab,
+  editorRenameTabPaths,
   editorSetTabDirty,
   editorSetTabMode,
   useDux,
@@ -229,9 +246,29 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // `ConfirmCloseEditorTabDialog` instead; this is the overlay-level guard so
   // Esc/backdrop/Close can never silently drop edits in some other tab.
   const [overlayCloseConfirmOpen, setOverlayCloseConfirmOpen] = useState(false)
-  const [newFileOpen, setNewFileOpen] = useState(false)
-  const [newFilePath, setNewFilePath] = useState("")
-  const [creating, setCreating] = useState(false)
+  // New File…/New Folder…/Rename…/Delete… dialog targets. Local EditorBody
+  // state, not store targets: the file tree is a client-owned lazy cache, not
+  // a server-broadcast ViewModel slice, so there is nothing for
+  // useVanishedTargetGuard to key against (matches the New-file dialog's
+  // existing precedent — see the plan's stop-condition note).
+  const [newEntryTarget, setNewEntryTarget] = useState<NewEntryTarget | null>(
+    null,
+  )
+  const [renameEntryTarget, setRenameEntryTarget] =
+    useState<RenameEntryTarget | null>(null)
+  const [deleteEntryTarget, setDeleteEntryTarget] =
+    useState<DeleteEntryTarget | null>(null)
+  // Bumped by `revalidateDirs` after a create/rename/delete lands, so
+  // `FileTree` force-refetches the affected dir(s) past its lazy-load cache.
+  const [treeRevalidate, setTreeRevalidate] = useState<{
+    dirs: string[]
+    nonce: number
+  } | null>(null)
+  const revalidateNonceRef = useRef(0)
+  function revalidateDirs(dirs: string[]): void {
+    revalidateNonceRef.current += 1
+    setTreeRevalidate({ dirs, nonce: revalidateNonceRef.current })
+  }
   // The flat file list backing the "Search files…" box (fetched from the
   // editor's session directly, independent of the changed-files watch). The
   // TREE does not consume this — it browses lazily via fileApi.tree.
@@ -323,28 +360,26 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       .slice(0, MAX_SEARCH_RESULTS)
   }, [search, searchIndex])
 
-  // Fetch the search index (a capped flat walk) on open. The TREE loads itself
-  // lazily per directory. Mount-only: the body is keyed by session, so a new
-  // session remounts.
-  useEffect(() => {
-    let cancelled = false
-    fileApi
+  // Refetch the search index (a capped flat walk of the worktree). Called on
+  // mount AND after every create/rename/delete mutation so newly-created or
+  // renamed paths become findable via "Search files…" without waiting for the
+  // next overlay open. The TREE never uses this — it browses lazily per
+  // directory via fileApi.tree, revalidated separately (see `revalidateDirs`).
+  function refreshSearchIndex(): Promise<void> {
+    return fileApi
       .list(sessionId)
       .then((result) => {
-        if (!cancelled) {
-          setSearchIndex(result.files)
-          setSearchTruncated(result.truncated ?? false)
-        }
+        setSearchIndex(result.files)
+        setSearchTruncated(result.truncated ?? false)
       })
       .catch(() => {
-        if (!cancelled) toast.error("could not index worktree files for search")
+        toast.error("could not index worktree files for search")
       })
-      .finally(() => {
-        if (!cancelled) setSearchLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
+  }
+
+  // Mount-only: the body is keyed by session, so a new session remounts.
+  useEffect(() => {
+    refreshSearchIndex().finally(() => setSearchLoading(false))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -707,28 +742,81 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       .finally(() => setOpeningEditor(false))
   }
 
-  function createFile(): void {
-    const path = newFilePath.trim()
-    if (!path || creating) return
-    setCreating(true)
-    fileApi
-      .write(sessionId, path, "")
-      .then(() => fileApi.list(sessionId))
-      .then((result) => {
-        // Refresh the search index so the new file is findable; the tree pulls
-        // the file's parent directory itself when the tab opens on it.
-        setSearchIndex(result.files)
-        setSearchTruncated(result.truncated ?? false)
-        setNewFileOpen(false)
-        setNewFilePath("")
-        // A brand-new file is a deliberate open, so pin it and force file
-        // mode (it can't have a diff since it was just created).
-        editorOpenFile(sessionId, path, { mode: "file", pin: true })
+  // New File… / New Folder…, unified: `newEntryTarget.kind` picks the server
+  // call. On success the dialog closes; a NEW file is also opened (pinned,
+  // forced to file mode — it can't have a diff since it was just created),
+  // matching the header FilePlus button's "New File at root" behavior. On
+  // error the dialog stays open (target untouched) so the user can fix the
+  // name and retry — the promise resolves either way so NewEntryDialog's
+  // submitting flag always clears.
+  function handleNewEntrySubmit(name: string): Promise<void> {
+    if (!newEntryTarget) return Promise.resolve()
+    const { kind, dir } = newEntryTarget
+    const path = joinName(dir, name)
+    const create =
+      kind === "file"
+        ? fileApi.createFile(sessionId, path)
+        : fileApi.createDir(sessionId, path)
+    return create
+      .then(() => {
+        setNewEntryTarget(null)
+        revalidateDirs([dir])
+        if (kind === "file") {
+          editorOpenFile(sessionId, path, { mode: "file", pin: true })
+        }
+        return refreshSearchIndex()
       })
       .catch((e) => {
-        toast.error(e instanceof Error ? e.message : "could not create file")
+        toast.error(
+          e instanceof Error
+            ? e.message
+            : `could not create ${kind === "file" ? "file" : "folder"}`,
+        )
       })
-      .finally(() => setCreating(false))
+  }
+
+  // Rename…: retargets the open tab's path in place (see editorTabs.ts
+  // `renameTabPaths` for the tab-collision close and the accepted Monaco
+  // undo-history/view-state loss) and revalidates BOTH the source and
+  // destination parent dirs (a same-dir rename only needs one refetch, but a
+  // move across dirs needs both to reflect the entry leaving one and
+  // appearing in the other). On error the dialog stays open for a retry.
+  function handleRenameSubmit(newName: string): Promise<void> {
+    if (!renameEntryTarget) return Promise.resolve()
+    const from = renameEntryTarget.path
+    const to = computeRenameTarget(from, newName)
+    return fileApi
+      .rename(sessionId, from, to)
+      .then(() => {
+        setRenameEntryTarget(null)
+        editorRenameTabPaths(sessionId, from, to)
+        revalidateDirs([parentDir(from), parentDir(to)])
+        return refreshSearchIndex()
+      })
+      .catch((e) => {
+        toast.error(e instanceof Error ? e.message : "could not rename")
+      })
+  }
+
+  // Delete…: fire-and-forget once confirmed, mirroring
+  // ConfirmDiscardFileDialog's handleConfirm (closes immediately rather than
+  // waiting on the request; the destructive confirm dialog already gated the
+  // action, and a failure — e.g. another client already deleted it — just
+  // toasts, matching the plan's "another client raced us" acceptance).
+  function handleDeleteConfirm(): void {
+    const target = deleteEntryTarget
+    if (!target) return
+    setDeleteEntryTarget(null)
+    fileApi
+      .remove(sessionId, target.path)
+      .then(() => {
+        editorCloseTabsUnderPath(sessionId, target.path)
+        revalidateDirs([parentDir(target.path)])
+        return refreshSearchIndex()
+      })
+      .catch((e) => {
+        toast.error(e instanceof Error ? e.message : "could not delete")
+      })
   }
 
   const openPath = activeTab?.path ?? null
@@ -907,7 +995,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
                 size="icon-sm"
                 variant="ghost"
                 aria-label="New file"
-                onClick={() => setNewFileOpen(true)}
+                onClick={() => setNewEntryTarget({ kind: "file", dir: "" })}
               >
                 <FilePlus />
               </Button>
@@ -967,6 +1055,15 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
               changed={changedMap}
               initialPath={initialPath}
               onOpen={requestOpen}
+              onNewFile={(dir) => setNewEntryTarget({ kind: "file", dir })}
+              onNewFolder={(dir) => setNewEntryTarget({ kind: "folder", dir })}
+              onRename={(path, isDir) =>
+                setRenameEntryTarget({ path, isDir })
+              }
+              onDelete={(path, isDir) =>
+                setDeleteEntryTarget({ path, isDir })
+              }
+              revalidate={treeRevalidate}
             />
           )}
         </div>
@@ -1064,58 +1161,34 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         </div>
       </div>
 
-      {/* New-file prompt. */}
-      <Dialog
-        open={newFileOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setNewFileOpen(false)
-            setNewFilePath("")
-          }
-        }}
-      >
-        <DialogContent showCloseButton={false} className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>New file</DialogTitle>
-            <DialogDescription>
-              Worktree-relative path. The parent folder must already exist.
-            </DialogDescription>
-          </DialogHeader>
-          <Input
-            value={newFilePath}
-            onChange={(e) => setNewFilePath(e.target.value)}
-            placeholder="src/example.ts"
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault()
-                createFile()
-              }
-            }}
-          />
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setNewFileOpen(false)
-                setNewFilePath("")
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={!newFilePath.trim() || creating}
-              aria-busy={creating}
-              onClick={createFile}
-            >
-              {creating ? (
-                <Loader2 className="motion-safe:animate-spin" />
-              ) : null}
-              Create
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* New File… / New Folder…, Rename…, Delete… — driven by the file
+          tree's right-click context menu (and the header FilePlus button,
+          which targets the root). Local EditorBody state, not store targets
+          (see the newEntryTarget/renameEntryTarget/deleteEntryTarget
+          declarations above for why useVanishedTargetGuard doesn't apply
+          here). */}
+      <NewEntryDialog
+        target={newEntryTarget}
+        onClose={() => setNewEntryTarget(null)}
+        onSubmit={handleNewEntrySubmit}
+      />
+      <RenameEntryDialog
+        target={renameEntryTarget}
+        isDirty={
+          renameEntryTarget !== null &&
+          hasDirtyUnderPath(
+            tabsState ?? { tabs: [], activeId: null },
+            renameEntryTarget.path,
+          )
+        }
+        onClose={() => setRenameEntryTarget(null)}
+        onSubmit={handleRenameSubmit}
+      />
+      <DeleteEntryDialog
+        target={deleteEntryTarget}
+        onClose={() => setDeleteEntryTarget(null)}
+        onConfirm={handleDeleteConfirm}
+      />
 
       {/* Styled unsaved-changes confirmation for closing the WHOLE overlay
           (Esc/backdrop/Close) when any tab is dirty. Per-tab close instead uses
