@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { agentRowVisual } from "./agentRow"
+import { agentRowVisual, statusDotColorClass } from "./agentRow"
 
 describe("agentRowVisual", () => {
   it("shimmers an active agent that is streaming output", () => {
@@ -55,5 +55,19 @@ describe("agentRowVisual", () => {
       dimmed: false,
       attention: true,
     })
+  })
+})
+
+describe("statusDotColorClass", () => {
+  it("uses the cyan-frost attention tint regardless of status when flagged", () => {
+    expect(statusDotColorClass("active", true)).toBe("text-cyan-100")
+    expect(statusDotColorClass("detached", true)).toBe("text-cyan-100")
+    expect(statusDotColorClass("exited", true)).toBe("text-cyan-100")
+  })
+
+  it("falls back to the per-status color when not flagged for attention", () => {
+    expect(statusDotColorClass("active", false)).toBe("text-green-500")
+    expect(statusDotColorClass("detached", false)).toBe("text-amber-500")
+    expect(statusDotColorClass("exited", false)).toBe("text-muted-foreground")
   })
 })

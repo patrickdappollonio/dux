@@ -779,7 +779,7 @@ function applyBootstrap(b: Bootstrap): void {
 }
 
 // The instance title/favicon carry a live "needs attention" overlay: a `(N) `
-// count prefix on the browser-tab title and an amber dot composited onto the
+// count prefix on the browser-tab title and a cyan dot composited onto the
 // favicon, both driven by how many agents are flagged in the current spine. This
 // runs whenever the count could change (a spine apply) or the base title/favicon
 // changes (a bootstrap/config.changed). `applyAttentionFavicon` composes at most

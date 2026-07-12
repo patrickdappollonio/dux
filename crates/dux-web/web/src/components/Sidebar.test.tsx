@@ -567,7 +567,7 @@ describe("AppSidebar collapsed icon rail", () => {
     expect(
       buttons[0].querySelector("svg")?.getAttribute("class"),
     ).toContain("animate-agent-working")
-    // s2 needs attention: its icon wrapper carries the amber blink.
+    // s2 needs attention: its icon wrapper carries the cyan blink.
     expect(
       buttons[1].querySelector("[aria-label='Needs attention']"),
     ).toBeTruthy()

@@ -25,7 +25,7 @@ export interface AgentVitalsModel {
 }
 
 // The status line's label, mirroring StatusBadge's semantics: needs_attention
-// wins over everything else (amber "Needs attention"); an active+working agent
+// wins over everything else (cyan "Needs attention"); an active+working agent
 // reads "Working" (green); a plain active agent reads "Active" (green); anything
 // else (detached/exited) falls back to the raw status word, capitalized, in
 // StatusBadge's muted/amber tone via `statusDotColorClass`.

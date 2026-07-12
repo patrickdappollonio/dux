@@ -235,7 +235,7 @@ function SessionSubItem({
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
   // Running agents shimmer their name; non-running (detached/exited) recede.
-  // `attention` adds an amber dot when the agent needs the user (permission
+  // `attention` adds a cyan dot when the agent needs the user (permission
   // prompt / finished turn), independent of the working cues.
   const { shimmer, dimmed, attention } = agentRowVisual(
     session.status,
@@ -343,13 +343,13 @@ function SessionSubItem({
                 instead of freezing at the top or bottom of the bob.
 
                 The icon doubles as the attention indicator: when the agent needs
-                the user it turns amber and blinks in the same double-pulse-then-
+                the user it turns cyan and blinks in the same double-pulse-then-
                 hold rhythm as the favicon-adjacent web chrome. The blink lives on
                 this WRAPPER (opacity) while the bob lives on the inner icon
                 (transform), because two Tailwind `animate-*` utilities on one
                 element would fight over the `animation` property; nested, the two
-                cues mix cleanly. Under reduced motion the icon holds steady amber.
-                COLOR PAIRING: amber-400, matching `AttentionDot` and
+                cues mix cleanly. Under reduced motion the icon holds steady cyan.
+                COLOR PAIRING: cyan-100, matching `AttentionDot` and
                 `ATTENTION_DOT_FILL` in lib/favicon.ts.
 
                 SIZING/COLOR NOTE: wrapping the icon takes it out of reach of the
@@ -361,7 +361,7 @@ function SessionSubItem({
               className={cn(
                 "inline-flex shrink-0",
                 attention
-                  ? "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                  ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
                   : "text-sidebar-accent-foreground"
               )}
             >
@@ -863,7 +863,7 @@ function CollapsedAgentIcon({
             className={cn(
               "inline-flex shrink-0",
               attention
-                ? "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
                 : "text-sidebar-accent-foreground",
             )}
           >

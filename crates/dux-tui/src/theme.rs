@@ -23,8 +23,8 @@ pub const DOT_GLYPH: &str = "●";
 /// Glyph shown (blinking, in the `session_attention` color) in the sidebar when
 /// an agent needs attention. The same solid round dot the status states use:
 /// attention takes precedence over the status dot while flagged, so the blink
-/// plus the amber `session_attention` color is what reads as "needs you", not
-/// a distinct shape.
+/// plus the theme's accent-colored `session_attention` color is what reads as
+/// "needs you", not a distinct shape.
 pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
@@ -74,9 +74,11 @@ pub struct Theme {
     /// code change.
     pub session_deleting: Color,
     /// Foreground for the blinking attention glyph shown in the sidebar when an
-    /// agent needs attention (a permission prompt, a finished turn). Amber/urgent
-    /// by default (mapped to the `warning` semantic); a dedicated slot so themes
-    /// can distinguish "needs you" from the ordinary detached/warning states.
+    /// agent needs attention (a permission prompt, a finished turn). Mapped to
+    /// the theme's own accent color (`accent.primary`) by default; a dedicated
+    /// slot so themes can distinguish "needs you" from the ordinary
+    /// detached/warning states, and so a custom theme that sets
+    /// `dux.session_attention` explicitly still overrides this default.
     pub session_attention: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,
@@ -346,7 +348,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.session_detached", warning);
     theme.register_default_token("dux.session_exited", text_dim);
     theme.register_default_token("dux.session_deleting", text_dim);
-    theme.register_default_token("dux.session_attention", warning);
+    theme.register_default_token("dux.session_attention", accent_primary);
 
     // Status line
     theme.register_default_token("dux.status_info_fg", text_muted);
@@ -702,9 +704,9 @@ mod tests {
             session_detached: Color::Yellow,
             session_exited: Color::Rgb(100, 100, 100),
             session_deleting: Color::Rgb(100, 100, 100),
-            // Maps to the `warning` semantic (like `session_detached`), so the
-            // bundled dux-dark theme resolves it to the same amber.
-            session_attention: Color::Yellow,
+            // Maps to `accent.primary`, so the bundled dux-dark theme resolves
+            // it to the same cyan as `title_focused`/`border_focused`.
+            session_attention: Color::Cyan,
             status_info_fg: Color::Rgb(100, 100, 100),
             status_info_bg: Color::Rgb(25, 25, 25),
             status_busy_fg: Color::Yellow,
@@ -981,5 +983,81 @@ variant = "dark"
         assert_eq!(theme.pr_open_label, Color::Rgb(19, 20, 21));
         assert_eq!(theme.pr_merged_label, Color::Rgb(22, 23, 24));
         assert_eq!(theme.pr_closed_label, Color::Rgb(25, 32, 33));
+    }
+
+    /// The bundled dux-dark theme's attention color must resolve to its own
+    /// accent (the same cyan as the focused title), not the warning/amber
+    /// semantic, once attention is repointed to accent.primary.
+    #[test]
+    fn dux_dark_attention_resolves_to_accent_not_warning() {
+        let theme = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
+        assert_eq!(theme.session_attention, theme.title_focused);
+        assert_ne!(theme.session_attention, theme.warning_fg);
+    }
+
+    /// A generic Opaline built-in (no `dux.*` tokens defined) should derive
+    /// its attention color from the theme's own accent, not the warning
+    /// semantic, via the default-token derivation in `register_dux_defaults`.
+    #[test]
+    fn builtin_theme_attention_derives_from_accent_not_warning() {
+        let mut nord = opaline::load_by_name("nord").expect("nord built-in must exist");
+        register_dux_defaults(&mut nord);
+        let theme = Theme::from_opaline(&nord);
+        // Nord's accent.primary is `nord8` (#88c0d0).
+        assert_eq!(theme.session_attention, theme.title_focused);
+        assert_ne!(theme.session_attention, theme.warning_fg);
+    }
+
+    /// A theme that explicitly sets `dux.session_attention` keeps its own
+    /// value; the default-token derivation must never override an explicit
+    /// theme token. This is the back-compat guard for the accent repoint.
+    #[test]
+    fn explicit_session_attention_token_overrides_accent_default() {
+        let theme = load_from_str(
+            r##"
+[meta]
+name = "Explicit Attention Theme"
+variant = "dark"
+
+[palette]
+base = "#010203"
+text = "#111111"
+muted = "#222222"
+dim = "#333333"
+panel = "#444444"
+highlight = "#555555"
+active = "#666666"
+accent = "#123456"
+accent_secondary = "#abcdef"
+border = "#999999"
+success = "#010101"
+error = "#020202"
+warning = "#030303"
+info = "#040404"
+
+[tokens]
+"text.primary" = "text"
+"text.muted" = "muted"
+"text.dim" = "dim"
+"bg.base" = "base"
+"bg.panel" = "panel"
+"bg.highlight" = "highlight"
+"bg.active" = "active"
+"accent.primary" = "accent"
+"accent.secondary" = "accent_secondary"
+"border.focused" = "border"
+"border.unfocused" = "dim"
+success = "success"
+error = "error"
+warning = "warning"
+info = "info"
+"dux.session_attention" = "#abcdef"
+"##,
+        )
+        .expect("theme must parse");
+
+        assert_eq!(theme.session_attention, Color::Rgb(0xab, 0xcd, 0xef));
+        assert_ne!(theme.session_attention, theme.title_focused);
+        assert_ne!(theme.session_attention, theme.warning_fg);
     }
 }

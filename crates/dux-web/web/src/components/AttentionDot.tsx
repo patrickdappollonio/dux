@@ -4,15 +4,15 @@ import { SimpleTooltip } from "@/components/SimpleTooltip"
 import type { TooltipContent } from "@/components/ui/tooltip"
 
 // The single "needs attention" marker used across every surface (sidebar rows,
-// the mobile agent rows, the tab-strip pills): an amber dot that blinks in a
+// the mobile agent rows, the tab-strip pills): a cyan-frost dot that blinks in a
 // double-pulse-then-fade rhythm (`--animate-attention-pulse` in index.css) and
 // holds still under reduced motion. Extracted so the markup and, crucially,
-// the amber color live in exactly one place.
+// the cyan color live in exactly one place.
 //
-// COLOR PAIRING: the fill is Tailwind `bg-amber-400`. The favicon compositor in
+// COLOR PAIRING: the fill is Tailwind `bg-cyan-100`. The favicon compositor in
 // `lib/favicon.ts` draws the same dot onto a canvas, where a Tailwind class is
-// unreadable, so it hardcodes the matching hex (`ATTENTION_DOT_FILL = #fbbf24`,
-// amber-400). Keep the two in lockstep: if you change the dot color here, change
+// unreadable, so it hardcodes the matching hex (`ATTENTION_DOT_FILL = #cffafe`,
+// cyan-100). Keep the two in lockstep: if you change the dot color here, change
 // `ATTENTION_DOT_FILL` there too.
 export function AttentionDot({
   withTooltip = true,
@@ -26,7 +26,7 @@ export function AttentionDot({
   const dot = (
     <span
       aria-label="Needs attention"
-      className="size-2 shrink-0 rounded-full bg-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+      className="size-2 shrink-0 rounded-full bg-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
     />
   )
   if (!withTooltip) return dot

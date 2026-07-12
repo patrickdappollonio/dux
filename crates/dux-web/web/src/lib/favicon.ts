@@ -200,12 +200,12 @@ function setIconLink(href: string, type: string): void {
   document.head.appendChild(link)
 }
 
-// The amber attention dot and its dark rim (for contrast against the duck).
-// COLOR PAIRING: this is Tailwind amber-400 (#fbbf24), the SAME amber the
-// `AttentionDot` component paints via `bg-amber-400`. The canvas compositor can't
+// The cyan-frost attention dot and its dark rim (for contrast against the duck).
+// COLOR PAIRING: this is Tailwind cyan-100 (#cffafe), the SAME cyan the
+// `AttentionDot` component paints via `bg-cyan-100`. The canvas compositor can't
 // read a Tailwind class, so the hex is duplicated here by necessity; keep the two
 // in lockstep (change both, or the sidebar dot and the favicon dot drift apart).
-const ATTENTION_DOT_FILL = "#fbbf24"
+const ATTENTION_DOT_FILL = "#cffafe"
 const ATTENTION_DOT_RIM = "#1a1a1a"
 
 // Composed "base icon + dot" data URLs, keyed by the base href. A given base is
@@ -221,7 +221,7 @@ let wantedDotBase: string | null = null
 let appliedDottedIcon: string | null = null
 
 /**
- * Composite the current favicon with an amber dot in the bottom-right corner, or
+ * Composite the current favicon with a cyan dot in the bottom-right corner, or
  * restore the clean icon, based on `hasAttention`. Idempotent: it composes a
  * given base at most once (cached) and only touches the DOM when the shown icon
  * changes. Self-guards on the DOM (no-op under the store's Node test env), and
@@ -274,7 +274,7 @@ export function applyAttentionFavicon(
     })
 }
 
-/** Draw the base favicon plus an amber corner dot onto a canvas and return a PNG
+/** Draw the base favicon plus a cyan corner dot onto a canvas and return a PNG
  * data URL, or `null` when canvas/image loading is unavailable (e.g. jsdom). */
 function composeFaviconWithDot(href: string): Promise<string | null> {
   return new Promise((resolve) => {
@@ -298,7 +298,7 @@ function composeFaviconWithDot(href: string): Promise<string | null> {
         const r = size * 0.26
         const cx = size - r - size * 0.05
         const cy = size - r - size * 0.05
-        // Dark rim first for contrast against the duck, then the amber fill.
+        // Dark rim first for contrast against the duck, then the cyan fill.
         ctx.beginPath()
         ctx.arc(cx, cy, r + size * 0.06, 0, Math.PI * 2)
         ctx.fillStyle = ATTENTION_DOT_RIM

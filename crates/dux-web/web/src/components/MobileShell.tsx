@@ -298,7 +298,7 @@ function SessionRow({
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
   // Running agents shimmer their name; non-running (detached/exited) recede.
-  // `attention` adds an amber dot when the agent needs the user.
+  // `attention` adds a cyan dot when the agent needs the user.
   const { shimmer, dimmed, attention } = agentRowVisual(
     session.status,
     session.working,
@@ -336,12 +336,12 @@ function SessionRow({
               transition settles it back to rest (translateY(0)) when streaming
               stops mid-bounce instead of freezing at the top or bottom.
 
-              The icon doubles as the attention indicator: amber + the shared
+              The icon doubles as the attention indicator: cyan + the shared
               double-pulse-then-hold blink while the agent needs the user. Blink
               (opacity) on this wrapper, bob (transform) on the inner icon, so
               the two Tailwind `animate-*` utilities never fight over the
-              `animation` property and the cues mix cleanly. Steady amber under
-              reduced motion. COLOR PAIRING: amber-400, matching `AttentionDot`
+              `animation` property and the cues mix cleanly. Steady cyan under
+              reduced motion. COLOR PAIRING: cyan-100, matching `AttentionDot`
               and `ATTENTION_DOT_FILL` in lib/favicon.ts.
 
               SIZING NOTE: the icon sizes itself (`size-4.5`, a step up from the
@@ -352,7 +352,7 @@ function SessionRow({
             className={cn(
               "inline-flex shrink-0",
               attention &&
-                "text-amber-400 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
             )}
           >
             <Bot

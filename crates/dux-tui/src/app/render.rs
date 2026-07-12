@@ -692,7 +692,7 @@ impl App {
                     // threading a deletion flag through it.
                     let deleting = self.engine.pending_deletions.contains(&session.id);
                     // The label follows the dot color, EXCEPT while blinking for
-                    // attention: the glyph pulses amber on/off, but the label must
+                    // attention: the glyph pulses the accent color on/off, but the label must
                     // stay a steady color rather than flicker with it, so it falls
                     // back to the plain status-dot color in that case.
                     let label_fallback_color = if needs_attention {
@@ -736,7 +736,7 @@ impl App {
                             Span::styled(
                                 format!("{dot} "),
                                 if needs_attention && !deleting {
-                                    // The glyph carries the amber attention color;
+                                    // The glyph carries the accent attention color;
                                     // the label stays steady (see label_color).
                                     Style::default().fg(dot_color)
                                 } else {

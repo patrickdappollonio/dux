@@ -14,11 +14,11 @@ fixes that. When an agent needs you, it says so, and now dux listens.
 When an agent pauses for you, the indicator lights up wherever you happen to be
 looking:
 
-- **In the TUI**, a blinking amber dot (`●`) takes over the agent's status dot in
-  the sidebar: two quick blinks, a steady hold, repeat. It wins over the working
-  spinner, so an agent that is streaming its permission prompt still reads as
-  "needs you," not just "busy."
-- **In the web UI**, the agent's icon itself turns amber and does the same
+- **In the TUI**, a blinking accent-colored dot (`●`) takes over the agent's status
+  dot in the sidebar, cyan in the default theme: two quick blinks, a steady hold,
+  repeat. It wins over the working spinner, so an agent that is streaming its
+  permission prompt still reads as "needs you," not just "busy."
+- **In the web UI**, the agent's icon itself turns cyan and does the same
   two-quick-blinks rhythm, in the sidebar and in the mobile list alike (plus a
   small dot on the specific tab's pill when you are running several tabs). If the
   agent was mid-bounce when it stopped to ask, the blink layers cleanly on top.
@@ -26,7 +26,7 @@ looking:
 - **The browser tab title** gains a count in front of your configured instance
   name: `(2) dux` when two agents are waiting. A backgrounded dux tab updates the
   count without you visiting it, so a glance at your tab strip is enough.
-- **The favicon** gets a small amber dot in the corner of the duck whenever the
+- **The favicon** gets a small cyan dot in the corner of the duck whenever the
   count is above zero, and goes back to the clean duck when everything is handled.
 
 The flag clears the moment you look. Selecting the agent and focusing its terminal

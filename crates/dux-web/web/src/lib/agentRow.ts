@@ -14,7 +14,7 @@ import type { SessionStatus } from "@/lib/types"
  *  `dimmed` requires not-`active`.
  *
  *  - `attention`: any of the agent's tabs needs attention (a permission prompt,
- *    a finished turn) the user has not looked at → an amber dot on the row. The
+ *    a finished turn) the user has not looked at → a cyan dot on the row. The
  *    server tears the flag down when the tab exits, so it is effectively only
  *    ever set on a live (active) agent; it is orthogonal to shimmer/dimmed (a
  *    flagged agent may still be streaming its prompt). */
@@ -36,7 +36,7 @@ export function agentRowVisual(
 // status line (the agent vitals tooltip) can share the exact mapping without
 // re-deriving it and risking drift, and so StatusBadge.tsx stays a
 // components-only export for React Fast Refresh. `needsAttention` takes
-// precedence over the raw status, matching the amber "needs attention"
+// precedence over the raw status, matching the cyan "needs attention"
 // treatment used elsewhere (the sidebar row's Bot icon, the favicon dot).
 const STATUS_DOT_COLOR: Record<SessionStatus, string> = {
   active: "text-green-500",
@@ -48,5 +48,5 @@ export function statusDotColorClass(
   status: SessionStatus,
   needsAttention = false,
 ): string {
-  return needsAttention ? "text-amber-400" : STATUS_DOT_COLOR[status]
+  return needsAttention ? "text-cyan-100" : STATUS_DOT_COLOR[status]
 }

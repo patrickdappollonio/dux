@@ -161,7 +161,7 @@ function TabPill({
           tab.working && "motion-safe:animate-agent-working",
         )}
       />
-      {/* Amber attention dot on the flagged tab's pill (a permission prompt or a
+      {/* Cyan attention dot on the flagged tab's pill (a permission prompt or a
           finished turn on this specific tab). */}
       {tab.needs_attention && <AttentionDot />}
       <span className="max-w-40 truncate">{label}</span>
