@@ -8,7 +8,7 @@ import { FileTreeContextMenu } from "@/components/FileTreeContextMenu"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { dirIconKind, fileIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
-import { parentDir } from "@/lib/fileTreeOps"
+import { targetDirForCreate } from "@/lib/fileTreeOps"
 import {
   ancestorDirs,
   descendantDirPaths,
@@ -395,8 +395,14 @@ export function FileTree({
                   </ContextMenuTrigger>
                   <FileTreeContextMenu
                     variant="dir"
-                    onNewFile={() => onNewFile(row.path)}
-                    onNewFolder={() => onNewFolder(row.path)}
+                    onNewFile={() =>
+                      onNewFile(targetDirForCreate({ kind: "dir", path: row.path }))
+                    }
+                    onNewFolder={() =>
+                      onNewFolder(
+                        targetDirForCreate({ kind: "dir", path: row.path }),
+                      )
+                    }
                     onRename={() => onRename(row.path, true)}
                     onDelete={() => onDelete(row.path, true)}
                   />
@@ -465,8 +471,16 @@ export function FileTree({
                   </ContextMenuTrigger>
                   <FileTreeContextMenu
                     variant="file"
-                    onNewFile={() => onNewFile(parentDir(row.path))}
-                    onNewFolder={() => onNewFolder(parentDir(row.path))}
+                    onNewFile={() =>
+                      onNewFile(
+                        targetDirForCreate({ kind: "file", path: row.path }),
+                      )
+                    }
+                    onNewFolder={() =>
+                      onNewFolder(
+                        targetDirForCreate({ kind: "file", path: row.path }),
+                      )
+                    }
                     onRename={() => onRename(row.path, false)}
                     onDelete={() => onDelete(row.path, false)}
                   />
@@ -480,8 +494,8 @@ export function FileTree({
       </ContextMenuTrigger>
       <FileTreeContextMenu
         variant="root"
-        onNewFile={() => onNewFile("")}
-        onNewFolder={() => onNewFolder("")}
+        onNewFile={() => onNewFile(targetDirForCreate({ kind: "root" }))}
+        onNewFolder={() => onNewFolder(targetDirForCreate({ kind: "root" }))}
         onRename={noop}
         onDelete={noop}
       />

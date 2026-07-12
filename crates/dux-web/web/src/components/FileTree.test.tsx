@@ -545,6 +545,62 @@ describe("FileTree", () => {
       expect(screen.queryByText("Delete…")).toBeNull()
     })
 
+    it("clicking New File… in the root menu targets the worktree root", async () => {
+      const onNewFile = vi.fn()
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [file("a.ts")] : [] }),
+      )
+      const { container } = render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onNewFile={onNewFile}
+          onNewFolder={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      await screen.findByText("a.ts")
+      const filler = container.querySelector(
+        '[data-slot="context-menu-trigger"]',
+      )
+      if (!filler) throw new Error("root context menu trigger not found")
+      fireEvent.contextMenu(filler)
+      fireEvent.click(await screen.findByText("New File…"))
+      expect(onNewFile).toHaveBeenCalledWith("")
+    })
+
+    it("clicking New Folder… in the root menu targets the worktree root", async () => {
+      const onNewFolder = vi.fn()
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [file("a.ts")] : [] }),
+      )
+      const { container } = render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onNewFile={() => {}}
+          onNewFolder={onNewFolder}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      await screen.findByText("a.ts")
+      const filler = container.querySelector(
+        '[data-slot="context-menu-trigger"]',
+      )
+      if (!filler) throw new Error("root context menu trigger not found")
+      fireEvent.contextMenu(filler)
+      fireEvent.click(await screen.findByText("New Folder…"))
+      expect(onNewFolder).toHaveBeenCalledWith("")
+    })
+
     it("clicking Rename/Delete in a row's menu fires the callback with the row's path and isDir", async () => {
       const onRename = vi.fn()
       const onDelete = vi.fn()
