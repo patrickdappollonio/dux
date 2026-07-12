@@ -1430,8 +1430,16 @@ pub fn is_under(base: &Path, candidate: &Path) -> bool {
 
 /// The single security boundary for client-supplied worktree-relative paths.
 /// Resolves `rel_path` to its on-disk location under `worktree`, rejecting empty
-/// or absolute paths, any `..`/root/prefix component, the `.git` directory, and
-/// (for paths that exist) symlinks whose realpath escapes the worktree. Returns
+/// or absolute paths, any `..`/`.`/root/prefix component, the `.git` directory,
+/// and (for paths that exist) symlinks whose realpath escapes the worktree. A
+/// literal `.` (`Component::CurDir`) component is rejected even though it is
+/// lexically harmless on its own: after a symlink component, POSIX resolves `.`
+/// against the symlink's TARGET directory, so `symlink_metadata` on a path
+/// ending in `.` dereferences the preceding symlink and `Path::parent()` on that
+/// path strips the symlink component entirely, letting a parent-containment
+/// check run against the always-safe worktree root instead of the symlink's
+/// real (possibly escaping) location. UI-supplied paths never legitimately need
+/// `.`, so it is refused outright rather than specially handled. Returns
 /// the joined path, which may not yet exist — existence/file-kind is the caller's
 /// concern. (Callers that read/write should additionally refuse symlinks via a
 /// no-follow stat to close the dangling-symlink window this existence check can
@@ -1450,6 +1458,13 @@ pub fn resolve_worktree_path(worktree: &Path, rel_path: &str) -> anyhow::Result<
                 Component::ParentDir | Component::Prefix(_) | Component::RootDir
             )
         })
+        // `Path::components()` normalizes away a non-leading `.` segment (per its
+        // own docs: "Occurrences of `.` are normalized away, except if they are
+        // at the beginning of the path"), so `a/./b` and `a/.` do NOT surface a
+        // `Component::CurDir` above even though the raw string contains one.
+        // Check the raw, unnormalized string instead so every `.` segment,
+        // anywhere in the path, is caught.
+        || rel_path.split('/').any(|seg| seg == ".")
     {
         anyhow::bail!("invalid worktree path: {rel_path}");
     }
@@ -1865,6 +1880,42 @@ mod tests {
     fn is_under_rejects_nonexistent_candidate() {
         let tmp = std::env::temp_dir();
         assert!(!is_under(&tmp, Path::new("/nonexistent/path/xyz")));
+    }
+
+    // --- resolve_worktree_path: CurDir (`.`) rejection ---
+    //
+    // A literal `.` component is never legitimate in a UI-supplied path: it has
+    // no meaning a client should be sending, and (per the reviewer's finding
+    // reproduced in `worktree_file::tests::delete_refuses_curdir_component`) it
+    // can make `symlink_metadata` dereference a preceding symlink and make
+    // `Path::parent()` strip the symlink component from containment checks.
+    // Reject it lexically at this shared boundary, same as ParentDir.
+
+    #[test]
+    fn resolve_worktree_path_rejects_bare_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(resolve_worktree_path(dir.path(), ".").is_err());
+    }
+
+    #[test]
+    fn resolve_worktree_path_rejects_dot_as_middle_component() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        assert!(resolve_worktree_path(dir.path(), "a/./b").is_err());
+    }
+
+    #[test]
+    fn resolve_worktree_path_rejects_trailing_dot_component() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        assert!(resolve_worktree_path(dir.path(), "a/.").is_err());
+    }
+
+    #[test]
+    fn resolve_worktree_path_still_accepts_a_plain_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        assert!(resolve_worktree_path(dir.path(), "a/b").is_ok());
     }
 
     #[test]

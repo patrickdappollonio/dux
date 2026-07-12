@@ -394,6 +394,19 @@ pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
                 Component::ParentDir | Component::Prefix(_) | Component::RootDir
             )
         })
+        // `Path::components()` normalizes away a non-leading `.` segment, so
+        // `sub/.` does NOT surface a `Component::CurDir` above even though the
+        // raw string contains one. Check the raw, unnormalized string instead.
+        // This closes the reviewer-found hole: `delete_entry(worktree,
+        // "<symlink>/.")` let a trailing `.` make `symlink_metadata` dereference
+        // the preceding symlink (POSIX resolves `.` against the target
+        // directory, so it reports is_dir=true, is_symlink=false) AND made
+        // `Path::parent()` on the joined path strip the symlink component too,
+        // so the parent-containment check below ran against the always-safe
+        // worktree root while `remove_dir_all` acted on the symlink's external
+        // target's contents. See `delete_refuses_curdir_component` for the
+        // regression test.
+        || rel_path.split('/').any(|seg| seg == ".")
     {
         anyhow::bail!("invalid worktree path: {rel_path}");
     }
@@ -1061,10 +1074,50 @@ mod tests {
     }
 
     #[test]
-    fn delete_refuses_worktree_root() {
+    fn delete_refuses_worktree_root_dot() {
         let dir = worktree();
-        assert!(delete_entry(dir.path(), ".").is_err() || delete_entry(dir.path(), "").is_err());
+        assert!(delete_entry(dir.path(), ".").is_err());
         assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn delete_refuses_worktree_root_empty() {
+        let dir = worktree();
+        assert!(delete_entry(dir.path(), "").is_err());
+        assert!(dir.path().exists());
+    }
+
+    /// Reproduces the reviewer's finding: `delete_entry(worktree, "<symlink>/.")`
+    /// where the symlink points OUTSIDE the worktree must NOT recursively delete
+    /// the target directory's contents.
+    ///
+    /// Root cause: a trailing `.` component makes `symlink_metadata` dereference
+    /// the preceding symlink (POSIX resolves `.` against the directory, so the
+    /// stat reports `is_dir = true`, `is_symlink = false`), and it also makes
+    /// `Path::parent()` on the joined path strip the symlink component, so the
+    /// parent-containment check runs against the always-safe worktree root
+    /// instead of the symlink's escaping target. `delete_entry` then took the
+    /// `remove_dir_all` branch on what it believed was an in-tree directory, but
+    /// was actually the external target reached through the symlink.
+    #[test]
+    fn delete_refuses_curdir_component() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep-me.txt"), "do not delete\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("sub")).unwrap();
+
+        assert!(
+            delete_entry(dir.path(), "sub/.").is_err(),
+            "a trailing `.` component after a symlink must be rejected, not resolved"
+        );
+        assert!(
+            outside.path().join("keep-me.txt").exists(),
+            "the external target's contents must survive"
+        );
+        assert!(
+            outside.path().exists(),
+            "the external target directory itself must survive"
+        );
     }
 
     #[test]
