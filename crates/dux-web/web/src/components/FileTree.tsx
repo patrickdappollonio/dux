@@ -2,10 +2,13 @@ import { useRef, useState, useMemo, useCallback, useEffect } from "react"
 import { ChevronRight, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
+import { FileTreeContextMenu } from "@/components/FileTreeContextMenu"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { dirIconKind, fileIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
+import { parentDir } from "@/lib/fileTreeOps"
 import {
   ancestorDirs,
   descendantDirPaths,
@@ -13,6 +16,8 @@ import {
   flattenLazy,
 } from "@/lib/fileTree"
 import type { DirState } from "@/lib/fileTree"
+
+const noop = () => {}
 
 const ROW_HEIGHT = 28 // px — must match the py-1 + text-sm row height
 const OVERSCAN = 10 // rows to render above/below the viewport
@@ -32,6 +37,16 @@ interface FileTreeProps {
   // idempotent for an already-open path (it just activates), so the pin lands
   // cleanly right after.
   onOpen: (path: string, opts?: { pin?: boolean }) => void
+  // Right-click menu callbacks (New File…/New Folder…/Rename…/Delete…). All
+  // optional so tests exercising unrelated behavior don't need to wire them;
+  // production usage (EditorOverlay) always provides all four.
+  onNewFile?: (dir: string) => void
+  onNewFolder?: (dir: string) => void
+  onRename?: (path: string, isDir: boolean) => void
+  onDelete?: (path: string, isDir: boolean) => void
+  // Bump the nonce (with the affected dir(s)) to force a refetch of those
+  // directories after a create/rename/delete mutation lands.
+  revalidate?: { dirs: string[]; nonce: number } | null
 }
 
 export function FileTree({
@@ -40,6 +55,11 @@ export function FileTree({
   changed,
   initialPath,
   onOpen,
+  onNewFile = noop,
+  onNewFolder = noop,
+  onRename = noop,
+  onDelete = noop,
+  revalidate = null,
 }: FileTreeProps) {
   // The lazy loaded-directory cache: dirPath ("" = root) → DirState.
   const [dirs, setDirs] = useState<Map<string, DirState>>(() => new Map())
@@ -189,6 +209,36 @@ export function FileTree({
     }
   }, [openPath, dirs, fetchDir])
 
+  // Post-mutation revalidation: a create/rename/delete landed on the server,
+  // so force-refetch the affected dir(s) (bypassing requestedRef, same escape
+  // hatch the Retry button uses) and make sure each is expanded so a newly
+  // created entry is actually visible without an extra click.
+  useEffect(() => {
+    if (!revalidate) return
+    for (const d of revalidate.dirs) {
+      requestedRef.current.delete(d)
+      // `fetchDir` seeds `{ status: "loading" }` via `setDirs` before it ever
+      // fetches. The lint's static call-graph tracing flags this as a
+      // set-state-in-effect even though it's the same escape-hatch pattern
+      // the Retry button already uses to force a refetch (see EditorOverlay
+      // for the identical, already-accepted disable).
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      fetchDir(d)
+    }
+    setExpanded((prev) => {
+      if (revalidate.dirs.every((d) => d === "" || prev.has(d))) return prev
+      const next = new Set(prev)
+      for (const d of revalidate.dirs) {
+        if (d !== "") next.add(d)
+      }
+      return next
+    })
+    // Only the nonce should retrigger this: `dirs` is intentionally excluded
+    // (it would refetch on every unrelated directory load) and `fetchDir` is
+    // stable per sessionId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revalidate?.nonce])
+
   const toggle = useCallback(
     (path: string, expandable: boolean) => {
       if (expanded.has(path)) {
@@ -254,7 +304,19 @@ export function FileTree({
         setViewportHeight(e.currentTarget.clientHeight)
       }}
     >
-      <div className="p-1">
+      <ContextMenu>
+      <ContextMenuTrigger
+        render={
+          <div
+            className="min-h-full p-1"
+            // A right-click that lands directly on this filler (not bubbled
+            // up from a row's own trigger, which stops propagation before it
+            // gets here) opens the root menu: New File…/New Folder… at the
+            // worktree root. `min-h-full` covers the empty space below the
+            // last row so a click there still hits this trigger.
+          />
+        }
+      >
         {!rootState || rootState.status === "loading" ? (
           <div className="flex items-center justify-center py-4 text-muted-foreground">
             <Loader2 className="size-4 motion-safe:animate-spin" />
@@ -290,36 +352,55 @@ export function FileTree({
           {visibleRows.map((row) =>
             row.isDir ? (
               <li key={row.path}>
-                <button
-                  type="button"
-                  onClick={() => toggle(row.path, row.expandable)}
-                  aria-expanded={expanded.has(row.path)}
-                  className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left hover:bg-muted"
-                  style={{
-                    paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
-                    height: ROW_HEIGHT,
-                  }}
-                >
-                  {row.state === "loading" ? (
-                    <Loader2 className="size-3.5 shrink-0 text-muted-foreground motion-safe:animate-spin" />
-                  ) : (
-                    <ChevronRight
-                      className={cn(
-                        "size-3.5 shrink-0 text-muted-foreground transition-transform",
-                        expanded.has(row.path) && "rotate-90",
-                      )}
+                <ContextMenu>
+                  <ContextMenuTrigger
+                    render={
+                      <button
+                        type="button"
+                        onClick={() => toggle(row.path, row.expandable)}
+                        // Stop the native contextmenu event from bubbling to
+                        // the root trigger above: this row's own trigger
+                        // (attached to this same element) already opens its
+                        // menu, so without this the root menu would ALSO try
+                        // to open from the same right-click.
+                        onContextMenu={(e) => e.stopPropagation()}
+                        aria-expanded={expanded.has(row.path)}
+                        className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left hover:bg-muted"
+                        style={{
+                          paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
+                          height: ROW_HEIGHT,
+                        }}
+                      />
+                    }
+                  >
+                    {row.state === "loading" ? (
+                      <Loader2 className="size-3.5 shrink-0 text-muted-foreground motion-safe:animate-spin" />
+                    ) : (
+                      <ChevronRight
+                        className={cn(
+                          "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                          expanded.has(row.path) && "rotate-90",
+                        )}
+                      />
+                    )}
+                    <FileTreeIcon
+                      kind={dirIconKind({
+                        open: expanded.has(row.path),
+                        empty: row.empty,
+                      })}
                     />
-                  )}
-                  <FileTreeIcon
-                    kind={dirIconKind({
-                      open: expanded.has(row.path),
-                      empty: row.empty,
-                    })}
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                      {row.name}
+                    </span>
+                  </ContextMenuTrigger>
+                  <FileTreeContextMenu
+                    variant="dir"
+                    onNewFile={() => onNewFile(row.path)}
+                    onNewFolder={() => onNewFolder(row.path)}
+                    onRename={() => onRename(row.path, true)}
+                    onDelete={() => onDelete(row.path, true)}
                   />
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                    {row.name}
-                  </span>
-                </button>
+                </ContextMenu>
               </li>
             ) : row.kind === "loading" ? (
               <li key={row.path}>
@@ -353,34 +434,58 @@ export function FileTree({
               </li>
             ) : (
               <li key={row.path}>
-                <button
-                  type="button"
-                  onClick={() => onOpen(row.path)}
-                  onDoubleClick={() => onOpen(row.path, { pin: true })}
-                  style={{
-                    paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
-                    height: ROW_HEIGHT,
-                  }}
-                  className={cn(
-                    "flex w-full items-center gap-1.5 rounded py-1 pr-1 text-left hover:bg-muted",
-                    row.path === openPath && "bg-muted",
-                  )}
-                >
-                  <FileTreeIcon kind={fileIconKind(row.path)} />
-                  <span className="min-w-0 flex-1 truncate font-mono text-sm">
-                    {row.name}
-                  </span>
-                  {changed.get(row.path) && (
-                    <FileStatusIcon status={changed.get(row.path)!} />
-                  )}
-                </button>
+                <ContextMenu>
+                  <ContextMenuTrigger
+                    render={
+                      <button
+                        type="button"
+                        onClick={() => onOpen(row.path)}
+                        onDoubleClick={() => onOpen(row.path, { pin: true })}
+                        // See the dir row's identical comment: stops this
+                        // row's right-click from also opening the root menu.
+                        onContextMenu={(e) => e.stopPropagation()}
+                        style={{
+                          paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
+                          height: ROW_HEIGHT,
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-1.5 rounded py-1 pr-1 text-left hover:bg-muted",
+                          row.path === openPath && "bg-muted",
+                        )}
+                      />
+                    }
+                  >
+                    <FileTreeIcon kind={fileIconKind(row.path)} />
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                      {row.name}
+                    </span>
+                    {changed.get(row.path) && (
+                      <FileStatusIcon status={changed.get(row.path)!} />
+                    )}
+                  </ContextMenuTrigger>
+                  <FileTreeContextMenu
+                    variant="file"
+                    onNewFile={() => onNewFile(parentDir(row.path))}
+                    onNewFolder={() => onNewFolder(parentDir(row.path))}
+                    onRename={() => onRename(row.path, false)}
+                    onDelete={() => onDelete(row.path, false)}
+                  />
+                </ContextMenu>
               </li>
               ),
             )}
           </ul>
           </div>
         )}
-      </div>
+      </ContextMenuTrigger>
+      <FileTreeContextMenu
+        variant="root"
+        onNewFile={() => onNewFile("")}
+        onNewFolder={() => onNewFolder("")}
+        onRename={noop}
+        onDelete={noop}
+      />
+      </ContextMenu>
     </ScrollArea>
   )
 }

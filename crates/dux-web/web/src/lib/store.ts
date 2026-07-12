@@ -31,9 +31,11 @@ import { resolveFocusedTab, shouldRefireFocusPut } from "./agentTabs"
 import {
   activateTab as editorActivateTabPure,
   closeTab as editorCloseTabPure,
+  closeTabsUnderPath as editorCloseTabsUnderPathPure,
   emptyTabsState,
   openFile as editorOpenFilePure,
   pinTab as editorPinTabPure,
+  renameTabPaths as editorRenameTabPathsPure,
   setTabDirty as editorSetTabDirtyPure,
   setTabMode as editorSetTabModePure,
 } from "./editorTabs"
@@ -1764,6 +1766,30 @@ export function editorSetTabMode(
 // active tab via the VS Code right-then-left rule.
 export function editorCloseTab(sessionId: string, tabId: string): void {
   setEditorTabsFor(sessionId, editorCloseTabPure(editorTabsFor(sessionId), tabId))
+}
+
+// Rename retarget: rewrite the path of the tab(s) affected by renaming a file
+// or folder from `from` to `to`. See `lib/editorTabs.ts` `renameTabPaths` for
+// the folder-prefix rewrite and the pre-existing-destination-tab collision
+// close.
+export function editorRenameTabPaths(
+  sessionId: string,
+  from: string,
+  to: string,
+): void {
+  setEditorTabsFor(
+    sessionId,
+    editorRenameTabPathsPure(editorTabsFor(sessionId), from, to),
+  )
+}
+
+// Close every tab under a deleted file or folder path. See
+// `lib/editorTabs.ts` `closeTabsUnderPath`.
+export function editorCloseTabsUnderPath(sessionId: string, path: string): void {
+  setEditorTabsFor(
+    sessionId,
+    editorCloseTabsUnderPathPure(editorTabsFor(sessionId), path),
+  )
 }
 
 // Drop all of a session's editor tabs (session deleted from the spine). See

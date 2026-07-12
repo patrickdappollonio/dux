@@ -424,4 +424,154 @@ describe("FileTree", () => {
     const rendered = container.querySelectorAll("li").length
     expect(rendered).toBeLessThan(60)
   })
+
+  describe("context menu", () => {
+    it("right-clicking a file row opens a menu with all four actions, each with an icon", async () => {
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [file("a.ts")] : [] }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onNewFile={() => {}}
+          onNewFolder={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      const row = await screen.findByText("a.ts")
+      fireEvent.contextMenu(row)
+
+      const newFile = await screen.findByText("New File…")
+      const newFolder = await screen.findByText("New Folder…")
+      const rename = await screen.findByText("Rename…")
+      const del = await screen.findByText("Delete…")
+      for (const item of [newFile, newFolder, rename, del]) {
+        const menuItem = item.closest('[data-slot="context-menu-item"]')
+        expect(menuItem, `${item.textContent} has no menu-item wrapper`).toBeTruthy()
+        expect(
+          menuItem?.querySelector("svg"),
+          `${item.textContent} has no leading icon`,
+        ).toBeTruthy()
+      }
+    })
+
+    it("right-clicking a folder row targets New File/New Folder at that folder's own path", async () => {
+      const onNewFile = vi.fn()
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [dir("src")] : [] }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onNewFile={onNewFile}
+          onNewFolder={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      const row = await screen.findByText("src")
+      fireEvent.contextMenu(row)
+      const newFile = await screen.findByText("New File…")
+      fireEvent.click(newFile)
+      expect(onNewFile).toHaveBeenCalledWith("src")
+    })
+
+    it("right-clicking a file row targets New File/New Folder at the file's parent dir", async () => {
+      const onNewFolder = vi.fn()
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({
+          dir: d,
+          entries: d === "" ? [dir("src")] : d === "src" ? [file("src/a.ts")] : [],
+        }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath="src/a.ts"
+          onOpen={() => {}}
+          onNewFile={() => {}}
+          onNewFolder={onNewFolder}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      const row = await screen.findByText("a.ts")
+      fireEvent.contextMenu(row)
+      const newFolder = await screen.findByText("New Folder…")
+      fireEvent.click(newFolder)
+      expect(onNewFolder).toHaveBeenCalledWith("src")
+    })
+
+    it("right-clicking the empty area below the rows opens the root menu with only New File/New Folder", async () => {
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [file("a.ts")] : [] }),
+      )
+      const { container } = render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onNewFile={() => {}}
+          onNewFolder={() => {}}
+          onRename={() => {}}
+          onDelete={() => {}}
+        />,
+      )
+      await screen.findByText("a.ts")
+      // Right-click the root filler div directly (not a row) — this is the
+      // "empty area below the rows" trigger.
+      const filler = container.querySelector(
+        '[data-slot="context-menu-trigger"]',
+      )
+      if (!filler) throw new Error("root context menu trigger not found")
+      fireEvent.contextMenu(filler)
+
+      expect(await screen.findByText("New File…")).toBeTruthy()
+      expect(screen.getByText("New Folder…")).toBeTruthy()
+      expect(screen.queryByText("Rename…")).toBeNull()
+      expect(screen.queryByText("Delete…")).toBeNull()
+    })
+
+    it("clicking Rename/Delete in a row's menu fires the callback with the row's path and isDir", async () => {
+      const onRename = vi.fn()
+      const onDelete = vi.fn()
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? [file("a.ts")] : [] }),
+      )
+      render(
+        <FileTree
+          sessionId="s1"
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onNewFile={() => {}}
+          onNewFolder={() => {}}
+          onRename={onRename}
+          onDelete={onDelete}
+        />,
+      )
+      const row = await screen.findByText("a.ts")
+      fireEvent.contextMenu(row)
+      fireEvent.click(await screen.findByText("Rename…"))
+      expect(onRename).toHaveBeenCalledWith("a.ts", false)
+
+      fireEvent.contextMenu(row)
+      fireEvent.click(await screen.findByText("Delete…"))
+      expect(onDelete).toHaveBeenCalledWith("a.ts", false)
+    })
+  })
 })

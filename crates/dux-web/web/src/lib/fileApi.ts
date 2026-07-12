@@ -102,4 +102,20 @@ export const fileApi = {
       path,
       editor,
     }).then((r) => r.editor),
+  // Create a new empty file. Refused (400) if the entry already exists or the
+  // parent directory is missing, matching write's create semantics minus the
+  // implicit overwrite.
+  createFile: (sessionId: string, path: string) =>
+    postFileNoContent(fileUrl(sessionId, "create-file"), { path }),
+  // Create a new directory, creating missing intermediate components.
+  createDir: (sessionId: string, path: string) =>
+    postFileNoContent(fileUrl(sessionId, "create-dir"), { path }),
+  // Rename/move a file or directory. Refused (400) if the destination already
+  // exists (no overwrite).
+  rename: (sessionId: string, from: string, to: string) =>
+    postFileNoContent(fileUrl(sessionId, "rename"), { from, to }),
+  // Permanently delete a file or (recursively) a directory. Named `remove`,
+  // not `delete`, to avoid the reserved-word-adjacent name.
+  remove: (sessionId: string, path: string) =>
+    postFileNoContent(fileUrl(sessionId, "delete"), { path }),
 }

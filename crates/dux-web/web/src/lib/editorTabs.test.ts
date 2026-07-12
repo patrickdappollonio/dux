@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest"
 import {
   activateTab,
   closeTab,
+  closeTabsUnderPath,
   dirtyCloseMessage,
   emptyTabsState,
+  hasDirtyUnderPath,
   nextActiveId,
   openFile,
   pinTab,
+  renameTabPaths,
   setTabDirty,
   setTabMode,
   shouldConfirmClose,
@@ -334,5 +337,202 @@ describe("shouldConfirmClose", () => {
     expect(shouldConfirmClose(state, "t2")).toBe(false)
     // A vanished tab id is not dirty by definition.
     expect(shouldConfirmClose(state, "gone")).toBe(false)
+  })
+})
+
+describe("renameTabPaths", () => {
+  it("rewrites the path of the single tab matching a file rename", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    const next = renameTabPaths(state, "a.ts", "b.ts")
+    expect(next.tabs).toEqual([
+      { id: "t1", path: "b.ts", mode: "file", preview: false, dirty: false },
+    ])
+    expect(next.activeId).toBe("t1")
+  })
+
+  it("rewrites the prefix of every tab under a renamed folder", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "src/a.ts", mode: "file", preview: false, dirty: false },
+        {
+          id: "t2",
+          path: "src/nested/b.ts",
+          mode: "file",
+          preview: false,
+          dirty: false,
+        },
+        { id: "t3", path: "other.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    const next = renameTabPaths(state, "src", "lib")
+    expect(next.tabs.map((t) => t.path)).toEqual([
+      "lib/a.ts",
+      "lib/nested/b.ts",
+      "other.ts",
+    ])
+  })
+
+  it("returns the same reference when nothing matches", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    expect(renameTabPaths(state, "nope.ts", "b.ts")).toBe(state)
+  })
+
+  it("closes a pre-existing tab already holding the destination path (file rename)", () => {
+    // t2 is a stale tab for a path that will become the rename target — e.g.
+    // left open from a file that was deleted and recreated. Retargeting t1
+    // onto "b.ts" without closing t2 first would leave two tabs holding the
+    // same path, which the Monaco-model disposal effect assumes never happens.
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+        { id: "t2", path: "b.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t2",
+    }
+    const next = renameTabPaths(state, "a.ts", "b.ts")
+    expect(next.tabs).toEqual([
+      { id: "t1", path: "b.ts", mode: "file", preview: false, dirty: false },
+    ])
+    // t2 was active and got closed; t1 is the only tab left.
+    expect(next.activeId).toBe("t1")
+  })
+
+  it("closes a pre-existing tab colliding with a retargeted descendant (folder rename)", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        {
+          id: "t1",
+          path: "src/nested/b.ts",
+          mode: "file",
+          preview: false,
+          dirty: false,
+        },
+        // Stale tab already sitting at the folder rename's computed
+        // destination for t1: "lib/nested/b.ts".
+        {
+          id: "t2",
+          path: "lib/nested/b.ts",
+          mode: "file",
+          preview: false,
+          dirty: false,
+        },
+      ],
+      activeId: "t1",
+    }
+    const next = renameTabPaths(state, "src", "lib")
+    expect(next.tabs).toEqual([
+      {
+        id: "t1",
+        path: "lib/nested/b.ts",
+        mode: "file",
+        preview: false,
+        dirty: false,
+      },
+    ])
+  })
+})
+
+describe("closeTabsUnderPath", () => {
+  it("closes the single tab matching a file path", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+        { id: "t2", path: "b.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    const next = closeTabsUnderPath(state, "a.ts")
+    expect(next.tabs.map((t) => t.id)).toEqual(["t2"])
+  })
+
+  it("closes every tab under a deleted folder subtree", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "src/a.ts", mode: "file", preview: false, dirty: false },
+        {
+          id: "t2",
+          path: "src/nested/b.ts",
+          mode: "file",
+          preview: false,
+          dirty: false,
+        },
+        { id: "t3", path: "other.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    const next = closeTabsUnderPath(state, "src")
+    expect(next.tabs.map((t) => t.id)).toEqual(["t3"])
+  })
+
+  it("reselects the next active tab per the closeTab rule", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+        { id: "t2", path: "b.ts", mode: "file", preview: false, dirty: false },
+        { id: "t3", path: "c.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t2",
+    }
+    const next = closeTabsUnderPath(state, "b.ts")
+    expect(next.activeId).toBe("t3")
+  })
+
+  it("returns the same reference when nothing matches", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    expect(closeTabsUnderPath(state, "nope.ts")).toBe(state)
+  })
+})
+
+describe("hasDirtyUnderPath", () => {
+  it("is true when the exact file path is dirty", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: true },
+      ],
+      activeId: "t1",
+    }
+    expect(hasDirtyUnderPath(state, "a.ts")).toBe(true)
+  })
+
+  it("is true when a descendant of a folder is dirty", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        {
+          id: "t1",
+          path: "src/nested/b.ts",
+          mode: "file",
+          preview: false,
+          dirty: true,
+        },
+      ],
+      activeId: "t1",
+    }
+    expect(hasDirtyUnderPath(state, "src")).toBe(true)
+  })
+
+  it("is false when clean", () => {
+    const state: EditorTabsState = {
+      tabs: [
+        { id: "t1", path: "a.ts", mode: "file", preview: false, dirty: false },
+      ],
+      activeId: "t1",
+    }
+    expect(hasDirtyUnderPath(state, "a.ts")).toBe(false)
   })
 })

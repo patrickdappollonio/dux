@@ -175,6 +175,91 @@ export function shouldPromoteOnEdit(
   return tab !== undefined && tab.preview && newDirty
 }
 
+// True when `tabPath` is exactly `base`, or a descendant of it (`base/...`).
+// Shared by the file-management reducers below: a file-scoped op (base ===
+// the file's own path) matches by equality; a folder-scoped op (base === the
+// folder's path) matches every tab nested under it.
+function underPath(tabPath: string, base: string): boolean {
+  return tabPath === base || tabPath.startsWith(`${base}/`)
+}
+
+// Rename retarget: rewrite the path of the tab whose path === `from` (a file
+// rename), or every tab whose path is under `from/` (a folder rename),
+// replacing the `from` prefix with `to`. Returns the SAME state reference
+// when nothing matched (ref-equal short-circuit, matching `setTabDirty`'s
+// contract so `setEditorTabsFor` bails out of a no-op setState).
+//
+// Before rewriting, closes any OTHER (non-renaming) tab that already sits at
+// one of the computed destination paths -- e.g. a stale tab left open from a
+// previously deleted file. Without this, retargeting would produce two tabs
+// holding the same path, violating the path-uniqueness invariant the Monaco
+// model-disposal effect in EditorOverlay.tsx depends on. The collision close
+// reuses `closeTab`'s next-active rule, one tab at a time.
+//
+// Note: retargeting a CLEAN open tab necessarily discards its Monaco undo
+// history and view state (folding, scroll position, cursor) -- the Monaco
+// model is keyed by the path's URI, so the new path gets a fresh model with
+// no history. This is accepted (see the plan): the alternative is a dirty
+// buffer silently reloading from disk, which is worse. A dirty tab is never
+// renamed at all -- the caller gates the Rename dialog on `hasDirtyUnderPath`
+// before ever calling this reducer.
+export function renameTabPaths(
+  state: EditorTabsState,
+  from: string,
+  to: string,
+): EditorTabsState {
+  const matchingFrom = state.tabs.filter((t) => underPath(t.path, from))
+  if (matchingFrom.length === 0) return state
+
+  const fromIds = new Set(matchingFrom.map((t) => t.id))
+  const newPathFor = (tabPath: string) =>
+    tabPath === from ? to : to + tabPath.slice(from.length)
+  const newPaths = new Set(matchingFrom.map((t) => newPathFor(t.path)))
+
+  const collidingIds = state.tabs
+    .filter((t) => !fromIds.has(t.id) && newPaths.has(t.path))
+    .map((t) => t.id)
+
+  let working = state
+  for (const id of collidingIds) {
+    working = closeTab(working, id)
+  }
+
+  return {
+    ...working,
+    tabs: working.tabs.map((t) =>
+      fromIds.has(t.id) ? { ...t, path: newPathFor(t.path) } : t,
+    ),
+  }
+}
+
+// Delete: close the tab whose path === `path` (a file) or every tab under
+// `path/` (a folder). Reuses the `closeTab` next-active rule for each removed
+// tab, one at a time, so cascading closes reselect exactly as a user closing
+// them one by one would. Returns the same reference when nothing matched.
+export function closeTabsUnderPath(
+  state: EditorTabsState,
+  path: string,
+): EditorTabsState {
+  const matching = state.tabs.filter((t) => underPath(t.path, path))
+  if (matching.length === 0) return state
+  let working = state
+  for (const tab of matching) {
+    working = closeTab(working, tab.id)
+  }
+  return working
+}
+
+// True when `path` (a file) or any tab under `path/` (a folder) is DIRTY --
+// used to gate the Rename dialog so an unsaved buffer is never silently
+// reloaded away by the post-rename staleness refetch.
+export function hasDirtyUnderPath(
+  state: EditorTabsState,
+  path: string,
+): boolean {
+  return state.tabs.some((t) => underPath(t.path, path) && t.dirty)
+}
+
 // The overlay-close "Discard unsaved changes?" confirmation copy, singular vs.
 // plural across however many tabs are dirty. Single source of truth so the
 // dialog body and any future caller never drift on the exact wording.
