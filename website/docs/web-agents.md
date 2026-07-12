@@ -96,9 +96,9 @@ conversation if you want a specific one.
 ## Attention and notifications
 
 You do not have to babysit every tab. When an agent needs you (a permission
-prompt, a finished turn), its sidebar icon itself recolors amber and pulses, its
-tab-strip pill gains a small amber dot next to its icon, the browser tab title
-gains a count like `(2) dux`, and the favicon grows a small amber dot. The flag
+prompt, a finished turn), its sidebar icon itself turns cyan and pulses, its
+tab-strip pill gains a small cyan dot next to its icon, the browser tab title
+gains a count like `(2) dux`, and the favicon grows a small cyan dot. The flag
 clears the moment you actually look at that agent. The whole model, and how to
 make sure your agents actually emit the signal, is covered in
 [Attention indicators](/docs/attention-indicators).

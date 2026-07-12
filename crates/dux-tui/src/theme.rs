@@ -677,7 +677,11 @@ mod tests {
 
     /// Snapshot of the original `Theme::default_dark()` palette, kept here as
     /// an oracle so the bundled dux-dark TOML can be verified field-for-field
-    /// against the pre-Opaline behavior.
+    /// against the pre-Opaline behavior. One deliberate exception:
+    /// `session_attention` was intentionally recolored from the historical
+    /// yellow to cyan when the attention indicator moved to the accent color,
+    /// so for that field the oracle tracks the current intended value, not the
+    /// pre-Opaline one.
     fn default_dark_archived() -> Theme {
         Theme {
             // app_bg matches the historical overlay_bg shade so dark-terminal
@@ -985,9 +989,12 @@ variant = "dark"
         assert_eq!(theme.pr_closed_label, Color::Rgb(25, 32, 33));
     }
 
-    /// The bundled dux-dark theme's attention color must resolve to its own
-    /// accent (the same cyan as the focused title), not the warning/amber
-    /// semantic, once attention is repointed to accent.primary.
+    /// The bundled dux-dark theme's attention color must stay consistent with
+    /// its own accent (the same cyan as the focused title) and distinct from
+    /// the warning/amber semantic. Note: dux-dark sets `dux.session_attention`
+    /// explicitly in its TOML, so this guards the shipped theme's consistency;
+    /// the default accent.primary derivation path is exercised by the `nord`
+    /// test below, which has no explicit dux.* tokens.
     #[test]
     fn dux_dark_attention_resolves_to_accent_not_warning() {
         let theme = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
