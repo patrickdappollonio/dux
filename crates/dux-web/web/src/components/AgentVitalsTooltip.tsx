@@ -40,25 +40,14 @@ export function AgentVitalsTooltip({
           {vitals.rows.map((row) => (
             <Fragment key={row.key}>
               <span className="text-muted-foreground">{row.label}</span>
-              {row.key === "worktree" ? (
-                // Middle-ish truncation for the long worktree path, mirroring
-                // EditorOverlay's open-path treatment: rtl direction ellipsizes
-                // the front, the bdi flips the visible text back to LTR so it
-                // still reads correctly, leaving the (usually more useful) tail
-                // of the path visible.
-                <span className="min-w-0 truncate text-right font-mono [direction:rtl]">
-                  <bdi dir="ltr">{row.value}</bdi>
-                </span>
-              ) : (
-                <span
-                  className={cn(
-                    "min-w-0 truncate text-right",
-                    row.mono && "font-mono",
-                  )}
-                >
-                  {row.value}
-                </span>
-              )}
+              <span
+                className={cn(
+                  "min-w-0 truncate text-right",
+                  row.mono && "font-mono",
+                )}
+              >
+                {row.value}
+              </span>
             </Fragment>
           ))}
         </div>

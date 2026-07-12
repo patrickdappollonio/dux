@@ -46,6 +46,23 @@ function tabsSummary(session: SessionView): string | null {
   return `${live} of ${total} live`
 }
 
+// One line summarizing what runs in the agent's tabs: providers in first-
+// appearance order, each with a count when it holds more than one tab, e.g.
+// `claude (2), codex, copilot (4)`. A single-tab agent reads as just its
+// provider name. Tab provider strings arrive already resolved (a tab without
+// its own provider inherits the session's), so no fallback logic is needed
+// beyond the tabless edge case.
+export function providersSummary(session: SessionView): string {
+  if (session.tabs.length === 0) return session.provider
+  const counts = new Map<string, number>()
+  for (const tab of session.tabs) {
+    counts.set(tab.provider, (counts.get(tab.provider) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([name, n]) => (n > 1 ? `${name} (${n})` : name))
+    .join(", ")
+}
+
 // Branch row value: plain current branch, or an "initial → current" drift form
 // when the worktree has moved off the branch the agent was created on.
 function branchValue(session: SessionView): string {
@@ -89,6 +106,17 @@ export function buildAgentVitals(
   const branch = branchValue(session)
   if (branch) rows.push({ key: "branch", label: "Branch", value: branch, mono: true })
 
+  // The branch this agent was forked from. Skipped when it matches the current
+  // branch, where it would say nothing the branch row doesn't.
+  if (session.source_branch && session.source_branch !== session.branch_name) {
+    rows.push({
+      key: "source",
+      label: "Source",
+      value: session.source_branch,
+      mono: true,
+    })
+  }
+
   if (changesCount !== null && changesCount > 0) {
     rows.push({
       key: "changes",
@@ -108,18 +136,12 @@ export function buildAgentVitals(
     })
   }
 
-  if (session.worktree_path) {
-    rows.push({
-      key: "worktree",
-      label: "Worktree",
-      value: session.worktree_path,
-      mono: true,
-    })
-  }
+  // No worktree row: worktree directories are named after the branch, so the
+  // branch row above already identifies it without repeating a long path.
 
   return {
     name: session.title || session.branch_name,
-    provider: session.provider,
+    provider: providersSummary(session),
     statusLabel: vitalsStatusLabel(session),
     statusColorClass: statusDotColorClass(
       session.status,

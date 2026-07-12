@@ -142,10 +142,54 @@ describe("buildAgentVitals", () => {
     ).toBe("Needs attention")
   })
 
-  it("always includes worktree path when present", () => {
+  it("has no worktree row; the branch row already names the worktree", () => {
     const model = buildAgentVitals(session(), "myproject", null)
-    expect(model.rows.find((r) => r.key === "worktree")?.value).toBe(
-      "/home/user/worktrees/feature-foo",
+    expect(model.rows.find((r) => r.key === "worktree")).toBeUndefined()
+  })
+
+  it("shows the source branch, skipping it when it matches the current branch", () => {
+    const forked = buildAgentVitals(session(), "myproject", null)
+    expect(forked.rows.find((r) => r.key === "source")?.value).toBe("main")
+
+    const onSource = buildAgentVitals(
+      session({ source_branch: "feature/foo" }),
+      "myproject",
+      null,
     )
+    expect(onSource.rows.find((r) => r.key === "source")).toBeUndefined()
+
+    const noSource = buildAgentVitals(
+      session({ source_branch: "" }),
+      "myproject",
+      null,
+    )
+    expect(noSource.rows.find((r) => r.key === "source")).toBeUndefined()
+  })
+
+  it("summarizes a single-tab agent's provider as just the provider name", () => {
+    const model = buildAgentVitals(session(), "myproject", null)
+    expect(model.provider).toBe("claude")
+  })
+
+  it("aggregates multi-tab providers in first-appearance order with counts", () => {
+    const model = buildAgentVitals(
+      session({
+        tabs: [
+          tab({ id: "s1", provider: "claude" }),
+          tab({ id: "t2", provider: "codex" }),
+          tab({ id: "t3", provider: "claude" }),
+          tab({ id: "t4", provider: "copilot" }),
+          tab({ id: "t5", provider: "copilot" }),
+        ],
+      }),
+      "myproject",
+      null,
+    )
+    expect(model.provider).toBe("claude (2), codex, copilot (2)")
+  })
+
+  it("falls back to the session provider when the tabs list is empty", () => {
+    const model = buildAgentVitals(session({ tabs: [] }), "myproject", null)
+    expect(model.provider).toBe("claude")
   })
 })
