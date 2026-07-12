@@ -271,6 +271,68 @@ describe("editor tabs store slice", () => {
     expect(mod.getSnapshot().editorCloseTabTarget).toBeNull()
   })
 
+  // Finding 8: `editorRenameTabPaths`/`editorCloseTabsUnderPath` had no direct
+  // store-level coverage; the pure reducers (`renameTabPaths`/
+  // `closeTabsUnderPath`) are covered by editorTabs.test.ts, but the store's
+  // thin wrapping (keying by session id, and the ref-equal no-op short-
+  // circuit `setEditorTabsFor` relies on to skip a store-wide re-render) was
+  // untested at this layer.
+  it("editorRenameTabPaths retargets the matching tab's path via editorTabsFor snapshot", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "src/a.ts", { pin: true })
+    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    mod.editorRenameTabPaths("s1", "src/a.ts", "src/renamed.ts")
+    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0]).toMatchObject({ id, path: "src/renamed.ts" })
+  })
+
+  it("editorRenameTabPaths retargets every tab under a renamed folder", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "src/a.ts", { pin: true })
+    mod.editorOpenFile("s1", "src/nested/b.ts", { pin: true })
+    mod.editorRenameTabPaths("s1", "src", "lib")
+    const paths = mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path).sort()
+    expect(paths).toEqual(["lib/a.ts", "lib/nested/b.ts"])
+  })
+
+  it("editorRenameTabPaths is a ref-equal no-op on a session with no matching tab (no store-wide re-render)", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "a.ts")
+    const before = mod.getSnapshot().editorTabs.s1
+    mod.editorRenameTabPaths("s1", "unrelated.ts", "still-unrelated.ts")
+    expect(mod.getSnapshot().editorTabs.s1).toBe(before)
+  })
+
+  it("editorCloseTabsUnderPath closes the tab at an exact deleted file path and reselects", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    mod.editorOpenFile("s1", "b.ts", { pin: true })
+    const [, b] = mod.getSnapshot().editorTabs.s1.tabs
+    mod.editorCloseTabsUnderPath("s1", "a.ts")
+    const tabs = mod.getSnapshot().editorTabs.s1
+    expect(tabs.tabs.map((t) => t.id)).toEqual([b.id])
+    expect(tabs.activeId).toBe(b.id)
+  })
+
+  it("editorCloseTabsUnderPath closes every tab under a deleted folder", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "src/a.ts", { pin: true })
+    mod.editorOpenFile("s1", "src/nested/b.ts", { pin: true })
+    mod.editorOpenFile("s1", "keep.ts", { pin: true })
+    mod.editorCloseTabsUnderPath("s1", "src")
+    const paths = mod.getSnapshot().editorTabs.s1.tabs.map((t) => t.path)
+    expect(paths).toEqual(["keep.ts"])
+  })
+
+  it("editorCloseTabsUnderPath is a ref-equal no-op when nothing matches (no store-wide re-render)", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "a.ts")
+    const before = mod.getSnapshot().editorTabs.s1
+    mod.editorCloseTabsUnderPath("s1", "unrelated.ts")
+    expect(mod.getSnapshot().editorTabs.s1).toBe(before)
+  })
+
   it("clears a session's editor tabs and closes a targeted editor overlay when the session vanishes from the spine", async () => {
     spineBody = makeSpine(["s1", "s2"])
     const mod = await loadStore()
