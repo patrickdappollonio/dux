@@ -1,5 +1,6 @@
 import { GitPullRequest } from "lucide-react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { prBannerClass, prStateLabel } from "@/lib/pr"
 import { cn } from "@/lib/utils"
 import type { PrView } from "@/lib/types"
@@ -38,7 +39,13 @@ export function PrBanner({
           state/title misaligned vertically under items-center. */}
       <span className="shrink-0 font-semibold">#{pr.number}</span>
       <span className="shrink-0 capitalize opacity-80">{state}</span>
-      <span className="truncate text-foreground/80">{pr.title}</span>
+      {/* Only the title carries a tooltip: the #number is already fully visible
+          so repeating it would be the old redundant tooltip. The title itself
+          is `truncate` and can clip at narrow widths, so it always gets the
+          full text on hover (skipping truncation detection keeps this simple). */}
+      <SimpleTooltip content={pr.title}>
+        <span className="truncate text-foreground/80">{pr.title}</span>
+      </SimpleTooltip>
     </a>
   )
 }
