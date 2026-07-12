@@ -279,6 +279,164 @@ pub fn write_file(worktree: &Path, rel_path: &str, content: &str) -> anyhow::Res
     Ok(())
 }
 
+/// Create a new EMPTY file at `rel_path`. Refuses to overwrite an existing entry
+/// (file, dir, or symlink), refuses `.git`/traversal/escape, and, like
+/// `write_file`, requires the parent to already exist inside the worktree (no
+/// implicit `mkdir -p`). Uses `File::create_new` so the create itself is
+/// TOCTOU-safe: if another process creates the file in the race window between
+/// our existence check and the actual create, this call fails instead of
+/// silently overwriting.
+pub fn create_file(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    let path = resolve_worktree_path(worktree, rel_path)?;
+    if path.symlink_metadata().is_ok() {
+        anyhow::bail!("refusing to create file, entry already exists: {rel_path}");
+    }
+    let parent = path.parent().unwrap_or(worktree);
+    if !is_under(worktree, parent) {
+        anyhow::bail!(
+            "cannot create file: parent directory is missing or outside the worktree: {rel_path}"
+        );
+    }
+    if resolves_into_git_dir(worktree, parent) {
+        anyhow::bail!("refusing to create a file inside the git directory: {rel_path}");
+    }
+    std::fs::File::create_new(&path)
+        .map_err(|e| anyhow::anyhow!("cannot create file {rel_path}: {e}"))?;
+    Ok(())
+}
+
+/// Create a new directory at `rel_path`, creating missing intermediate
+/// components (VS Code "New Folder: a/b/c"). Refuses to overwrite an existing
+/// entry, refuses `.git`/traversal, and refuses if the nearest existing
+/// ancestor escapes the worktree or resolves into `.git`.
+pub fn create_dir(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    let path = resolve_worktree_path(worktree, rel_path)?;
+    if path.symlink_metadata().is_ok() {
+        anyhow::bail!("refusing to create directory, entry already exists: {rel_path}");
+    }
+    // The target does not exist yet, so `resolve_worktree_path`'s existence-gated
+    // containment check did not run for it. Walk up to the nearest ancestor that
+    // DOES exist and check containment there instead, since intermediate
+    // components may be created and any of them could be a symlink.
+    let mut ancestor = path.as_path();
+    loop {
+        match ancestor.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                if parent.exists() {
+                    ancestor = parent;
+                    break;
+                }
+                ancestor = parent;
+            }
+            _ => {
+                ancestor = worktree;
+                break;
+            }
+        }
+    }
+    if !is_under(worktree, ancestor) {
+        anyhow::bail!("cannot create directory: outside the worktree: {rel_path}");
+    }
+    if resolves_into_git_dir(worktree, ancestor) {
+        anyhow::bail!("refusing to create a directory inside the git directory: {rel_path}");
+    }
+    std::fs::create_dir_all(&path)
+        .map_err(|e| anyhow::anyhow!("cannot create directory {rel_path}: {e}"))?;
+    Ok(())
+}
+
+/// Rename/move `from_rel` to `to_rel` (file or directory). Refuses: a missing
+/// source, an existing destination (no overwrite), `.git`/traversal/escape on
+/// either side, and a destination whose parent is missing or escapes the
+/// worktree or resolves into `.git`.
+pub fn rename_entry(worktree: &Path, from_rel: &str, to_rel: &str) -> anyhow::Result<()> {
+    let src = resolve_worktree_path(worktree, from_rel)?;
+    let dst = resolve_worktree_path(worktree, to_rel)?;
+    src.symlink_metadata()
+        .map_err(|e| anyhow::anyhow!("rename source does not exist: {from_rel}: {e}"))?;
+    if dst.symlink_metadata().is_ok() {
+        anyhow::bail!("refusing to rename, destination already exists: {to_rel}");
+    }
+    let dst_parent = dst.parent().unwrap_or(worktree);
+    if !is_under(worktree, dst_parent) {
+        anyhow::bail!(
+            "cannot rename: destination's parent directory is missing or outside the worktree: {to_rel}"
+        );
+    }
+    if resolves_into_git_dir(worktree, dst_parent) {
+        anyhow::bail!("refusing to rename into the git directory: {to_rel}");
+    }
+    std::fs::rename(&src, &dst)
+        .map_err(|e| anyhow::anyhow!("cannot rename {from_rel} to {to_rel}: {e}"))?;
+    Ok(())
+}
+
+/// Delete `rel_path`: a file or symlink is removed with `remove_file` (a
+/// symlink removes the LINK, never its target); a directory is removed
+/// recursively with `remove_dir_all`. Refuses `.git`/traversal/escape and
+/// refuses to delete the worktree root itself. Permanent: there is no trash on
+/// the server (CLAUDE.md: worktrees are user data, but deletion here is the
+/// explicit, confirmed action the caller asked for).
+///
+/// Deliberately does NOT call `resolve_worktree_path`: that resolver checks
+/// containment of the FOLLOWED realpath, which is the wrong check for delete.
+/// Deleting a symlink removes the directory entry (the link), never its
+/// target, so an escaping-target symlink is a legitimate delete target — only
+/// the literal path and its PARENT's containment matter here.
+pub fn delete_entry(worktree: &Path, rel_path: &str) -> anyhow::Result<()> {
+    use std::path::Component;
+    let rp = Path::new(rel_path);
+    if rp.as_os_str().is_empty()
+        || rp.is_absolute()
+        || rp.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+    {
+        anyhow::bail!("invalid worktree path: {rel_path}");
+    }
+    if rp
+        .iter()
+        .any(|c| c.to_str().is_some_and(|s| s.eq_ignore_ascii_case(".git")))
+    {
+        anyhow::bail!("refusing to access the git directory: {rel_path}");
+    }
+    let path = worktree.join(rel_path);
+    // No-follow stat on the literal path: existence and kind of the entry
+    // ITSELF, never its symlink target.
+    let meta = path
+        .symlink_metadata()
+        .map_err(|e| anyhow::anyhow!("delete target does not exist: {rel_path}: {e}"))?;
+    // Containment is checked on the PARENT directory (canonicalized, so an
+    // intermediate symlink that escapes the worktree is still caught), not on
+    // the leaf, since the leaf may legitimately be an escaping symlink.
+    let parent = path.parent().unwrap_or(worktree);
+    if !is_under(worktree, parent) {
+        anyhow::bail!("path escapes worktree: {rel_path}");
+    }
+    if resolves_into_git_dir(worktree, parent) {
+        anyhow::bail!("refusing to access the git directory: {rel_path}");
+    }
+    let canon_worktree = worktree
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot canonicalize worktree: {e}"))?;
+    if let Ok(canon_path) = path.canonicalize()
+        && canon_path == canon_worktree
+    {
+        anyhow::bail!("refusing to delete the worktree root");
+    }
+    if meta.file_type().is_symlink() || meta.is_file() {
+        std::fs::remove_file(&path)
+            .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;
+    } else {
+        std::fs::remove_dir_all(&path)
+            .map_err(|e| anyhow::anyhow!("cannot delete {rel_path}: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +827,276 @@ mod tests {
             std::fs::read_to_string(outside_dir.path().join("secret.txt")).unwrap(),
             "classified\n",
             "outside file must be untouched"
+        );
+    }
+
+    // --- create_file ---
+
+    #[test]
+    fn create_file_at_root() {
+        let dir = worktree();
+        create_file(dir.path(), "new.txt").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn create_file_in_existing_subdir() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        create_file(dir.path(), "src/new.rs").unwrap();
+        assert!(dir.path().join("src/new.rs").exists());
+    }
+
+    #[test]
+    fn create_file_refuses_overwrite_existing_file() {
+        let dir = worktree();
+        assert!(create_file(dir.path(), "hello.txt").is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "hi\nthere\n",
+            "existing file must be untouched"
+        );
+    }
+
+    #[test]
+    fn create_file_refuses_overwrite_dir() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        assert!(create_file(dir.path(), "sub").is_err());
+        assert!(dir.path().join("sub").is_dir());
+    }
+
+    #[test]
+    fn create_file_refuses_git_path() {
+        let dir = worktree();
+        assert!(create_file(dir.path(), ".git/evil").is_err());
+    }
+
+    #[test]
+    fn create_file_refuses_traversal() {
+        let dir = worktree();
+        assert!(create_file(dir.path(), "../evil.txt").is_err());
+    }
+
+    #[test]
+    fn create_file_refuses_missing_parent() {
+        let dir = worktree();
+        assert!(create_file(dir.path(), "nope/new.txt").is_err());
+        assert!(!dir.path().join("nope").exists());
+    }
+
+    #[test]
+    fn create_file_refuses_escaping_symlink_parent() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        assert!(create_file(dir.path(), "escape/evil.txt").is_err());
+        assert!(!outside.path().join("evil.txt").exists());
+    }
+
+    // --- create_dir ---
+
+    #[test]
+    fn create_dir_single() {
+        let dir = worktree();
+        create_dir(dir.path(), "newdir").unwrap();
+        assert!(dir.path().join("newdir").is_dir());
+    }
+
+    #[test]
+    fn create_dir_nested_creates_intermediates() {
+        let dir = worktree();
+        create_dir(dir.path(), "a/b/c").unwrap();
+        assert!(dir.path().join("a/b/c").is_dir());
+    }
+
+    #[test]
+    fn create_dir_refuses_existing() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        assert!(create_dir(dir.path(), "sub").is_err());
+    }
+
+    #[test]
+    fn create_dir_refuses_git_path() {
+        let dir = worktree();
+        assert!(create_dir(dir.path(), ".git/evil").is_err());
+    }
+
+    #[test]
+    fn create_dir_refuses_traversal() {
+        let dir = worktree();
+        assert!(create_dir(dir.path(), "../evil").is_err());
+    }
+
+    #[test]
+    fn create_dir_refuses_escaping_ancestor() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        assert!(create_dir(dir.path(), "escape/nested/dir").is_err());
+        assert!(!outside.path().join("nested").exists());
+    }
+
+    // --- rename_entry ---
+
+    #[test]
+    fn rename_file_happy() {
+        let dir = worktree();
+        rename_entry(dir.path(), "hello.txt", "renamed.txt").unwrap();
+        assert!(!dir.path().join("hello.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("renamed.txt")).unwrap(),
+            "hi\nthere\n"
+        );
+    }
+
+    #[test]
+    fn rename_dir_with_contents_happy() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/inner.txt"), "inner\n").unwrap();
+        rename_entry(dir.path(), "sub", "moved").unwrap();
+        assert!(!dir.path().join("sub").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("moved/inner.txt")).unwrap(),
+            "inner\n"
+        );
+    }
+
+    #[test]
+    fn rename_refuses_missing_source() {
+        let dir = worktree();
+        assert!(rename_entry(dir.path(), "nope.txt", "dst.txt").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_existing_destination() {
+        let dir = worktree();
+        std::fs::write(dir.path().join("dst.txt"), "already here\n").unwrap();
+        assert!(rename_entry(dir.path(), "hello.txt", "dst.txt").is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dst.txt")).unwrap(),
+            "already here\n"
+        );
+    }
+
+    #[test]
+    fn rename_refuses_git_source() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+        assert!(rename_entry(dir.path(), ".git/config", "leaked.txt").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_git_destination() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert!(rename_entry(dir.path(), "hello.txt", ".git/evil").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_traversal_either_side() {
+        let dir = worktree();
+        assert!(rename_entry(dir.path(), "../evil.txt", "dst.txt").is_err());
+        assert!(rename_entry(dir.path(), "hello.txt", "../evil.txt").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_escaping_dest_parent() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        assert!(rename_entry(dir.path(), "hello.txt", "escape/evil.txt").is_err());
+        assert!(!outside.path().join("evil.txt").exists());
+    }
+
+    // --- delete_entry ---
+
+    #[test]
+    fn delete_file_happy() {
+        let dir = worktree();
+        delete_entry(dir.path(), "hello.txt").unwrap();
+        assert!(!dir.path().join("hello.txt").exists());
+    }
+
+    #[test]
+    fn delete_empty_dir_happy() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        delete_entry(dir.path(), "empty").unwrap();
+        assert!(!dir.path().join("empty").exists());
+    }
+
+    #[test]
+    fn delete_dir_recursive_happy() {
+        let dir = worktree();
+        std::fs::create_dir_all(dir.path().join("sub/nested")).unwrap();
+        std::fs::write(dir.path().join("sub/nested/f.txt"), "x\n").unwrap();
+        delete_entry(dir.path(), "sub").unwrap();
+        assert!(!dir.path().join("sub").exists());
+    }
+
+    #[test]
+    fn delete_symlink_removes_link_not_target() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("target.txt"), "keep me\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("target.txt"),
+            dir.path().join("link.txt"),
+        )
+        .unwrap();
+        delete_entry(dir.path(), "link.txt").unwrap();
+        assert!(!dir.path().join("link.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("target.txt")).unwrap(),
+            "keep me\n",
+            "symlink target must survive deleting the link"
+        );
+    }
+
+    #[test]
+    fn delete_refuses_worktree_root() {
+        let dir = worktree();
+        assert!(delete_entry(dir.path(), ".").is_err() || delete_entry(dir.path(), "").is_err());
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn delete_refuses_git_path() {
+        let dir = worktree();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+        assert!(delete_entry(dir.path(), ".git/config").is_err());
+        assert!(dir.path().join(".git/config").exists());
+    }
+
+    #[test]
+    fn delete_refuses_traversal() {
+        let dir = worktree();
+        assert!(delete_entry(dir.path(), "../evil").is_err());
+    }
+
+    #[test]
+    fn delete_escaping_symlink_removes_only_link() {
+        let dir = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "top secret\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("escape-link"),
+        )
+        .unwrap();
+        delete_entry(dir.path(), "escape-link").unwrap();
+        assert!(!dir.path().join("escape-link").exists());
+        assert!(
+            outside.path().join("secret.txt").exists(),
+            "the outside target must survive"
         );
     }
 }
