@@ -5,12 +5,27 @@ import type { editor } from "monaco-editor"
 // setup once for both the editor and the diff viewer.
 import { monaco } from "@/lib/monacoSetup"
 
+// The `monaco` instance's type, re-exported so a consumer (EditorOverlay's
+// `EditorBody`, which owns tab lifecycle and disposes closed tabs' models) can
+// type a ref to it WITHOUT importing `@/lib/monacoSetup` itself: that import
+// runs the multi-MB self-host bootstrap eagerly, defeating the whole point of
+// lazy-loading `CodeEditor`. A `MonacoInstance` type-only import is erased at
+// build time, so it costs nothing.
+export type MonacoInstance = typeof monaco
+
 interface CodeEditorProps {
   // The worktree-relative path — Monaco infers the language from its extension.
   path: string
   value: string
   onChange: (value: string) => void
   onSave: () => void
+  // Fired once on mount with the `monaco` instance captured at `onMount`, so
+  // the PARENT (EditorBody, which owns the tab lifecycle) can dispose a
+  // closed tab's model by URI: `monaco.editor.getModel(monaco.Uri.parse(path))
+  // ?.dispose()`. CodeEditor stays a pure active-tab renderer and never
+  // disposes models itself, see EditorOverlay.tsx's "Monaco model lifecycle"
+  // comment for the full contract.
+  onReady?: (mon: MonacoInstance) => void
 }
 
 export default function CodeEditor({
@@ -18,6 +33,7 @@ export default function CodeEditor({
   value,
   onChange,
   onSave,
+  onReady,
 }: CodeEditorProps) {
   // Ctrl/Cmd+s is bound once on mount, but `onSave` is a fresh closure each
   // render (it reads the latest draft). Route the keybinding through a ref so it
@@ -33,6 +49,7 @@ export default function CodeEditor({
     mon: typeof monaco,
   ): void {
     ed.addCommand(mon.KeyMod.CtrlCmd | mon.KeyCode.KeyS, () => saveRef.current())
+    onReady?.(mon)
   }
 
   return (

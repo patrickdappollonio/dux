@@ -157,6 +157,119 @@ describe("FileTree", () => {
     expect(onOpen).toHaveBeenCalledWith("__error__")
   })
 
+  // classList.contains does exact-token matching (unlike a `[class*=]` CSS
+  // selector, which would substring-match "lucide-folder" against
+  // "lucide-folder-open" too), so this reliably distinguishes lucide's
+  // sibling icon names.
+  function hasIcon(el: Element | null, lucideClass: string): boolean {
+    if (!el) return false
+    return [...el.querySelectorAll("svg")].some((svg) =>
+      svg.classList.contains(lucideClass),
+    )
+  }
+
+  it("renders a type-aware icon for a code file, and folder/folder-open for a directory", async () => {
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({
+        dir: d,
+        entries: d === "" ? [dir("src"), file("main.ts")] : [file("src/lib.rs")],
+      }),
+    )
+    render(
+      <FileTree
+        sessionId="s1"
+        openPath={null}
+        changed={new Map()}
+        initialPath={null}
+        onOpen={() => {}}
+      />,
+    )
+    await screen.findByText("main.ts")
+    const fileRow = screen.getByText("main.ts").closest("button")
+    expect(hasIcon(fileRow, "lucide-file-code")).toBe(true)
+
+    const dirRow = screen.getByText("src").closest("button")
+    expect(hasIcon(dirRow, "lucide-folder")).toBe(true)
+    expect(hasIcon(dirRow, "lucide-folder-open")).toBe(false)
+
+    fireEvent.click(dirRow!)
+    await screen.findByText("lib.rs")
+    expect(hasIcon(dirRow, "lucide-folder-open")).toBe(true)
+  })
+
+  it("renders the distinct empty-folder glyph for a loaded, zero-child directory", async () => {
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({ dir: d, entries: d === "" ? [dir("empty-dir")] : [] }),
+    )
+    render(
+      <FileTree
+        sessionId="s1"
+        openPath={null}
+        changed={new Map()}
+        initialPath={null}
+        onOpen={() => {}}
+      />,
+    )
+    const dirRow = await screen.findByText("empty-dir")
+    const button = dirRow.closest("button")
+    fireEvent.click(button!) // expand, triggers the fetch that reveals "empty"
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10))
+    })
+    expect(hasIcon(button, "lucide-folder-x")).toBe(true)
+  })
+
+  it("double-click on a file row calls onOpen with { pin: true }", async () => {
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({ dir: d, entries: d === "" ? [file("main.ts")] : [] }),
+    )
+    const onOpen = vi.fn()
+    render(
+      <FileTree
+        sessionId="s1"
+        openPath={null}
+        changed={new Map()}
+        initialPath={null}
+        onOpen={onOpen}
+      />,
+    )
+    const row = await screen.findByText("main.ts")
+    fireEvent.doubleClick(row)
+    expect(onOpen).toHaveBeenCalledWith("main.ts", { pin: true })
+  })
+
+  // A real browser double-click fires click, click, THEN dblclick, in that
+  // order, not just a single doubleclick event. The comment above FileTree's
+  // `onOpen` prop claims the two preceding `onClick`s are "harmless" because
+  // `openFile` (lib/editorTabs.ts) is idempotent for an already-open path; this
+  // exercises that actual three-event sequence rather than only the synthetic
+  // `fireEvent.doubleClick` shortcut used above, so a regression that makes the
+  // preceding clicks NOT harmless (e.g. clobbering the pin) would be caught.
+  it("a real click, click, dblclick sequence calls onOpen with the preview opens first, then the pin call", async () => {
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({ dir: d, entries: d === "" ? [file("main.ts")] : [] }),
+    )
+    const onOpen = vi.fn()
+    render(
+      <FileTree
+        sessionId="s1"
+        openPath={null}
+        changed={new Map()}
+        initialPath={null}
+        onOpen={onOpen}
+      />,
+    )
+    const row = await screen.findByText("main.ts")
+    fireEvent.click(row)
+    fireEvent.click(row)
+    fireEvent.doubleClick(row)
+    expect(onOpen.mock.calls).toEqual([
+      ["main.ts"],
+      ["main.ts"],
+      ["main.ts", { pin: true }],
+    ])
+  })
+
   it("evicts a collapsed directory's cache so re-expanding refetches (F3)", async () => {
     let srcCalls = 0
     treeMock.mockImplementation((_sid, d) => {

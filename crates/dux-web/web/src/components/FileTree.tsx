@@ -1,8 +1,10 @@
 import { useRef, useState, useMemo, useCallback, useEffect } from "react"
-import { ChevronRight, File as FileIcon, Loader2, RotateCw } from "lucide-react"
+import { ChevronRight, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
+import { FileTreeIcon } from "@/components/FileTreeIcon"
+import { dirIconKind, fileIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
 import {
   ancestorDirs,
@@ -24,7 +26,12 @@ interface FileTreeProps {
   // link / opened-from-elsewhere). Later changes to openPath also pull any
   // not-yet-loaded parents so a freshly created file is revealed.
   initialPath: string | null
-  onOpen: (path: string) => void
+  // Single click = preview open (`onOpen(path)`); double-click = permanent
+  // open / pin (`onOpen(path, { pin: true })`). A double-click also fires two
+  // preceding `onClick`s, harmless since `openFile` (lib/editorTabs.ts) is
+  // idempotent for an already-open path (it just activates), so the pin lands
+  // cleanly right after.
+  onOpen: (path: string, opts?: { pin?: boolean }) => void
 }
 
 export function FileTree({
@@ -303,6 +310,12 @@ export function FileTree({
                       )}
                     />
                   )}
+                  <FileTreeIcon
+                    kind={dirIconKind({
+                      open: expanded.has(row.path),
+                      empty: row.empty,
+                    })}
+                  />
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
                     {row.name}
                   </span>
@@ -343,6 +356,7 @@ export function FileTree({
                 <button
                   type="button"
                   onClick={() => onOpen(row.path)}
+                  onDoubleClick={() => onOpen(row.path, { pin: true })}
                   style={{
                     paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
                     height: ROW_HEIGHT,
@@ -352,7 +366,7 @@ export function FileTree({
                     row.path === openPath && "bg-muted",
                   )}
                 >
-                  <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                  <FileTreeIcon kind={fileIconKind(row.path)} />
                   <span className="min-w-0 flex-1 truncate font-mono text-sm">
                     {row.name}
                   </span>
