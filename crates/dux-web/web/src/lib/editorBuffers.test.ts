@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { isBufferStale } from "./editorBuffers"
+import { isBufferStale, pruneByIds, pruneSetByIds } from "./editorBuffers"
 
 // Component-level/logic coverage for the preview-replace stale-buffer fix:
 // `EditorBody` keys its Monaco buffers by TAB ID, but `openFile` rule 2 (see
@@ -23,5 +23,51 @@ describe("isBufferStale", () => {
 
   it("a buffer whose path matches the tab's current path is fresh", () => {
     expect(isBufferStale({ path: "a.ts" }, "a.ts")).toBe(false)
+  })
+})
+
+// `pruneByIds` backs the finding-4 fix: EditorBody keys its `buffers` Map and
+// the file/diff request-token maps by tab id, and none of them shrank on
+// their own when a tab closed. This is the pure prune step those caches now
+// run through in the same `[tabs]`-keyed effect that already disposes Monaco
+// models by path.
+describe("pruneByIds", () => {
+  it("drops entries whose key is no longer live", () => {
+    const map = new Map([
+      ["t1", "a"],
+      ["t2", "b"],
+      ["t3", "c"],
+    ])
+    const next = pruneByIds(map, new Set(["t1", "t3"]))
+    expect([...next.entries()]).toEqual([
+      ["t1", "a"],
+      ["t3", "c"],
+    ])
+  })
+
+  it("returns the SAME map reference when nothing needs pruning", () => {
+    const map = new Map([["t1", "a"]])
+    const next = pruneByIds(map, new Set(["t1", "t2"]))
+    expect(next).toBe(map)
+  })
+
+  it("an empty live set prunes every entry", () => {
+    const map = new Map([["t1", "a"]])
+    const next = pruneByIds(map, new Set())
+    expect(next.size).toBe(0)
+  })
+})
+
+describe("pruneSetByIds", () => {
+  it("drops ids that are no longer live", () => {
+    const set = new Set(["t1", "t2", "t3"])
+    const next = pruneSetByIds(set, new Set(["t2"]))
+    expect([...next]).toEqual(["t2"])
+  })
+
+  it("returns the SAME set reference when nothing needs pruning", () => {
+    const set = new Set(["t1"])
+    const next = pruneSetByIds(set, new Set(["t1", "t2"]))
+    expect(next).toBe(set)
   })
 })

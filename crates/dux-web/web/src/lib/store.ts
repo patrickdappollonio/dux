@@ -38,6 +38,7 @@ import {
   setTabMode as editorSetTabModePure,
 } from "./editorTabs"
 import type { EditorTabsState } from "./editorTabs"
+import { newClientId } from "./uid"
 import type {
   BranchWarningView,
   ChangedFileView,
@@ -1672,7 +1673,7 @@ export function openEditor(
 ): void {
   if (state.selectedSessionId !== sessionId) selectSession(sessionId)
   setState({ editorTarget: { sessionId, initialPath, initialMode: mode } })
-  if (initialPath !== null) editorOpenFile(sessionId, initialPath, mode)
+  if (initialPath !== null) editorOpenFile(sessionId, initialPath, { mode })
 }
 
 export function closeEditor(): void {
@@ -1689,23 +1690,36 @@ function editorTabsFor(sessionId: string): EditorTabsState {
   return state.editorTabs[sessionId] ?? emptyTabsState()
 }
 
+// Skips `setState` entirely when `next` is REFERENCE-EQUAL to the session's
+// current tabs state. A reducer that determined nothing actually changed
+// (e.g. `setTabDirty` called with the flag it already has) returns the same
+// object back. `useDux()` is an unselective `useSyncExternalStore`, so every
+// consumer app-wide re-renders on every `setState`; without this guard a
+// no-op dispatch (like the one `editorSetTabDirty` would otherwise fire on
+// every keystroke) would still fan out a global re-render for nothing.
 function setEditorTabsFor(sessionId: string, next: EditorTabsState): void {
+  if (state.editorTabs[sessionId] === next) return
   setState({ editorTabs: { ...state.editorTabs, [sessionId]: next } })
 }
 
 // Open (or activate, or preview-replace) a file in a session's tab list. See
-// `lib/editorTabs.ts` `openFile` for the exact promotion rules.
+// `lib/editorTabs.ts` `openFile` for the exact promotion rules. `opts.mode` is
+// an EXPLICIT mode intent (changed-files Edit/Diff, a brand-new file, an
+// external deep-link via `openEditor`); it always drives a new/replaced tab's
+// mode and, given, also retargets an already-open tab's mode. Omit it for a
+// plain activation (tree/search click) so re-clicking an already-open path
+// never silently flips its existing diff view back to file view.
 export function editorOpenFile(
   sessionId: string,
   path: string,
-  mode: EditorViewMode = "file",
-  opts: { pin?: boolean } = {},
+  opts: { mode?: EditorViewMode; pin?: boolean } = {},
 ): void {
   setEditorTabsFor(
     sessionId,
-    editorOpenFilePure(editorTabsFor(sessionId), path, mode, {
+    editorOpenFilePure(editorTabsFor(sessionId), path, {
+      mode: opts.mode,
       pin: opts.pin,
-      newId: () => crypto.randomUUID(),
+      newId: () => newClientId(),
     }),
   )
 }

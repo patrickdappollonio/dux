@@ -167,6 +167,25 @@ describe("editor tabs store slice", () => {
     expect(tabs[0]).toMatchObject({ path: "a.ts", mode: "diff" })
   })
 
+  it("editorOpenFile without an explicit mode preserves an existing tab's mode (tree/search re-click)", async () => {
+    const mod = await loadStore()
+    mod.openEditor("s1", "a.ts", "diff")
+    // A tree/search click on the already-open path carries no mode intent.
+    mod.editorOpenFile("s1", "a.ts")
+    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0].mode).toBe("diff")
+  })
+
+  it("editorOpenFile with an explicit mode retargets an existing tab (changed-files Diff button)", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "a.ts", { mode: "file", pin: true })
+    mod.editorOpenFile("s1", "a.ts", { mode: "diff" })
+    const tabs = mod.getSnapshot().editorTabs.s1.tabs
+    expect(tabs).toHaveLength(1)
+    expect(tabs[0].mode).toBe("diff")
+  })
+
   it("editorPinTab clears preview", async () => {
     const mod = await loadStore()
     mod.editorOpenFile("s1", "a.ts")
@@ -186,10 +205,21 @@ describe("editor tabs store slice", () => {
     expect(mod.getSnapshot().editorTabs.s1.tabs[0].dirty).toBe(false)
   })
 
+  it("editorSetTabDirty with an unchanged value is a no-op and keeps the session's tabs state reference identical (no store-wide re-render)", async () => {
+    const mod = await loadStore()
+    mod.editorOpenFile("s1", "a.ts")
+    const id = mod.getSnapshot().editorTabs.s1.tabs[0].id
+    const before = mod.getSnapshot().editorTabs.s1
+    // The freshly-opened tab already starts at dirty: false, so setting it to
+    // false again must not replace the session's tabs-state object.
+    mod.editorSetTabDirty("s1", id, false)
+    expect(mod.getSnapshot().editorTabs.s1).toBe(before)
+  })
+
   it("editorCloseTab activates the neighbor and removes the tab", async () => {
     const mod = await loadStore()
-    mod.editorOpenFile("s1", "a.ts", "file", { pin: true })
-    mod.editorOpenFile("s1", "b.ts", "file", { pin: true })
+    mod.editorOpenFile("s1", "a.ts", { pin: true })
+    mod.editorOpenFile("s1", "b.ts", { pin: true })
     const [a, b] = mod.getSnapshot().editorTabs.s1.tabs
     mod.editorActivateTab("s1", a.id)
     mod.editorCloseTab("s1", a.id)

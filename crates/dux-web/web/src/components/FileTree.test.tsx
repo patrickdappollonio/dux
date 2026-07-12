@@ -238,6 +238,38 @@ describe("FileTree", () => {
     expect(onOpen).toHaveBeenCalledWith("main.ts", { pin: true })
   })
 
+  // A real browser double-click fires click, click, THEN dblclick, in that
+  // order, not just a single doubleclick event. The comment above FileTree's
+  // `onOpen` prop claims the two preceding `onClick`s are "harmless" because
+  // `openFile` (lib/editorTabs.ts) is idempotent for an already-open path; this
+  // exercises that actual three-event sequence rather than only the synthetic
+  // `fireEvent.doubleClick` shortcut used above, so a regression that makes the
+  // preceding clicks NOT harmless (e.g. clobbering the pin) would be caught.
+  it("a real click, click, dblclick sequence calls onOpen with the preview opens first, then the pin call", async () => {
+    treeMock.mockImplementation((_sid, d) =>
+      Promise.resolve({ dir: d, entries: d === "" ? [file("main.ts")] : [] }),
+    )
+    const onOpen = vi.fn()
+    render(
+      <FileTree
+        sessionId="s1"
+        openPath={null}
+        changed={new Map()}
+        initialPath={null}
+        onOpen={onOpen}
+      />,
+    )
+    const row = await screen.findByText("main.ts")
+    fireEvent.click(row)
+    fireEvent.click(row)
+    fireEvent.doubleClick(row)
+    expect(onOpen.mock.calls).toEqual([
+      ["main.ts"],
+      ["main.ts"],
+      ["main.ts", { pin: true }],
+    ])
+  })
+
   it("evicts a collapsed directory's cache so re-expanding refetches (F3)", async () => {
     let srcCalls = 0
     treeMock.mockImplementation((_sid, d) => {

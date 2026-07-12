@@ -18,7 +18,8 @@ import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
 import type { FileDiffContents } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
-import { isBufferStale } from "@/lib/editorBuffers"
+import { isBufferStale, pruneByIds, pruneSetByIds } from "@/lib/editorBuffers"
+import { dirtyCloseMessage, shouldPromoteOnEdit } from "@/lib/editorTabs"
 import { isLocalAccessHost } from "@/lib/localAccess"
 import { isMarkdownPath } from "@/lib/markdown"
 import { cn } from "@/lib/utils"
@@ -121,6 +122,20 @@ interface TabBuffer {
   // The path whose content is actually held in `loaded`/`draft`, or null
   // while a fetch for `path` is in flight / has never completed.
   loadedPath: string | null
+  // True from the moment `loadFileBuffer` seeds this entry until its fetch
+  // settles (success OR error). `loadFileBuffer` seeds a fresh buffer
+  // synchronously before its async read resolves (so a stale buffer never
+  // renders even for one frame), and that synchronous `setState` changes
+  // `activeBuffer?.loadedPath` (undefined -> null), which re-triggers the
+  // load effect on the very next render. Without this flag the effect's
+  // "already loaded?" check (`loadedPath === path`) sees `null` both before
+  // AND during the in-flight fetch and can't tell them apart, so it fires a
+  // SECOND `fileApi.read` for the same tab+path. This is harmless for
+  // correctness (the request-token check discards the first response), but
+  // it doubles the read cost on every fresh open. `loading` is the marker
+  // that lets the effect distinguish "already fetching, don't refetch" from
+  // "settled with an error, retry on next visit."
+  loading: boolean
   loaded: string
   draft: string
   binary: boolean
@@ -136,6 +151,7 @@ function emptyBuffer(path: string): TabBuffer {
   return {
     path,
     loadedPath: null,
+    loading: true,
     loaded: "",
     draft: "",
     binary: false,
@@ -270,9 +286,12 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // avoids allocating a combined array on every tick.
   const activeTabPath = activeTab?.path ?? null
   // Not memoized: two small array scans over the changes slice is cheap, and
-  // wrapping it in `useMemo` here fought the React Compiler's own inference
-  // (it flagged the manual dependency array as stale relative to its
-  // analysis) — the compiler auto-memoizes this expression anyway.
+  // wrapping it in `useMemo` here fought `eslint-plugin-react-hooks`'
+  // compiler-derived lint rules (it flagged the manual dependency array as
+  // stale relative to its analysis). Note the build does NOT run
+  // babel-plugin-react-compiler, so there is no runtime auto-memoization
+  // here. This expression genuinely re-evaluates on every render; the two
+  // scans are just cheap enough that that's fine.
   const openFileSignal = (() => {
     if (activeTabPath === null || !slice) return ""
     const f =
@@ -339,10 +358,11 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Fetch and store a tab's file buffer for `path`. Extracted into its own
   // function (rather than inlined in the effect below) so the effect body
   // never calls `setBuffers` directly — mirrors FileTree.tsx's `fetchDir`. A
-  // plain function (not `useCallback`): the React Compiler's manual-
-  // memoization check disagreed with a `[sessionId]` dependency array here
-  // even though this mirrors `fetchDir`'s (which DOES pass) shape exactly;
-  // the effect below still gates on tab/path identity, so a fresh function
+  // plain function (not `useCallback`): `eslint-plugin-react-hooks`'
+  // compiler-derived manual-memoization lint disagreed with a `[sessionId]`
+  // dependency array here even though this mirrors `fetchDir`'s (which DOES
+  // pass) shape exactly; the effect below still gates on tab/path identity,
+  // so a fresh function
   // each render costs nothing beyond one extra allocation.
   function loadFileBuffer(tabId: string, path: string): void {
     const token = (fileRequestTokenRef.current.get(tabId) ?? 0) + 1
@@ -370,6 +390,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
           next.set(tabId, {
             ...cur,
             loadedPath: path,
+            loading: false,
             loaded: f.content,
             draft: f.content,
             binary: f.binary,
@@ -387,6 +408,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
           const next = new Map(prev)
           next.set(tabId, {
             ...cur,
+            loading: false,
             fileError: e instanceof Error ? e.message : "could not open file",
           })
           return next
@@ -397,15 +419,16 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // Load the active tab's file buffer lazily: only in file mode, only when the
   // cached buffer doesn't already hold CURRENT content for this tab (absent,
   // stale per `isBufferStale` — e.g. a preview-replace swapped this tab's
-  // path — or a fetch for this path hasn't completed yet). Skipped entirely in
-  // diff mode. Unlike the diff, the buffer is NOT auto-refreshed when the file
-  // changes on disk under us: re-reading could silently clobber unsaved edits.
+  // path) AND isn't already mid-fetch for this exact path (`loading`).
+  // Skipped entirely in diff mode. Unlike the diff, the buffer is NOT
+  // auto-refreshed when the file changes on disk under us: re-reading could
+  // silently clobber unsaved edits.
   useEffect(() => {
     if (!activeTab || activeTab.mode !== "file") return
     if (
       activeBuffer &&
       !isBufferStale(activeBuffer, activeTab.path) &&
-      activeBuffer.loadedPath === activeTab.path
+      (activeBuffer.loadedPath === activeTab.path || activeBuffer.loading)
     )
       return
     // `loadFileBuffer` synchronously seeds a placeholder buffer (so a stale
@@ -414,7 +437,11 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     // `setState` at the top of a data-loading effect, matching FileTree.tsx's
     // `fetchDir` (which seeds `{ status: "loading" }` before fetching the
     // same way). The lint's static call-graph tracing flags it here even
-    // though the equivalent pattern in FileTree.tsx doesn't trip it.
+    // though the equivalent pattern in FileTree.tsx doesn't trip it. That
+    // synchronous seed changes `activeBuffer?.loadedPath` on the very next
+    // render (undefined -> null), which is exactly why the `loading` check
+    // above exists: without it, this effect would fire a second, redundant
+    // `fileApi.read` for the same tab+path before the first one even settles.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadFileBuffer(activeTab.id, activeTab.path)
     // `loadFileBuffer` is a plain function (fresh identity every render, see
@@ -427,11 +454,12 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     activeTab?.path,
     activeBuffer?.path,
     activeBuffer?.loadedPath,
+    activeBuffer?.loading,
   ])
 
   // Fetch and store a tab's diff cache for `path`. Extracted for the same
   // reason as `loadFileBuffer` above; also a plain function for the same
-  // React-Compiler-manual-memoization reason.
+  // compiler-derived-lint-rule reason.
   function loadDiffBuffer(tabId: string, path: string): void {
     const token = (diffRequestTokenRef.current.get(tabId) ?? 0) + 1
     diffRequestTokenRef.current.set(tabId, token)
@@ -495,6 +523,14 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   // anymore. Diffs by the SET OF OPEN PATHS (not tab ids) — see the
   // `prevOpenPathsRef` comment above for why that's required for a
   // preview-replace's OLD path to get disposed too.
+  //
+  // This same tick also prunes every tab-id-keyed cache down to the live tab
+  // set: the `buffers` Map, the file/diff request-token maps, and the
+  // markdown-preview-open Set otherwise keep a closed tab's entry forever
+  // (unbounded for a long-lived overlay session that opens/closes many
+  // files). `pruneByIds` returns the same reference when there's nothing to
+  // drop, so this is a no-op setState on every tab-list change that isn't a
+  // close.
   useEffect(() => {
     const currentPaths = new Set(tabs.map((t) => t.path))
     const mon = monacoRef.current
@@ -506,11 +542,31 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
       }
     }
     prevOpenPathsRef.current = currentPaths
+
+    const liveIds = new Set(tabs.map((t) => t.id))
+    // Synchronous setState in this effect body is deliberate, matching
+    // `loadFileBuffer`'s seed above: this is a synchronize-with-`tabs`
+    // cleanup step (pruning caches keyed by ids that just left `tabs`), not
+    // state derived from a render. `pruneByIds`/`pruneSetByIds` return the
+    // SAME reference when nothing needs dropping, so React bails out of the
+    // re-render on every tick that isn't an actual tab close.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBuffers((prev) => pruneByIds(prev, liveIds))
+    setPreviewOpenTabIds((prev) => pruneSetByIds(prev, liveIds))
+    fileRequestTokenRef.current = pruneByIds(fileRequestTokenRef.current, liveIds)
+    diffRequestTokenRef.current = pruneByIds(diffRequestTokenRef.current, liveIds)
   }, [tabs])
 
   // Dispose every retained model when the overlay body unmounts (overlay
-  // closed) — the library only disposes the CURRENT model on unmount; we own
-  // the rest.
+  // closed). @monaco-editor/react only disposes the CURRENT model on
+  // unmount, so we own the rest, i.e. every OTHER path's model this tab strip
+  // accumulated. One thing we deliberately do NOT chase down: the library
+  // also keeps its own module-level view-state cache (cursor/scroll position
+  // per path, in a Map that is never pruned), separate from the models we
+  // dispose here. We accept that small, unbounded cache since its per-entry
+  // cost is just cursor/scroll coordinates, and passing
+  // `saveViewState={false}` to avoid it would mean losing view-state restore
+  // (cursor/scroll position) when reopening a file.
   useEffect(() => {
     return () => {
       const mon = monacoRef.current
@@ -523,9 +579,13 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
 
   // Preview open (tree single-click, search click). Double-click / new-file
   // pass { pin: true }. Single source of truth for every open entry point —
-  // see lib/editorTabs.ts `openFile` for the promotion rules.
+  // see lib/editorTabs.ts `openFile` for the promotion rules. Deliberately
+  // carries no `mode` intent: a tree/search click is a plain activation, not
+  // an explicit Edit/Diff action, so re-clicking an already-open path must
+  // preserve whatever mode that tab is currently showing (openFile's rule 1)
+  // rather than silently flipping an open diff tab back to file view.
   function requestOpen(path: string, opts?: { pin?: boolean }): void {
-    editorOpenFile(sessionId, path, "file", opts)
+    editorOpenFile(sessionId, path, opts)
   }
 
   function requestClose(): void {
@@ -571,8 +631,17 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
     const cur = buffers.get(tabId)
     if (cur && !cur.binary && !cur.readOnly) {
       const newDirty = value !== cur.loaded
-      editorSetTabDirty(sessionId, tabId, newDirty)
-      if (newDirty && activeTab.preview) editorPinTab(sessionId, tabId)
+      // Only dispatch when the dirty flag actually flips: `useDux()` is an
+      // unselective `useSyncExternalStore`, so a dispatch on every keystroke
+      // fans out a store-wide re-render to every consumer, not just this
+      // overlay. `editorSetTabDirty`/`setTabDirty` also short-circuit on an
+      // unchanged value (belt-and-braces), but skipping the call entirely
+      // here avoids even constructing the new-tabs-array allocation the
+      // reducer would otherwise do on every keystroke.
+      if (newDirty !== activeTab.dirty) {
+        editorSetTabDirty(sessionId, tabId, newDirty)
+      }
+      if (shouldPromoteOnEdit(activeTab, newDirty)) editorPinTab(sessionId, tabId)
     }
   }
 
@@ -652,8 +721,9 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         setSearchTruncated(result.truncated ?? false)
         setNewFileOpen(false)
         setNewFilePath("")
-        // A brand-new file is a deliberate open — pin it.
-        editorOpenFile(sessionId, path, "file", { pin: true })
+        // A brand-new file is a deliberate open, so pin it and force file
+        // mode (it can't have a diff since it was just created).
+        editorOpenFile(sessionId, path, { mode: "file", pin: true })
       })
       .catch((e) => {
         toast.error(e instanceof Error ? e.message : "could not create file")
@@ -1059,11 +1129,7 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
         <DialogContent showCloseButton={false} className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>Discard unsaved changes?</DialogTitle>
-            <DialogDescription>
-              {dirtyTabCount === 1
-                ? "You have unsaved changes in 1 tab. They will be lost."
-                : `You have unsaved changes in ${dirtyTabCount} tabs. They will be lost.`}
-            </DialogDescription>
+            <DialogDescription>{dirtyCloseMessage(dirtyTabCount)}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button

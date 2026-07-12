@@ -30,37 +30,50 @@ export function emptyTabsState(): EditorTabsState {
 // Open a file, applying the VS Code preview model. Single source of truth for
 // every open entry point (tree single-click, tree double-click, search, new
 // file, changed-files Edit/Diff):
-//  1. If a tab already holds `path`: activate it; if opts.pin, clear its preview.
+//  1. If a tab already holds `path`: activate it; if opts.pin, clear its preview;
+//     if opts.mode is given (an EXPLICIT mode intent, e.g. the changed-files
+//     Edit/Diff buttons), retarget the existing tab's mode. A plain activation
+//     (tree/search click, opts.mode omitted) PRESERVES whatever mode the tab
+//     was already showing: a tree re-click must never silently flip an open
+//     diff tab back to file view.
 //  2. Else if a NON-DIRTY preview tab exists: REPLACE it in place (reuse its id,
 //     swap path+mode; preview stays true unless opts.pin). Never accumulates.
-//  3. Else: append a new tab (preview = !opts.pin), activate it.
+//     The new tab's mode is opts.mode, defaulting to "file".
+//  3. Else: append a new tab (preview = !opts.pin, mode = opts.mode ?? "file"),
+//     activate it.
 // A dirty preview tab is impossible in normal flow (editing pins a tab), but
 // rule 2 guards `!preview.dirty` defensively so we never clobber unsaved edits.
 export function openFile(
   state: EditorTabsState,
   path: string,
-  mode: EditorTabMode,
-  opts: { pin?: boolean; newId: () => string },
+  opts: { mode?: EditorTabMode; pin?: boolean; newId: () => string },
 ): EditorTabsState {
   const pin = opts.pin ?? false
+  const explicitMode = opts.mode
 
   // Rule 1: already open — activate (and optionally pin), never duplicate.
+  // Mode is retargeted only when the caller expressed an explicit intent.
   const existing = state.tabs.find((t) => t.path === path)
   if (existing) {
-    const tabs = pin
-      ? state.tabs.map((t) =>
-          t.id === existing.id ? { ...t, preview: false, mode } : t,
-        )
-      : state.tabs.map((t) => (t.id === existing.id ? { ...t, mode } : t))
+    const tabs = state.tabs.map((t) => {
+      if (t.id !== existing.id) return t
+      return {
+        ...t,
+        mode: explicitMode ?? t.mode,
+        preview: pin ? false : t.preview,
+      }
+    })
     return { tabs, activeId: existing.id }
   }
+
+  const newTabMode = explicitMode ?? "file"
 
   // Rule 2: a non-dirty preview tab exists — replace it in place.
   const previewTab = state.tabs.find((t) => t.preview && !t.dirty)
   if (previewTab) {
     const tabs = state.tabs.map((t) =>
       t.id === previewTab.id
-        ? { ...t, path, mode, preview: !pin, dirty: false }
+        ? { ...t, path, mode: newTabMode, preview: !pin, dirty: false }
         : t,
     )
     return { tabs, activeId: previewTab.id }
@@ -68,7 +81,7 @@ export function openFile(
 
   // Rule 3: append a new tab.
   const id = opts.newId()
-  const tab: EditorTab = { id, path, mode, preview: !pin, dirty: false }
+  const tab: EditorTab = { id, path, mode: newTabMode, preview: !pin, dirty: false }
   return { tabs: [...state.tabs, tab], activeId: id }
 }
 
@@ -80,11 +93,20 @@ export function pinTab(state: EditorTabsState, id: string): EditorTabsState {
   }
 }
 
+// Returns the SAME `state` reference when the target tab's dirty flag is
+// already `dirty` (including when `id` doesn't match any tab). This matters
+// because the store wrapper skips `setState` on a same-reference result (see
+// `store.ts` `editorSetTabDirty`), and the overlay currently calls this on
+// every keystroke. Without the identity short-circuit, that call would fan
+// out a store-wide re-render (useSyncExternalStore has no per-field
+// selectors) on every keystroke rather than only on an actual dirty flip.
 export function setTabDirty(
   state: EditorTabsState,
   id: string,
   dirty: boolean,
 ): EditorTabsState {
+  const target = state.tabs.find((t) => t.id === id)
+  if (!target || target.dirty === dirty) return state
   return {
     ...state,
     tabs: state.tabs.map((t) => (t.id === id ? { ...t, dirty } : t)),
@@ -138,4 +160,26 @@ export function nextActiveId(
 // this — a vanished tab id is not dirty by definition.
 export function shouldConfirmClose(state: EditorTabsState, id: string): boolean {
   return state.tabs.find((t) => t.id === id)?.dirty ?? false
+}
+
+// Whether a first edit should promote its tab from preview to permanent, so
+// an in-progress edit is never silently discarded by a later preview-replace.
+// True only when the edit turns a still-preview tab dirty; false for an
+// already-permanent tab (nothing to promote) or an edit that doesn't actually
+// change the dirty flag (e.g. undoing back to the saved content, or a
+// duplicate call for a tab that's already dirty).
+export function shouldPromoteOnEdit(
+  tab: EditorTab | undefined,
+  newDirty: boolean,
+): boolean {
+  return tab !== undefined && tab.preview && newDirty
+}
+
+// The overlay-close "Discard unsaved changes?" confirmation copy, singular vs.
+// plural across however many tabs are dirty. Single source of truth so the
+// dialog body and any future caller never drift on the exact wording.
+export function dirtyCloseMessage(dirtyCount: number): string {
+  return dirtyCount === 1
+    ? "You have unsaved changes in 1 tab. They will be lost."
+    : `You have unsaved changes in ${dirtyCount} tabs. They will be lost.`
 }
