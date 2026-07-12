@@ -56,6 +56,17 @@ struct WriteOp {
 }
 
 #[derive(Deserialize)]
+struct PathOp {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct RenameOp {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
 struct OpenInEditorOp {
     path: String,
     /// Which editor to open, as a dux-core editor config key/alias (e.g.
@@ -119,6 +130,10 @@ pub fn routes() -> Router<AppState> {
         .route(&format!("{prefix}/diff"), post(diff_contents))
         .route(&format!("{prefix}/raw"), get(read_raw))
         .route(&format!("{prefix}/write"), post(write_file))
+        .route(&format!("{prefix}/create-file"), post(create_file))
+        .route(&format!("{prefix}/create-dir"), post(create_dir))
+        .route(&format!("{prefix}/rename"), post(rename_entry))
+        .route(&format!("{prefix}/delete"), post(delete_entry))
         .route(&format!("{prefix}/open-in-editor"), post(open_in_editor))
 }
 
@@ -447,6 +462,157 @@ async fn write_file(
     StatusCode::OK.into_response()
 }
 
+/// Create a new empty file at `op.path`. Refuses an already-existing entry and
+/// a missing parent, same as `write_file`'s create arm. See
+/// `dux_core::worktree_file::create_file` for the containment guards.
+async fn create_file(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<PathOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let wt = worktree.clone();
+    let path = op.path;
+    match tokio::task::spawn_blocking(move || dux_core::worktree_file::create_file(&wt, &path))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("create-file task failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+    state
+        .engine
+        .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    state.changes.invalidate(session_id);
+    StatusCode::OK.into_response()
+}
+
+/// Create a new directory at `op.path`, creating missing intermediate
+/// components. See `dux_core::worktree_file::create_dir`.
+async fn create_dir(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<PathOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let wt = worktree.clone();
+    let path = op.path;
+    match tokio::task::spawn_blocking(move || dux_core::worktree_file::create_dir(&wt, &path)).await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("create-dir task failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+    state
+        .engine
+        .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    state.changes.invalidate(session_id);
+    StatusCode::OK.into_response()
+}
+
+/// Rename/move `op.from` to `op.to` (file or directory). See
+/// `dux_core::worktree_file::rename_entry`.
+async fn rename_entry(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<RenameOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let wt = worktree.clone();
+    let from = op.from;
+    let to = op.to;
+    match tokio::task::spawn_blocking(move || {
+        dux_core::worktree_file::rename_entry(&wt, &from, &to)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("rename task failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+    state
+        .engine
+        .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    state.changes.invalidate(session_id);
+    StatusCode::OK.into_response()
+}
+
+/// Delete `op.path` (file or, recursively, a directory). Permanent: no trash on
+/// the server. See `dux_core::worktree_file::delete_entry`.
+async fn delete_entry(
+    State(state): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    Json(op): Json<PathOp>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    let session_id = id.clone();
+    let worktree = match resolve_worktree(&state, id).await {
+        Ok(w) => w,
+        Err(r) => return r,
+    };
+    let wt = worktree.clone();
+    let path = op.path;
+    match tokio::task::spawn_blocking(move || dux_core::worktree_file::delete_entry(&wt, &path))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("delete task failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+    state
+        .engine
+        .refresh_changed_files(worktree.to_string_lossy().into_owned());
+    state.changes.invalidate(session_id);
+    StatusCode::OK.into_response()
+}
+
 /// Open a worktree file in a locally-installed GUI editor, reusing the TUI's
 /// detection + launch path. `op.editor` (a dux-core editor config key like
 /// "vscode") picks a specific editor — the web picker always sends one — and we
@@ -754,6 +920,283 @@ mod tests {
                 resolve_worktree_path_for_read(dir.path(), "logo.png").unwrap();
             assert!(!is_outside, "logo.png must not be flagged as outside");
             assert!(!is_git, "logo.png must not be flagged as git-dir");
+        }
+    }
+
+    /// Endpoint tests for the four VS Code-style file management routes:
+    /// create-file, create-dir, rename, delete. Boots a real engine with a
+    /// session pointed at a real worktree directory (not a git repo — these
+    /// operations don't need git, only the containment guards in
+    /// `dux_core::worktree_file`), mirroring `changes.rs`'s `boot()` helper but
+    /// serving requests through the real axum router.
+    mod fs_op_endpoints {
+        use axum::body::to_bytes;
+        use axum::http::{Request, StatusCode};
+        use dux_core::config::{DuxPaths, ProjectConfig};
+        use dux_core::storage::SessionStore;
+        use tower::ServiceExt;
+
+        fn now() -> chrono::DateTime<chrono::Utc> {
+            chrono::Utc::now()
+        }
+
+        fn sample_session(id: &str, worktree: &str) -> dux_core::model::AgentSession {
+            let n = now();
+            dux_core::model::AgentSession {
+                id: id.to_string(),
+                project_id: "p1".to_string(),
+                project_path: None,
+                provider: dux_core::model::ProviderKind::new("claude"),
+                source_branch: "main".to_string(),
+                branch_name: "feat".to_string(),
+                initial_branch: "feat".to_string(),
+                worktree_path: worktree.to_string(),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: true,
+                auto_reopen_enabled: false,
+                status: dux_core::model::SessionStatus::Detached,
+                created_at: n,
+                updated_at: n,
+                last_focused_tab: None,
+            }
+        }
+
+        /// Boots a real router with session "s1" pointed at a fresh worktree
+        /// directory containing `hello.txt`. Returns the temp root (kept alive
+        /// for the test), the worktree path, and the router.
+        async fn router_with_session() -> (tempfile::TempDir, std::path::PathBuf, axum::Router) {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().to_path_buf();
+            let wt = root.join("wt");
+            std::fs::create_dir_all(&wt).unwrap();
+            std::fs::write(wt.join("hello.txt"), "hi\n").unwrap();
+
+            let paths = DuxPaths {
+                root: root.clone(),
+                config_path: root.join("config.toml"),
+                sessions_db_path: root.join("sessions.sqlite3"),
+                worktrees_root: root.join("worktrees"),
+                lock_path: root.join("dux.lock"),
+            };
+            std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+            {
+                let store = SessionStore::open(&paths.sessions_db_path).unwrap();
+                store
+                    .upsert_project(&ProjectConfig {
+                        id: "p1".to_string(),
+                        path: root.to_string_lossy().into_owned(),
+                        name: Some("p1".to_string()),
+                        default_provider: None,
+                        leading_branch: None,
+                        auto_reopen_agents: None,
+                        startup_command: None,
+                        env: Default::default(),
+                    })
+                    .unwrap();
+                store
+                    .upsert_session(&sample_session("s1", wt.to_string_lossy().as_ref()))
+                    .unwrap();
+            }
+            let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+            let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+            let app = crate::server::router(handle);
+            (tmp, wt, app)
+        }
+
+        fn json_req(uri: &str, body: serde_json::Value) -> Request<axum::body::Body> {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn create_file_endpoint_creates_an_empty_file() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/create-file",
+                    serde_json::json!({ "path": "new.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(std::fs::read_to_string(wt.join("new.txt")).unwrap(), "");
+        }
+
+        #[tokio::test]
+        async fn create_file_endpoint_rejects_overwrite_with_400() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/create-file",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn create_file_endpoint_rejects_git_path() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/create-file",
+                    serde_json::json!({ "path": ".git/evil" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn create_dir_endpoint_creates_a_directory() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/create-dir",
+                    serde_json::json!({ "path": "a/b/c" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(wt.join("a/b/c").is_dir());
+        }
+
+        #[tokio::test]
+        async fn create_dir_endpoint_rejects_existing_entry_with_400() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/create-dir",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn rename_endpoint_renames_a_file() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/rename",
+                    serde_json::json!({ "from": "hello.txt", "to": "renamed.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(!wt.join("hello.txt").exists());
+            assert!(wt.join("renamed.txt").exists());
+        }
+
+        #[tokio::test]
+        async fn rename_endpoint_rejects_existing_destination_with_400() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::write(wt.join("dst.txt"), "already here\n").unwrap();
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/rename",
+                    serde_json::json!({ "from": "hello.txt", "to": "dst.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn rename_endpoint_rejects_git_destination_with_400() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/rename",
+                    serde_json::json!({ "from": "hello.txt", "to": ".git/evil" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn delete_endpoint_deletes_a_file() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/delete",
+                    serde_json::json!({ "path": "hello.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(!wt.join("hello.txt").exists());
+        }
+
+        #[tokio::test]
+        async fn delete_endpoint_rejects_worktree_root_with_400() {
+            let (_tmp, wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/delete",
+                    serde_json::json!({ "path": "." }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(wt.exists());
+        }
+
+        #[tokio::test]
+        async fn delete_endpoint_rejects_git_path_with_400() {
+            let (_tmp, wt, app) = router_with_session().await;
+            std::fs::create_dir(wt.join(".git")).unwrap();
+            std::fs::write(wt.join(".git/config"), "[core]\n").unwrap();
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/delete",
+                    serde_json::json!({ "path": ".git/config" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert!(wt.join(".git/config").exists());
+        }
+
+        #[tokio::test]
+        async fn create_file_endpoint_unknown_session_is_404() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/does-not-exist/files/create-file",
+                    serde_json::json!({ "path": "new.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// A successful mutation must invalidate the REST changed-files cache so a
+        /// subsequent GET recomputes instead of serving a stale snapshot from
+        /// before the mutation. We can't easily observe the `/ws/events` push in
+        /// a oneshot test, so this asserts the response is OK and the body is
+        /// empty (the documented no-content success contract every route shares).
+        #[tokio::test]
+        async fn create_file_endpoint_returns_no_content_body_on_success() {
+            let (_tmp, _wt, app) = router_with_session().await;
+            let resp = app
+                .oneshot(json_req(
+                    "/api/v1/sessions/s1/files/create-file",
+                    serde_json::json!({ "path": "empty-body.txt" }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert!(bytes.is_empty());
         }
     }
 }
