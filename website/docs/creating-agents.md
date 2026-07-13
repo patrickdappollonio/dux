@@ -9,7 +9,8 @@ An agent in dux is a CLI tool running in its own git worktree on its own branch.
 Every agent is isolated: two agents on the same project can work simultaneously
 without touching each other's files, and switching between them is just a
 keystroke. Before you can create agents, you need at least one project added to
-dux (see the project browser, accessible via the `add-project` palette command).
+dux (see the project browser, accessible via the `add-project` palette command
+in the TUI, or the dedicated Add-project button in the web UI).
 
 Every action below is reachable from the command palette. Each also has a
 default keybinding you can view (and rebind) in the in-app help overlay (`?`),

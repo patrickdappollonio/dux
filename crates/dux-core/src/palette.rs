@@ -227,9 +227,10 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::OpenProjectBrowser,
         name: "add-project",
         description: "Open the project browser",
-        // Both (GLOBAL): opens the project browser to add a NEW project — it
-        // operates on no existing target. Web opens the add-project dialog.
-        surface: PaletteSurface::Both,
+        // TUI-only: opens the project browser to add a NEW project. The web
+        // UI surfaces this through a dedicated Add-project button instead of
+        // the command palette.
+        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::CopyPath,
@@ -583,7 +584,6 @@ mod tests {
     #[test]
     fn web_surface_ids_match_expected_pin() {
         let expected = [
-            "add-project",
             "configure-global-env",
             "customize-ui-preferences",
             "edit-config",

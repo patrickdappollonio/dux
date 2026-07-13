@@ -60,11 +60,10 @@ describe("paletteGroups", () => {
     const commands = (await webCommandIds()).map(cmd)
     const grouped = groupPaletteCommands(commands)
     expect(grouped.map((g) => g.group)).toEqual([
-      "Projects",
-      "Agents",
-      "Layout",
       "Preferences",
+      "Layout",
       "Configuration",
+      "Agents",
     ])
   })
 
@@ -111,13 +110,16 @@ describe("paletteGroups", () => {
   })
 
   it("drops empty groups", () => {
-    const grouped = groupPaletteCommands([cmd("add-project")])
-    expect(grouped.map((g) => g.group)).toEqual(["Projects"])
+    const grouped = groupPaletteCommands([cmd("toggle-copy-on-select")])
+    expect(grouped.map((g) => g.group)).toEqual(["Preferences"])
   })
 
   it("ignores ids with no group mapping", () => {
-    const grouped = groupPaletteCommands([cmd("add-project"), cmd("mystery")])
+    const grouped = groupPaletteCommands([
+      cmd("toggle-copy-on-select"),
+      cmd("mystery"),
+    ])
     const all = grouped.flatMap((g) => g.commands.map((c) => c.id))
-    expect(all).toEqual(["add-project"])
+    expect(all).toEqual(["toggle-copy-on-select"])
   })
 })

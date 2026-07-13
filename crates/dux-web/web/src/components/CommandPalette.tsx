@@ -86,7 +86,7 @@ export function CommandPalette() {
   // The "Commands" groups are driven by the surface-aware core registry: the
   // ViewModel projects the Web/Both subset (id + description, canonical order);
   // we render each entry whose id has a web handler, bucketed into app-menu
-  // groups (Projects / Agents / Layout / Preferences / Configuration) for the
+  // groups (Preferences / Layout / Configuration / Agents) for the
   // menu-like feel.
   // Hide the PR-banner-position toggle when GitHub integration is OFF: there is
   // no banner to position. Gate on the raw `github_integration` flag, NOT

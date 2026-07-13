@@ -20,7 +20,6 @@ beforeAll(() => {
 // `crates/dux-core/src/palette.rs`. Changing one surface without the other
 // fails a gate. Keep this list alphabetized.
 const EXPECTED_WEB_COMMANDS = [
-  "add-project",
   "configure-global-env",
   "customize-ui-preferences",
   "edit-config",

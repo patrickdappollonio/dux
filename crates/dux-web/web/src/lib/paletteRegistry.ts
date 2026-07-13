@@ -13,7 +13,6 @@
 // updating both pins fails a gate.
 
 import {
-  openAddProject,
   openConfigEditor,
   openCustomizeWebapp,
   openGlobalEnv,
@@ -33,7 +32,6 @@ import { toast } from "sonner"
 // id (dashed core command name) -> action to run. Handlers perform the action
 // only; CommandPalette closes the palette afterward.
 export const PALETTE_HANDLERS: Record<string, () => void> = {
-  "add-project": () => openAddProject(),
   "configure-global-env": () => openGlobalEnv(),
   "customize-ui-preferences": () => openCustomizeWebapp(),
   "edit-config": () => openConfigEditor(),

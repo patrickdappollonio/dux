@@ -15,11 +15,10 @@ import type { PaletteCommandView } from "@/lib/types"
 // The app-menu groups, in display order. Commands appear under their group in
 // the order the registry (and thus `palette_commands`) yields them.
 export const PALETTE_GROUP_ORDER = [
-  "Projects",
-  "Agents",
-  "Layout",
   "Preferences",
+  "Layout",
   "Configuration",
+  "Agents",
 ] as const
 
 export type PaletteGroup = (typeof PALETTE_GROUP_ORDER)[number]
@@ -28,7 +27,6 @@ export type PaletteGroup = (typeof PALETTE_GROUP_ORDER)[number]
 // id must appear here; the pin test fails otherwise so grouping can't silently
 // drift from the registry.
 const GROUP_BY_ID: Record<string, PaletteGroup> = {
-  "add-project": "Projects",
   "sort-agents-by-created": "Agents",
   "sort-agents-by-name": "Agents",
   "sort-agents-by-updated": "Agents",

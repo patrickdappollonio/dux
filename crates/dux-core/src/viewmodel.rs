@@ -710,13 +710,15 @@ mod tests {
 
         // Spot-check that known web commands are present and known TUI-only
         // commands are absent.
-        assert!(actual.contains(&"add-project"));
         assert!(actual.contains(&"edit-macros"));
         assert!(!actual.contains(&"start-web-server"));
         assert!(!actual.contains(&"change-theme"));
         // Demoted to TUI-only: the web renders diffs in Monaco's DiffEditor,
         // which manages its own line-number gutters.
         assert!(!actual.contains(&"toggle-diff-line-numbers"));
+        // TUI-only: the web surfaces this via a dedicated Add-project button,
+        // not the command palette.
+        assert!(!actual.contains(&"add-project"));
     }
 
     #[test]
