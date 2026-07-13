@@ -35,7 +35,7 @@ import { toast } from "sonner"
 export const PALETTE_HANDLERS: Record<string, () => void> = {
   "add-project": () => openAddProject(),
   "configure-global-env": () => openGlobalEnv(),
-  "customize-webapp": () => openCustomizeWebapp(),
+  "customize-ui-preferences": () => openCustomizeWebapp(),
   "edit-config": () => openConfigEditor(),
   "edit-macros": () => openMacrosDialog(),
   "kill-running": () => openKillRunning(),

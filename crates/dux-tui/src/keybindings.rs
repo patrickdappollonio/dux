@@ -2194,7 +2194,7 @@ mod tests {
         // but now allowing intentional exceptions. Web-only commands are also
         // intentionally absent from the TUI listing.
         const KNOWN_WEB_ONLY: &[&str] =
-            &["customize-webapp", "edit-config", "toggle-copy-on-select"];
+            &["customize-ui-preferences", "edit-config", "toggle-copy-on-select"];
         for cmd in palette::PALETTE_COMMANDS {
             if cmd.surface == PaletteSurface::Web {
                 assert!(

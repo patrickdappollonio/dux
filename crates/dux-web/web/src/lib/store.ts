@@ -305,7 +305,7 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
-  // The customize-webapp dialog (the Ctrl+k "customize-webapp" command). Gates the
+  // The customize-webapp dialog (the Ctrl+k "customize-ui-preferences" command). Gates the
   // modal that sets the browser tab title + favicon colour + Changes pane
   // visibility; the dialog seeds its fields from the bootstrap document, so it
   // needs no state beyond this flag.
@@ -2846,7 +2846,7 @@ export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
 }
 
-// The customize-webapp dialog (Ctrl+k "customize-webapp"). Open/close just flip the
+// The customize-webapp dialog (Ctrl+k "customize-ui-preferences"). Open/close just flip the
 // gate; the dialog seeds its title, favicon, and Changes pane fields from the
 // bootstrap document.
 export function openCustomizeWebapp(): void {

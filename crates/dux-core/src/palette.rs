@@ -357,7 +357,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: Action::RenameWebInstance,
-        name: "customize-webapp",
+        name: "customize-ui-preferences",
         description: "Open Settings: instance name/favicon, web preferences, and shared ui/capabilities options",
         // Web-only: opens the Settings modal (instance identity via
         // /api/v1/config/instance-identity, plus the grouped ui/capabilities
@@ -585,7 +585,7 @@ mod tests {
         let expected = [
             "add-project",
             "configure-global-env",
-            "customize-webapp",
+            "customize-ui-preferences",
             "edit-config",
             "edit-macros",
             "kill-running",
