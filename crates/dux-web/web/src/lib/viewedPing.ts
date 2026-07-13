@@ -17,11 +17,79 @@
  * flag rise between pings. */
 export const VIEWED_PING_INTERVAL_MS = 2000
 
+/** Fallback attention grace, in seconds, when the server omits
+ * `ui.attention_grace_seconds` (older servers) or before the first bootstrap
+ * fetch lands. Mirrors `dux_core::config::UiConfig::attention_grace_seconds`'s
+ * default (`crates/dux-core/src/config.rs`), a plain duplicated literal, not
+ * generated from the Rust default, so nothing enforces the two staying equal. */
+export const DEFAULT_ATTENTION_GRACE_SECONDS = 3
+
+/**
+ * Web-only "attention grace delay" (`ui.attention_grace_seconds`, default 3s):
+ * after the document transitions hidden -> visible, viewed pings are
+ * suppressed for a grace period so the attention indicator for a flagged
+ * agent stays up long enough for the returning user to actually see it,
+ * instead of being dismissed the instant the tab regains focus. Steady-state
+ * behavior (tab already visible) and initial page load are unaffected: grace
+ * only arms on an OBSERVED hidden -> visible transition.
+ *
+ * Whether `now` is still within the grace window that started at
+ * `visibleSince`. `visibleSince === undefined` means no transition has been
+ * observed yet (e.g. initial load), so there is no grace to apply.
+ * `graceMs <= 0` disables the grace entirely (today's instant-clear
+ * behavior).
+ */
+export function withinAttentionGrace(
+  now: number,
+  visibleSince: number | undefined,
+  graceMs: number,
+): boolean {
+  if (visibleSince === undefined) return false
+  if (graceMs <= 0) return false
+  return now - visibleSince < graceMs
+}
+
 /** Whether a viewed ping should be sent right now: only when this device owns the
- * PTY input AND its document is visible (foregrounded). */
+ * PTY input AND its document is visible (foregrounded), AND (when grace context
+ * is supplied) the document is not within its post-transition attention grace
+ * window. Omitting `now`/`visibleSince`/`graceMs` preserves the pre-grace
+ * behavior for existing call sites. */
 export function shouldSendViewed(ctx: {
   isOwner: boolean
   visible: boolean
+  now?: number
+  visibleSince?: number
+  graceMs?: number
 }): boolean {
-  return ctx.isOwner && ctx.visible
+  if (!ctx.isOwner || !ctx.visible) return false
+  if (ctx.now === undefined || ctx.graceMs === undefined) return true
+  return !withinAttentionGrace(ctx.now, ctx.visibleSince, ctx.graceMs)
+}
+
+/**
+ * Computes the new hidden->visible transition timestamp given a visibility
+ * sample. Call this on every observed visibility signal (visibilitychange,
+ * window focus) with the previously known visible state and "since" value.
+ *
+ * - `prevVisible === undefined` (no prior sample, e.g. first mount): never
+ *   arms the grace, even if `nowVisible` is true, so initial page load has no
+ *   grace.
+ * - A real `false -> true` transition arms the grace, recording `now` as the
+ *   new `visibleSince`.
+ * - A redundant `true -> true` signal (e.g. a `focus` event while already
+ *   visible) does NOT re-arm; it returns the existing `prevSince` unchanged.
+ * - Going hidden (`nowVisible === false`) always resets to `undefined`.
+ */
+export function visibleSinceAfterTransition(
+  prevVisible: boolean | undefined,
+  nowVisible: boolean,
+  prevSince: number | undefined,
+  now: number,
+): number | undefined {
+  if (!nowVisible) return undefined
+  if (prevVisible === true) return prevSince
+  if (prevVisible === false) return now
+  // prevVisible === undefined: no prior sample observed, so this can't be a
+  // real hidden -> visible transition.
+  return undefined
 }

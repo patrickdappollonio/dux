@@ -276,6 +276,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.pr_poll_interval_seconds,
     );
     patch_table_bool(doc, "ui", "copy_on_select", config.ui.copy_on_select);
+    patch_table_u64(
+        doc,
+        "ui",
+        "attention_grace_seconds",
+        config.ui.attention_grace_seconds,
+    );
     patch_table_bool(
         doc,
         "ui",
@@ -521,6 +527,11 @@ fn patch_table_usize(doc: &mut DocumentMut, section: &str, key: &str, value: usi
 fn patch_table_bool(doc: &mut DocumentMut, section: &str, key: &str, value: bool) {
     let table = ensure_table(doc, section);
     table[key] = toml_edit::value(value);
+}
+
+fn patch_table_u64(doc: &mut DocumentMut, section: &str, key: &str, value: u64) {
+    let table = ensure_table(doc, section);
+    table[key] = toml_edit::value(value as i64);
 }
 
 fn remove_table_key(doc: &mut DocumentMut, section: &str, key: &str) {

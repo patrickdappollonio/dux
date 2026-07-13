@@ -69,6 +69,12 @@ pub struct BootstrapView {
     /// terminal auto-copies it (default true). Read by the terminal pane and the
     /// web command palette's toggle.
     pub copy_on_select: bool,
+    /// Mirrors `config.ui.attention_grace_seconds`: seconds the attention
+    /// indicators stay visible in the web UI after the browser tab returns to
+    /// the foreground, before the focused agent's needs-attention flag
+    /// clears (default 3; 0 clears immediately). Web-only; read by the
+    /// terminal pane's viewed-ping scheduling.
+    pub attention_grace_seconds: u64,
     /// Mirrors `config.capabilities.web_notifications`: whether the web UI bridges
     /// an agent's notification sequences to a browser desktop Notification (default
     /// true). The browser still only fires after the visitor grants permission and
@@ -573,6 +579,7 @@ impl Engine {
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
+            attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
             clipboard_passthrough: crate::config::ClipboardPassthroughMode::parse(
@@ -1259,6 +1266,7 @@ mod tests {
             "gh_available",
             "github_integration",
             "copy_on_select",
+            "attention_grace_seconds",
             "web_notifications",
             "hyperlinks",
             "clipboard_passthrough",

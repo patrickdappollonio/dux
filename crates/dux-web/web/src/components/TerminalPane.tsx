@@ -52,7 +52,12 @@ import {
   onPtyOwner,
 } from "@/lib/ptyOwnership"
 import { deviceLabel } from "@/lib/deviceLabel"
-import { VIEWED_PING_INTERVAL_MS, shouldSendViewed } from "@/lib/viewedPing"
+import {
+  DEFAULT_ATTENTION_GRACE_SECONDS,
+  VIEWED_PING_INTERVAL_MS,
+  shouldSendViewed,
+  visibleSinceAfterTransition,
+} from "@/lib/viewedPing"
 import { DEFAULT_SCROLLBACK_LINES } from "@/lib/types"
 import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { registerAgentNotifications } from "@/lib/agentNotifications"
@@ -199,6 +204,28 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   useEffect(() => {
     copyOnSelectRef.current = bootstrap?.copy_on_select ?? true
   }, [bootstrap?.copy_on_select])
+  // The `ui.attention_grace_seconds` preference (default 3s), converted to ms.
+  // Read via a ref inside the stable mount-effect visibility handlers so
+  // changing it never recreates the terminal; the fallback (3s) applies only
+  // before the first bootstrap fetch lands.
+  const attentionGraceMsRef = useRef(
+    (bootstrap?.attention_grace_seconds ?? DEFAULT_ATTENTION_GRACE_SECONDS) *
+      1000
+  )
+  useEffect(() => {
+    attentionGraceMsRef.current =
+      (bootstrap?.attention_grace_seconds ?? DEFAULT_ATTENTION_GRACE_SECONDS) *
+      1000
+  }, [bootstrap?.attention_grace_seconds])
+  // Tracks the attention-grace hidden -> visible transition (see
+  // `visibleSinceAfterTransition` in viewedPing.ts). Refs, not state, so both
+  // the mount effect's visibility listeners and the ownership-gain effect
+  // below read/update the same value without re-running the mount effect.
+  // Per-component (not module-level): each mounted pane listens to its own
+  // visibilitychange/focus events, so tracking per-component is correct.
+  // `undefined` means "no transition observed" (covers initial load).
+  const visibleSinceRef = useRef<number | undefined>(undefined)
+  const prevVisibleRef = useRef<boolean | undefined>(undefined)
   // Whether agent notification sequences bridge to a browser Notification (the
   // `capabilities.web_notifications` bit, default on). Read lazily in the OSC
   // handlers so toggling it never recreates the terminal.
@@ -980,6 +1007,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
         shouldSendViewed({
           isOwner: isOwnerRef.current,
           visible: document.visibilityState === "visible",
+          now: Date.now(),
+          visibleSince: visibleSinceRef.current,
+          graceMs: attentionGraceMsRef.current,
         })
       ) {
         pty.sendViewed()
@@ -988,11 +1018,41 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     const viewedTimer = setInterval(pingViewed, VIEWED_PING_INTERVAL_MS)
 
     let resyncTimer: ReturnType<typeof setTimeout> | undefined
+    // Fires the one grace-boundary ping (see viewedPing.ts's module doc),
+    // cancelled via clearTimeout if the document goes hidden again first.
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
     const resyncToForeground = () => {
-      if (document.visibilityState !== "visible") return
-      // Becoming visible is a fresh "looking at it" moment: ping immediately so
-      // the flag drops without waiting for the next interval tick.
-      pingViewed()
+      const nowVisible = document.visibilityState === "visible"
+      const now = Date.now()
+      // A real hidden -> visible flip (not a redundant focus-while-visible
+      // signal, and not the unobserved initial-load case) arms the grace.
+      const transitioned = prevVisibleRef.current === false && nowVisible
+      visibleSinceRef.current = visibleSinceAfterTransition(
+        prevVisibleRef.current,
+        nowVisible,
+        visibleSinceRef.current,
+        now,
+      )
+      prevVisibleRef.current = nowVisible
+
+      if (!nowVisible) {
+        clearTimeout(graceTimer)
+        return
+      }
+
+      clearTimeout(graceTimer)
+      const graceMs = attentionGraceMsRef.current
+      if (transitioned && graceMs > 0) {
+        // Suppress the immediate ping; fire exactly once at the grace
+        // boundary instead (cancelled above if hidden again before then).
+        graceTimer = setTimeout(pingViewed, graceMs)
+      } else {
+        // Steady state (already visible, e.g. a window focus event) or grace
+        // disabled: ping immediately so the flag drops without waiting for
+        // the next interval tick, matching the pre-grace behavior.
+        pingViewed()
+      }
+
       clearTimeout(resyncTimer)
       resyncTimer = setTimeout(() => {
         term.write("", () => {
@@ -1012,6 +1072,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       clearTimeout(initialResizeFallback)
       clearTimeout(jiggleTimer)
       clearTimeout(resyncTimer)
+      clearTimeout(graceTimer)
       clearTimeout(longPressTimer)
       clearInterval(viewedTimer)
       container.removeEventListener("mousedown", onMouseDown)
@@ -1067,7 +1128,15 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // (when visible) so the agent's attention flag drops immediately, rather than
   // waiting up to one interval for the periodic viewed ping in the mount effect.
   useEffect(() => {
-    if (shouldSendViewed({ isOwner, visible: document.visibilityState === "visible" })) {
+    if (
+      shouldSendViewed({
+        isOwner,
+        visible: document.visibilityState === "visible",
+        now: Date.now(),
+        visibleSince: visibleSinceRef.current,
+        graceMs: attentionGraceMsRef.current,
+      })
+    ) {
       ptyRef.current?.sendViewed()
     }
   }, [isOwner])

@@ -467,6 +467,12 @@ pub struct UiConfig {
     /// clipboard (X11-style "highlight to copy"). Toggling it from the web
     /// command palette persists the new value here. Web-only behavior.
     pub copy_on_select: bool,
+    /// Seconds the attention indicators stay visible in the web UI after the
+    /// browser tab returns to the foreground, before the focused agent's
+    /// needs-attention flag clears. Gives you time to see which agent(s)
+    /// wanted you before the indicator vanishes. `0` clears immediately (the
+    /// pre-grace behavior). Web-only; the TUI has no equivalent delay.
+    pub attention_grace_seconds: u64,
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.
     /// Toggling it from the command palette or the web's Changes actions menu
@@ -711,6 +717,7 @@ impl Default for UiConfig {
             github_integration: true,
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
             copy_on_select: true,
+            attention_grace_seconds: 3,
             auto_reopen_agents: false,
             show_changes_pane: true,
             always_show_tab_strip: false,
@@ -1191,6 +1198,7 @@ impl Default for Config {
                 github_integration: true,
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
                 copy_on_select: true,
+                attention_grace_seconds: 3,
                 auto_reopen_agents: false,
                 show_changes_pane: true,
                 always_show_tab_strip: false,

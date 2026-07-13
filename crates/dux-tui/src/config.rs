@@ -598,6 +598,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
         },
         ConfigEntry::Field {
+            key: "attention_grace_seconds",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: seconds the attention indicators stay visible after you\n# return to the dux browser tab, before the focused agent's needs-attention\n# flag clears. Gives you time to see which agent(s) wanted you before the\n# indicator vanishes. Set to 0 to clear the indicator immediately on return\n# (the pre-grace behavior).",
+            )),
+            value_fn: |c| FieldValue::Usize(c.ui.attention_grace_seconds as usize),
+        },
+        ConfigEntry::Field {
             key: "auto_reopen_agents",
             comment: Some(CommentSource::Static(
                 "# Reopen agent PTYs that were still running when dux last exited.\n# Disabled by default. Toggle project-level and agent-level opt-outs from the command palette.",
@@ -1489,6 +1496,7 @@ mod tests {
         assert!(rendered.contains("pr_poll_interval_seconds = 180"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("copy_on_select = true"));
+        assert!(rendered.contains("attention_grace_seconds = 3"));
         assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("always_show_tab_strip = false"));
         assert!(rendered.contains("attention_indicator = true"));

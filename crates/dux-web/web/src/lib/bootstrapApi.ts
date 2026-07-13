@@ -39,6 +39,11 @@ export interface Bootstrap {
   /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
    * terminal auto-copies it to the clipboard (default true). */
   copy_on_select: boolean
+  /** Mirrors `config.ui.attention_grace_seconds`: seconds the attention
+   * indicators stay visible after the browser tab returns to the foreground,
+   * before the focused agent's needs-attention flag clears (default 3; 0
+   * clears immediately). Older servers omit it, so consumers fall back to 3. */
+  attention_grace_seconds?: number
   /** Mirrors `config.capabilities.web_notifications`: whether the web UI bridges
    * an agent's notification sequences to a browser desktop Notification. Still
    * gated on visitor permission and a backgrounded tab. Older servers omit it,

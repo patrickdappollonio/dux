@@ -33,6 +33,13 @@ The flag clears the moment you look. Selecting the agent and focusing its termin
 (TUI) or opening its live view (web) puts the flag down, and so does typing into
 it. An agent you are already watching never nags you.
 
+In the web UI specifically, switching back to your dux browser tab keeps the
+indicators up for a few seconds instead of dismissing them the instant the tab
+regains focus, so you actually get a look at which agent(s) wanted you before
+the flag clears. That grace window is configurable (`ui.attention_grace_seconds`,
+covered below) and only applies right after you return to the tab; while you
+stay on it, watching an agent still clears its flag immediately as usual.
+
 ## How dux detects it
 
 dux runs each agent inside its own embedded terminal, so it sees exactly what the
@@ -94,11 +101,20 @@ attention_indicator = true
 # most compatible signal (Codex falls back to it; Claude Code emits it in
 # terminal_bell mode) but can occasionally ring for mundane reasons.
 attention_on_bell = true
+
+# Web UI only: seconds the attention indicators stay visible after you return
+# to the dux browser tab, before the focused agent's needs-attention flag
+# clears. Gives you time to see which agent(s) wanted you before the
+# indicator vanishes. Set to 0 to clear the indicator immediately on return
+# (the pre-grace behavior).
+attention_grace_seconds = 3
 ```
 
 Turn `attention_on_bell` off if a chatty tool inside your agent's session (a test
 runner, tab completion) rings the bell for reasons that are not really about you.
 Turn `attention_indicator` off to silence the whole feature everywhere.
+`attention_grace_seconds` is web-only: the TUI has no equivalent delay, since a
+focused terminal pane clears its own flag instantly either way.
 
 By default this feature stays inside dux: bells rung inside an agent's session are
 consumed by dux's embedded terminal and not re-forwarded to the terminal you run
