@@ -2879,6 +2879,25 @@ export function setInstanceIdentity(body: {
     })
 }
 
+// Persist an explicit patch of the Settings modal's `[ui]`/`[capabilities]`
+// fields (everything the modal exposes EXCEPT title/favicon, which stay on
+// `setInstanceIdentity`). Mirrors `setInstanceIdentity`'s resolves-to-boolean +
+// toast-on-error contract so the dialog can `Promise.all` both writes and gate
+// its close on every one succeeding. The server validates/clamps and emits
+// `config.changed`; we do NOT hand-apply here. The refetched bootstrap is the
+// single source of truth, so the dialog re-seeds from it.
+export function saveSettings(
+  patch: Parameters<typeof configApi.patchSettings>[0],
+): Promise<boolean> {
+  return configApi
+    .patchSettings(patch)
+    .then(() => true)
+    .catch((e) => {
+      toast.error(e instanceof Error ? e.message : "Could not save settings.")
+      return false
+    })
+}
+
 // Force-kill one agent's PTY. The agent detaches (it is NOT deleted) and can be
 // reconnected; the spine refetch flips its row to detached. A success toast is
 // the engine's routed status; here we only surface a failure. Companion

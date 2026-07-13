@@ -18,6 +18,11 @@
 //! - `POST /api/v1/ui/toggle-copy-on-select` — flip web-terminal copy-on-select.
 //! - `POST /api/v1/ui/toggle-always-show-tab-strip` — flip whether the agent tab
 //!   strip always renders, even with a single tab.
+//! - `POST /api/v1/config/instance-identity`: set the browser tab title and
+//!   favicon color.
+//! - `PATCH /api/v1/config/settings`: set explicit values for the grouped
+//!   Settings modal's other `[ui]`/`[capabilities]` fields in one request (see
+//!   `crates/dux-web/web/src/lib/settingsDescriptors.ts`).
 //!
 //! On a successful config change the engine emits a `config.changed` event (via
 //! the Phase 2 forwarder in `server.rs`), so subscribed clients refetch
@@ -30,7 +35,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +75,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/config/instance-identity",
             post(set_instance_identity),
         )
+        .route("/api/v1/config/settings", patch(set_settings))
         .route(
             "/api/v1/config/raw",
             // A config.toml is a few KB; 256 KB is generous. The cap stops a
@@ -234,6 +240,109 @@ async fn set_instance_identity(
         WireCommand::SetInstanceIdentity {
             title: body.title,
             favicon: body.favicon,
+        },
+    )
+    .await
+}
+
+// ── Settings PATCH (grouped Settings modal) ──────────────────────────────────
+//
+// Body shape decision (see the plan's section 6/open-risk-2 tension between a
+// flat dotted-key map and a typed struct that rejects unknown keys): a
+// `HashMap<String, Value>` can't enforce per-field types or reject unknown
+// keys, so this uses NESTED typed sub-structs: `{"ui": {...}, "capabilities":
+// {...}}`, each `#[serde(default, deny_unknown_fields)]` with every field
+// `Option<T>`. `#[serde(rename = "...")]` dotted keys on a flat struct fight
+// `deny_unknown_fields` in practice here (the two groups' fields would need to
+// live in one flat struct to dotted-rename cleanly, which reintroduces the
+// "which endpoint owns title/favicon" ambiguity), so nesting by config section
+// is the form that compiles cleanly AND matches how the fields are actually
+// grouped in `config.toml` (`[ui]` / `[capabilities]`).
+
+/// The `[ui]` half of a settings-PATCH body. Every field is optional; an
+/// absent field is left untouched. Unknown fields are rejected (400) so a
+/// typo or a client/server drift surfaces immediately instead of silently
+/// no-opping.
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct UiSettingsPatch {
+    copy_on_select: Option<bool>,
+    show_changes_pane: Option<bool>,
+    always_show_tab_strip: Option<bool>,
+    status_clear_seconds: Option<u16>,
+    attention_grace_seconds: Option<u64>,
+    attention_indicator: Option<bool>,
+    attention_on_bell: Option<bool>,
+    pr_banner_position: Option<String>,
+    diff_tab_width: Option<u16>,
+    show_diff_line_numbers: Option<bool>,
+    theme: Option<String>,
+}
+
+/// The `[capabilities]` half of a settings-PATCH body. Same optional/
+/// unknown-field-rejecting shape as [`UiSettingsPatch`].
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct CapabilitiesSettingsPatch {
+    web_notifications: Option<bool>,
+    hyperlinks: Option<bool>,
+}
+
+/// `PATCH /api/v1/config/settings` body: `{"ui": {...}, "capabilities": {...}}`,
+/// either or both groups optional, every leaf field optional. `title`/
+/// `favicon` are deliberately absent here, they stay on
+/// `POST /api/v1/config/instance-identity`.
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct SettingsBody {
+    ui: UiSettingsPatch,
+    capabilities: CapabilitiesSettingsPatch,
+}
+
+/// `PATCH /api/v1/config/settings`. Set explicit values for the Settings
+/// modal's `[ui]`/`[capabilities]` fields in one request (see
+/// `crates/dux-web/web/src/lib/settingsDescriptors.ts` for the exact field
+/// set the modal renders). Any field omitted from the body is left untouched;
+/// a body with no fields present is a no-op `200`. `200` on success; plain-text
+/// `400` on a validation error (unknown enum value, unknown/mistyped field) via
+/// the shared `dispatch`. A rejected patch mutates nothing. The engine clamps
+/// numeric fields to a documented ceiling server-side, so the client should
+/// treat its own bounds as UX-only and re-seed from the post-save bootstrap
+/// refetch for the authoritative saved value.
+async fn set_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<SettingsBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    // axum's default `Json` extractor answers a deserialize failure (an
+    // unknown field caught by `deny_unknown_fields`, or a field of the wrong
+    // type) with 422 Unprocessable Entity. Every other config-mutation route
+    // in this file answers validation failures with plain-text 400, so map the
+    // rejection to 400 here to keep the surface consistent (a client only ever
+    // needs to branch on "ok" vs "4xx with a message").
+    let Json(body) = match body {
+        Ok(json) => json,
+        Err(rejection) => {
+            return (StatusCode::BAD_REQUEST, rejection.body_text()).into_response();
+        }
+    };
+    dispatch(
+        &state,
+        &headers,
+        WireCommand::SetSettings {
+            copy_on_select: body.ui.copy_on_select,
+            show_changes_pane: body.ui.show_changes_pane,
+            web_notifications: body.capabilities.web_notifications,
+            always_show_tab_strip: body.ui.always_show_tab_strip,
+            status_clear_seconds: body.ui.status_clear_seconds,
+            attention_grace_seconds: body.ui.attention_grace_seconds,
+            attention_indicator: body.ui.attention_indicator,
+            attention_on_bell: body.ui.attention_on_bell,
+            pr_banner_position: body.ui.pr_banner_position,
+            diff_tab_width: body.ui.diff_tab_width,
+            show_diff_line_numbers: body.ui.show_diff_line_numbers,
+            hyperlinks: body.capabilities.hyperlinks,
+            theme: body.ui.theme,
         },
     )
     .await
@@ -583,6 +692,209 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Settings PATCH (grouped Settings modal) ──────────────────────────────
+
+    #[tokio::test]
+    async fn set_settings_accepts_a_valid_ui_patch() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"copy_on_select":false,"always_show_tab_strip":true,"pr_banner_position":"top"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(raw.contains("copy_on_select = false"), "raw: {raw}");
+        assert!(raw.contains("always_show_tab_strip = true"), "raw: {raw}");
+        assert!(raw.contains("pr_banner_position = \"top\""), "raw: {raw}");
+    }
+
+    #[tokio::test]
+    async fn set_settings_clamps_out_of_range_status_clear_seconds() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"status_clear_seconds":65535}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains(&format!(
+                "status_clear_seconds = {}",
+                dux_core::config::MAX_STATUS_CLEAR_SECONDS
+            )),
+            "expected the clamped ceiling to persist: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_settings_accepts_zero_for_attention_grace_seconds() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"attention_grace_seconds":0}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains("attention_grace_seconds = 0"),
+            "0 must persist as a real value, not a clamp/default: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_settings_rejects_unknown_enum_value_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let before = read_raw_config_text(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"pr_banner_position":"sideways"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let after = read_raw_config_text(&app).await;
+        assert_eq!(
+            before, after,
+            "a rejected enum value must not mutate config"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_settings_rejects_unknown_theme_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"theme":"not_a_real_theme"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_settings_empty_patch_is_a_noop_200() {
+        let (_tmp, app) = router_no_auth();
+        let before = read_raw_config_text(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_req("PATCH", "/api/v1/config/settings", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = read_raw_config_text(&app).await;
+        assert_eq!(before, after, "an empty patch must not mutate config");
+    }
+
+    #[tokio::test]
+    async fn set_settings_ignores_absent_fields() {
+        let (_tmp, app) = router_no_auth();
+
+        // Set the theme first.
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"theme":"nord"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A second patch that only touches an unrelated field must leave theme
+        // untouched.
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"diff_tab_width":8}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(raw.contains("theme = \"nord\""), "raw: {raw}");
+        assert!(raw.contains("diff_tab_width = 8"), "raw: {raw}");
+    }
+
+    #[tokio::test]
+    async fn set_settings_rejects_unknown_top_level_key_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"server":{"title":"hacked"}}"#,
+            ))
+            .await
+            .unwrap();
+        // `deny_unknown_fields` rejects a "server" group outright: title/favicon
+        // stay on the dedicated instance-identity endpoint, not this one.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_settings_rejects_unknown_field_within_a_group_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"not_a_real_field":true}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_settings_accepts_a_capabilities_patch() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"capabilities":{"web_notifications":false,"hyperlinks":false}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(raw.contains("web_notifications = false"), "raw: {raw}");
+        assert!(raw.contains("hyperlinks = false"), "raw: {raw}");
     }
 
     #[tokio::test]

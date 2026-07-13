@@ -95,7 +95,38 @@ export interface Bootstrap {
    * this many tabs; the server re-enforces on create. Older servers omit it, so
    * consumers fall back to `DEFAULT_AGENT_TABS_MAX`. */
   agent_tabs_max?: number
+  /** Mirrors `config.ui.attention_indicator`: whether an attention cue is
+   * shown at all when an agent asks for attention (default true). Read by the
+   * Settings modal's "Both surfaces" group. Older servers omit it, so
+   * consumers fall back to true. */
+  attention_indicator?: boolean
+  /** Mirrors `config.ui.attention_on_bell`: whether a plain terminal bell also
+   * counts as an attention request (default true; no effect when
+   * `attention_indicator` is false). Older servers omit it, so consumers fall
+   * back to true. */
+  attention_on_bell?: boolean
+  /** Mirrors `config.ui.diff_tab_width`: how many columns a tab character
+   * expands to in the diff viewer. 0 means "leave tabs as-is". Older servers
+   * omit it, so consumers fall back to 4. */
+  diff_tab_width?: number
+  /** Mirrors `config.ui.show_diff_line_numbers`: whether the diff viewer shows
+   * a line-number gutter (default false). Older servers omit it, so consumers
+   * fall back to false. */
+  show_diff_line_numbers?: boolean
+  /** Mirrors `config.ui.theme` (TUI-only visual theme name). Surfaced only so
+   * the Settings modal's "Terminal (TUI)" section can show/edit the running
+   * dux TUI's configured theme; the web itself never renders it. Older
+   * servers omit it, so consumers fall back to `DEFAULT_THEME_NAME`. */
+  theme?: string
 }
+
+/** Fallback TUI theme name when the server omits `theme` (older servers).
+ * Mirrors `dux_core::theme::DEFAULT_THEME_NAME`
+ * (`crates/dux-core/src/theme.rs`), a plain duplicated literal, not
+ * generated from the Rust constant. `settingsDescriptors.test.ts` pins this
+ * value so a change on either side without the other shows up as a failing
+ * test. */
+export const DEFAULT_THEME_NAME = "dux_dark"
 
 /** Fallback per-agent tab cap when the server omits `agent_tabs_max` (older
  * servers). Mirrors `dux_core::config::DEFAULT_AGENT_TABS_MAX`

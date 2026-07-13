@@ -109,6 +109,33 @@ colors — `violet`, `blue`, `sky`, `cyan`, `teal`, `green`, `amber`, `orange`,
 distinguishable at a glance.
 
 You don't have to edit the file: from the web UI, open the command palette
-(`Ctrl/Cmd+k`) and run **Rename this instance** to set the title and pick a
-favicon color. The change is written to `[server]` in `config.toml` and applies
-to every open tab immediately, so it sticks across restarts.
+(`Ctrl/Cmd+k`) and run **Open Settings**. The change is written to `[server]` in
+`config.toml` and applies to every open tab immediately, so it sticks across
+restarts.
+
+## Editing settings from the web
+
+The same **Settings** command also opens a grouped panel for a curated set of
+`[ui]`/`[capabilities]` preferences, so you don't have to hand-edit
+`config.toml` for the common ones. Rows are grouped by which surface they
+affect:
+
+- **This browser (Web)**: the instance name/favicon above, plus
+  copy-on-select, desktop notifications, and the Changes pane default.
+- **Both surfaces**: status-message auto-clear, the attention indicator and
+  its grace period, the always-show-tab-strip preference, the PR banner
+  position, diff-viewer line numbers/tab width, and clickable hyperlinks.
+- **Terminal (TUI)**: the TUI's theme. The web writes it to `config.toml`
+  like everything else here, but a **running** `dux` TUI process doesn't watch
+  the file for changes; it picks up the new value after its own config
+  reload or a restart.
+
+Each row shows its documented default and, where a value of `0` means
+something special (like "never auto-clear" or "leave tabs as-is"), that
+meaning too. The server validates and clamps every value before saving, and
+every connected browser refreshes automatically once it's written.
+
+Not every `[ui]`/`[capabilities]` field is here yet: keybindings, provider
+commands, and project identity stay in the raw config file (or their own
+dedicated dialogs) by design; see **Edit config.toml** in the command palette
+for anything not covered.

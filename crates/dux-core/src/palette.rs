@@ -358,11 +358,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::RenameWebInstance,
         name: "customize-webapp",
-        description: "Rename this dux instance, pick a favicon color, and show or hide the Changes pane",
-        // Web-only: opens the customize-webapp dialog (browser tab title + favicon
-        // color + Changes pane visibility), which POSTs to
-        // /api/v1/config/instance-identity. The TUI sets config.server.title/favicon
-        // through `dux config`, so it does not list this.
+        description: "Open Settings: instance name/favicon, web preferences, and shared ui/capabilities options",
+        // Web-only: opens the Settings modal (instance identity via
+        // /api/v1/config/instance-identity, plus the grouped ui/capabilities
+        // knobs via PATCH /api/v1/config/settings, see
+        // crates/dux-web/web/src/lib/settingsDescriptors.ts for the exact field
+        // set). The TUI sets config through `dux config` and its own palette
+        // commands, so it does not list this.
         surface: PaletteSurface::Web,
     },
     PaletteCommand {

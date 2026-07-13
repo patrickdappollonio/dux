@@ -260,6 +260,47 @@ pub fn normalized_pr_poll_interval(seconds: u16) -> u16 {
     seconds
 }
 
+/// Hard ceiling on `ui.status_clear_seconds` (the settings-PATCH endpoint
+/// clamps to this). One hour is far longer than any useful auto-clear delay;
+/// `0` ("never auto-clear") is a separate, always-allowed value handled by the
+/// caller before clamping.
+pub const MAX_STATUS_CLEAR_SECONDS: u16 = 3_600;
+
+/// Hard ceiling on `ui.attention_grace_seconds` (the settings-PATCH endpoint
+/// clamps to this). Five minutes is far longer than any useful "just came
+/// back" grace window; `0` ("clear immediately") is a separate, always-allowed
+/// value handled by the caller before clamping.
+pub const MAX_ATTENTION_GRACE_SECONDS: u64 = 300;
+
+/// Hard ceiling on `ui.diff_tab_width` (the settings-PATCH endpoint clamps to
+/// this). Wider than 16 columns per tab stop is never a sane diff rendering
+/// choice; `0` ("leave tabs as-is") is a separate, always-allowed value
+/// handled by the caller before clamping.
+pub const MAX_DIFF_TAB_WIDTH: u16 = 16;
+
+/// The theme names documented in the `ui.theme` config template comment
+/// (`crates/dux-tui/src/config.rs`, the `theme` field's `ConfigEntry::Field`
+/// comment). Keep this list mirrored with that comment and with the web's
+/// `settingsDescriptors.ts` theme select options. `dux_core` has no dependency
+/// on the opaline theme engine (that lives in `dux-tui`), so the settings-PATCH
+/// endpoint can only validate against this small, explicitly documented subset
+/// rather than every theme the TUI can actually load (any opaline built-in, or
+/// a user's own `<config_dir>/themes/*.toml` file). This is a deliberate
+/// narrowing: the web settings modal offers a safe, always-valid picklist:
+/// anything else stays a raw-config-editor / TUI change.
+pub const THEME_BUILTIN_NAMES: &[&str] = &[
+    "dux_dark",
+    "catppuccin_mocha",
+    "catppuccin_frappe",
+    "nord",
+    "dracula",
+    "gruvbox_dark",
+    "tokyo_night",
+    "solarized_dark",
+    "one_dark",
+    "rose_pine",
+];
+
 /// Convert a configured `shutdown_timeout_seconds` into the grace `Duration`
 /// every shutdown path uses, clamped to [`MAX_SHUTDOWN_TIMEOUT_SECONDS`]. Logs a
 /// warning when the configured value is above the ceiling so the operator learns

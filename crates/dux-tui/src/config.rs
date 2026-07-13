@@ -406,6 +406,13 @@ enum ConfigEntry {
     Macros,
 }
 
+/// KEEP IN SYNC WITH `crates/dux-web/web/src/lib/settingsDescriptors.ts`: the
+/// web Ctrl+K "Settings" modal renders a first-cut subset of these `[ui]`/
+/// `[capabilities]` fields (plus `server.title`/`server.favicon`) with
+/// descriptions adapted from this table's `comment` text into readable
+/// prose. If you change a field's default, zero-value meaning, or comment
+/// here, check whether `settingsDescriptors.ts`'s matching entry needs the
+/// same update (and vice versa). There is no codegen linking the two.
 fn config_schema() -> Vec<ConfigEntry> {
     vec![
         ConfigEntry::Comment("# dux configuration"),

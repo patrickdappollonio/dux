@@ -75,6 +75,33 @@ export const configApi = {
     favicon?: string
   }): Promise<void> =>
     send("POST", "/api/v1/config/instance-identity", body),
+  // Persist an explicit patch of the Settings modal's other `[ui]`/
+  // `[capabilities]` fields in one request. Body shape mirrors the server's
+  // typed, `deny_unknown_fields` sub-structs: `{ui: {...}, capabilities:
+  // {...}}`, both optional, every leaf field optional. An absent field is left
+  // untouched server-side; the server clamps numeric fields to a documented
+  // ceiling and rejects an unrecognized enum value (pr_banner_position,
+  // theme) with a 400 that leaves config unchanged. `title`/`favicon` are NOT
+  // here, they stay on `setInstanceIdentity`.
+  patchSettings: (patch: {
+    ui?: {
+      copy_on_select?: boolean
+      show_changes_pane?: boolean
+      always_show_tab_strip?: boolean
+      status_clear_seconds?: number
+      attention_grace_seconds?: number
+      attention_indicator?: boolean
+      attention_on_bell?: boolean
+      pr_banner_position?: string
+      diff_tab_width?: number
+      show_diff_line_numbers?: boolean
+      theme?: string
+    }
+    capabilities?: {
+      web_notifications?: boolean
+      hyperlinks?: boolean
+    }
+  }): Promise<void> => send("PATCH", "/api/v1/config/settings", patch),
   // Read the raw config.toml text for the Monaco editor. Returns the file
   // verbatim (or the plain render of the running config if none exists yet).
   readRawConfig: async (): Promise<string> => {
