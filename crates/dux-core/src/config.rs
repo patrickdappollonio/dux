@@ -467,11 +467,14 @@ pub struct UiConfig {
     /// clipboard (X11-style "highlight to copy"). Toggling it from the web
     /// command palette persists the new value here. Web-only behavior.
     pub copy_on_select: bool,
-    /// Seconds the attention indicators stay visible in the web UI after the
-    /// browser tab returns to the foreground, before the focused agent's
-    /// needs-attention flag clears. Gives you time to see which agent(s)
-    /// wanted you before the indicator vanishes. `0` clears immediately (the
-    /// pre-grace behavior). Web-only; the TUI has no equivalent delay.
+    /// Seconds the attention indicators stay visible after dux regains your
+    /// attention, before the focused agent's needs-attention flag clears.
+    /// Applies when you return to the dux browser tab (web UI) and when your
+    /// terminal window regains focus (TUI). Gives you time to see which
+    /// agent(s) wanted you before the indicator vanishes. `0` clears
+    /// immediately (the pre-grace behavior). TUI note: requires a terminal
+    /// that reports focus; under tmux, set `focus-events on`. Terminals that
+    /// never report focus keep the old behavior.
     pub attention_grace_seconds: u64,
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.

@@ -25,13 +25,16 @@ export const VIEWED_PING_INTERVAL_MS = 2000
 export const DEFAULT_ATTENTION_GRACE_SECONDS = 3
 
 /**
- * Web-only "attention grace delay" (`ui.attention_grace_seconds`, default 3s):
- * after the document transitions hidden -> visible, viewed pings are
- * suppressed for a grace period so the attention indicator for a flagged
- * agent stays up long enough for the returning user to actually see it,
- * instead of being dismissed the instant the tab regains focus. Steady-state
- * behavior (tab already visible) and initial page load are unaffected: grace
- * only arms on an OBSERVED hidden -> visible transition.
+ * The "attention grace delay" (`ui.attention_grace_seconds`, default 3s) is
+ * shared with the TUI (see `dux_core::config::UiConfig::attention_grace_seconds`
+ * and `crates/dux-tui/src/focus.rs`): after the document transitions
+ * hidden -> visible, viewed pings are suppressed for a grace period so the
+ * attention indicator for a flagged agent stays up long enough for the
+ * returning user to actually see it, instead of being dismissed the instant
+ * the tab regains focus. Steady-state behavior (tab already visible) and
+ * initial page load are unaffected: grace only arms on an OBSERVED
+ * hidden -> visible transition. The TUI applies the same grace on its own
+ * signal, the terminal window regaining focus.
  *
  * Whether `now` is still within the grace window that started at
  * `visibleSince`. `visibleSince === undefined` means no transition has been
