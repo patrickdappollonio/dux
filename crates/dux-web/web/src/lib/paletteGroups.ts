@@ -15,9 +15,11 @@ import type { PaletteCommandView } from "@/lib/types"
 // The app-menu groups, in display order. Commands appear under their group in
 // the order the registry (and thus `palette_commands`) yields them.
 export const PALETTE_GROUP_ORDER = [
-  "Configuration",
-  "View",
   "Projects",
+  "Agents",
+  "Layout",
+  "Preferences",
+  "Configuration",
 ] as const
 
 export type PaletteGroup = (typeof PALETTE_GROUP_ORDER)[number]
@@ -27,32 +29,30 @@ export type PaletteGroup = (typeof PALETTE_GROUP_ORDER)[number]
 // drift from the registry.
 const GROUP_BY_ID: Record<string, PaletteGroup> = {
   "add-project": "Projects",
-  "configure-global-env": "Configuration",
+  "sort-agents-by-created": "Agents",
+  "sort-agents-by-name": "Agents",
+  "sort-agents-by-updated": "Agents",
+  "toggle-randomized-pet-name-default": "Agents",
+  "kill-running": "Agents",
+  "toggle-pr-banner-position": "Layout",
+  "toggle-remove-git-pane": "Layout",
+  "toggle-always-show-tabs": "Layout",
+  "customize-ui-preferences": "Preferences",
+  "toggle-copy-on-select": "Preferences",
   "edit-config": "Configuration",
   "edit-macros": "Configuration",
+  "configure-global-env": "Configuration",
   "reload-config": "Configuration",
-  "customize-ui-preferences": "Configuration",
   "toggle-github-integration": "Configuration",
-  "toggle-randomized-pet-name-default": "Configuration",
-  "sort-agents-by-created": "View",
-  "sort-agents-by-name": "View",
-  "sort-agents-by-updated": "View",
-  "toggle-pr-banner-position": "View",
-  "toggle-remove-git-pane": "View",
-  "toggle-copy-on-select": "View",
-  "toggle-always-show-tabs": "View",
-  // A runtime action rather than a true "view" concern, but grouped here to
-  // avoid a single-command group; revisit if more runtime commands arrive.
-  "kill-running": "View",
 }
 
-// The ids that carry a group mapping — exported for the coverage test's REVERSE
+// The ids that carry a group mapping, exported for the coverage test's REVERSE
 // check (every mapped id must still be a live web command, so a removed command
 // left behind here is caught rather than silently lingering).
 export const GROUPED_PALETTE_IDS = Object.keys(GROUP_BY_ID)
 
 // The group for a web command id, or null when none is mapped (a registry
-// addition without a group — caught by the coverage test). CommandPalette skips
+// addition without a group, caught by the coverage test). CommandPalette skips
 // ungrouped ids so an unmapped command never crashes the render.
 export function paletteGroupFor(id: string): PaletteGroup | null {
   return GROUP_BY_ID[id] ?? null

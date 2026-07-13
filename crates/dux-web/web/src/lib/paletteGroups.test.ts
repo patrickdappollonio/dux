@@ -60,26 +60,54 @@ describe("paletteGroups", () => {
     const commands = (await webCommandIds()).map(cmd)
     const grouped = groupPaletteCommands(commands)
     expect(grouped.map((g) => g.group)).toEqual([
-      "Configuration",
-      "View",
       "Projects",
+      "Agents",
+      "Layout",
+      "Preferences",
+      "Configuration",
     ])
   })
 
   it("preserves the input order within a group", () => {
-    // Reverse the View commands; the bucket should keep that relative order.
+    // Reverse the Agents commands; the bucket should keep that relative order.
     const commands = [
       cmd("sort-agents-by-name"),
       cmd("sort-agents-by-created"),
       cmd("sort-agents-by-updated"),
     ]
     const grouped = groupPaletteCommands(commands)
-    const view = grouped.find((g) => g.group === "View")
-    expect(view?.commands.map((c) => c.id)).toEqual([
+    const agents = grouped.find((g) => g.group === "Agents")
+    expect(agents?.commands.map((c) => c.id)).toEqual([
       "sort-agents-by-name",
       "sort-agents-by-created",
       "sort-agents-by-updated",
     ])
+  })
+
+  it("places runtime and agent-lifecycle commands in Agents", () => {
+    expect(paletteGroupFor("kill-running")).toBe("Agents")
+    expect(paletteGroupFor("toggle-randomized-pet-name-default")).toBe(
+      "Agents",
+    )
+  })
+
+  it("places pane/tab layout toggles in Layout", () => {
+    expect(paletteGroupFor("toggle-pr-banner-position")).toBe("Layout")
+    expect(paletteGroupFor("toggle-remove-git-pane")).toBe("Layout")
+    expect(paletteGroupFor("toggle-always-show-tabs")).toBe("Layout")
+  })
+
+  it("places user-preference commands in Preferences", () => {
+    expect(paletteGroupFor("customize-ui-preferences")).toBe("Preferences")
+    expect(paletteGroupFor("toggle-copy-on-select")).toBe("Preferences")
+  })
+
+  it("places config-file and integration commands in Configuration", () => {
+    expect(paletteGroupFor("edit-config")).toBe("Configuration")
+    expect(paletteGroupFor("edit-macros")).toBe("Configuration")
+    expect(paletteGroupFor("configure-global-env")).toBe("Configuration")
+    expect(paletteGroupFor("reload-config")).toBe("Configuration")
+    expect(paletteGroupFor("toggle-github-integration")).toBe("Configuration")
   })
 
   it("drops empty groups", () => {
