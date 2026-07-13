@@ -54,6 +54,13 @@ impl TerminalFocus {
     /// `FocusGained` while already focused is a no-op and never restarts a
     /// running grace.
     pub fn on_focus_gained(&mut self, now: Instant) {
+        // `!self.focused` alone already implies `ever_saw_focus_event`: the
+        // only setter of `focused = false` is `on_focus_lost`, which always
+        // sets `ever_saw_focus_event = true` in the same call. The explicit
+        // `ever_saw_focus_event &&` guard is kept only to document that
+        // invariant; the assertion below catches a future setter of
+        // `focused = false` that forgets to also set `ever_saw_focus_event`.
+        debug_assert!(self.focused || self.ever_saw_focus_event);
         if self.ever_saw_focus_event && !self.focused {
             self.regained_at = Some(now);
         }

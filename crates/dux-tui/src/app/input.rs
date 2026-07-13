@@ -1395,14 +1395,17 @@ impl App {
                 &buf[..n],
                 LOADING_INPUT_BUF_MAX,
             );
-            if self.scan_loading_phase_exit() {
-                return Ok(false);
-            }
             // Focus reports arriving before the provider produced output are
             // suppressed from forwarding (like every loading-phase byte), but we
             // still want to track them so a focus change during agent startup is
-            // not lost.
-            self.scan_loading_phase_focus();
+            // not lost. scan_loading_phase applies the focus scan before the
+            // exit scan's early return, and feeds the shared raw_input_parser
+            // so bracket-paste state (and therefore focus-report exemption) is
+            // tracked exactly like the interactive path, including across the
+            // loading -> interactive transition.
+            if self.scan_loading_phase(&buf[..n]) {
+                return Ok(false);
+            }
             // Trim to the incomplete remainder so a partial escape can be
             // completed by the next read (already bounded by the cap above).
             let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
@@ -6682,14 +6685,31 @@ impl App {
         false
     }
 
-    /// Scan `loading_input_buf` for terminal focus reports (DEC mode 1004) and
-    /// apply them to `terminal_focus`. Used during the loading phase, where all
-    /// input is suppressed from forwarding: without this a focus change while an
-    /// agent is starting up would go unobserved. Only complete sequences are
-    /// inspected; a partial escape rides the caller's remainder machinery.
-    pub(crate) fn scan_loading_phase_focus(&mut self) {
-        let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
-        for seq in &sequences {
+    /// Scan parsed loading-phase sequences for terminal focus reports (DEC
+    /// mode 1004) and apply them to `terminal_focus`. Used during the loading
+    /// phase, where all input is suppressed from forwarding: without this a
+    /// focus change while an agent is starting up would go unobserved.
+    ///
+    /// `sequences` must come from the shared `raw_input_parser` (the same
+    /// parser instance the interactive path uses via
+    /// `process_raw_input_bytes`), so each sequence's `in_bracket_paste` flag
+    /// is bracket-paste aware exactly like the interactive path: a literal
+    /// `ESC[I` / `ESC[O` pasted as content is forwarded as data and must never
+    /// be reinterpreted as a real focus report.
+    pub(crate) fn scan_loading_phase_focus(
+        &mut self,
+        sequences: &[crate::raw_input::ParsedSequence],
+    ) {
+        for parsed in sequences {
+            let seq = parsed.bytes.as_slice();
+            if seq == crate::raw_input::BRACKET_PASTE_START
+                || seq == crate::raw_input::BRACKET_PASTE_END
+            {
+                continue;
+            }
+            if parsed.in_bracket_paste {
+                continue;
+            }
             if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
                 if gained {
                     self.terminal_focus.on_focus_gained(Instant::now());
@@ -6698,6 +6718,20 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Feed newly-read loading-phase bytes through the shared
+    /// `raw_input_parser`, then scan for a focus report and an
+    /// ExitInteractive trigger. Focus is applied first so a focus report
+    /// bundled in the same read as an ExitInteractive trigger is still
+    /// observed even though `scan_loading_phase_exit` returns early on a
+    /// match. Returns whether interactive mode was exited.
+    pub(crate) fn scan_loading_phase(&mut self, new_bytes: &[u8]) -> bool {
+        let sequences = self.raw_input_parser.feed_sequences(new_bytes);
+        self.raw_input_buf = self.raw_input_parser.pending().to_vec();
+        self.in_bracket_paste = self.raw_input_parser.in_bracket_paste();
+        self.scan_loading_phase_focus(&sequences);
+        self.scan_loading_phase_exit()
     }
 }
 
@@ -14387,7 +14421,8 @@ cyan = "#00ffff"
             "a focus-out report must flip the state to unfocused"
         );
 
-        // Focus-in: fail-open first-ever style refocus resumes stamping.
+        // Focus-in: a genuine unfocused->focused transition. With zero grace
+        // (passed to should_stamp_viewed below) stamping resumes immediately.
         app.process_raw_input_bytes(b"\x1b[I").unwrap();
         assert!(
             app.terminal_focus
@@ -14400,6 +14435,36 @@ cyan = "#00ffff"
         assert!(
             app.engine.pty_input.is_empty(),
             "focus reports must never be forwarded to the child PTY"
+        );
+    }
+
+    #[test]
+    fn raw_focus_gained_on_fresh_app_confirms_fail_open_with_no_grace() {
+        // A fresh App has never seen a focus event, so it fails open (assumes
+        // focused). The very first raw focus report being a focus-in simply
+        // confirms that assumption; it must not start a grace window, so
+        // stamping is immediate under any grace, including a nonzero one.
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.engine.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        app.process_raw_input_bytes(b"\x1b[I").unwrap();
+        assert!(
+            app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::from_secs(3)),
+            "the first-ever focus-in report must not start a grace window"
         );
     }
 
@@ -14448,10 +14513,11 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         // Mirror the existing loading-phase tests: bytes suppressed from
-        // forwarding are staged in loading_input_buf, then scanned.
-        app.loading_input_buf = b"\x1b[O".to_vec();
+        // forwarding are fed through the shared raw_input_parser (the same
+        // parser instance the interactive path uses), then scanned.
+        let sequences = app.raw_input_parser.feed_sequences(b"\x1b[O");
 
-        app.scan_loading_phase_focus();
+        app.scan_loading_phase_focus(&sequences);
 
         assert!(
             !app.terminal_focus
@@ -14461,6 +14527,82 @@ cyan = "#00ffff"
         assert!(
             app.engine.pty_input.is_empty(),
             "loading-phase focus scanning forwards nothing"
+        );
+    }
+
+    #[test]
+    fn loading_phase_focus_scan_applies_bare_focus_gained() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.terminal_focus.on_focus_lost();
+
+        // A bare focus-in report (not inside a bracketed paste) must still be
+        // observed during the loading phase.
+        let sequences = app.raw_input_parser.feed_sequences(b"\x1b[I");
+        app.scan_loading_phase_focus(&sequences);
+
+        assert!(
+            app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
+            "a bare focus-in report during loading must resume stamping"
+        );
+    }
+
+    #[test]
+    fn loading_phase_focus_scan_exempts_bracketed_paste_content() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.terminal_focus.on_focus_lost();
+
+        // A paste whose content contains a literal ESC[I must not be
+        // reinterpreted as a real focus report during the loading phase,
+        // mirroring the interactive path's bracket-paste exemption.
+        let mut input = Vec::new();
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        input.extend_from_slice(b"\x1b[I");
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+
+        let sequences = app.raw_input_parser.feed_sequences(&input);
+        app.scan_loading_phase_focus(&sequences);
+
+        assert!(
+            !app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::from_secs(3)),
+            "a literal ESC[I inside a loading-phase paste must not resume focus stamping"
+        );
+    }
+
+    #[test]
+    fn loading_phase_scan_observes_focus_before_exit_early_return() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.terminal_focus.on_focus_lost();
+
+        // A single read bundles a focus-in report together with the
+        // ExitInteractive trigger (Ctrl-g). The exit scan returns early on a
+        // match; the bundled focus report must still be observed rather than
+        // dropped by that early return.
+        let mut input = Vec::new();
+        input.extend_from_slice(b"\x1b[I");
+        input.push(0x07);
+
+        // Mirror poll_and_forward_raw_input's own bookkeeping: it appends
+        // newly-read bytes into loading_input_buf (which scan_loading_phase_exit
+        // reads from) before calling scan_loading_phase.
+        app.loading_input_buf = input.clone();
+
+        let exited = app.scan_loading_phase(&input);
+
+        assert!(
+            exited,
+            "the ExitInteractive trigger in the bundled read must still fire"
+        );
+        assert!(
+            app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
+            "a focus-in report bundled with an exit trigger in the same read must not be dropped"
         );
     }
 
