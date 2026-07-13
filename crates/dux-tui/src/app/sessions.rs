@@ -3587,6 +3587,7 @@ mod tests {
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
+            terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: Arc::new(AtomicBool::new(false)),
             sigwinch_sig_id: None,

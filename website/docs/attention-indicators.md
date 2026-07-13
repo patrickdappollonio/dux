@@ -33,12 +33,16 @@ The flag clears the moment you look. Selecting the agent and focusing its termin
 (TUI) or opening its live view (web) puts the flag down, and so does typing into
 it. An agent you are already watching never nags you.
 
-In the web UI specifically, switching back to your dux browser tab keeps the
-indicators up for a few seconds instead of dismissing them the instant the tab
-regains focus, so you actually get a look at which agent(s) wanted you before
-the flag clears. That grace window is configurable (`ui.attention_grace_seconds`,
-covered below) and only applies right after you return to the tab; while you
-stay on it, watching an agent still clears its flag immediately as usual.
+There is a twist for when you step away entirely. While you are not looking at
+dux at all, dux stops treating the focused agent as "being watched" so a fresh
+attention request can still light up: in the web UI that means your dux browser
+tab is hidden, and in the TUI it means your terminal window (or tmux pane) has
+lost focus. Then, the moment you come back, dux keeps the indicators up for a
+few seconds instead of dismissing them the instant focus returns, so you
+actually get a look at which agent(s) wanted you before the flag clears. That
+grace window is configurable (`ui.attention_grace_seconds`, covered below) and
+only applies right after you return; while you stay put, watching an agent still
+clears its flag immediately as usual.
 
 ## How dux detects it
 
@@ -102,19 +106,28 @@ attention_indicator = true
 # terminal_bell mode) but can occasionally ring for mundane reasons.
 attention_on_bell = true
 
-# Web UI only: seconds the attention indicators stay visible after you return
-# to the dux browser tab, before the focused agent's needs-attention flag
-# clears. Gives you time to see which agent(s) wanted you before the
-# indicator vanishes. Set to 0 to clear the indicator immediately on return
-# (the pre-grace behavior).
+# Seconds the attention indicators stay visible after dux regains your
+# attention, before the focused agent's needs-attention flag clears. Applies
+# when you return to the dux browser tab (web UI) and when your terminal
+# window regains focus (TUI). Gives you time to see which agent(s) wanted you
+# before the indicator vanishes. Set to 0 to clear the indicator immediately.
+# TUI note: requires a terminal that reports focus; under tmux, set
+# `focus-events on`. Terminals that never report focus keep the old behavior.
 attention_grace_seconds = 3
 ```
 
 Turn `attention_on_bell` off if a chatty tool inside your agent's session (a test
 runner, tab completion) rings the bell for reasons that are not really about you.
 Turn `attention_indicator` off to silence the whole feature everywhere.
-`attention_grace_seconds` is web-only: the TUI has no equivalent delay, since a
-focused terminal pane clears its own flag instantly either way.
+`attention_grace_seconds` now covers both surfaces. In the TUI it rides on your
+terminal telling dux when its window gains or loses focus (DEC focus reporting,
+which kitty, ghostty, WezTerm, iTerm2, foot, alacritty, and xterm all speak): dux
+stops clearing the focused agent's flag while your window is unfocused, then holds
+the indicators for this many seconds once you switch back. Running inside tmux? Add
+`set -g focus-events on` to your `~/.tmux.conf` so tmux forwards those focus events
+(note tmux reports focus per pane, so switching tmux panes away from dux reads as
+unfocused too). A terminal that never reports focus simply keeps the pre-grace
+behavior: dux assumes you are always looking, exactly as before.
 
 By default this feature stays inside dux: bells rung inside an agent's session are
 consumed by dux's embedded terminal and not re-forwarded to the terminal you run

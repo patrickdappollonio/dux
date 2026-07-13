@@ -1398,6 +1398,11 @@ impl App {
             if self.scan_loading_phase_exit() {
                 return Ok(false);
             }
+            // Focus reports arriving before the provider produced output are
+            // suppressed from forwarding (like every loading-phase byte), but we
+            // still want to track them so a focus change during agent startup is
+            // not lost.
+            self.scan_loading_phase_focus();
             // Trim to the incomplete remainder so a partial escape can be
             // completed by the next read (already bounded by the cap above).
             let (_, remainder) = crate::raw_input::split_sequences(&self.loading_input_buf);
@@ -1557,6 +1562,19 @@ impl App {
             }
             if parsed.in_bracket_paste {
                 actions.push(SeqAction::Forward(seq.to_vec()));
+                continue;
+            }
+            // Terminal focus reports (DEC mode 1004: ESC[I / ESC[O) are host
+            // status, not user input. Update focus state and drop them; they
+            // must NEVER reach the child PTY (they would type stray `[I`/`[O`).
+            // Ordered after the bracket-paste branch above so a literal ESC[I
+            // pasted as content still forwards.
+            if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
+                if gained {
+                    self.terminal_focus.on_focus_gained(Instant::now());
+                } else {
+                    self.terminal_focus.on_focus_lost();
+                }
                 continue;
             }
             // Mouse events must be handled by the UI, not forwarded to the
@@ -1905,7 +1923,22 @@ impl App {
     /// agent's live terminal is off-screen, so viewing the diff must NOT be taken
     /// as looking at the agent, or attention would be suppressed for a prompt the
     /// user cannot see.
+    ///
+    /// The terminal-focus gate matters just as much: viewing only counts while
+    /// the host terminal window is focused. While it is unfocused we stop
+    /// stamping so a new attention request can rise, and for
+    /// `ui.attention_grace_seconds` after refocus we still hold off so the user
+    /// has time to see which agent(s) wanted them before the flag clears. Until
+    /// the first focus report of the run arrives the gate fails open, preserving
+    /// the pre-feature behavior on terminals that never report focus.
     pub(crate) fn note_focused_agent_viewed(&mut self) {
+        let grace = Duration::from_secs(self.engine.config.ui.attention_grace_seconds);
+        if !self
+            .terminal_focus
+            .should_stamp_viewed(Instant::now(), grace)
+        {
+            return;
+        }
         if self.focus == FocusPane::Center
             && matches!(self.center_mode, CenterMode::Agent)
             && self.active_terminal_id.is_none()
@@ -6648,6 +6681,24 @@ impl App {
         }
         false
     }
+
+    /// Scan `loading_input_buf` for terminal focus reports (DEC mode 1004) and
+    /// apply them to `terminal_focus`. Used during the loading phase, where all
+    /// input is suppressed from forwarding: without this a focus change while an
+    /// agent is starting up would go unobserved. Only complete sequences are
+    /// inspected; a partial escape rides the caller's remainder machinery.
+    pub(crate) fn scan_loading_phase_focus(&mut self) {
+        let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
+        for seq in &sequences {
+            if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
+                if gained {
+                    self.terminal_focus.on_focus_gained(Instant::now());
+                } else {
+                    self.terminal_focus.on_focus_lost();
+                }
+            }
+        }
+    }
 }
 
 fn set_create_agent_request_custom_name(request: &mut CreateAgentRequest, name: String) {
@@ -9596,6 +9647,88 @@ not_a_real_action = ["x"]
         assert!(
             app.engine.tab_needs_attention(&tab_id),
             "the Left pane having focus is not looking at the agent"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_does_not_clear_while_terminal_unfocused() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.active_terminal_id = None;
+        // The terminal window is not focused: viewing must not stamp.
+        app.terminal_focus.on_focus_lost();
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            app.engine.tab_needs_attention(&tab_id),
+            "an unfocused terminal window must not clear the agent's attention flag"
+        );
+        assert!(
+            app.engine.agent_viewed.is_empty(),
+            "nothing should be stamped as viewed while the terminal is unfocused"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_does_not_clear_within_refocus_grace() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.active_terminal_id = None;
+        // Default grace is 3 s; a fresh refocus is still inside it.
+        app.terminal_focus.on_focus_lost();
+        app.terminal_focus
+            .on_focus_gained(std::time::Instant::now());
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            app.engine.tab_needs_attention(&tab_id),
+            "within the refocus grace the flag must stay visible"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_clears_after_refocus_grace() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.active_terminal_id = None;
+        // Backdate the regain so the (default 3 s) grace has fully elapsed.
+        app.terminal_focus.on_focus_lost();
+        app.terminal_focus
+            .on_focus_gained(std::time::Instant::now() - std::time::Duration::from_secs(4));
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            !app.engine.tab_needs_attention(&tab_id),
+            "after the refocus grace elapses, viewing must clear the flag"
+        );
+    }
+
+    #[test]
+    fn note_focused_agent_viewed_clears_immediately_with_zero_grace() {
+        let mut app = test_app(default_bindings());
+        let tab_id = seed_selected_attention(&mut app);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.active_terminal_id = None;
+        app.engine.config.ui.attention_grace_seconds = 0;
+        app.terminal_focus.on_focus_lost();
+        app.terminal_focus
+            .on_focus_gained(std::time::Instant::now());
+
+        app.note_focused_agent_viewed();
+
+        assert!(
+            !app.engine.tab_needs_attention(&tab_id),
+            "with the grace disabled a refocus clears the flag immediately"
         );
     }
 
@@ -14224,6 +14357,111 @@ cyan = "#00ffff"
             "Ctrl-g inside bracket paste must not exit interactive mode"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+    }
+
+    #[test]
+    fn raw_focus_sequences_update_focus_state_and_are_not_forwarded() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.engine.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let grace = std::time::Duration::from_secs(3);
+
+        // Focus-out: the terminal window is unfocused, so viewing must stop.
+        app.process_raw_input_bytes(b"\x1b[O").unwrap();
+        assert!(
+            !app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), grace),
+            "a focus-out report must flip the state to unfocused"
+        );
+
+        // Focus-in: fail-open first-ever style refocus resumes stamping.
+        app.process_raw_input_bytes(b"\x1b[I").unwrap();
+        assert!(
+            app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
+            "a focus-in report must flip the state back to focused"
+        );
+
+        // Neither report may reach the child PTY: nothing was forwarded, so the
+        // per-tab pty-input bookkeeping stays empty.
+        assert!(
+            app.engine.pty_input.is_empty(),
+            "focus reports must never be forwarded to the child PTY"
+        );
+    }
+
+    #[test]
+    fn raw_focus_bytes_inside_bracketed_paste_are_forwarded_verbatim() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        app.engine.providers.insert(
+            "session-1".to_string(),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "cat; sleep 0.5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Paste-start + a literal ESC[I + paste-end: the ESC[I is pasted user
+        // data, not a host focus report, so it must forward and must NOT touch
+        // the focus state.
+        let mut input = Vec::new();
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_START);
+        input.extend_from_slice(b"\x1b[I");
+        input.extend_from_slice(crate::raw_input::BRACKET_PASTE_END);
+        app.process_raw_input_bytes(&input).unwrap();
+
+        // Focus state untouched: still fail-open (stamps under any grace).
+        assert!(
+            app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::from_secs(3)),
+            "a focus sequence inside a bracketed paste must not change focus state"
+        );
+        // The paste content reached the PTY.
+        assert!(
+            !app.engine.pty_input.is_empty(),
+            "bracketed-paste content, including literal ESC[I, must forward to the PTY"
+        );
+    }
+
+    #[test]
+    fn focus_event_during_loading_phase_updates_state() {
+        let mut app = test_app(default_bindings());
+        app.input_target = InputTarget::Agent;
+        // Mirror the existing loading-phase tests: bytes suppressed from
+        // forwarding are staged in loading_input_buf, then scanned.
+        app.loading_input_buf = b"\x1b[O".to_vec();
+
+        app.scan_loading_phase_focus();
+
+        assert!(
+            !app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::from_secs(3)),
+            "a focus-out arriving during loading must still be observed"
+        );
+        assert!(
+            app.engine.pty_input.is_empty(),
+            "loading-phase focus scanning forwards nothing"
+        );
     }
 
     #[test]

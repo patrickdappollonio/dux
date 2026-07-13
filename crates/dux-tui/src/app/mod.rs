@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use ratatui::Frame;
@@ -159,6 +159,11 @@ pub struct App {
     /// (`ESC[200~` … `ESC[201~`). Inside a paste, intercept matching is
     /// skipped so pasted text doesn't trigger keybindings.
     pub(crate) in_bracket_paste: bool,
+    /// Host terminal-window focus, tracked via DEC mode 1004 focus reports.
+    /// Gates the per-tick "viewed" stamp so an unfocused window stops
+    /// suppressing the focused agent's attention flag. Fails open until the
+    /// first focus event of the run is observed.
+    pub(crate) terminal_focus: crate::focus::TerminalFocus,
     pub(crate) macro_bar: Option<MacroBarState>,
     pub(crate) sigwinch_flag: Arc<AtomicBool>,
     /// Registration id for the SIGWINCH handler, unregistered when the App is
@@ -1917,6 +1922,7 @@ impl App {
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             in_bracket_paste: false,
+            terminal_focus: crate::focus::TerminalFocus::new(),
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
             sigwinch_sig_id: signals.sigwinch_sig_id,
@@ -2029,7 +2035,10 @@ impl App {
         self.engine.spawn_project_branch_status_checks();
         self.engine.spawn_gh_status_check();
         let mut terminal = ratatui::init();
-        execute!(stdout(), EnableMouseCapture)?;
+        // EnableFocusChange (DEC mode 1004) so the host reports window focus,
+        // gating the per-tick "viewed" stamp. Enabled/disabled symmetrically
+        // with mouse capture at every terminal-mode lifecycle site below.
+        execute!(stdout(), EnableMouseCapture, EnableFocusChange)?;
 
         let result: RunExit = {
             'main: loop {
@@ -2069,9 +2078,9 @@ impl App {
                     if let Err(err) = terminal.clear() {
                         self.report_runtime_error("force redraw failed", &err);
                     }
-                    // Re-enable mouse capture — terminal.clear() resets
-                    // terminal state which drops the mouse capture mode.
-                    let _ = execute!(stdout(), EnableMouseCapture);
+                    // Re-enable mouse capture and focus reporting:
+                    // terminal.clear() resets terminal state which drops both.
+                    let _ = execute!(stdout(), EnableMouseCapture, EnableFocusChange);
                 }
 
                 if let Err(err) = terminal.draw(|frame| self.render(frame)) {
@@ -2206,6 +2215,10 @@ impl App {
                                     should_exit = self.handle_mouse(mouse);
                                 }
                                 Event::Resize(_, _) => {}
+                                Event::FocusGained => {
+                                    self.terminal_focus.on_focus_gained(Instant::now())
+                                }
+                                Event::FocusLost => self.terminal_focus.on_focus_lost(),
                                 _ => {}
                             }
 
@@ -2240,7 +2253,7 @@ impl App {
             }
         };
 
-        let _ = execute!(stdout(), DisableMouseCapture);
+        let _ = execute!(stdout(), DisableMouseCapture, DisableFocusChange);
         ratatui::restore();
 
         // On a real quit, wind the agents and companion terminals down

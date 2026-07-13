@@ -600,7 +600,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "attention_grace_seconds",
             comment: Some(CommentSource::Static(
-                "# Web UI only: seconds the attention indicators stay visible after you\n# return to the dux browser tab, before the focused agent's needs-attention\n# flag clears. Gives you time to see which agent(s) wanted you before the\n# indicator vanishes. Set to 0 to clear the indicator immediately on return\n# (the pre-grace behavior).",
+                "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Terminals that never report focus keep the old behavior.",
             )),
             value_fn: |c| FieldValue::Usize(c.ui.attention_grace_seconds as usize),
         },

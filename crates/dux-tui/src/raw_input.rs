@@ -5,6 +5,29 @@ pub const BRACKET_PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracket paste mode end marker: `ESC [ 201 ~`
 pub const BRACKET_PASTE_END: &[u8] = b"\x1b[201~";
 
+/// Focus-in report (DEC private mode 1004): `ESC [ I`.
+pub const FOCUS_GAINED_SEQ: &[u8] = b"\x1b[I";
+/// Focus-out report (DEC private mode 1004): `ESC [ O`.
+pub const FOCUS_LOST_SEQ: &[u8] = b"\x1b[O";
+
+/// Recognize a terminal focus report emitted while DEC mode 1004 is enabled.
+///
+/// Returns `Some(true)` for focus-in (`ESC [ I`), `Some(false)` for focus-out
+/// (`ESC [ O`), and `None` for anything else. These are exact matches (no
+/// parameters), which keeps them distinct from cursor motion (`ESC [ A`) and
+/// parameterized sequences; the CSI splitter always delivers them whole, so the
+/// interactive input path can intercept and drop them instead of forwarding the
+/// host's report into the child PTY.
+pub fn parse_focus_event(seq: &[u8]) -> Option<bool> {
+    if seq == FOCUS_GAINED_SEQ {
+        Some(true)
+    } else if seq == FOCUS_LOST_SEQ {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Returns `true` if the byte sequence is an SGR mouse event (`\x1b[<…M` or
 /// `\x1b[<…m`).
 pub fn is_sgr_mouse(seq: &[u8]) -> bool {
@@ -338,6 +361,39 @@ pub fn split_sequences(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_focus_event_recognizes_gained_and_lost() {
+        assert_eq!(parse_focus_event(FOCUS_GAINED_SEQ), Some(true));
+        assert_eq!(parse_focus_event(FOCUS_LOST_SEQ), Some(false));
+        assert_eq!(parse_focus_event(b"\x1b[I"), Some(true));
+        assert_eq!(parse_focus_event(b"\x1b[O"), Some(false));
+    }
+
+    #[test]
+    fn parse_focus_event_rejects_non_focus_sequences() {
+        assert_eq!(parse_focus_event(b"\x1b[A"), None); // cursor up
+        assert_eq!(parse_focus_event(b"\x1b[200~"), None); // bracket paste start
+        assert_eq!(parse_focus_event(b"\x1b[<0;1;1M"), None); // SGR mouse
+        assert_eq!(parse_focus_event(b"I"), None); // bare letter
+        assert_eq!(parse_focus_event(b"\x1b[1I"), None); // parameterized, not focus
+        assert_eq!(parse_focus_event(b""), None);
+    }
+
+    #[test]
+    fn focus_sequences_split_as_standalone_sequences() {
+        let (seqs, rem) = split_sequences(b"a\x1b[Ib\x1b[O");
+        assert_eq!(
+            seqs,
+            vec![
+                b"a".as_slice(),
+                b"\x1b[I".as_slice(),
+                b"b".as_slice(),
+                b"\x1b[O".as_slice(),
+            ]
+        );
+        assert!(rem.is_empty());
+    }
 
     #[test]
     fn single_printable_ascii() {

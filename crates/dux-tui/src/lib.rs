@@ -6,6 +6,7 @@ mod clipboard;
 mod config;
 mod config_saver;
 mod diff;
+mod focus;
 mod keybindings;
 mod raw_input;
 mod server_screen;
