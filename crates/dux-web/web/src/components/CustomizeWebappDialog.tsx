@@ -34,13 +34,14 @@ import {
   type SettingValue,
 } from "@/lib/settingsDescriptors"
 import {
+  changesPaneVisible,
   closeCustomizeWebapp,
   saveSettings,
+  setChangesPaneVisibility,
   setInstanceIdentity,
   useDux,
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
-import type { Bootstrap } from "@/lib/bootstrapApi"
 
 // The favicon swatch grid. "Original" (favicon "") previews the bundled
 // full-colour duck; each curated colour previews the tinted duck silhouette.
@@ -118,6 +119,80 @@ function FaviconControl({
   )
 }
 
+function clampToControl(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n))
+}
+
+// A number row keeps its OWN local text buffer, decoupled from the committed
+// `value` prop, for two reasons (see the adversarial-review findings this
+// fixes): (1) an emptied field must render empty while the user is between
+// keystrokes, and Input's `value` is otherwise fully controlled by the
+// committed numeric override, so without a local buffer the field would snap
+// back to a stale digit the instant the last character is deleted; (2) an
+// empty field must NOT commit as `0`, since 0 is a meaningful value for every
+// numeric setting here (never auto-clear, clear immediately, leave tabs
+// as-is). Every keystroke that parses to a finite number commits immediately,
+// clamped to the descriptor's [min, max] client-side so an out-of-range value
+// never reaches the wire (the server re-clamps too, but silently, which is
+// surprising UX on its own). The buffer re-syncs whenever the committed
+// `value` changes from OUTSIDE this control (an override reset, or a
+// concurrent client's bootstrap update reflected while untouched), via the
+// React-documented "adjust state during render" pattern (a `prevValue`
+// tracker compared on every render) rather than a `useEffect`, so the
+// re-sync lands in the SAME render/commit as the prop change instead of a
+// cascading extra render.
+function NumberControl({
+  id,
+  label,
+  min,
+  max,
+  value,
+  onChange,
+  disabled,
+}: {
+  id: string
+  label: string
+  min: number
+  max: number
+  value: number
+  onChange: (v: number) => void
+  disabled: boolean
+}) {
+  const [text, setText] = useState(String(value))
+  const [prevValue, setPrevValue] = useState(value)
+  if (value !== prevValue) {
+    setPrevValue(value)
+    setText(String(value))
+  }
+
+  return (
+    <Input
+      id={id}
+      type="number"
+      aria-label={label}
+      min={min}
+      max={max}
+      value={text}
+      disabled={disabled}
+      className="max-md:min-h-10 w-24"
+      onChange={(e) => {
+        const raw = e.target.value
+        setText(raw)
+        if (raw.trim() === "") return
+        const parsed = Number(raw)
+        if (!Number.isFinite(parsed)) return
+        onChange(clampToControl(parsed, min, max))
+      }}
+      onBlur={() => {
+        // Leaving the field empty (or on some other non-committing state)
+        // reverts the displayed text to the last committed value rather than
+        // stranding a blank input with a stale numeric override underneath.
+        if (text.trim() === "") setText(String(value))
+      }}
+    />
+  )
+}
+
 function SettingControl({
   d,
   value,
@@ -143,19 +218,14 @@ function SettingControl({
       )
     case "number":
       return (
-        <Input
+        <NumberControl
           id={id}
-          type="number"
-          aria-label={d.label}
+          label={d.label}
           min={d.control.min}
           max={d.control.max}
           value={value as number}
           disabled={disabled}
-          className="max-md:min-h-10 w-24"
-          onChange={(e) => {
-            const raw = Number(e.target.value)
-            onChange(Number.isFinite(raw) ? raw : 0)
-          }}
+          onChange={(v) => onChange(v)}
         />
       )
     case "enum":
@@ -243,24 +313,39 @@ function SettingRow({
 }
 
 // Build the write bodies for a set of [descriptor, value] pairs, keeping only
-// entries whose value actually differs from the live bootstrap (so an
-// untouched-but-equal field, and a field touched back to its original value,
-// never gets sent). Returns null when there is nothing to write.
+// entries whose value actually differs from its ORIGINAL (pre-touch) value
+// (so an untouched-but-equal field, and a field touched back to its original
+// value, never gets sent). Returns null when there is nothing to write.
+//
+// `originalOf` supplies that pre-touch baseline. It is NOT always
+// `d.read(bootstrap)`: `ui.show_changes_pane` (`writeTarget: "changesPane"`)
+// is bespoke, the store tracks an optimistic `changesPaneOverride` for that
+// one field (the Changes menu can flip it live outside this dialog too), so
+// its baseline is the override-aware `changesPaneVisible()`, not the raw
+// bootstrap field, and comparing against the raw field would wrongly treat a
+// toggle back to the STALE bootstrap value as a no-op. For the same reason
+// `ui.show_changes_pane` is excluded from the generic `settings` bucket here
+// and routed through `setChangesPaneVisibility` by the caller instead of the
+// generic PATCH. See the `writeTarget` doc in `settingsDescriptors.ts`.
 function buildWrites(
   entries: [SettingDescriptor, SettingValue][],
-  bootstrap: Bootstrap,
+  originalOf: (d: SettingDescriptor) => SettingValue,
 ): {
   identity: { title?: string; favicon?: string } | null
   settings: { ui?: Record<string, SettingValue>; capabilities?: Record<string, SettingValue> } | null
+  changesPane: boolean | null
 } {
   const identity: { title?: string; favicon?: string } = {}
   const ui: Record<string, SettingValue> = {}
   const capabilities: Record<string, SettingValue> = {}
+  let changesPane: boolean | null = null
   for (const [d, value] of entries) {
-    if (value === d.read(bootstrap)) continue
+    if (value === originalOf(d)) continue
     if (d.writeTarget === "identity") {
       const field = d.key.split(".")[1] as "title" | "favicon"
       identity[field] = value as string
+    } else if (d.writeTarget === "changesPane") {
+      changesPane = value as boolean
     } else {
       const [group, field] = d.key.split(".")
       if (group === "capabilities") capabilities[field] = value
@@ -276,17 +361,19 @@ function buildWrites(
             capabilities: Object.keys(capabilities).length ? capabilities : undefined,
           }
         : null,
+    changesPane,
   }
 }
 
 async function persist(
   entries: [SettingDescriptor, SettingValue][],
-  bootstrap: Bootstrap,
+  originalOf: (d: SettingDescriptor) => SettingValue,
 ): Promise<boolean> {
-  const { identity, settings } = buildWrites(entries, bootstrap)
+  const { identity, settings, changesPane } = buildWrites(entries, originalOf)
   const writes: Promise<boolean>[] = []
   if (identity) writes.push(setInstanceIdentity(identity))
   if (settings) writes.push(saveSettings(settings))
+  if (changesPane !== null) writes.push(setChangesPaneVisibility(changesPane))
   if (writes.length === 0) return true
   return (await Promise.all(writes)).every(Boolean)
 }
@@ -309,9 +396,23 @@ function CustomizeWebappForm({
   // Changes-pane tracking, generalized to every row).
   const [overrides, setOverrides] = useState<Record<string, SettingValue>>({})
 
+  // The pre-touch baseline for a row: what it would show/compare against if
+  // the user had never touched it in this dialog session. The Changes-pane
+  // row's baseline must be the store's override-aware `changesPaneVisible()`,
+  // not the raw bootstrap field: the Changes menu can flip an optimistic
+  // `changesPaneOverride` while this dialog is open (or already applied one
+  // before it opened), and reading `bootstrap.show_changes_pane` directly
+  // would show a stale value until the next bootstrap refetch reconciles it,
+  // and would make `buildWrites` wrongly treat a toggle back to that stale
+  // value as a no-op.
+  const originalOf = (d: SettingDescriptor): SettingValue => {
+    if (d.writeTarget === "changesPane") return changesPaneVisible(dux)
+    return bootstrap ? d.read(bootstrap) : d.default
+  }
+
   const effective = (d: SettingDescriptor): SettingValue => {
     if (d.key in overrides) return overrides[d.key]
-    return bootstrap ? d.read(bootstrap) : d.default
+    return originalOf(d)
   }
   const setOverride = (key: string, value: SettingValue) =>
     setOverrides((o) => ({ ...o, [key]: value }))
@@ -334,7 +435,7 @@ function CustomizeWebappForm({
       const touched: [SettingDescriptor, SettingValue][] = allSettingDescriptors()
         .filter((d) => d.key in overrides)
         .map((d) => [d, overrides[d.key]])
-      if (await persist(touched, bootstrap)) closeCustomizeWebapp()
+      if (await persist(touched, originalOf)) closeCustomizeWebapp()
     } finally {
       savingRef.current = false
       setSaving(false)
@@ -357,12 +458,21 @@ function CustomizeWebappForm({
         d,
         resetValue(d),
       ])
-      setOverrides((o) => {
-        const next = { ...o }
-        for (const d of settings) next[d.key] = resetValue(d)
-        return next
-      })
-      await persist(entries, bootstrap)
+      // Only reflect the reset defaults in the dialog's local state AFTER the
+      // write actually lands. Applying the optimistic override first (the
+      // previous behavior) showed reset defaults in the controls even when
+      // `persist()` failed, misrepresenting an unsaved state as saved. The
+      // dialog stays OPEN either way, "reset section" is a section-scoped
+      // action the user may keep editing after, not a full-dialog commit
+      // like Save, so a failure just leaves the prior values in place for
+      // the user to see the error toast and retry.
+      if (await persist(entries, originalOf)) {
+        setOverrides((o) => {
+          const next = { ...o }
+          for (const d of settings) next[d.key] = resetValue(d)
+          return next
+        })
+      }
     } finally {
       savingRef.current = false
       setSaving(false)

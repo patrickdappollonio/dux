@@ -41,7 +41,16 @@ describe("settingsDescriptors", () => {
     expect(SETTING_GROUPS.map((g) => g.surface)).toEqual(["web", "both", "tui"])
   })
 
-  it("exposes exactly the first-cut subset of keys", () => {
+  // NOTE: this only catches an accidental key change WITHIN this file (a typo
+  // in a descriptor's `key`, or an accidental add/remove). It is NOT a
+  // cross-language guard against the Rust config schema, the hand-typed `Set`
+  // below lives in this same file, so it can drift right alongside
+  // `SETTING_GROUPS` without failing. The real cross-language guard is the
+  // "KEEP IN SYNC WITH" comment on `config_schema()` in
+  // `crates/dux-tui/src/config.rs`, which is a human-reviewed pointer, not an
+  // automated check. A full build-time cross-check against the Rust schema is
+  // out of scope for this test.
+  it("exposes exactly the first-cut subset of keys (catches accidental key changes within this file)", () => {
     const keys = allSettingDescriptors().map((d) => d.key)
     expect(new Set(keys)).toEqual(
       new Set([

@@ -316,10 +316,20 @@ async fn set_settings(
 ) -> Response {
     // axum's default `Json` extractor answers a deserialize failure (an
     // unknown field caught by `deny_unknown_fields`, or a field of the wrong
-    // type) with 422 Unprocessable Entity. Every other config-mutation route
-    // in this file answers validation failures with plain-text 400, so map the
-    // rejection to 400 here to keep the surface consistent (a client only ever
-    // needs to branch on "ok" vs "4xx with a message").
+    // type) with 422 Unprocessable Entity. This route deliberately maps that
+    // rejection to plain-text 400 instead. This is an intentional DIVERGENCE
+    // from the other `Json<...>`-extracting routes in this file (e.g.
+    // `set_instance_identity`), which still fall through to axum's default
+    // 422 on a malformed body, not an attempt to make every config-mutation
+    // route return the same status for a bad body. The divergence is
+    // acceptable here because this route is the one that layers typed,
+    // `deny_unknown_fields` nested sub-structs on `Json` (see the body-shape
+    // decision above), so a client typo or client/server field-set drift is
+    // far more likely to surface as a deserialize rejection on this route
+    // than on the others' flat bodies; mapping it to 400 with the
+    // rejection's message as the body matches this route's own hand-rolled
+    // 400 validation failures, so a caller of `set_settings` only ever needs
+    // to branch on "ok" vs "4xx with a message" for THIS route.
     let Json(body) = match body {
         Ok(json) => json,
         Err(rejection) => {

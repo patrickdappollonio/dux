@@ -2,8 +2,8 @@ import { Switch as SwitchPrimitive } from "@base-ui/react/switch"
 
 import { cn } from "@/lib/utils"
 
-// A settings toggle is visually a switch, not a checkbox — base-ui ships one,
-// so per the "shadcn/base-ui first" tenet we wrap it rather than reusing
+// A settings toggle is visually a switch, not a checkbox, and base-ui ships
+// one, so per the "shadcn/base-ui first" tenet we wrap it rather than reusing
 // Checkbox. Sized so the whole control (including invisible padding) clears
 // the 40px touch-target floor on phones; desktop density is unchanged.
 function Switch({ className, ...props }: SwitchPrimitive.Root.Props) {

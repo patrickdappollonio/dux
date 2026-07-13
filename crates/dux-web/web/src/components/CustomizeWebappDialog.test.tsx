@@ -18,6 +18,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     setInstanceIdentity: vi.fn(),
     closeCustomizeWebapp: vi.fn(),
     saveSettings: vi.fn(),
+    setChangesPaneVisibility: vi.fn(),
   }
 })
 
@@ -31,6 +32,23 @@ vi.mock("@/components/SimpleTooltip", () => ({
 // The real store boots on import (localStorage + bootstrap fetch). jsdom
 // doesn't provide those as bare globals, so stub them before the component
 // loads.
+// base-ui's Select (and other Radix-style popups) probe pointer-capture and
+// layout APIs jsdom doesn't implement; without these stubs the trigger's
+// pointerdown handler throws internally and the popup never opens.
+function installPointerCaptureStubs() {
+  const proto = Element.prototype as unknown as {
+    hasPointerCapture?: () => boolean
+    setPointerCapture?: () => void
+    releasePointerCapture?: () => void
+    scrollIntoView?: () => void
+  }
+  proto.hasPointerCapture ??= () => false
+  proto.setPointerCapture ??= () => {}
+  proto.releasePointerCapture ??= () => {}
+  proto.scrollIntoView ??= () => {}
+}
+installPointerCaptureStubs()
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -50,6 +68,7 @@ const store = await import("@/lib/store")
 const setInstanceIdentity = vi.mocked(store.setInstanceIdentity)
 const closeCustomizeWebapp = vi.mocked(store.closeCustomizeWebapp)
 const saveSettings = vi.mocked(store.saveSettings)
+const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 
 const fullBootstrap: Bootstrap = {
   available_providers: [],
@@ -94,6 +113,7 @@ beforeEach(() => {
   setInstanceIdentity.mockClear().mockResolvedValue(true)
   closeCustomizeWebapp.mockClear()
   saveSettings.mockClear().mockResolvedValue(true)
+  setChangesPaneVisibility.mockClear().mockResolvedValue(true)
 })
 
 afterEach(() => {
@@ -166,17 +186,37 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const switches = screen.getAllByRole("switch")
-    fireEvent.click(switches[0]) // "Show the Changes pane" or "Copy on select", first bool row.
+    // "Copy on select", NOT "Show the Changes pane": that one is bespoke and
+    // is covered by its own dedicated test below.
+    fireEvent.click(screen.getByLabelText("Copy on select"))
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     expect(saveSettings).toHaveBeenCalledTimes(1)
     expect(setInstanceIdentity).not.toHaveBeenCalled()
+    expect(setChangesPaneVisibility).not.toHaveBeenCalled()
     const [patch] = saveSettings.mock.calls[0]
     const uiKeys = Object.keys(patch.ui ?? {})
     const capKeys = Object.keys(patch.capabilities ?? {})
     expect(uiKeys.length + capKeys.length).toBe(1)
+  })
+
+  it("saving the Changes-pane toggle calls setChangesPaneVisibility, not saveSettings, and the row reflects an active override", async () => {
+    seed({ show_changes_pane: true })
+    mockState.changesPaneOverride = false // a concurrent client already flipped it.
+    render(<CustomizeWebappDialog />)
+
+    // The row reflects the store's override-aware effective value (false),
+    // not the raw (stale) bootstrap value (true).
+    const paneSwitch = screen.getByLabelText("Show the Changes pane")
+    expect(paneSwitch.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.click(paneSwitch)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setChangesPaneVisibility).toHaveBeenCalledWith(true)
+    expect(saveSettings).not.toHaveBeenCalled()
   })
 
   it("does not persist anything when Save is clicked without touching a field", async () => {
@@ -300,7 +340,7 @@ describe("CustomizeWebappDialog", () => {
     expect(setInstanceIdentity).toHaveBeenCalledWith({ favicon: "" })
   })
 
-  it("resets the Web section to defaults and persists it", async () => {
+  it("resets the Web section to defaults and persists exactly the changed keys", async () => {
     seed({ title: "prod dux", favicon: "amber", copy_on_select: false })
     render(<CustomizeWebappDialog />)
 
@@ -308,6 +348,115 @@ describe("CustomizeWebappDialog", () => {
 
     await waitFor(() => expect(setInstanceIdentity).toHaveBeenCalled())
     expect(setInstanceIdentity).toHaveBeenCalledWith({ title: "", favicon: "" })
-    expect(saveSettings).toHaveBeenCalled()
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    const [patch] = saveSettings.mock.calls[0]
+    // Only `copy_on_select` differed from its default in this seed. Every
+    // other Web-section key (show_changes_pane is bespoke and already at its
+    // default, web_notifications is already at its default) must be absent,
+    // and no `both`/`tui`-group key should leak in from a full-descriptor
+    // reset.
+    expect(patch.ui).toEqual({ copy_on_select: true })
+    expect(patch.capabilities ?? {}).toEqual({})
+    expect(setChangesPaneVisibility).not.toHaveBeenCalled()
+  })
+
+  it("resets the Web section's Changes-pane row through setChangesPaneVisibility when it differs from default", async () => {
+    seed({ show_changes_pane: false })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
+
+    await waitFor(() => expect(setChangesPaneVisibility).toHaveBeenCalledWith(true))
+    // show_changes_pane must never ride the generic settings PATCH.
+    for (const call of saveSettings.mock.calls) {
+      const [patch] = call
+      expect(patch.ui ?? {}).not.toHaveProperty("show_changes_pane")
+    }
+  })
+
+  it("a failed reset does not leave the controls showing defaults", async () => {
+    seed({ copy_on_select: false })
+    saveSettings.mockResolvedValue(false)
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
+
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(
+        (screen.getAllByRole("button", { name: /Reset section to defaults/i })[0] as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    )
+    // The failed write must not have applied the optimistic reset override:
+    // the switch still reflects the pre-reset (non-default) value.
+    expect(
+      screen.getByLabelText("Copy on select").getAttribute("aria-checked"),
+    ).toBe("false")
+  })
+
+  it("fires a real number-control change and sends the exact key/value, including the empty-string edge", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    const input = screen.getByLabelText("Status message auto-clear") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "42" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui).toEqual({ status_clear_seconds: 42 })
+  })
+
+  it("does not send 0 when a number field is emptied and saved", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    const input = screen.getByLabelText("Status message auto-clear") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "42" } })
+    fireEvent.change(input, { target: { value: "" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    // The last committed value (42) stands, the empty keystroke never
+    // recorded a 0 override.
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui).toEqual({ status_clear_seconds: 42 })
+  })
+
+  it("clamps a value above max client-side before it reaches the sent payload", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    // ui.attention_grace_seconds caps at 300.
+    const input = screen.getByLabelText("Attention grace") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "99999" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui).toEqual({ attention_grace_seconds: 300 })
+  })
+
+  it("fires a real select change and sends the exact key/value", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    // The "both" group's enum row: PR banner position (top/bottom). base-ui's
+    // SelectItem only commits a plain `click` as a real (non-virtual) mouse
+    // selection when it was preceded by a `pointerdown` on the same item
+    // (see `SelectItem.js`'s `allowMouseSelectionRef`), so a bare
+    // `fireEvent.click` alone is silently ignored as an untrusted click.
+    const trigger = screen.getByLabelText("PR banner position")
+    fireEvent.click(trigger)
+    await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
+    const option = await screen.findByRole("option", { name: "Top" })
+    fireEvent.pointerDown(option, { pointerType: "mouse" })
+    fireEvent.click(option)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui).toEqual({ pr_banner_position: "top" })
   })
 })

@@ -44,12 +44,22 @@ export interface SettingDescriptor {
   surface: SettingSurface
   control: SettingControl
   default: SettingValue
-  /** Which write path Save uses for this row: the generic settings PATCH, or
-   * the dedicated instance-identity endpoint (title/favicon only, see the
-   * CLAUDE.md web-UI tenet: "keep title/favicon on the existing endpoint"). */
-  writeTarget: "settings" | "identity"
+  /** Which write path Save uses for this row: the generic settings PATCH, the
+   * dedicated instance-identity endpoint (title/favicon only, see the
+   * CLAUDE.md web-UI tenet: "keep title/favicon on the existing endpoint"), or
+   * the bespoke Changes-pane visibility endpoint. `"changesPane"` is bespoke
+   * because the store tracks an optimistic `changesPaneOverride` for that one
+   * field (the Changes menu toggles it live outside this dialog too), so its
+   * row is wired directly to `changesPaneVisible()`/`setChangesPaneVisibility`
+   * in `CustomizeWebappDialog.tsx` rather than through the generic
+   * read/buildWrites/saveSettings path every other row uses. */
+  writeTarget: "settings" | "identity" | "changesPane"
   /** Reads the current value out of the live Bootstrap document, falling back
-   * to `default` when an older server omits the field. */
+   * to `default` when an older server omits the field. NOTE: for the
+   * `"changesPane"`-targeted row this is NOT the effective value shown in the
+   * dialog, the override-aware `changesPaneVisible()` in `store.ts` is. It is
+   * kept here only so generic helpers (the drift-guard test, `defaultLabel`)
+   * that read every descriptor still have something to call. */
   read: (b: Bootstrap) => SettingValue
 }
 
@@ -131,7 +141,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         surface: "web",
         control: { kind: "bool" },
         default: true,
-        writeTarget: "settings",
+        writeTarget: "changesPane",
         read: (b) => b.show_changes_pane ?? true,
       },
       {
