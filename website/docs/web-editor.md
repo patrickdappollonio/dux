@@ -36,21 +36,55 @@ read-only badge where it applies, and **Save** and **Close**.
 
 Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write.
 
+## Tabs
+
+Open more than one file and the editor grows a tab strip, the way any real
+editor does, so you can flip between several open files without losing your
+place in each one.
+
+Single-clicking a file in the tree opens it in a **preview tab**, shown in
+italic. A preview tab is reusable: click another file and it replaces the same
+tab instead of piling up a new one, so browsing around the tree to find the
+right file does not leave a trail of tabs behind you. The moment you actually
+edit the file, or double-click it in the tree (or double-click its tab), it is
+promoted to a permanent tab, and a new preview tab is free to take over for the
+next file you are just looking at.
+
+You can have as many permanent tabs open as you like, each with its own edit
+history, scroll position, and cursor location, so switching back to a tab
+returns you to exactly where you left it. Close a tab with its `×` control or a
+middle-click; if it has unsaved changes, dux asks before discarding them.
+
 ## Finding a file
 
-The file tree lists the files in the worktree, with directories first and
-alphabetical within a level, rendered as a virtualized list so even a large repo
-scrolls smoothly. The ancestors of whatever file you have open expand
-automatically. Changed files carry the same status icon you see in the [Changes
-pane](/docs/web-git), so you can spot your edits at a glance. (The tree is a
-plain filesystem walk of the worktree, not a git-aware listing: gitignored files
-are included, and so is most of `.git/` itself. It is capped at 50,000 entries,
-with a truncation notice if a repo has more. A filesystem-browser rework is in
-progress, so treat this as the current, not final, behavior.)
+The file tree is a lazy filesystem browser: it loads one directory at a time, as
+you expand it, rather than walking the whole worktree up front. That means it
+stays fast and effectively uncapped no matter how large the repo is, and a huge
+sibling folder you never open costs nothing. Directories list before files,
+alphabetically within each level, and the whole tree renders as a virtualized
+list so scrolling stays smooth even with a folder expanded wide. The ancestors of
+whatever file you have open expand automatically. Changed files carry the same
+status icon you see in the [Changes pane](/docs/web-git), so you can spot your
+edits at a glance.
+
+The tree is a plain filesystem listing, not a git-aware one: gitignored files are
+included, and so is `.git/` itself, browsable like any other folder. Anything
+inside `.git/` opens read-only, so you can look but not edit it.
+
+Each row also carries a file-type icon on the left, monochrome so it never
+competes with the git-status marker on the right: folders look different open,
+closed, or empty, and files get an icon for their kind (code, image, config,
+Markdown, lockfile, binary, and a generic fallback for everything else). It is a
+glance-level cue, not a replacement for opening the file.
 
 The **Search files…** box does a fast, case-insensitive match on file paths across
 the worktree, so you do not have to click through folders to reach a deeply nested
-file. It matches paths, not file contents.
+file. It matches paths, not file contents. Unlike the tree, search works off a
+flat index built by walking the worktree once, and that index is capped (50,000
+files by default, configurable via `[server] search_index_max_files`, `0`
+disables the cap) so a very large repository still gets a bounded, fast search
+rather than an unbounded walk. The tree itself has no such cap: it only ever asks
+for one directory at a time.
 
 ## Editing and saving
 

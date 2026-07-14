@@ -156,4 +156,6 @@ story is deliberately minimal: the service worker caches only a small "dux is
 unreachable" fallback page, nothing else. The app itself always loads fresh from
 the server, so there is zero risk of a stale bundle talking to a newer server.
 When you genuinely lose the connection mid-session, dux grays the app out behind a
-"Reconnecting…" overlay and reconnects when it can.
+"Reconnecting…" overlay and reconnects when it can. The overlay sits on top of the
+app rather than navigating away from it, so once you are back online you land
+right back on the agent or screen you were already looking at.
