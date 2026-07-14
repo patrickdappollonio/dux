@@ -669,6 +669,12 @@ eventsSocket.onOpen = () => {
     // anything missed during the outage — or a load that failed on first boot —
     // recovers. Concurrent loads are safe: spine is seq-guarded and bootstrap
     // apply is idempotent.
+    //
+    // Capture the deep-linked route BEFORE `loadSpine` so a transient exit-eject
+    // during the reconnect (the center pane resets to home while the agent is
+    // momentarily `detached`) can be re-restored once the agent resumes. Reading
+    // the hash here — before any spine apply runs — beats that eject wiping it.
+    armReconnectDeepLink()
     loadBootstrap()
     loadSpine()
     // The server's ownership epoch counter restarts at zero if the server itself
@@ -885,6 +891,9 @@ function applySpine(rawSpine: Spine, seq: number): void {
   focusNewlyCreatedSession(spine)
   pruneSelectionIfGone(spine)
   pruneEditorStateIfGone(spine)
+  // Re-restore a reconnect deep-link once its agent is present and back to
+  // `active`, undoing a transient exit-eject that fired during the reconnect.
+  restoreReconnectDeepLink(spine)
   // The flagged-agent count may have changed with this spine: refresh the
   // browser-tab count prefix and the favicon dot. Backgrounded tabs update too,
   // since spines arrive from server pushes without a visit.
@@ -1280,6 +1289,37 @@ let pendingDeepLink: SelectedTarget | null =
     ? parseSelectionHash(location.hash ?? "")
     : null
 
+// Route a normalized deep-link target onto an already-resolved session: restore
+// a still-present terminal or extra tab, else fall back to the session-slot tab.
+// Shared by the boot deep-link restore and the reconnect re-restore so both
+// honor tabs/terminals identically.
+function applyDeepLinkSelection(
+  session: Spine["sessions"][number],
+  target: SelectedTarget,
+): void {
+  if (target.kind === "terminal") {
+    if (session.terminals.some((t) => t.id === target.terminalId)) {
+      selectTerminal(target.terminalId, target.sessionId)
+      return
+    }
+    // Terminal id gone — fall back to the owning agent.
+    selectSession(target.sessionId)
+    return
+  }
+  if (
+    target.tabId !== target.sessionId &&
+    session.tabs.some((t) => t.id === target.tabId)
+  ) {
+    // An extra-tab deep link: restore it only if the tab still exists, else fall
+    // through to the session-slot tab. `persist: false` because merely FOLLOWING
+    // a shared link must not rewrite the workspace-shared remembered tab for
+    // everyone that opens it.
+    selectTab(target.sessionId, target.tabId, { persist: false })
+    return
+  }
+  selectSession(target.sessionId)
+}
+
 // Restore the boot-time deep-link against the first spine. Resolve the session in
 // the spine; restore the terminal when it still exists, else fall back to the
 // session; ignore the link entirely when the session is gone.
@@ -1289,25 +1329,79 @@ function restoreDeepLink(spine: Spine): void {
   pendingDeepLink = null // one-shot, whatever the outcome
   const session = spine.sessions.find((s) => s.id === link.sessionId)
   if (!session) return // session id gone — ignore the link
-  if (link.kind === "terminal") {
-    const stillThere = session.terminals.some((t) => t.id === link.terminalId)
-    if (stillThere) {
-      selectTerminal(link.terminalId, link.sessionId)
-      return
-    }
-    // Terminal id gone — fall back to the owning agent.
-  } else if (link.tabId !== link.sessionId) {
-    // A extra-tab deep link: restore it only if the tab still exists, else
-    // fall through to the session-slot tab. `persist: false` because merely
-    // FOLLOWING a shared link must not rewrite the workspace-shared
-    // remembered tab for everyone that opens it.
-    const stillThere = session.tabs.some((t) => t.id === link.tabId)
-    if (stillThere) {
-      selectTab(link.sessionId, link.tabId, { persist: false })
-      return
-    }
+  applyDeepLinkSelection(session, link)
+}
+
+// Deep-link intent re-armed on an events-socket RECONNECT — distinct from the
+// boot `pendingDeepLink` one-shot above. When the connection drops while the
+// user is deep-linked to a running agent, the reconnect can transiently clear
+// the selection: the center pane mirrors the TUI's "agent exited" behavior and
+// ejects to the welcome screen while the agent is momentarily `detached` (it
+// exited during the outage and has not finished resuming yet), and that eject
+// wipes the URL hash back to home. Nothing then restores the route, because
+// `restoreDeepLink` is a spent boot one-shot. So on every reconnect we capture
+// the route from `location.hash` — BEFORE any spine apply or eject can wipe it
+// — and re-restore it once the agent is present AND back to `active` (its resume
+// has completed). Restoring earlier, while still `detached`, would ping-pong
+// with the center pane's eject.
+let reconnectDeepLink: { target: SelectedTarget; armedAt: number } | null = null
+
+// Bound how long the re-armed intent stays live. Generously above a normal
+// provider resume, but finite so an agent that never returns to `active` (resume
+// failed, or it was genuinely stopped) cannot keep the intent armed to grab a
+// later selection.
+const RECONNECT_DEEPLINK_TTL_MS = 30_000
+
+// Capture the current route as the reconnect deep-link intent. Called from the
+// events socket's reconnect `onOpen` BEFORE `loadSpine`, so the hash is read
+// while it still names the agent (the transient eject happens later, during the
+// spine apply). A bare/home hash arms nothing.
+function armReconnectDeepLink(): void {
+  if (typeof location === "undefined") {
+    reconnectDeepLink = null
+    return
   }
-  selectSession(link.sessionId)
+  const target = parseSelectionHash(location.hash ?? "")
+  reconnectDeepLink = target ? { target, armedAt: Date.now() } : null
+}
+
+// Re-restore a reconnect deep-link once the agent is present and active again.
+// Runs on every spine apply while an intent is armed; it self-clears on success,
+// on a genuine deletion, when the user has moved to a different agent, or on TTL
+// expiry, so it never re-yanks a user or chases a phantom session.
+function restoreReconnectDeepLink(spine: Spine): void {
+  const armed = reconnectDeepLink
+  if (!armed) return
+  const sel = state.selectedSessionId
+  // The user actively moved to a DIFFERENT agent since we armed — respect it and
+  // drop the intent so we never yank them back. A cleared selection (`null`) is
+  // the transient exit-eject we are here to undo, so it does NOT disarm us.
+  if (sel !== null && sel !== armed.target.sessionId) {
+    reconnectDeepLink = null
+    return
+  }
+  if (Date.now() - armed.armedAt > RECONNECT_DEEPLINK_TTL_MS) {
+    reconnectDeepLink = null
+    return
+  }
+  const session = spine.sessions.find((s) => s.id === armed.target.sessionId)
+  if (!session) {
+    // Genuinely gone (deleted here or by another client): a deletion legitimately
+    // ejects to home, so drop the intent rather than resurrect a phantom.
+    reconnectDeepLink = null
+    return
+  }
+  // Wait until the agent has finished resuming (back to `active`). Until then we
+  // stay armed: a still-`detached` agent is about to be ejected by the center
+  // pane, and restoring now would just ping-pong with that eject.
+  if (session.status !== "active") return
+  // The agent is present and running again. If the eject already cleared the
+  // selection, re-restore the captured route; if it never cleared, this is a
+  // no-op. Either way, disarm.
+  if (sel !== armed.target.sessionId) {
+    applyDeepLinkSelection(session, armed.target)
+  }
+  reconnectDeepLink = null
 }
 
 // Select an agent session as the streamed target. Signature kept stable so
