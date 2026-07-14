@@ -1346,37 +1346,75 @@ function restoreDeepLink(spine: Spine): void {
 // with the center pane's eject.
 let reconnectDeepLink: { target: SelectedTarget; armedAt: number } | null = null
 
-// Bound how long the re-armed intent stays live. Generously above a normal
-// provider resume, but finite so an agent that never returns to `active` (resume
-// failed, or it was genuinely stopped) cannot keep the intent armed to grab a
-// later selection.
-const RECONNECT_DEEPLINK_TTL_MS = 30_000
+// Bound how long the re-armed intent stays live, measured from the LATEST
+// events-socket reopen (armReconnectDeepLink refreshes `armedAt` on every
+// reopen, including one that finds the hash already wiped by our own eject,
+// see below). This is a best-effort bound, generously above a normal provider
+// resume: an agent that never returns to `active` within a window after the
+// last reopen (resume failed, or it was genuinely stopped) intentionally gives
+// up rather than keep chasing it indefinitely. A slow resume across a laptop
+// sleep gets a fresh full window on the wake-triggered reopen, so this mostly
+// only bites a resume that is actually stuck.
+const RECONNECT_DEEPLINK_TTL_MS = 60_000
+
+// Set by `ejectSelectionForReconnect` immediately around its own
+// `selectSession(null)` call, and cleared (to `false`) by every OTHER entry
+// into `selectSession`. This is how `restoreReconnectDeepLink` tells "the
+// center pane's transient reconnect-eject just cleared the selection" apart
+// from "the user deliberately navigated (including to home) on their own":
+// only the former should be undone once the agent comes back.
+let lastClearWasReconnectEject = false
 
 // Capture the current route as the reconnect deep-link intent. Called from the
 // events socket's reconnect `onOpen` BEFORE `loadSpine`, so the hash is read
 // while it still names the agent (the transient eject happens later, during the
-// spine apply). A bare/home hash arms nothing.
+// spine apply).
 function armReconnectDeepLink(): void {
   if (typeof location === "undefined") {
     reconnectDeepLink = null
     return
   }
   const target = parseSelectionHash(location.hash ?? "")
-  reconnectDeepLink = target ? { target, armedAt: Date.now() } : null
+  if (target) {
+    reconnectDeepLink = { target, armedAt: Date.now() }
+    return
+  }
+  // The hash reads as home. This is either a genuine "nothing was deep-linked"
+  // reconnect, OR a second (or later) reopen arriving after OUR OWN transient
+  // eject already wiped the hash while the agent was still resuming from the
+  // first drop. The boot one-shot is already spent, so if we discard the
+  // still-armed intent here the user is stranded. Keep it alive and refresh its
+  // `armedAt` so this fresh reopen grants the agent another full resume window.
+  if (
+    reconnectDeepLink &&
+    Date.now() - reconnectDeepLink.armedAt <= RECONNECT_DEEPLINK_TTL_MS
+  ) {
+    reconnectDeepLink = { ...reconnectDeepLink, armedAt: Date.now() }
+    return
+  }
+  reconnectDeepLink = null
 }
 
 // Re-restore a reconnect deep-link once the agent is present and active again.
 // Runs on every spine apply while an intent is armed; it self-clears on success,
-// on a genuine deletion, when the user has moved to a different agent, or on TTL
-// expiry, so it never re-yanks a user or chases a phantom session.
+// on a genuine deletion, on a deliberate navigation away, or on TTL expiry, so
+// it never re-yanks a user or chases a phantom session.
 function restoreReconnectDeepLink(spine: Spine): void {
   const armed = reconnectDeepLink
   if (!armed) return
   const sel = state.selectedSessionId
   // The user actively moved to a DIFFERENT agent since we armed — respect it and
-  // drop the intent so we never yank them back. A cleared selection (`null`) is
-  // the transient exit-eject we are here to undo, so it does NOT disarm us.
+  // drop the intent so we never yank them back.
   if (sel !== null && sel !== armed.target.sessionId) {
+    reconnectDeepLink = null
+    return
+  }
+  // A cleared selection (`null`) is ambiguous on its own: it is either the
+  // transient reconnect-eject we are here to undo, or the user deliberately
+  // navigating home (a "back to home" control, say) while the agent was still
+  // resuming. `lastClearWasReconnectEject` disambiguates: only our own eject
+  // leaves it `true`. A deliberate clear must disarm, not merely wait.
+  if (sel === null && !lastClearWasReconnectEject) {
     reconnectDeepLink = null
     return
   }
@@ -1415,6 +1453,9 @@ function restoreReconnectDeepLink(spine: Spine): void {
 // not a write — no persistence call happens here; `selectTab` below owns
 // persisting an actual tab switch.
 export function selectSession(id: string | null): void {
+  // Any deliberate selection (to an agent OR to null/home) means the user took
+  // control. See `ejectSelectionForReconnect` below for the one carve-out.
+  lastClearWasReconnectEject = false
   const prev = state.selectedSessionId
   if (id === null) {
     // Clear the target FIRST so any synchronous re-render shows the fallback,
@@ -1456,6 +1497,19 @@ export function selectSession(id: string | null): void {
   switchChangesSubscription(prev, id)
   writeSelectionHash()
   if (prev !== id) loadChanges(id)
+}
+
+// The ONE carve-out to `selectSession`'s "any clear disarms the reconnect
+// intent" rule: called exclusively by the center pane's transient
+// reconnect-eject (mirroring the TUI's "agent exited" reset, see
+// `TerminalPane`), never by a user-initiated navigation. Marks this specific
+// `selectSession(null)` as OUR eject so `restoreReconnectDeepLink` can tell it
+// apart from a deliberate home navigation the user made on their own while the
+// agent was still resuming, only the former should be undone once the agent
+// comes back to `active`.
+export function ejectSelectionForReconnect(): void {
+  selectSession(null)
+  lastClearWasReconnectEject = true
 }
 
 // Focus a specific provider tab of a session. `tabId === sessionId` focuses the

@@ -162,8 +162,10 @@ describe("reconnect preserves a deep-linked agent route", () => {
 
     // The center pane (TerminalPane) mirrors the TUI exit behavior and ejects to
     // the welcome screen for a non-active session-slot agent, wiping the hash to
-    // home. Model that eject here (it fires from a React effect after the apply).
-    mod.selectSession(null)
+    // home. Model that eject here via the marker function TerminalPane calls
+    // instead of a bare `selectSession(null)` (it fires from a React effect
+    // after the apply).
+    mod.ejectSelectionForReconnect()
     expect(mod.getSnapshot().selectedTarget).toBeNull()
     expect(hashRef.value).toBe("")
 
@@ -175,6 +177,68 @@ describe("reconnect preserves a deep-linked agent route", () => {
     })
 
     // The route is back on the agent (bug: it stayed on home).
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1",
+    })
+    expect(hashRef.value).toBe("#/agent/s1")
+  })
+
+  it("does not undo a deliberate home navigation made during the armed window", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", status: "active" },
+    ])
+    await consumeBootOpen(mod)
+
+    // Reconnect: s1 detached (resume pending). Intent armed for s1.
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.eventsSocket.onOpen()
+    await settle()
+
+    // The user deliberately navigates home themselves (NOT the TerminalPane
+    // reconnect-eject) while s1 is still resuming, e.g. clicking a "back to
+    // home" control. This must disarm the intent, not merely clear the target.
+    mod.selectSession(null)
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+
+    // s1 finishes resuming; the deliberate home nav must be respected, not
+    // yanked back onto the agent.
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "active" }])
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await settle()
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(hashRef.value).toBe("")
+  })
+
+  it("restores the agent after a second reconnect wipes the hash again before resume completes", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", status: "active" },
+    ])
+    await consumeBootOpen(mod)
+
+    // First reconnect: s1 detached (resume pending). Intent armed for s1, then
+    // the transient eject wipes the hash back to home.
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.eventsSocket.onOpen()
+    await settle()
+    mod.ejectSelectionForReconnect()
+    expect(hashRef.value).toBe("")
+
+    // Second reconnect (e.g. a flaky connection drops again) fires BEFORE s1
+    // has finished resuming. `armReconnectDeepLink` now reads the hash as home
+    // (our own eject wiped it); it must NOT discard the still-valid armed
+    // intent for s1.
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.eventsSocket.onOpen()
+    await settle()
+
+    // The resume completes on this later reconnect.
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", status: "active" }])
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).not.toBeNull()
+    })
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
@@ -266,7 +330,7 @@ describe("reconnect deep-link guard rails", () => {
     ])
     mod.eventsSocket.onOpen()
     await settle()
-    mod.selectSession(null)
+    mod.ejectSelectionForReconnect()
 
     spineBody = makeSpine([
       { id: "s1", project_id: "p1", status: "active", tabs: ["t2"] },

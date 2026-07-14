@@ -32,8 +32,8 @@ import {
   TAB,
 } from "@/lib/termkeys"
 import {
+  ejectSelectionForReconnect,
   handleTabGone,
-  selectSession,
   useDux,
 } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
@@ -378,7 +378,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   const sessionStatus = session?.status
   useEffect(() => {
     if (isSessionSlotTab && everReady && sessionStatus && sessionStatus !== "active") {
-      selectSession(null)
+      // Marked as OUR eject (not a user navigation) so a re-armed reconnect
+      // deep-link can tell it apart from a deliberate home nav and restore the
+      // route once this agent finishes resuming. See `ejectSelectionForReconnect`.
+      ejectSelectionForReconnect()
     }
   }, [isSessionSlotTab, everReady, sessionStatus])
 
