@@ -2215,6 +2215,97 @@ mod tests {
         }
     }
 
+    /// THE "TUI PALETTE IS UNCHANGED" PIN.
+    ///
+    /// The exact set of commands the `Ctrl-p` palette lists, captured from the
+    /// registry as it stood BEFORE `PaletteSurface` was removed (when the
+    /// listing was `find_by_action(..).filter(|c| c.surface.in_tui())`). The
+    /// surface collapse dropped only the three Web-only rows, which `in_tui()`
+    /// already filtered out of this listing, so this list had to survive the
+    /// refactor byte-for-byte.
+    ///
+    /// This is a deliberate hand-maintained list, NOT derived from
+    /// `PALETTE_COMMANDS` — a derived list would tautologically agree with any
+    /// registry edit and prove nothing. Adding or removing a TUI palette
+    /// command is a real user-facing change: update this list in the same
+    /// commit, on purpose.
+    #[test]
+    fn tui_palette_listing_is_the_expected_command_set() {
+        let bindings = default_bindings();
+        let mut listed: Vec<&str> = bindings
+            .bindings
+            .iter()
+            .filter_map(|b| b.palette_name)
+            .collect();
+        listed.sort_unstable();
+
+        let expected = [
+            "add-project",
+            "agent-info",
+            "change-agent-provider",
+            "change-default-provider",
+            "change-project-default-provider",
+            "change-theme",
+            "checkout-project-default-branch",
+            "close-tab",
+            "configure-global-env",
+            "configure-project-env",
+            "configure-startup-command",
+            "copy-path",
+            "delete-agent",
+            "delete-project",
+            "delete-terminal",
+            "edit-macros",
+            "force-reconnect-agent",
+            "force-redraw",
+            "fork-agent",
+            "help",
+            "input-debugging",
+            "kill-running",
+            "new-agent",
+            "new-agent-from-pr",
+            "new-agent-from-worktree",
+            "new-agent-tab",
+            "new-terminal",
+            "open-current-pr",
+            "open-worktree",
+            "open-worktree-with",
+            "pull-project",
+            "read-startup-command-logs",
+            "reconnect-agent",
+            "reload-config",
+            "remove-project",
+            "rename-agent",
+            "rerun-startup-command-on-agent",
+            "resource-monitor",
+            "show-agent",
+            "show-terminal",
+            "sort-agents-by-created",
+            "sort-agents-by-name",
+            "sort-agents-by-updated",
+            "start-web-server",
+            "toggle-agent-auto-reopen",
+            "toggle-always-show-tabs",
+            "toggle-diff-line-numbers",
+            "toggle-git-pane",
+            "toggle-github-integration",
+            "toggle-pr-banner-position",
+            "toggle-project",
+            "toggle-project-auto-reopen-agents",
+            "toggle-randomized-pet-name-default",
+            "toggle-remove-git-pane",
+            "toggle-sidebar",
+        ];
+
+        assert_eq!(
+            listed, expected,
+            "the TUI command palette's listing changed. The web app menu is a \
+             SEPARATE surface (crates/dux-web/web/src/lib/appMenu.ts) and must \
+             never move this list. If this change is a deliberate TUI palette \
+             addition/removal, update `expected` here in the same commit."
+        );
+    }
+
     #[test]
     fn left_scope_resolves_t_to_show_terminal() {
         let bindings = default_bindings();
