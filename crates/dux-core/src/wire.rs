@@ -231,9 +231,9 @@ pub enum WireCommand {
     /// absent field is left untouched, and a body with every field absent is a
     /// no-op (no write, no `config.changed`). Numeric fields are clamped to a
     /// sane documented ceiling (0 stays 0 where the config documents a zero
-    /// meaning); `pr_banner_position` and `theme` are validated against a fixed
-    /// set of accepted values and the whole command is REJECTED (no partial
-    /// apply) if either is present and unrecognized. `server.title` and
+    /// meaning); `pr_banner_position` is validated against a fixed set of
+    /// accepted values and the whole command is REJECTED (no partial apply)
+    /// if it is present and unrecognized. `server.title` and
     /// `server.favicon` are deliberately NOT here, they stay on
     /// `SetInstanceIdentity`. The write is eager so the endpoint can report a
     /// synchronous success/failure, and a non-empty patch mutates config-static
@@ -249,10 +249,7 @@ pub enum WireCommand {
         attention_indicator: Option<bool>,
         attention_on_bell: Option<bool>,
         pr_banner_position: Option<String>,
-        diff_tab_width: Option<u16>,
-        show_diff_line_numbers: Option<bool>,
         hyperlinks: Option<bool>,
-        theme: Option<String>,
     },
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
     /// worktree, the web counterpart to the TUI's kill-running modal (for one
@@ -599,9 +596,9 @@ pub fn normalize_instance_title(raw: &str) -> String {
 
 /// Clamp a numeric settings-PATCH field to `[0, max]`, preserving `0`
 /// unclamped: several of these fields document `0` as a distinct "disable"/
-/// "never" meaning (`status_clear_seconds`, `attention_grace_seconds`,
-/// `diff_tab_width`), not the bottom of a numeric range, so the ceiling only
-/// applies to nonzero input.
+/// "never" meaning (`status_clear_seconds`, `attention_grace_seconds`), not
+/// the bottom of a numeric range, so the ceiling only applies to nonzero
+/// input.
 fn clamp_nonzero<T: PartialOrd + Copy>(value: T, max: T) -> T {
     if value > max { max } else { value }
 }
@@ -622,21 +619,8 @@ pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
     }
 }
 
-/// Normalize a `ui.theme` value for [`Engine::set_settings`]. Accepts exactly
-/// one of [`crate::config::THEME_BUILTIN_NAMES`] (trimmed); anything else is
-/// rejected. See that constant's doc comment for why the settings-PATCH
-/// endpoint validates against this fixed, documented subset rather than the
-/// full set of themes the TUI can load.
-pub fn normalize_theme(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    crate::config::THEME_BUILTIN_NAMES
-        .iter()
-        .find(|name| **name == trimmed)
-        .map(|name| (*name).to_string())
-}
-
 /// The present/absent fields for [`WireCommand::SetSettings`], grouped into a
-/// struct so [`Engine::set_settings`] doesn't take a 13-argument positional
+/// struct so [`Engine::set_settings`] doesn't take a many-argument positional
 /// list. See the variant's doc comment for the field-by-field semantics.
 pub struct SettingsPatch {
     pub copy_on_select: Option<bool>,
@@ -648,10 +632,7 @@ pub struct SettingsPatch {
     pub attention_indicator: Option<bool>,
     pub attention_on_bell: Option<bool>,
     pub pr_banner_position: Option<String>,
-    pub diff_tab_width: Option<u16>,
-    pub show_diff_line_numbers: Option<bool>,
     pub hyperlinks: Option<bool>,
-    pub theme: Option<String>,
 }
 
 impl WireCommand {
@@ -687,10 +668,7 @@ impl WireCommand {
             attention_indicator,
             attention_on_bell,
             pr_banner_position,
-            diff_tab_width,
-            show_diff_line_numbers,
             hyperlinks,
-            theme,
         } = self
         {
             return copy_on_select.is_some()
@@ -702,10 +680,7 @@ impl WireCommand {
                 || attention_indicator.is_some()
                 || attention_on_bell.is_some()
                 || pr_banner_position.is_some()
-                || diff_tab_width.is_some()
-                || show_diff_line_numbers.is_some()
-                || hyperlinks.is_some()
-                || theme.is_some();
+                || hyperlinks.is_some();
         }
         matches!(
             self,
@@ -1088,10 +1063,7 @@ impl Engine {
                 attention_indicator,
                 attention_on_bell,
                 pr_banner_position,
-                diff_tab_width,
-                show_diff_line_numbers,
                 hyperlinks,
-                theme,
             } => {
                 let status = self.set_settings(SettingsPatch {
                     copy_on_select,
@@ -1103,10 +1075,7 @@ impl Engine {
                     attention_indicator,
                     attention_on_bell,
                     pr_banner_position,
-                    diff_tab_width,
-                    show_diff_line_numbers,
                     hyperlinks,
-                    theme,
                 })?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
@@ -1313,10 +1282,10 @@ impl Engine {
     /// absent field is left untouched. Numeric fields are clamped into a sane
     /// documented ceiling (0 is preserved where the config documents a zero
     /// meaning, see each field's config.rs doc comment); `pr_banner_position`
-    /// and `theme` are validated against a fixed accepted set and the WHOLE
-    /// command is rejected (nothing written) if either present value is
-    /// unrecognized, matching `set_instance_identity`'s all-or-nothing favicon
-    /// validation. The write is eager and idempotent (unchanged values skip the
+    /// is validated against a fixed accepted set and the WHOLE command is
+    /// rejected (nothing written) if the present value is unrecognized,
+    /// matching `set_instance_identity`'s all-or-nothing favicon validation.
+    /// The write is eager and idempotent (unchanged values skip the
     /// disk write), and a non-empty patch mutates config-static state so the web
     /// fires `config.changed` for connected clients to refetch their settings.
     fn set_settings(&mut self, patch: SettingsPatch) -> anyhow::Result<WireStatus> {
@@ -1330,10 +1299,7 @@ impl Engine {
             attention_indicator,
             attention_on_bell,
             pr_banner_position,
-            diff_tab_width,
-            show_diff_line_numbers,
             hyperlinks,
-            theme,
         } = patch;
 
         if copy_on_select.is_none()
@@ -1345,10 +1311,7 @@ impl Engine {
             && attention_indicator.is_none()
             && attention_on_bell.is_none()
             && pr_banner_position.is_none()
-            && diff_tab_width.is_none()
-            && show_diff_line_numbers.is_none()
             && hyperlinks.is_none()
-            && theme.is_none()
         {
             return Ok(WireStatus::new("info", "Nothing to update."));
         }
@@ -1359,16 +1322,6 @@ impl Engine {
             .map(|raw| {
                 normalize_pr_banner_position(&raw)
                     .ok_or_else(|| anyhow::anyhow!("unknown PR banner position \"{raw}\""))
-            })
-            .transpose()?;
-        let theme = theme
-            .map(|raw| {
-                normalize_theme(&raw).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown theme \"{raw}\", expected one of: {}",
-                        crate::config::THEME_BUILTIN_NAMES.join(", ")
-                    )
-                })
             })
             .transpose()?;
 
@@ -1402,17 +1355,8 @@ impl Engine {
         if let Some(v) = pr_banner_position {
             candidate.ui.pr_banner_position = v;
         }
-        if let Some(v) = diff_tab_width {
-            candidate.ui.diff_tab_width = clamp_nonzero(v, crate::config::MAX_DIFF_TAB_WIDTH);
-        }
-        if let Some(v) = show_diff_line_numbers {
-            candidate.ui.show_diff_line_numbers = v;
-        }
         if let Some(v) = hyperlinks {
             candidate.capabilities.hyperlinks = v;
-        }
-        if let Some(v) = theme {
-            candidate.ui.theme = v;
         }
 
         // Idempotent: skip the write (and the fan-out) when nothing changed
@@ -1427,10 +1371,7 @@ impl Engine {
             && candidate.ui.attention_indicator == self.config.ui.attention_indicator
             && candidate.ui.attention_on_bell == self.config.ui.attention_on_bell
             && candidate.ui.pr_banner_position == self.config.ui.pr_banner_position
-            && candidate.ui.diff_tab_width == self.config.ui.diff_tab_width
-            && candidate.ui.show_diff_line_numbers == self.config.ui.show_diff_line_numbers
             && candidate.capabilities.hyperlinks == self.config.capabilities.hyperlinks
-            && candidate.ui.theme == self.config.ui.theme
         {
             return Ok(WireStatus::new("info", "Settings unchanged."));
         }
@@ -1449,10 +1390,7 @@ impl Engine {
         self.config.ui.attention_indicator = candidate.ui.attention_indicator;
         self.config.ui.attention_on_bell = candidate.ui.attention_on_bell;
         self.config.ui.pr_banner_position = candidate.ui.pr_banner_position;
-        self.config.ui.diff_tab_width = candidate.ui.diff_tab_width;
-        self.config.ui.show_diff_line_numbers = candidate.ui.show_diff_line_numbers;
         self.config.capabilities.hyperlinks = candidate.capabilities.hyperlinks;
-        self.config.ui.theme = candidate.ui.theme;
         Ok(WireStatus::new(
             "info",
             "Settings updated. Every connected browser picks up the change now; a \
@@ -7944,18 +7882,15 @@ mod tests {
             attention_indicator: None,
             attention_on_bell: None,
             pr_banner_position: None,
-            diff_tab_width: None,
-            show_diff_line_numbers: None,
             hyperlinks: None,
-            theme: None,
         }
     }
 
-    /// Build a `WireCommand::SetSettings` patch with only `theme` set (every
-    /// other field `None`). `WireCommand`'s struct-variant fields don't support
-    /// functional-update syntax (`..base`, `E0436`), so each single-field
-    /// helper spells out the full field list explicitly.
-    fn theme_only_patch(theme: &str) -> WireCommand {
+    /// Build a `WireCommand::SetSettings` patch with only `pr_banner_position`
+    /// set (every other field `None`). `WireCommand`'s struct-variant fields
+    /// don't support functional-update syntax (`..base`, `E0436`), so each
+    /// single-field helper spells out the full field list explicitly.
+    fn pr_banner_position_only_patch(position: &str) -> WireCommand {
         WireCommand::SetSettings {
             copy_on_select: None,
             show_changes_pane: None,
@@ -7965,18 +7900,15 @@ mod tests {
             attention_grace_seconds: None,
             attention_indicator: None,
             attention_on_bell: None,
-            pr_banner_position: None,
-            diff_tab_width: None,
-            show_diff_line_numbers: None,
+            pr_banner_position: Some(position.to_string()),
             hyperlinks: None,
-            theme: Some(theme.to_string()),
         }
     }
 
     #[test]
     fn set_settings_mutates_config_static_only_when_a_field_is_present() {
         assert!(!empty_settings_patch().mutates_config_static());
-        assert!(theme_only_patch("nord").mutates_config_static());
+        assert!(pr_banner_position_only_patch("top").mutates_config_static());
     }
 
     #[test]
@@ -7995,20 +7927,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_theme_accepts_documented_builtins() {
-        for name in crate::config::THEME_BUILTIN_NAMES {
-            assert_eq!(normalize_theme(name), Some((*name).to_string()));
-        }
-        assert_eq!(normalize_theme("  nord  "), Some("nord".to_string()));
-    }
-
-    #[test]
-    fn normalize_theme_rejects_unknown() {
-        assert_eq!(normalize_theme("my_custom_theme"), None);
-        assert_eq!(normalize_theme(""), None);
-    }
-
-    #[test]
     fn set_settings_accepts_a_valid_ui_patch() {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine
@@ -8022,10 +7940,7 @@ mod tests {
                 attention_indicator: None,
                 attention_on_bell: None,
                 pr_banner_position: Some("top".to_string()),
-                diff_tab_width: None,
-                show_diff_line_numbers: None,
                 hyperlinks: None,
-                theme: None,
             })
             .expect("dispatch ok");
         assert_eq!(outcome.status.expect("status").tone, "info");
@@ -8048,10 +7963,7 @@ mod tests {
                 attention_indicator: None,
                 attention_on_bell: None,
                 pr_banner_position: None,
-                diff_tab_width: None,
-                show_diff_line_numbers: None,
                 hyperlinks: None,
-                theme: None,
             })
             .expect("dispatch ok");
         assert_eq!(
@@ -8075,10 +7987,7 @@ mod tests {
                 attention_indicator: None,
                 attention_on_bell: None,
                 pr_banner_position: None,
-                diff_tab_width: None,
-                show_diff_line_numbers: None,
                 hyperlinks: None,
-                theme: None,
             })
             .expect("dispatch ok");
         assert_eq!(engine.config.ui.attention_grace_seconds, 0);
@@ -8089,37 +7998,11 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let before = engine.config.ui.pr_banner_position.clone();
         let err = engine
-            .apply_wire(WireCommand::SetSettings {
-                copy_on_select: None,
-                show_changes_pane: None,
-                web_notifications: None,
-                always_show_tab_strip: None,
-                status_clear_seconds: None,
-                attention_grace_seconds: None,
-                attention_indicator: None,
-                attention_on_bell: None,
-                pr_banner_position: Some("sideways".to_string()),
-                diff_tab_width: None,
-                show_diff_line_numbers: None,
-                hyperlinks: None,
-                theme: None,
-            })
+            .apply_wire(pr_banner_position_only_patch("sideways"))
             .map(|_| ())
             .unwrap_err();
         assert!(err.to_string().contains("PR banner position"), "{err}");
         assert_eq!(engine.config.ui.pr_banner_position, before);
-    }
-
-    #[test]
-    fn set_settings_rejects_unknown_theme_and_leaves_config_unchanged() {
-        let (mut engine, _tmp) = test_engine();
-        let before = engine.config.ui.theme.clone();
-        let err = engine
-            .apply_wire(theme_only_patch("not_a_real_theme"))
-            .map(|_| ())
-            .unwrap_err();
-        assert!(err.to_string().contains("theme"), "{err}");
-        assert_eq!(engine.config.ui.theme, before);
     }
 
     #[test]
@@ -8139,7 +8022,7 @@ mod tests {
     #[test]
     fn set_settings_ignores_absent_fields() {
         let (mut engine, _tmp) = test_engine();
-        engine.config.ui.theme = "nord".to_string();
+        engine.config.ui.pr_banner_position = "top".to_string();
         engine
             .apply_wire(WireCommand::SetSettings {
                 copy_on_select: Some(false),
@@ -8151,14 +8034,11 @@ mod tests {
                 attention_indicator: None,
                 attention_on_bell: None,
                 pr_banner_position: None,
-                diff_tab_width: None,
-                show_diff_line_numbers: None,
                 hyperlinks: None,
-                theme: None,
             })
             .expect("dispatch ok");
-        // theme was absent from the patch, so it must be untouched.
-        assert_eq!(engine.config.ui.theme, "nord");
+        // pr_banner_position was absent from the patch, so it must be untouched.
+        assert_eq!(engine.config.ui.pr_banner_position, "top");
     }
 
     /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in

@@ -95,9 +95,6 @@ const fullBootstrap: Bootstrap = {
   always_show_tab_strip: false,
   attention_indicator: true,
   attention_on_bell: true,
-  diff_tab_width: 4,
-  show_diff_line_numbers: false,
-  theme: "dux_dark",
 }
 
 function seed(overrides: Partial<Bootstrap> = {}) {
@@ -128,9 +125,6 @@ describe("CustomizeWebappDialog", () => {
 
     expect(screen.getByText(/This browser \(Web\)/)).toBeTruthy()
     expect(screen.getByText(/Both surfaces/)).toBeTruthy()
-    expect(
-      screen.getByText(/won't change this browser/i),
-    ).toBeTruthy()
   })
 
   it("renders a Switch for each bool setting", () => {
@@ -138,8 +132,8 @@ describe("CustomizeWebappDialog", () => {
     render(<CustomizeWebappDialog />)
 
     // copy_on_select, show_changes_pane, web_notifications, always_show_tab_strip,
-    // attention_indicator, attention_on_bell, show_diff_line_numbers, hyperlinks.
-    expect(screen.getAllByRole("switch").length).toBe(8)
+    // attention_indicator, attention_on_bell, hyperlinks.
+    expect(screen.getAllByRole("switch").length).toBe(7)
   })
 
   it("renders a number input for u64 settings and shows the zero-value hint", () => {
@@ -156,8 +150,8 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    // Two enum rows: pr_banner_position and theme.
-    expect(screen.getAllByRole("combobox").length).toBe(2)
+    // One enum row: pr_banner_position.
+    expect(screen.getAllByRole("combobox").length).toBe(1)
   })
 
   it("shows the documented default for each row", () => {
@@ -372,7 +366,7 @@ describe("CustomizeWebappDialog", () => {
     // Only `copy_on_select` differed from its default in this seed. Every
     // other Web-section key (show_changes_pane is bespoke and already at its
     // default, web_notifications is already at its default) must be absent,
-    // and no `both`/`tui`-group key should leak in from a full-descriptor
+    // and no `both`-group key should leak in from a full-descriptor
     // reset.
     expect(patch.ui).toEqual({ copy_on_select: true })
     expect(patch.capabilities ?? {}).toEqual({})

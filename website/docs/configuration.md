@@ -124,18 +124,16 @@ affect:
   copy-on-select, desktop notifications, and the Changes pane default.
 - **Both surfaces**: status-message auto-clear, the attention indicator and
   its grace period, the always-show-tab-strip preference, the PR banner
-  position, diff-viewer line numbers/tab width, and clickable hyperlinks.
-- **Terminal (TUI)**: the TUI's theme. The web writes it to `config.toml`
-  like everything else here, but a **running** `dux` TUI process doesn't watch
-  the file for changes; it picks up the new value after its own config
-  reload or a restart.
+  position, and clickable hyperlinks.
 
 Each row shows its documented default and, where a value of `0` means
-something special (like "never auto-clear" or "leave tabs as-is"), that
-meaning too. The server validates and clamps every value before saving, and
-every connected browser refreshes automatically once it's written.
+something special (like "never auto-clear"), that meaning too. The server
+validates and clamps every value before saving, and every connected browser
+refreshes automatically once it's written.
 
-Not every `[ui]`/`[capabilities]` field is here yet: keybindings, provider
-commands, and project identity stay in the raw config file (or their own
-dedicated dialogs) by design; see **Edit config.toml** in the command palette
-for anything not covered.
+Not every `[ui]`/`[capabilities]` field is here: settings that only affect the
+terminal app, like the TUI theme or the diff viewer's tab width and line
+numbers, stay TUI-only and aren't exposed in this web panel. Keybindings,
+provider commands, and project identity also stay in the raw config file (or
+their own dedicated dialogs) by design; see **Edit config.toml** in the
+command palette for anything not covered.

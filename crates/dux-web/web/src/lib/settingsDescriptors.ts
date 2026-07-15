@@ -21,9 +21,8 @@
 // `agent_tabs_max`) are deliberately deferred.
 
 import type { Bootstrap } from "./bootstrapApi"
-import { DEFAULT_THEME_NAME } from "./bootstrapApi"
 
-export type SettingSurface = "web" | "both" | "tui"
+export type SettingSurface = "web" | "both"
 
 export type SettingControl =
   | { kind: "bool" }
@@ -72,39 +71,12 @@ export interface SettingGroup {
   settings: SettingDescriptor[]
 }
 
-// Mirrors `dux_core::config::THEME_BUILTIN_NAMES` (`crates/dux-core/src/
-// config.rs`), the fixed, documented theme subset the settings-PATCH
-// endpoint validates against. Keep this list mirrored with that constant AND
-// with the `theme` field's config-template comment in
-// `crates/dux-tui/src/config.rs`.
-const THEME_BUILTIN_NAMES = [
-  "dux_dark",
-  "catppuccin_mocha",
-  "catppuccin_frappe",
-  "nord",
-  "dracula",
-  "gruvbox_dark",
-  "tokyo_night",
-  "solarized_dark",
-  "one_dark",
-  "rose_pine",
-]
-
-function themeLabel(name: string): string {
-  return name
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ")
-}
-
 // Mirrors the server-side clamp ceilings in `crates/dux-core/src/config.rs`
-// (`MAX_STATUS_CLEAR_SECONDS`, `MAX_ATTENTION_GRACE_SECONDS`,
-// `MAX_DIFF_TAB_WIDTH`). These bound the number inputs for UX only. The
-// server re-clamps and is authoritative; the post-save bootstrap refetch
-// reflects whatever it actually saved.
+// (`MAX_STATUS_CLEAR_SECONDS`, `MAX_ATTENTION_GRACE_SECONDS`). These bound
+// the number inputs for UX only. The server re-clamps and is authoritative;
+// the post-save bootstrap refetch reflects whatever it actually saved.
 const MAX_STATUS_CLEAR_SECONDS = 3_600
 const MAX_ATTENTION_GRACE_SECONDS = 300
-const MAX_DIFF_TAB_WIDTH = 16
 
 export const SETTING_GROUPS: SettingGroup[] = [
   {
@@ -257,32 +229,6 @@ export const SETTING_GROUPS: SettingGroup[] = [
         read: (b) => b.pr_banner_position ?? "bottom",
       },
       {
-        key: "ui.diff_tab_width",
-        label: "Diff tab width",
-        description: "How many columns a tab character expands to in the diff viewer.",
-        surface: "both",
-        control: {
-          kind: "number",
-          min: 0,
-          max: MAX_DIFF_TAB_WIDTH,
-          zeroMeaning: "Leave tabs as-is (may render zero-width)",
-          unit: "columns",
-        },
-        default: 4,
-        writeTarget: "settings",
-        read: (b) => b.diff_tab_width ?? 4,
-      },
-      {
-        key: "ui.show_diff_line_numbers",
-        label: "Diff line numbers",
-        description: "Shows a line-number gutter in the diff viewer.",
-        surface: "both",
-        control: { kind: "bool" },
-        default: false,
-        writeTarget: "settings",
-        read: (b) => b.show_diff_line_numbers ?? false,
-      },
-      {
         key: "capabilities.hyperlinks",
         label: "Clickable hyperlinks",
         description: "Renders OSC 8 hyperlinks an agent prints as clickable (http/https only).",
@@ -291,30 +237,6 @@ export const SETTING_GROUPS: SettingGroup[] = [
         default: true,
         writeTarget: "settings",
         read: (b) => b.hyperlinks ?? true,
-      },
-    ],
-  },
-  {
-    surface: "tui",
-    caption:
-      "Terminal (TUI). Changes the terminal app's config. This won't change this browser. A running dux TUI applies it after its next config reload or restart.",
-    settings: [
-      {
-        key: "ui.theme",
-        label: "Theme",
-        description:
-          "Visual theme for the dux TUI. Built-in options include dux_dark (the default) plus several bundled opaline themes. A custom theme dropped into the config themes directory is only editable from the raw config file.",
-        surface: "tui",
-        control: {
-          kind: "enum",
-          options: THEME_BUILTIN_NAMES.map((name) => ({
-            value: name,
-            label: themeLabel(name),
-          })),
-        },
-        default: DEFAULT_THEME_NAME,
-        writeTarget: "settings",
-        read: (b) => b.theme ?? DEFAULT_THEME_NAME,
       },
     ],
   },

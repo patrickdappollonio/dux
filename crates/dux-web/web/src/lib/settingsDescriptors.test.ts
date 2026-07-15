@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest"
 
 import type { Bootstrap } from "./bootstrapApi"
-import { DEFAULT_THEME_NAME } from "./bootstrapApi"
 import { SETTING_GROUPS, allSettingDescriptors } from "./settingsDescriptors"
 
 // A fully-populated bootstrap so every descriptor's `read()` has a real,
@@ -31,14 +30,11 @@ const sampleBootstrap: Bootstrap = {
   always_show_tab_strip: true,
   attention_indicator: false,
   attention_on_bell: false,
-  diff_tab_width: 8,
-  show_diff_line_numbers: true,
-  theme: "nord",
 }
 
 describe("settingsDescriptors", () => {
-  it("groups are ordered web, both, tui", () => {
-    expect(SETTING_GROUPS.map((g) => g.surface)).toEqual(["web", "both", "tui"])
+  it("groups are ordered web, both", () => {
+    expect(SETTING_GROUPS.map((g) => g.surface)).toEqual(["web", "both"])
   })
 
   // NOTE: this only catches an accidental key change WITHIN this file (a typo
@@ -65,10 +61,7 @@ describe("settingsDescriptors", () => {
         "ui.attention_on_bell",
         "ui.always_show_tab_strip",
         "ui.pr_banner_position",
-        "ui.diff_tab_width",
-        "ui.show_diff_line_numbers",
         "capabilities.hyperlinks",
-        "ui.theme",
       ]),
     )
     // No duplicate keys across groups.
@@ -104,36 +97,23 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.attention_on_bell"]).toBe(false)
     expect(byKey["ui.always_show_tab_strip"]).toBe(true)
     expect(byKey["ui.pr_banner_position"]).toBe("top")
-    expect(byKey["ui.diff_tab_width"]).toBe(8)
-    expect(byKey["ui.show_diff_line_numbers"]).toBe(true)
     expect(byKey["capabilities.hyperlinks"]).toBe(false)
-    expect(byKey["ui.theme"]).toBe("nord")
   })
 
   it("read() falls back to the documented default on an older bootstrap missing the field", () => {
     const bare = { ...sampleBootstrap } as Partial<Bootstrap>
     delete bare.attention_indicator
     delete bare.attention_on_bell
-    delete bare.diff_tab_width
-    delete bare.show_diff_line_numbers
-    delete bare.theme
     const byKey = Object.fromEntries(
       allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
     )
     expect(byKey["ui.attention_indicator"]).toBe(true)
     expect(byKey["ui.attention_on_bell"]).toBe(true)
-    expect(byKey["ui.diff_tab_width"]).toBe(4)
-    expect(byKey["ui.show_diff_line_numbers"]).toBe(false)
-    expect(byKey["ui.theme"]).toBe(DEFAULT_THEME_NAME)
   })
 
   it("number controls declare a zeroMeaning where the config documents one", () => {
     const byKey = Object.fromEntries(allSettingDescriptors().map((d) => [d.key, d]))
-    for (const key of [
-      "ui.status_clear_seconds",
-      "ui.attention_grace_seconds",
-      "ui.diff_tab_width",
-    ]) {
+    for (const key of ["ui.status_clear_seconds", "ui.attention_grace_seconds"]) {
       const d = byKey[key]
       expect(d.control.kind, key).toBe("number")
       if (d.control.kind === "number") {
@@ -147,16 +127,6 @@ describe("settingsDescriptors", () => {
       if (d.control.kind === "enum") {
         expect(d.control.options.length, d.key).toBeGreaterThanOrEqual(2)
       }
-    }
-  })
-
-  it("the theme select includes the bundled default", () => {
-    const theme = allSettingDescriptors().find((d) => d.key === "ui.theme")
-    expect(theme?.control.kind).toBe("enum")
-    if (theme?.control.kind === "enum") {
-      expect(theme.control.options.map((o) => o.value)).toContain(
-        DEFAULT_THEME_NAME,
-      )
     }
   })
 })

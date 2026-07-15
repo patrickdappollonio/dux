@@ -149,20 +149,6 @@ pub struct BootstrapView {
     /// `attention_indicator` is false). Older servers omit it, so the web
     /// treats a missing value as `true`.
     pub attention_on_bell: bool,
-    /// Mirrors `config.ui.diff_tab_width`: how many columns a tab character
-    /// expands to in the diff viewer. `0` means "leave tabs as-is" (may render
-    /// zero-width). Older servers omit it, so the web falls back to 4.
-    pub diff_tab_width: u16,
-    /// Mirrors `config.ui.show_diff_line_numbers`: whether the diff viewer
-    /// renders a line-number gutter (default false). Older servers omit it, so
-    /// the web treats a missing value as `false`.
-    pub show_diff_line_numbers: bool,
-    /// Mirrors `config.ui.theme` (TUI-only visual theme name). Surfaced so the
-    /// web settings modal's "Terminal (TUI)" section can show and edit the
-    /// running dux TUI's configured theme, even though the web itself never
-    /// renders it. Older servers omit it, so the web falls back to
-    /// `dux_core::theme::DEFAULT_THEME_NAME` ("dux_dark").
-    pub theme: String,
 }
 
 /// A single text macro projected for web clients, from
@@ -625,9 +611,6 @@ impl Engine {
             always_show_tab_strip: self.config.ui.always_show_tab_strip,
             attention_indicator: self.config.ui.attention_indicator,
             attention_on_bell: self.config.ui.attention_on_bell,
-            diff_tab_width: self.config.ui.diff_tab_width,
-            show_diff_line_numbers: self.config.ui.show_diff_line_numbers,
-            theme: self.config.ui.theme.clone(),
         }
     }
 }
@@ -1307,39 +1290,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_tab_width_is_projected_from_config() {
-        let (mut engine, _tmp) = test_engine();
-
-        assert_eq!(engine.bootstrap().diff_tab_width, 4);
-
-        engine.config.ui.diff_tab_width = 0;
-        assert_eq!(engine.bootstrap().diff_tab_width, 0);
-
-        engine.config.ui.diff_tab_width = 8;
-        assert_eq!(engine.bootstrap().diff_tab_width, 8);
-    }
-
-    #[test]
-    fn show_diff_line_numbers_is_projected_from_config() {
-        let (mut engine, _tmp) = test_engine();
-
-        assert!(!engine.bootstrap().show_diff_line_numbers);
-
-        engine.config.ui.show_diff_line_numbers = true;
-        assert!(engine.bootstrap().show_diff_line_numbers);
-    }
-
-    #[test]
-    fn theme_is_projected_from_config() {
-        let (mut engine, _tmp) = test_engine();
-
-        assert_eq!(engine.bootstrap().theme, "dux_dark");
-
-        engine.config.ui.theme = "nord".to_string();
-        assert_eq!(engine.bootstrap().theme, "nord");
-    }
-
-    #[test]
     fn bootstrap_serializes_to_json_with_expected_fields() {
         let (engine, _tmp) = test_engine();
         let json = serde_json::to_string(&engine.bootstrap()).expect("serialize");
@@ -1367,9 +1317,6 @@ mod tests {
             "always_show_tab_strip",
             "attention_indicator",
             "attention_on_bell",
-            "diff_tab_width",
-            "show_diff_line_numbers",
-            "theme",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),

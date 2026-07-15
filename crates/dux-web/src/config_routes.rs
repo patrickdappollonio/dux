@@ -274,9 +274,6 @@ struct UiSettingsPatch {
     attention_indicator: Option<bool>,
     attention_on_bell: Option<bool>,
     pr_banner_position: Option<String>,
-    diff_tab_width: Option<u16>,
-    show_diff_line_numbers: Option<bool>,
-    theme: Option<String>,
 }
 
 /// The `[capabilities]` half of a settings-PATCH body. Same optional/
@@ -349,10 +346,7 @@ async fn set_settings(
             attention_indicator: body.ui.attention_indicator,
             attention_on_bell: body.ui.attention_on_bell,
             pr_banner_position: body.ui.pr_banner_position,
-            diff_tab_width: body.ui.diff_tab_width,
-            show_diff_line_numbers: body.ui.show_diff_line_numbers,
             hyperlinks: body.capabilities.hyperlinks,
-            theme: body.ui.theme,
         },
     )
     .await
@@ -795,20 +789,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_settings_rejects_unknown_theme_with_400() {
-        let (_tmp, app) = router_no_auth();
-        let resp = app
-            .oneshot(json_req(
-                "PATCH",
-                "/api/v1/config/settings",
-                r#"{"ui":{"theme":"not_a_real_theme"}}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
     async fn set_settings_empty_patch_is_a_noop_200() {
         let (_tmp, app) = router_no_auth();
         let before = read_raw_config_text(&app).await;
@@ -828,34 +808,34 @@ mod tests {
     async fn set_settings_ignores_absent_fields() {
         let (_tmp, app) = router_no_auth();
 
-        // Set the theme first.
+        // Set the PR banner position first.
         let resp = app
             .clone()
             .oneshot(json_req(
                 "PATCH",
                 "/api/v1/config/settings",
-                r#"{"ui":{"theme":"nord"}}"#,
+                r#"{"ui":{"pr_banner_position":"top"}}"#,
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // A second patch that only touches an unrelated field must leave theme
-        // untouched.
+        // A second patch that only touches an unrelated field must leave the
+        // PR banner position untouched.
         let resp = app
             .clone()
             .oneshot(json_req(
                 "PATCH",
                 "/api/v1/config/settings",
-                r#"{"ui":{"diff_tab_width":8}}"#,
+                r#"{"ui":{"status_clear_seconds":8}}"#,
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let raw = read_raw_config_text(&app).await;
-        assert!(raw.contains("theme = \"nord\""), "raw: {raw}");
-        assert!(raw.contains("diff_tab_width = 8"), "raw: {raw}");
+        assert!(raw.contains("pr_banner_position = \"top\""), "raw: {raw}");
+        assert!(raw.contains("status_clear_seconds = 8"), "raw: {raw}");
     }
 
     #[tokio::test]
