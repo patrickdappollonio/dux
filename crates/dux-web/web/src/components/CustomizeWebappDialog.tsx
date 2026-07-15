@@ -89,7 +89,7 @@ function FaviconControl({
   disabled: boolean
 }) {
   return (
-    <div className="grid grid-cols-6 gap-2">
+    <div className="flex max-w-[15.5rem] flex-wrap gap-2">
       {SWATCHES.map((swatch) => {
         const selected = swatch.value === value
         return (
@@ -101,7 +101,7 @@ function FaviconControl({
               disabled={disabled}
               onClick={() => onChange(swatch.value)}
               className={cn(
-                "relative flex aspect-square items-center justify-center rounded-lg border bg-muted/40 p-1.5 transition-colors max-md:min-h-10 hover:bg-muted disabled:opacity-50",
+                "relative flex size-10 shrink-0 items-center justify-center rounded-lg border bg-muted/40 p-1.5 transition-colors hover:bg-muted disabled:opacity-50",
                 selected ? "border-ring ring-3 ring-ring/50" : "border-input",
               )}
             >
@@ -256,7 +256,7 @@ function SettingControl({
           maxLength={d.control.maxLen}
           placeholder={String(d.default)}
           disabled={disabled}
-          className="max-md:min-h-10"
+          className="max-md:min-h-10 w-full md:w-56"
           onChange={(e) => onChange(e.target.value)}
         />
       )

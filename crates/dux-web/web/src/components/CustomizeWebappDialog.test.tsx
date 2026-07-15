@@ -340,6 +340,25 @@ describe("CustomizeWebappDialog", () => {
     expect(setInstanceIdentity).toHaveBeenCalledWith({ favicon: "" })
   })
 
+  it("sizes favicon swatch buttons explicitly instead of deriving size from the grid column", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    // Regression guard: the swatch control's wrapper (`SettingRow`'s
+    // `shrink-0` div) is an auto-width flex child, so a swatch that derives
+    // its size from `aspect-square` inside a `grid-cols-6` column blows up
+    // to that column's shrink-to-fit width instead of a fixed size. Every
+    // swatch button must carry an explicit fixed square size (`size-10`) and
+    // must NOT rely on `aspect-square` for sizing.
+    const original = screen.getByRole("button", { name: "Original" })
+    expect(original.className).toMatch(/\bsize-10\b/)
+    expect(original.className).not.toMatch(/\baspect-square\b/)
+
+    const blue = screen.getByRole("button", { name: "Blue" })
+    expect(blue.className).toMatch(/\bsize-10\b/)
+    expect(blue.className).not.toMatch(/\baspect-square\b/)
+  })
+
   it("resets the Web section to defaults and persists exactly the changed keys", async () => {
     seed({ title: "prod dux", favicon: "amber", copy_on_select: false })
     render(<CustomizeWebappDialog />)
