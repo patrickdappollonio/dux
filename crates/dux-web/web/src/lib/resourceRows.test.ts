@@ -1,0 +1,254 @@
+import { describe, expect, it } from "vitest"
+
+import { taskManagerRows } from "./resourceRows"
+import type { ResourceStatsView } from "./resourcesApi"
+import type { AgentTabView, SessionView, TerminalView } from "./types"
+
+function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
+  return {
+    provider: "claude",
+    order: 0,
+    working: false,
+    needs_attention: false,
+    has_output: false,
+    has_live_process: true,
+    ...over,
+  }
+}
+
+function terminal(over: Partial<TerminalView> & { id: string }): TerminalView {
+  return {
+    label: "term",
+    has_output: false,
+    foreground_cmd: null,
+    ...over,
+  }
+}
+
+function session(over: Partial<SessionView> & { id: string }): SessionView {
+  return {
+    project_id: "p1",
+    title: null,
+    provider: "claude",
+    branch_name: "feat",
+    initial_branch: "feat",
+    source_branch: "main",
+    worktree_path: "/wt",
+    status: "active",
+    auto_reopen_enabled: false,
+    terminals: [],
+    tabs: [tab({ id: over.id })],
+    has_output: false,
+    working: false,
+    needs_attention: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    ...over,
+  } as SessionView
+}
+
+function stat(over: Partial<ResourceStatsView>): ResourceStatsView {
+  return {
+    id: null,
+    kind: "agent",
+    label: "row",
+    pid: 1,
+    cpu_percent: 0,
+    rss_bytes: 0,
+    process_count: 1,
+    children: [],
+    ...over,
+  }
+}
+
+const duxStat = stat({
+  id: null,
+  kind: "dux",
+  label: "dux (this process)",
+  cpu_percent: 1.2,
+  rss_bytes: 50_000_000,
+})
+const totalStat = stat({ id: null, kind: "total", label: "TOTAL" })
+
+describe("taskManagerRows", () => {
+  it("joins_stats_to_tabs_by_id", () => {
+    const sessions = [session({ id: "s1", title: "fix-auth" })]
+    const stats = [
+      duxStat,
+      stat({
+        id: "s1",
+        kind: "agent",
+        label: "Agent (claude): fix-auth",
+        cpu_percent: 3.4,
+        rss_bytes: 402653184,
+        process_count: 7,
+      }),
+      totalStat,
+    ]
+
+    const rows = taskManagerRows(sessions, stats)
+    const agent = rows.find((r) => r.key === "tab:s1")
+    expect(agent?.stats?.cpu_percent).toBe(3.4)
+    expect(agent?.stats?.process_count).toBe(7)
+  })
+
+  it("does_not_join_by_label_when_two_agents_share_a_title", () => {
+    // The whole reason stats carry an id: two agents with the same title must
+    // not be conflated. A label-matching join would give both the same numbers.
+    const sessions = [
+      session({ id: "s1", title: "fix-auth" }),
+      session({ id: "s2", title: "fix-auth", tabs: [tab({ id: "s2" })] }),
+    ]
+    const stats = [
+      duxStat,
+      stat({ id: "s1", label: "Agent (claude): fix-auth", cpu_percent: 1 }),
+      stat({ id: "s2", label: "Agent (claude): fix-auth", cpu_percent: 9 }),
+      totalStat,
+    ]
+
+    const rows = taskManagerRows(sessions, stats)
+    expect(rows.find((r) => r.key === "tab:s1")?.stats?.cpu_percent).toBe(1)
+    expect(rows.find((r) => r.key === "tab:s2")?.stats?.cpu_percent).toBe(9)
+  })
+
+  it("renders_row_without_stats_as_dashes", () => {
+    // A dormant tab (or one born since the last poll) has no stats. It must
+    // still render, and must still be stoppable — never drop a killable row for
+    // lack of numbers.
+    const sessions = [
+      session({
+        id: "s1",
+        tabs: [tab({ id: "s1" }), tab({ id: "t2", has_live_process: false })],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    const dormant = rows.find((r) => r.key === "tab:t2")
+    expect(dormant).toBeDefined()
+    expect(dormant?.stats).toBeNull()
+    expect(dormant?.stoppable).toBe(true)
+  })
+
+  it("drops_orphan_stats_not_in_spine", () => {
+    // A runtime killed between the poll and the spine refetch. The spine is
+    // authoritative for existence, so its row is gone.
+    const sessions = [session({ id: "s1" })]
+    const stats = [
+      duxStat,
+      stat({ id: "s1", label: "Agent (claude): s1" }),
+      stat({ id: "ghost", label: "Agent (claude): ghost" }),
+      totalStat,
+    ]
+    const rows = taskManagerRows(sessions, stats)
+    expect(rows.some((r) => r.key === "tab:ghost")).toBe(false)
+  })
+
+  it("pins_dux_first_and_total_last", () => {
+    const sessions = [session({ id: "s1" })]
+    const rows = taskManagerRows(sessions, [
+      duxStat,
+      stat({ id: "s1", label: "Agent (claude): s1" }),
+      totalStat,
+    ])
+    expect(rows[0].kind).toBe("dux")
+    expect(rows[rows.length - 1].kind).toBe("total")
+  })
+
+  it("dux_and_total_render_even_with_no_runtimes", () => {
+    const rows = taskManagerRows([], [duxStat, totalStat])
+    expect(rows.map((r) => r.kind)).toEqual(["dux", "total"])
+  })
+
+  it("groups_tabs_under_their_agent", () => {
+    // The session-slot tab leads; extra tabs nest under it in `order`, never
+    // reordered by a stat value.
+    const sessions = [
+      session({
+        id: "s1",
+        title: "fix-auth",
+        tabs: [
+          tab({ id: "s1", order: 0 }),
+          tab({ id: "t3", order: 2, provider: "codex" }),
+          tab({ id: "t2", order: 1, provider: "opencode" }),
+        ],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    const keys = rows.map((r) => r.key)
+    expect(keys).toEqual(["dux", "tab:s1", "tab:t2", "tab:t3", "total"])
+    // The session-slot tab is the group's lead row; extra tabs are nested.
+    expect(rows.find((r) => r.key === "tab:s1")?.nested).toBe(false)
+    expect(rows.find((r) => r.key === "tab:t2")?.nested).toBe(true)
+  })
+
+  it("orders_terminals_after_their_agents_tabs", () => {
+    const sessions = [
+      session({
+        id: "s1",
+        tabs: [tab({ id: "s1" })],
+        terminals: [terminal({ id: "term-1", label: "dev server" })],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    expect(rows.map((r) => r.key)).toEqual([
+      "dux",
+      "tab:s1",
+      "term:term-1",
+      "total",
+    ])
+  })
+
+  it("keeps_row_order_stable_regardless_of_stat_values", () => {
+    // R7: rows must never sort by a stat, or they would reorder under the
+    // cursor on every poll.
+    const sessions = [
+      session({ id: "s1", tabs: [tab({ id: "s1" }), tab({ id: "t2", order: 1 })] }),
+    ]
+    const hot = [
+      duxStat,
+      stat({ id: "s1", cpu_percent: 0.1 }),
+      stat({ id: "t2", cpu_percent: 99 }),
+      totalStat,
+    ]
+    const cold = [
+      duxStat,
+      stat({ id: "s1", cpu_percent: 99 }),
+      stat({ id: "t2", cpu_percent: 0.1 }),
+      totalStat,
+    ]
+    expect(taskManagerRows(sessions, hot).map((r) => r.key)).toEqual(
+      taskManagerRows(sessions, cold).map((r) => r.key),
+    )
+  })
+
+  it("carries_the_session_id_so_a_tab_row_can_be_stopped", () => {
+    const sessions = [
+      session({ id: "s1", tabs: [tab({ id: "s1" }), tab({ id: "t2", order: 1 })] }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    expect(rows.find((r) => r.key === "tab:t2")?.sessionId).toBe("s1")
+  })
+
+  it("reports_nothing_running_only_when_no_agents_or_terminals", () => {
+    expect(taskManagerRows([], [duxStat, totalStat]).some((r) => r.stoppable)).toBe(
+      false,
+    )
+    const sessions = [session({ id: "s1" })]
+    expect(
+      taskManagerRows(sessions, [duxStat, totalStat]).some((r) => r.stoppable),
+    ).toBe(true)
+  })
+
+  it("lists_only_agents_with_a_live_or_dormant_tab_not_exited_ones", () => {
+    // An exited/detached agent has no live tabs; it is not a running task, so
+    // the Task Manager does not list it.
+    const sessions = [
+      session({
+        id: "s1",
+        status: "detached",
+        tabs: [tab({ id: "s1", has_live_process: false })],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    expect(rows.map((r) => r.kind)).toEqual(["dux", "total"])
+  })
+})
