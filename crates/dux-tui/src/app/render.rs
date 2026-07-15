@@ -86,6 +86,110 @@ fn truncate_to_width(s: &str, max_w: u16) -> String {
     out
 }
 
+/// Column budget for the resource monitor table, computed from the inner
+/// content width so every column stays readable instead of colliding on a
+/// hardcoded per-column `Constraint`.
+///
+/// The old layout hardcoded `[Constraint::Min(30), Length(8), Length(6),
+/// Length(8), Length(12)]` for `[Name, PID, Procs, CPU %, RSS]`, on the
+/// assumption that `Min` is a soft lower bound and `Length` is rigid, so a
+/// narrow terminal would squeeze the flexible `Min(30)` Name column down to
+/// a couple of characters. Instrumenting the actual render with a
+/// `TestBackend` (see the `resource_monitor_*_legible_at_narrow_width`
+/// tests) showed the opposite: ratatui's `Table` constraint solver treats a
+/// `Min` column as free to grow and greedily claims the available width,
+/// while `Length` columns compress far below their stated size once the
+/// total no longer fits. At a 50-column terminal the old layout kept a
+/// generous ~31-character Name column while PID/Procs/CPU/RSS were crushed
+/// to unreadable slivers (the header rendered as `"PI P CP R"`, a 5.0% CPU
+/// reading as `"5."`, a 1.0 MiB RSS reading as `"1"`) - exactly backwards
+/// from this monitor's purpose, since CPU and RSS are the numbers the user
+/// opened the popup to read.
+///
+/// Fix: stop asking the constraint solver to guess and compute an exact
+/// column plan from the real inner width instead. CPU and RSS always keep
+/// their full width; they are never dropped or shrunk. PID is the least
+/// actionable column at a glance (a raw number) so it is dropped first when
+/// space runs out, then Procs. Name always keeps at least
+/// `RESOURCE_MONITOR_NAME_MIN_WIDTH` columns once PID/Procs are gone; if a
+/// name is still too long for that width, the caller truncates it with an
+/// ellipsis (`truncate_status_text`, character-based) rather than letting
+/// the table hard-chop it mid-character.
+struct ResourceMonitorColumns {
+    show_pid: bool,
+    show_procs: bool,
+    name_w: u16,
+    pid_w: u16,
+    procs_w: u16,
+    cpu_w: u16,
+    rss_w: u16,
+}
+
+impl ResourceMonitorColumns {
+    /// Number of visible columns, used to compute inter-column spacing.
+    fn visible_count(&self) -> u16 {
+        3 + u16::from(self.show_pid) + u16::from(self.show_procs) // Name + CPU + RSS + optionals
+    }
+}
+
+const RESOURCE_MONITOR_PID_W: u16 = 8;
+const RESOURCE_MONITOR_PROCS_W: u16 = 6;
+const RESOURCE_MONITOR_CPU_W: u16 = 8;
+const RESOURCE_MONITOR_RSS_W: u16 = 12;
+/// Floor below which the Name column is no longer considered readable and
+/// we drop another column instead of shrinking it further.
+const RESOURCE_MONITOR_NAME_MIN_WIDTH: u16 = 16;
+/// ratatui's `Table` default `column_spacing` between adjacent columns.
+const RESOURCE_MONITOR_COLUMN_SPACING: u16 = 1;
+
+fn resource_monitor_columns(inner_width: u16) -> ResourceMonitorColumns {
+    let try_plan = |show_pid: bool, show_procs: bool| -> Option<ResourceMonitorColumns> {
+        let mut fixed = RESOURCE_MONITOR_CPU_W + RESOURCE_MONITOR_RSS_W;
+        let mut visible_cols = 3u16; // Name, CPU %, RSS
+        if show_pid {
+            fixed += RESOURCE_MONITOR_PID_W;
+            visible_cols += 1;
+        }
+        if show_procs {
+            fixed += RESOURCE_MONITOR_PROCS_W;
+            visible_cols += 1;
+        }
+        let gaps = RESOURCE_MONITOR_COLUMN_SPACING * visible_cols.saturating_sub(1);
+        let used = fixed + gaps;
+        let name_w = inner_width.checked_sub(used)?;
+        // Only enforce the readability floor when dropping a column is still
+        // an option; the last-resort plan (no PID, no Procs) takes whatever
+        // is left, even below the floor, rather than rendering nothing.
+        if name_w < RESOURCE_MONITOR_NAME_MIN_WIDTH && (show_pid || show_procs) {
+            return None;
+        }
+        Some(ResourceMonitorColumns {
+            show_pid,
+            show_procs,
+            name_w: name_w.max(1),
+            pid_w: RESOURCE_MONITOR_PID_W,
+            procs_w: RESOURCE_MONITOR_PROCS_W,
+            cpu_w: RESOURCE_MONITOR_CPU_W,
+            rss_w: RESOURCE_MONITOR_RSS_W,
+        })
+    };
+
+    try_plan(true, true)
+        .or_else(|| try_plan(false, true))
+        .or_else(|| try_plan(false, false))
+        .unwrap_or(ResourceMonitorColumns {
+            show_pid: false,
+            show_procs: false,
+            name_w: inner_width
+                .saturating_sub(RESOURCE_MONITOR_CPU_W + RESOURCE_MONITOR_RSS_W + 2)
+                .max(1),
+            pid_w: RESOURCE_MONITOR_PID_W,
+            procs_w: RESOURCE_MONITOR_PROCS_W,
+            cpu_w: RESOURCE_MONITOR_CPU_W,
+            rss_w: RESOURCE_MONITOR_RSS_W,
+        })
+}
+
 fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     if width == 0 {
         return 0;
@@ -7228,13 +7332,24 @@ impl App {
             .fg(self.theme.help_section_header_fg)
             .add_modifier(Modifier::BOLD);
 
-        let header = Row::new(vec![
-            Cell::from("Name").style(header_style),
-            Cell::from("PID").style(header_style),
-            Cell::from("Procs").style(header_style),
-            Cell::from("CPU %").style(header_style),
-            Cell::from("RSS").style(header_style),
-        ]);
+        // Rebalance the column budget from the real inner width instead of
+        // hardcoding rigid widths for PID/Procs/CPU/RSS: at narrow terminal
+        // sizes that left Name (the only flexible column) with only a
+        // couple of characters. See `resource_monitor_columns` for the
+        // rationale (CPU/RSS always survive; PID drops first, then Procs).
+        let columns = resource_monitor_columns(inner.width);
+        let name_w = usize::from(columns.name_w);
+
+        let mut header_cells = vec![Cell::from("Name").style(header_style)];
+        if columns.show_pid {
+            header_cells.push(Cell::from("PID").style(header_style));
+        }
+        if columns.show_procs {
+            header_cells.push(Cell::from("Procs").style(header_style));
+        }
+        header_cells.push(Cell::from("CPU %").style(header_style));
+        header_cells.push(Cell::from("RSS").style(header_style));
+        let header = Row::new(header_cells);
 
         let visual = build_visual_rows(rows, expanded);
         let dim_style = Style::default().fg(self.theme.hint_dim_desc_fg);
@@ -7274,22 +7389,25 @@ impl App {
                     } else {
                         "  "
                     };
-                    let label = format!("{indicator}{}", stat.label);
+                    let label = truncate_status_text(&format!("{indicator}{}", stat.label), name_w);
 
-                    Row::new(vec![
-                        Cell::from(label),
-                        Cell::from(pid_str),
-                        Cell::from(procs_str),
-                        Cell::from(cpu_str),
-                        Cell::from(rss_str),
-                    ])
-                    .style(style)
+                    let mut cells = vec![Cell::from(label)];
+                    if columns.show_pid {
+                        cells.push(Cell::from(pid_str));
+                    }
+                    if columns.show_procs {
+                        cells.push(Cell::from(procs_str));
+                    }
+                    cells.push(Cell::from(cpu_str));
+                    cells.push(Cell::from(rss_str));
+                    Row::new(cells).style(style)
                 }
                 VisualRow::Child(parent_idx, child_idx) => {
                     let child = &rows[*parent_idx].children[*child_idx];
                     let is_last = *child_idx == rows[*parent_idx].children.len().saturating_sub(1);
                     let connector = if is_last { "└" } else { "├" };
-                    let label = format!("    {connector} {}", child.name);
+                    let label =
+                        truncate_status_text(&format!("    {connector} {}", child.name), name_w);
                     let cpu_str = if first_sample {
                         format!("~{:.1}%", child.cpu_percent)
                     } else {
@@ -7297,25 +7415,30 @@ impl App {
                     };
                     let rss_str = format_bytes(child.rss_bytes);
 
-                    Row::new(vec![
-                        Cell::from(label),
-                        Cell::from(child.pid.to_string()),
-                        Cell::from(""),
-                        Cell::from(cpu_str),
-                        Cell::from(rss_str),
-                    ])
-                    .style(dim_style)
+                    let mut cells = vec![Cell::from(label)];
+                    if columns.show_pid {
+                        cells.push(Cell::from(child.pid.to_string()));
+                    }
+                    if columns.show_procs {
+                        cells.push(Cell::from(""));
+                    }
+                    cells.push(Cell::from(cpu_str));
+                    cells.push(Cell::from(rss_str));
+                    Row::new(cells).style(dim_style)
                 }
             })
             .collect();
 
-        let widths = [
-            Constraint::Min(30),
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(12),
-        ];
+        let mut widths = vec![Constraint::Length(columns.name_w)];
+        if columns.show_pid {
+            widths.push(Constraint::Length(columns.pid_w));
+        }
+        if columns.show_procs {
+            widths.push(Constraint::Length(columns.procs_w));
+        }
+        widths.push(Constraint::Length(columns.cpu_w));
+        widths.push(Constraint::Length(columns.rss_w));
+        debug_assert_eq!(widths.len() as u16, columns.visible_count());
 
         let highlight_style = self.theme.selection_style();
         let table = Table::new(table_rows, widths)
@@ -9228,5 +9351,274 @@ mod tests {
         assert_eq!(status_footer_lines("short", 40), 1);
         assert_eq!(status_footer_lines("this message is too wide", 10), 2);
         assert_eq!(status_footer_lines("anything", 0), 1);
+    }
+
+    // --- resource_monitor_columns (pure column-budget helper) ---
+
+    #[test]
+    fn resource_monitor_columns_wide_terminal_keeps_all_columns() {
+        // A wide inner width (as at an 80+ column terminal) keeps every
+        // column and gives Name a generous, well-above-floor width.
+        let cols = resource_monitor_columns(76);
+        assert!(cols.show_pid);
+        assert!(cols.show_procs);
+        assert!(
+            cols.name_w >= RESOURCE_MONITOR_NAME_MIN_WIDTH,
+            "name width should stay comfortably above the floor at wide terminals: {}",
+            cols.name_w
+        );
+    }
+
+    #[test]
+    fn resource_monitor_columns_narrow_terminal_drops_pid_and_procs() {
+        // At an inner width around 40 (roughly what an 85%-wide popup on a
+        // ~50-column terminal yields), the old layout crushed PID/Procs/CPU/
+        // RSS to unreadable slivers (verified via TestBackend, see the
+        // module doc comment on `resource_monitor_columns`). The rebalanced
+        // plan drops PID and Procs first, since CPU and RSS are the point
+        // of the monitor and must survive at their full width.
+        let cols = resource_monitor_columns(40);
+        assert!(!cols.show_pid, "PID should drop before Name collapses");
+        assert!(!cols.show_procs, "Procs should drop before Name collapses");
+        assert!(
+            cols.name_w >= RESOURCE_MONITOR_NAME_MIN_WIDTH,
+            "name width must not collapse to a couple of characters: {}",
+            cols.name_w
+        );
+    }
+
+    #[test]
+    fn resource_monitor_columns_never_drops_cpu_or_rss() {
+        for width in [10u16, 20, 40, 60, 100, 200] {
+            let cols = resource_monitor_columns(width);
+            assert_eq!(cols.cpu_w, RESOURCE_MONITOR_CPU_W);
+            assert_eq!(cols.rss_w, RESOURCE_MONITOR_RSS_W);
+        }
+    }
+
+    #[test]
+    fn resource_monitor_columns_intermediate_width_drops_only_pid() {
+        // Wide enough to keep Procs once PID is dropped, but not wide
+        // enough to keep both.
+        let cols = resource_monitor_columns(45);
+        assert!(!cols.show_pid);
+        assert!(cols.show_procs);
+        assert!(cols.name_w >= RESOURCE_MONITOR_NAME_MIN_WIDTH);
+    }
+
+    /// Render-level regression, confirmed against the pre-fix code by
+    /// instrumenting a `TestBackend` render before writing this fix (see the
+    /// PR description): at a 50-column terminal (inner content width 40),
+    /// the old hardcoded `[Min(30), Length(8), Length(6), Length(8),
+    /// Length(12)]` widths did NOT protect PID/Procs/CPU/RSS as rigid
+    /// columns the way the constraint names suggest. ratatui's Table
+    /// constraint solver instead let the greedy `Min(30)` column consume
+    /// nearly all the width and compressed every `Length` column far below
+    /// its stated size, down to unreadable slivers: the header rendered as
+    /// `"PI P CP R"` (CPU shrunk to "CP", RSS to "R") and the data rows as
+    /// `"5."` for a 5.0% reading and `"1"` for a 1.0 MiB reading. That is
+    /// exactly backwards from this monitor's purpose: CPU and RSS are the
+    /// numbers the user opened this popup to read, and the tenet is that
+    /// they must survive longest. This test proves they render in full
+    /// after the fix; dropping PID and Procs (below) is what keeps CPU/RSS
+    /// intact.
+    #[test]
+    fn resource_monitor_cpu_and_rss_columns_stay_legible_at_narrow_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let rows = vec![ResourceStats {
+            label: "Agent (claude): some-branch-name".into(),
+            pid: Some(100),
+            cpu_percent: 5.0,
+            rss_bytes: 1024 * 1024,
+            process_count: 2,
+            children: vec![ProcessInfo {
+                name: "rust-analyzer".into(),
+                pid: 101,
+                cpu_percent: 3.0,
+                rss_bytes: 512 * 1024,
+            }],
+        }];
+        let mut expanded = HashSet::new();
+        expanded.insert(100u32);
+
+        let backend = TestBackend::new(50, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+            })
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("CPU %"),
+            "CPU % header must render in full, not truncated to a couple of characters; rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("5.0%"),
+            "the parent row's CPU reading must render in full; rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("1.0 MiB"),
+            "the parent row's RSS reading must render in full; rendered: {rendered}"
+        );
+        // PID and Procs are the columns that yield their space to Name/CPU/RSS
+        // at this width, per `resource_monitor_columns`.
+        assert!(
+            !rendered.contains("PID") && !rendered.contains("Procs"),
+            "PID/Procs should be dropped (not rendered truncated/empty) at this width: {rendered}"
+        );
+    }
+
+    /// Companion check for the child name itself at the same width as the
+    /// CPU/RSS regression above: the fix's `RESOURCE_MONITOR_NAME_MIN_WIDTH`
+    /// floor keeps the child's process name fully legible (not just "beyond
+    /// two characters") once PID/Procs are dropped to make room. Name was
+    /// not actually the column that collapsed pre-fix at this width (the
+    /// greedy `Min(30)` gave it plenty of room while crushing CPU/RSS
+    /// instead, see the test above) - this test guards against a *new*
+    /// regression where rebalancing the budget toward CPU/RSS would in turn
+    /// starve Name.
+    #[test]
+    fn resource_monitor_child_name_legible_at_narrow_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let rows = vec![ResourceStats {
+            label: "Agent (claude): some-branch-name".into(),
+            pid: Some(100),
+            cpu_percent: 5.0,
+            rss_bytes: 1024 * 1024,
+            process_count: 2,
+            children: vec![ProcessInfo {
+                name: "rust-analyzer".into(),
+                pid: 101,
+                cpu_percent: 3.0,
+                rss_bytes: 512 * 1024,
+            }],
+        }];
+        let mut expanded = HashSet::new();
+        expanded.insert(100u32);
+
+        let backend = TestBackend::new(50, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+            })
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        // The Name column floor (16) plus the child's 6-character tree
+        // prefix ("    └ ") leaves room for an 11-character prefix of the
+        // 13-character name before the ellipsis kicks in - well beyond the
+        // "first couple of characters" the reported bug described.
+        assert!(
+            rendered.contains("rust-analyz"),
+            "child process name must remain legible at narrow terminal widths; rendered: {rendered}"
+        );
+    }
+
+    /// Parent labels are longer than child names (`Agent (<provider>): <branch>`)
+    /// so they are even more exposed to a naive column rebalance; confirm
+    /// they stay legible too, not just the child rows.
+    #[test]
+    fn resource_monitor_parent_label_legible_at_narrow_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let rows = vec![ResourceStats {
+            label: "Agent (claude): some-branch-name".into(),
+            pid: Some(100),
+            cpu_percent: 5.0,
+            rss_bytes: 1024 * 1024,
+            process_count: 1,
+            children: Vec::new(),
+        }];
+        let expanded = HashSet::new();
+
+        let backend = TestBackend::new(50, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+            })
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            rendered.contains("Agent (claude)"),
+            "parent label must remain legible at narrow terminal widths; rendered: {rendered}"
+        );
+    }
+
+    /// No-regression check at a comfortably wide terminal: both the parent
+    /// label and the child process name render in full, and every column
+    /// (including PID and Procs) is present.
+    #[test]
+    fn resource_monitor_renders_fully_at_wide_terminal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let rows = vec![ResourceStats {
+            label: "Agent (claude): some-branch-name".into(),
+            pid: Some(100),
+            cpu_percent: 5.0,
+            rss_bytes: 1024 * 1024,
+            process_count: 2,
+            children: vec![ProcessInfo {
+                name: "rust-analyzer".into(),
+                pid: 101,
+                cpu_percent: 3.0,
+                rss_bytes: 512 * 1024,
+            }],
+        }];
+        let mut expanded = HashSet::new();
+        expanded.insert(100u32);
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+            })
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("Agent (claude): some-branch-name"));
+        assert!(rendered.contains("rust-analyzer"));
+        assert!(rendered.contains("PID"));
+        assert!(rendered.contains("Procs"));
+        assert!(rendered.contains("100"), "parent PID should render");
     }
 }
