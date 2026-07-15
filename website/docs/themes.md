@@ -19,8 +19,9 @@ theme = "dux_dark"   # the default
 ```
 
 Set it to any built-in name and restart, or (easier) open the **theme picker**
-from the command palette and arrow through the options with a live preview. No
-config editing, no guessing what a palette looks like.
+from the TUI's command palette and arrow through the options with a live preview.
+No config editing, no guessing what a palette looks like. (Themes are a terminal
+app concern: the web UI follows your browser instead.)
 
 Built-in names use underscores. A few you might recognize:
 
@@ -114,6 +115,6 @@ You have two ways to define colors:
 
 ### Preview as you go
 
-After saving a theme file, open the theme picker from the command palette. Your
+After saving a theme file, open the theme picker from the TUI's command palette. Your
 theme shows up alongside the built-ins, labeled as user-authored, with the same
 live preview. Tweak, save, re-pick, repeat until it feels right.

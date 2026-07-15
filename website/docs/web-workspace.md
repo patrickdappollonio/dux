@@ -24,11 +24,13 @@ On a desktop-width screen it is three panes, same as the TUI:
   full width. See [Git without leaving the browser](/docs/web-git).
 
 A slim header up top shows breadcrumbs (agent, provider, project, branch) and a
-**Commands…** button that opens the command palette. There is no in-app `?` help
-overlay in the browser the way there is in the TUI. Instead, the command palette
-(`Ctrl-k` or `Cmd-k`) is your map: it lists the global commands, each with a short
-description, and per-agent or per-file actions live in the `⋯` menu on the row
-itself.
+**cog** button that opens the app menu. There is no in-app `?` help overlay in the
+browser the way there is in the TUI, and no command palette either: the cog menu
+is your map. It holds your preferences, the configuration dialogs, and the
+actions that apply to the whole workspace rather than to one thing. It has no
+keyboard shortcut on purpose. Tab reaches it, Enter opens it, the arrow keys move
+through it, and Escape closes it. Anything that acts on a *specific* agent,
+project, or file lives in the `⋯` menu on that row instead.
 
 The web UI is dark-only today. There is no theme picker in the browser.
 
@@ -78,8 +80,8 @@ The web terminal copies and pastes the way a real terminal does, no menu require
 
 - **Select to copy.** Highlight text and it lands on your clipboard immediately.
   A small "Copied to clipboard" toast confirms it. This is governed by the
-  `ui.copy_on_select` preference (on by default), which you can flip from the
-  command palette.
+  `ui.copy_on_select` preference (on by default), which you can flip in
+  **Preferences** (the cog menu).
 - **Right-click to paste** (with a mouse or pen). It reads your browser clipboard
   and sends it to the agent. On plain HTTP, where the browser blocks clipboard
   reads, dux nudges you toward `Ctrl+v` instead.
@@ -133,8 +135,9 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one
 thumb, not a squished desktop:
 
 - The **home** screen is the hub: your projects and sessions with the same `⋯`
-  menus as desktop, an **Add project** button, and a **Search** button that opens
-  the command palette. Tap a session to jump straight into its terminal.
+  menus as desktop, an **Add project** button, and a **cog** button that opens the
+  app menu as a bottom sheet (submenus drill down in place, with a back arrow).
+  Tap a session to jump straight into its terminal.
 - The **terminal** screen is a full-screen terminal with a slim bar on top (Back,
   branch name, an optional PR chip, and a chip showing the changed-file count) and
   the tab strip when the agent has more than one tab.

@@ -112,11 +112,11 @@ them, on purpose:
 1. **The tab has to be in the background.** dux never pops a desktop notification
    for an agent whose tab you are already staring at.
 2. **You have to opt in.** dux never auto-prompts for notification permission,
-   because a surprise permission popup is nobody's idea of a good time. Open the
-   command palette (`Ctrl-k` / `Cmd-k`) and run **Enable browser notifications**
-   once; your browser asks, you say yes, and you are set. The action only appears
-   while notifications are enabled in config and you have not granted permission
-   yet.
+   because a surprise permission popup is nobody's idea of a good time. Open
+   **Preferences…** from the cog menu and use **Enable browser notifications**
+   once; your browser asks, you say yes, and you are set. It sits right under the
+   **Desktop notifications** setting it unlocks, and only appears while
+   notifications are enabled in config and you have not granted permission yet.
 
 Clipboard writes work in the web UI too, governed by the same
 `clipboard_passthrough` switch: when it is `"focused"` or `"always"` and the tab has

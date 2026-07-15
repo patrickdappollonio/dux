@@ -108,23 +108,23 @@ colors — `violet`, `blue`, `sky`, `cyan`, `teal`, `green`, `amber`, `orange`,
 `red`, `pink`, or `rose` — to recolor the duck so each instance is
 distinguishable at a glance.
 
-You don't have to edit the file: from the web UI, open the command palette
-(`Ctrl/Cmd+k`) and run **Open Settings**. The change is written to `[server]` in
-`config.toml` and applies to every open tab immediately, so it sticks across
-restarts.
+You don't have to edit the file: from the web UI, open the cog menu and choose
+**Preferences…**. The change is written to `[server]` in `config.toml` and applies
+to every open tab immediately, so it sticks across restarts.
 
 ## Editing settings from the web
 
-The same **Settings** command also opens a grouped panel for a curated set of
-`[ui]`/`[capabilities]` preferences, so you don't have to hand-edit
-`config.toml` for the common ones. Rows are grouped by which surface they
-affect:
+The same **Preferences…** dialog is where every web-adjustable setting lives, a
+curated set of `[ui]`/`[capabilities]`/`[defaults]` preferences, so you don't
+have to hand-edit `config.toml` for the common ones. Rows are grouped by which
+surface they affect:
 
 - **This browser (Web)**: the instance name/favicon above, plus
   copy-on-select, desktop notifications, and the Changes pane default.
 - **Both surfaces**: status-message auto-clear, the attention indicator and
   its grace period, the always-show-tab-strip preference, the PR banner
-  position, and clickable hyperlinks.
+  position, clickable hyperlinks, GitHub integration, and whether new agents
+  start with a random pet name.
 
 Each row shows its documented default and, where a value of `0` means
 something special (like "never auto-clear"), that meaning too. The server
@@ -135,5 +135,5 @@ Not every `[ui]`/`[capabilities]` field is here: settings that only affect the
 terminal app, like the TUI theme or the diff viewer's tab width and line
 numbers, stay TUI-only and aren't exposed in this web panel. Keybindings,
 provider commands, and project identity also stay in the raw config file (or
-their own dedicated dialogs) by design; see **Edit config.toml** in the
-command palette for anything not covered.
+their own dedicated dialogs) by design; in the web UI, use the cog menu's
+**Configuration → Edit config file…** for anything not covered.

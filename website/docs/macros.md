@@ -121,9 +121,9 @@ All changes (additions, edits, and deletions) are persisted immediately to
 
 ## Managing macros in the web UI
 
-The web UI has a full macro editor too. Open the command palette (**Ctrl/⌘K**)
-and pick **Edit macros**, or click **Edit macros** from any terminal pane's
-macro popover. A dialog opens with the same list of macros in declaration order.
+The web UI has a full macro editor too. Open the cog menu and pick
+**Configuration → Edit macros…**, or click **Edit macros** from any terminal
+pane's macro popover. A dialog opens with the same list of macros in declaration order.
 
 In the dialog:
 

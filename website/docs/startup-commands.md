@@ -90,8 +90,8 @@ you do not have to leave the app to manage them:
   *Configure startup command*, *Configure environment variables*, *Rerun
   startup command*, and *Startup command logs*. Because env and startup commands
   are project-scoped, the first two edit the agent's whole project (and the
-  change is written back to `config.toml`); global env stays in the command
-  palette. *Rerun startup command* re-runs the project's startup command in that
+  change is written back to `config.toml`); global env stays in the cog menu's
+  Configuration submenu. *Rerun startup command* re-runs the project's startup command in that
   one agent's worktree without recreating it, which is handy after editing the
   command or when a dependency install needs a redo.
 

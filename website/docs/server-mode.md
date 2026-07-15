@@ -176,13 +176,15 @@ including how it differs from the TUI's own mirroring behavior.
 
 ### Editing config from the browser
 
-You do not need shell access to the machine to change settings. The command
-palette's **Edit config** command opens a raw Monaco TOML editor over your actual
-`config.toml`, right in the page; saving writes the file but does not apply it
-live, so run **reload-config** afterward to pick up the change. For just the
-environment, **Configure global environment** opens a dedicated dialog for
-workspace-wide environment variables that every project inherits, which any
-project can still override with its own project-level environment settings.
+You do not need shell access to the machine to change settings. The cog menu's
+**Configuration → Edit config file…** opens a raw Monaco TOML editor over your
+actual `config.toml`, right in the page; saving writes the file but does not apply
+it live, so run **Reload config** from the same submenu afterward to pick up the
+change. For just the environment, **Global environment…** opens a dedicated dialog
+for workspace-wide environment variables that every project inherits, which any
+project can still override with its own project-level environment settings. For
+the common `[ui]`/`[capabilities]` preferences you don't need the raw file at all:
+they have rows in **Preferences…**.
 
 ## Where to go next
 

@@ -106,8 +106,8 @@ make sure your agents actually emit the signal, is covered in
 Server mode can go one step further and raise a **real browser desktop
 notification** when a backgrounded agent asks for you, bridged from the agent's
 own notification escape codes. It is strictly opt-in: dux never auto-prompts for
-permission. Run **Enable browser notifications** from the command palette once,
-grant permission, and you are set. It fires only while the tab is in the
+permission. Open **Preferences…** from the cog menu and use **Enable browser
+notifications** once, grant permission, and you are set. It fires only while the tab is in the
 background, so an agent you are watching never nags you. This is governed by the
 `web_notifications` capability, detailed in
 [Terminal capabilities](/docs/terminal-capabilities).

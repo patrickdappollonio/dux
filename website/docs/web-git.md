@@ -64,7 +64,7 @@ The pane header's `⋯` **Actions** menu carries the rest:
 When a session is tied to a GitHub pull request, a one-line strip shows the PR
 number, its state, and its title, color-coded (open is green, merged is purple,
 closed is red), and clicking it opens the PR in a new tab. You can move the banner
-above or below the terminal from the command palette.
+above or below the terminal in **Preferences** (the cog menu).
 
 There is no "create a PR" button in the web UI. The banner surfaces an **existing**
 PR; agents open PRs themselves as part of their work. Pulling a PR's branch into a
