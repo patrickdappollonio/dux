@@ -15,7 +15,6 @@ function makeBootstrap(): Bootstrap {
   return {
     available_providers: [],
     macros: [],
-    palette_commands: [],
     welcome_tips: [],
     dux_version: "development",
     randomize_agent_names_by_default: false,

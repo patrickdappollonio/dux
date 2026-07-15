@@ -19,7 +19,6 @@ describe("fetchBootstrap", () => {
     const body = {
       available_providers: ["claude"],
       macros: [],
-      palette_commands: [],
       welcome_tips: ["hi"],
       dux_version: "v1.0.0",
       randomize_agent_names_by_default: true,

@@ -15,7 +15,6 @@ function makeBootstrap(overrides: Partial<Bootstrap> = {}): Bootstrap {
   return {
     available_providers: ["claude", "codex"],
     macros: [],
-    palette_commands: [],
     welcome_tips: ["tip one"],
     dux_version: "v1.2.3",
     randomize_agent_names_by_default: false,

@@ -28,7 +28,7 @@ import {
   RefreshCw,
   RotateCcw,
   ScrollText,
-  Search,
+  Settings,
   SquareChevronRight,
   SquareTerminal,
   Trash2,
@@ -36,8 +36,9 @@ import {
   X,
 } from "lucide-react"
 import type { CSSProperties } from "react"
-import { Suspense } from "react"
+import { Suspense, useState } from "react"
 
+import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
@@ -103,7 +104,6 @@ import {
   rerunStartupCommand,
   selectSession,
   selectTerminal,
-  setPaletteOpen,
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
@@ -631,6 +631,7 @@ function HomeScreen() {
     pendingSessionOrder,
     pendingProjectOrder,
   } = useDux()
+  const [menuOpen, setMenuOpen] = useState(false)
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
   // Fold the optimistic drag overlays over the server order (see
@@ -666,16 +667,21 @@ function HomeScreen() {
           <span className="truncate font-semibold">{instanceTitle}</span>
           <span className="text-sm text-muted-foreground">agent sessions</span>
         </div>
+        {/* Was a "Search" button opening the command palette. The palette only
+            ever searched COMMANDS, so no search capability is lost by making
+            this the app-menu cog: it is the mobile twin of the desktop header's
+            cog, and opens the same menu as a bottom sheet. */}
         <Button
           variant="outline"
           size="icon"
           className="size-11 shrink-0"
-          aria-label="Search"
-          onClick={() => setPaletteOpen(true)}
+          aria-label="Menu"
+          onClick={() => setMenuOpen(true)}
         >
-          <Search />
+          <Settings />
         </Button>
       </header>
+      <AppMenuSheet open={menuOpen} onOpenChange={setMenuOpen} />
 
       {hasProjects ? (
         <ScrollArea className="min-h-0 flex-1">

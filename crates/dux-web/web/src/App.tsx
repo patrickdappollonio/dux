@@ -8,7 +8,6 @@ import { AttachWorktreeDialog } from "@/components/AttachWorktreeDialog"
 import { AppSidebar } from "@/components/Sidebar"
 import { StartupLogsDialog } from "@/components/StartupLogsDialog"
 import { ChangedFiles } from "@/components/ChangedFiles"
-import { CommandPalette } from "@/components/CommandPalette"
 import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
 import { EditorOverlay } from "@/components/EditorOverlay"
@@ -56,7 +55,6 @@ import { keyboardLikelyOpen } from "@/lib/viewport"
 function GlobalOverlays() {
   return (
     <>
-      <CommandPalette />
       <CommitDialog />
       <EditorOverlay />
       <CreateAgentDialog />

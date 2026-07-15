@@ -1,9 +1,8 @@
 import { Fragment } from "react"
 
-import { Button } from "@/components/ui/button"
+import { AppMenu } from "@/components/AppMenu"
 import { branchDrift } from "@/lib/agentTabs"
-import { paletteShortcutKeys } from "@/lib/platform"
-import { setPaletteOpen, useDux } from "@/lib/store"
+import { useDux } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 
 // One `key: value` crumb in the header details row. `muted`, when present, is
@@ -16,7 +15,7 @@ interface HeaderDetail {
 }
 
 // The desktop center-pane top bar: a flat `key: value` list (agent, provider,
-// project, branch, …) mirroring the TUI header, plus the command-palette button.
+// project, branch, …) mirroring the TUI header, plus the app-menu cog.
 // Extracted from App.tsx into its own module so it can be unit-tested in
 // isolation without pulling in `GlobalOverlays` -> `ConfigEditorDialog`, whose
 // eager Monaco import cannot initialize under vitest (see `TerminalArea`).
@@ -106,23 +105,7 @@ export function InsetHeader() {
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setPaletteOpen(true)}
-        >
-          {/* Render each key as its own flex child so the keys share the button's
-              sans font for consistent vertical alignment. The keycaps are
-              decorative (the button already reads "Commands…"), so they're hidden
-              from assistive tech. The label gets extra leading margin so the
-              keycaps sit as a distinct group, set apart from the word. */}
-          {paletteShortcutKeys().map((key) => (
-            <span key={key} aria-hidden className="text-muted-foreground">
-              {key}
-            </span>
-          ))}
-          <span className="ms-2">Commands…</span>
-        </Button>
+        <AppMenu />
       </div>
     </header>
   )

@@ -73,7 +73,6 @@ const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 const fullBootstrap: Bootstrap = {
   available_providers: [],
   macros: [],
-  palette_commands: [],
   welcome_tips: [],
   dux_version: "v0.0.0",
   randomize_agent_names_by_default: false,

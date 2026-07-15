@@ -1,6 +1,5 @@
 import { useState } from "react"
 
-import { paletteShortcutLabel } from "@/lib/platform"
 import { useDux } from "@/lib/store"
 
 // The dux welcome screen, mirroring the TUI's idle agent pane: the duck mark
@@ -24,11 +23,11 @@ const TEXT_LOGO = [
 // Render a tip, highlighting `backticked` spans in the foreground accent
 // (the backticks themselves are not shown) — same convention as the TUI.
 function TipText({ tip }: { tip: string }) {
-  // Server tips reference the palette as ⌘K (the canonical strings live in
-  // dux-core and can't know the client's platform); swap in the label for the
-  // key this machine actually has (Ctrl K outside Apple platforms).
-  const localized = tip.replaceAll("\u2318K", paletteShortcutLabel())
-  const parts = localized.split("`")
+  // No platform localization pass here: the web has no command palette and no
+  // keyboard shortcuts of its own, so web tips name affordances (the cog menu,
+  // buttons, the ⋯ menu) rather than keys. See the `web` field's doc in
+  // crates/dux-core/src/welcome.rs.
+  const parts = tip.split("`")
   return (
     <>
       {parts.map((part, i) =>

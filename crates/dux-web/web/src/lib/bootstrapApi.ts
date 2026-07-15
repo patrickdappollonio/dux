@@ -10,7 +10,7 @@
 // into this single document. A non-2xx is thrown as a `BootstrapFetchError`
 // carrying the HTTP status so the caller can branch.
 
-import type { MacroView, PaletteCommandView } from "./types"
+import type { MacroView } from "./types"
 
 // The bootstrap document. Field names/types mirror the server's JSON (snake_case)
 // and the values the legacy ViewModel carried, so consumers move over without a
@@ -22,8 +22,6 @@ export interface Bootstrap {
   available_providers: string[]
   /** Text macros from `[macros]` in config order (the macro popover/editor). */
   macros: MacroView[]
-  /** Surface-aware command-palette commands (Web/Both subset), in registry order. */
-  palette_commands: PaletteCommandView[]
   /** The rotating welcome tips shown on the empty-state screen. */
   welcome_tips: string[]
   /** The binary's display version ('vX.Y.Z' or 'development'); shown in the sidebar. */

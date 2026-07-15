@@ -221,9 +221,9 @@ export interface SidebarModel {
 }
 
 // The broadcast ViewModel is now a residual frame carrying ONLY `changed_files`.
-// The eleven build-static / config-derived fields (providers, macros, palette
-// commands, welcome tips, version, randomize default, gh availability, PR banner
-// position, scrollback, changes-pane default, global env) moved to
+// The build-static / config-derived fields (providers, macros, welcome tips,
+// version, randomize default, gh availability, PR banner position, scrollback,
+// changes-pane default, global env) moved to
 // `GET /api/v1/bootstrap` (`bootstrapApi.ts`, invalidated by `config.changed`),
 // and the projects/sessions/sidebar fields moved to `GET /api/v1/spine`
 // (`spineApi.ts`, invalidated by `projects.changed`/`sessions.changed`) — neither
@@ -232,13 +232,6 @@ export interface SidebarModel {
 // remains on the type only to mirror the residual wire frame.
 export interface ViewModel {
   changed_files: ChangedFiles
-}
-
-export interface PaletteCommandView {
-  /** Dashed command id (e.g. "sort-agents-by-updated"). */
-  id: string
-  /** One-line description shown alongside the id. */
-  description: string
 }
 
 export type ConnState = "connecting" | "open" | "closed" | "failed"

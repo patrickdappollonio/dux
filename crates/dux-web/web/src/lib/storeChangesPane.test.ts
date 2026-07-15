@@ -14,7 +14,6 @@ function makeBootstrap(showChangesPane: boolean): Bootstrap {
   return {
     available_providers: [],
     macros: [],
-    palette_commands: [],
     welcome_tips: [],
     dux_version: "development",
     randomize_agent_names_by_default: false,
@@ -219,10 +218,13 @@ describe("Changes-pane visibility", () => {
     ).resolves.toBe(false)
   })
 
-  it("the toggle-remove-git-pane palette command runs the toggle", async () => {
-    await loadStore() // boot the store so the palette handler module resolves
-    const { PALETTE_HANDLERS } = await import("./paletteRegistry")
-    PALETTE_HANDLERS["toggle-remove-git-pane"]()
+  // `toggleChangesPane` used to be reachable from the web command palette's
+  // "toggle-remove-git-pane" entry. That surface is gone (the Changes pane is a
+  // Preferences row now), but the action itself is still live: the Changes
+  // actions menu calls it. Drive it directly.
+  it("toggleChangesPane flips the pane's visibility", async () => {
+    const mod = await loadStore()
+    mod.toggleChangesPane()
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/v1/ui/changes-pane",
       expect.objectContaining({

@@ -48,24 +48,17 @@ export const configApi = {
   // Persist the Changes-pane visibility flag (`config.ui.show_changes_pane`).
   setChangesPaneVisible: (visible: boolean) =>
     send("PUT", "/api/v1/ui/changes-pane", { visible }),
-  // Reload config from disk (the "Reload config" palette command).
+  // Reload config from disk (the app menu's "Reload config").
   reload: () => send("POST", "/api/v1/config/reload", {}),
-  // Flip the random pet-name default. Parameterless: the server owns the value
-  // and flips it, then emits `config.changed`.
-  toggleRandomizedPetNameDefault: () =>
-    send("POST", "/api/v1/defaults/toggle-randomized-pet-name", {}),
-  // Swap the PR banner between the top and bottom of the agent pane.
-  togglePrBannerPosition: () =>
-    send("POST", "/api/v1/ui/toggle-pr-banner-position", {}),
-  // Flip GitHub PR integration (and its engine-side PR-sync side effects).
+  // Flip GitHub PR integration AND its engine-side PR-sync side effects (arming
+  // or disarming the background poll, clearing cached PR statuses). This is why
+  // the `ui.github_integration` Preferences row routes here instead of through
+  // the generic settings PATCH: that logic must not be forked. Parameterless:
+  // the server owns the value and flips it, which is safe only because the row
+  // is sent ONLY when it actually changed, so "changed" means "flip". See the
+  // `writeTarget` doc in settingsDescriptors.ts.
   toggleGithubIntegration: () =>
     send("POST", "/api/v1/ui/toggle-github-integration", {}),
-  // Flip whether selecting text in the web terminal auto-copies it.
-  toggleCopyOnSelect: () =>
-    send("POST", "/api/v1/ui/toggle-copy-on-select", {}),
-  // Flip whether the agent tab strip always renders, even with one tab.
-  toggleAlwaysShowTabs: () =>
-    send("POST", "/api/v1/ui/toggle-always-show-tab-strip", {}),
   // Persist the instance identity (browser tab title + favicon colour). Either
   // field may be omitted; the server validates the favicon against the curated
   // colour set, caps/normalizes the title, persists to config.toml, and emits

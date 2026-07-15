@@ -1,6 +1,5 @@
 import { Info } from "lucide-react"
 
-import { paletteShortcutLabel } from "@/lib/platform"
 import { useState } from "react"
 
 import CodeEditor from "@/components/CodeEditor"
@@ -54,7 +53,8 @@ function ConfigEditorForm({
         <span>
           Saving writes <span className="font-mono">config.toml</span> to disk but
           does not apply it. Run <span className="font-medium">Reload config</span>{" "}
-          from the command palette ({paletteShortcutLabel()}) to apply your changes.
+          from the app menu&rsquo;s <span className="font-medium">Configuration</span>{" "}
+          submenu to apply your changes.
         </span>
       </div>
       <DialogFooter>

@@ -289,7 +289,6 @@ export interface DuxState {
   //     inferred from an empty draft, so manually clearing the input doesn't
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
-  paletteOpen: boolean
   // The kill-running modal (the Ctrl+k "kill-running" command). Lists every
   // active agent and live companion terminal and force-kills each on demand
   // (agents detach and can be reconnected; terminals are destroyed). The list is
@@ -481,7 +480,6 @@ let state: DuxState = {
   createAgentGeneratedName: null,
   createAgentNamePending: false,
   createAgentPrInput: "",
-  paletteOpen: false,
   killRunningOpen: false,
   configEditorOpen: false,
   configEditorContent: "",
@@ -2802,9 +2800,6 @@ export function reorderProjects(orderedIds: string[]): void {
     })
 }
 
-export function setPaletteOpen(open: boolean): void {
-  setState({ paletteOpen: open })
-}
 
 // Run a macro by name on the focused PTY. Since Phase 5 the web no longer sends a
 // server-side `run_macro` command: it resolves the macro's text from the bootstrap
@@ -2937,54 +2932,16 @@ export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
     })
 }
 
-// Toggle the Changes pane (the Ctrl+k "toggle-remove-git-pane" command and the
-// Changes actions menu).
+// Toggle the Changes pane's visibility. Called by the Changes actions menu; the
+// saved preference itself is the `ui.show_changes_pane` Preferences row.
 export function toggleChangesPane(): void {
   setChangesPaneVisibility(!changesPaneVisible(state))
 }
 
-// The three Ctrl+k preference toggles (random pet-name default, PR banner
-// position, GitHub integration). Each is a parameterless server-side flip: the
-// server owns the value, persists it, and emits `config.changed` so the
-// refetched bootstrap reflects the new state. The success toast is the engine's
-// routed status; here we only surface a failure.
-function fireToggle(call: Promise<unknown>, fallback: string): void {
-  call.catch((e) => toast.error(e instanceof Error ? e.message : fallback))
-}
 
-export function toggleRandomizedPetNameDefault(): void {
-  fireToggle(
-    configApi.toggleRandomizedPetNameDefault(),
-    "Could not toggle the random pet-name default.",
-  )
-}
 
-export function togglePrBannerPosition(): void {
-  fireToggle(configApi.togglePrBannerPosition(), "Could not move the PR banner.")
-}
-
-export function toggleGithubIntegration(): void {
-  fireToggle(
-    configApi.toggleGithubIntegration(),
-    "Could not toggle GitHub integration.",
-  )
-}
-
-export function toggleCopyOnSelect(): void {
-  fireToggle(
-    configApi.toggleCopyOnSelect(),
-    "Could not toggle copy-on-select.",
-  )
-}
-
-export function toggleAlwaysShowTabs(): void {
-  fireToggle(
-    configApi.toggleAlwaysShowTabs(),
-    "Could not toggle always-show-tabs.",
-  )
-}
-
-// The kill-running modal (Ctrl+k "kill-running"). Open/close just flip the gate;
+// The kill-running modal (the app menu's "Stop running agents…"). Open/close
+// just flip the gate;
 // the dialog derives its rows from the spine.
 export function openKillRunning(): void {
   setState({ killRunningOpen: true })

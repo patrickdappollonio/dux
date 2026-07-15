@@ -71,6 +71,15 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe("InsetHeader app menu", () => {
+  it("renders the app-menu cog instead of a Commands button", () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(screen.queryByText(/Commands/)).toBeNull()
+    expect(screen.getByRole("button", { name: /^menu$/i })).toBeTruthy()
+  })
+})
+
 describe("InsetHeader branch drift cue", () => {
   it("shows the original branch only when the current branch differs", () => {
     mockState = stateFor("agent-tabs", "server-mode")
