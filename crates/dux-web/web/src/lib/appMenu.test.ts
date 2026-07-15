@@ -18,6 +18,8 @@ vi.mock("@/lib/store", () => ({
 }))
 vi.mock("@/lib/configApi", () => ({ configApi: { reload: () => reload() } }))
 
+import { SquarePen } from "lucide-react"
+
 import {
   appMenuModel,
   findSubmenu,
@@ -109,6 +111,15 @@ describe("appMenuModel", () => {
       "sep-config",
       "reload-config",
     ])
+  })
+
+  // The MacroPopover's own "Edit macros…" link (which calls the same
+  // openMacrosDialog action) uses SquarePen, so the app menu item for the same
+  // action must use the same icon rather than a mismatched one.
+  it("uses the same icon as MacroPopover's Edit macros… link", () => {
+    const sub = findSubmenu(appMenuModel(), "configuration")
+    const editMacros = sub?.entries.find((e) => e.id === "edit-macros")
+    expect(editMacros?.kind === "item" && editMacros.icon).toBe(SquarePen)
   })
 
   it("uses unique ids across the whole tree", () => {

@@ -26,7 +26,6 @@
 import {
   ArrowDownAZ,
   ArrowUpDown,
-  Braces,
   CalendarPlus,
   Clock,
   FileCode,
@@ -34,6 +33,7 @@ import {
   OctagonX,
   RefreshCw,
   SlidersHorizontal,
+  SquarePen,
   Wrench,
   type LucideIcon,
 } from "lucide-react"
@@ -146,7 +146,7 @@ export function appMenuModel(): AppMenuEntry[] {
           kind: "item",
           id: "edit-macros",
           title: "Edit macros…",
-          icon: Braces,
+          icon: SquarePen,
           run: () => openMacrosDialog(),
         },
         {
