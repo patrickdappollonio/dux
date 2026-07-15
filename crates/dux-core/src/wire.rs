@@ -1442,6 +1442,8 @@ impl Engine {
         self.config.ui.attention_on_bell = candidate.ui.attention_on_bell;
         self.config.ui.pr_banner_position = candidate.ui.pr_banner_position;
         self.config.capabilities.hyperlinks = candidate.capabilities.hyperlinks;
+        self.config.defaults.enable_randomized_pet_name_by_default =
+            candidate.defaults.enable_randomized_pet_name_by_default;
         self.config.defaults.provider = candidate.defaults.provider;
         Ok(WireStatus::new(
             "info",
@@ -8051,6 +8053,38 @@ mod tests {
         assert!(!engine.config.ui.copy_on_select);
         assert!(engine.config.ui.always_show_tab_strip);
         assert_eq!(engine.config.ui.pr_banner_position, "top");
+    }
+
+    /// Every field `set_settings` accepts must be copied back into the RUNNING
+    /// `self.config`, not just written to disk via `candidate`. Asserting disk
+    /// content alone hid a real bug: `enable_randomized_pet_name_by_default`
+    /// persisted correctly but left the in-memory config stale, so the engine
+    /// kept using the old value (and kept projecting it into the bootstrap)
+    /// until the next config reload. This asserts the in-memory value instead.
+    #[test]
+    fn set_settings_copies_pet_name_default_back_into_the_running_config() {
+        let (mut engine, _tmp) = test_engine();
+        let before = engine.config.defaults.enable_randomized_pet_name_by_default;
+        engine
+            .apply_wire(WireCommand::SetSettings {
+                copy_on_select: None,
+                show_changes_pane: None,
+                web_notifications: None,
+                always_show_tab_strip: None,
+                status_clear_seconds: None,
+                attention_grace_seconds: None,
+                attention_indicator: None,
+                attention_on_bell: None,
+                pr_banner_position: None,
+                hyperlinks: None,
+                enable_randomized_pet_name_by_default: Some(!before),
+                default_provider: None,
+            })
+            .expect("dispatch ok");
+        assert_eq!(
+            engine.config.defaults.enable_randomized_pet_name_by_default, !before,
+            "the running config must reflect the flip, not just the file on disk"
+        );
     }
 
     #[test]
