@@ -60,6 +60,15 @@ describe("AppMenuSheet", () => {
     expect(screen.queryByText("Preferences…")).toBeNull()
   })
 
+  it("gives the back button the 44px primary hub-control size, not the 40px dense floor", async () => {
+    render(<Harness />)
+    fireEvent.click(screen.getByText("Configuration"))
+    await settle()
+    const back = screen.getByLabelText("Back")
+    expect(back.className).toContain("size-11")
+    expect(back.className).not.toContain("size-10")
+  })
+
   it("shows the submenu title as the drilled-down header", async () => {
     render(<Harness />)
     fireEvent.click(screen.getByText("Sort agents by"))

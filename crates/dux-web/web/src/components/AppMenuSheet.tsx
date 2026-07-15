@@ -108,7 +108,7 @@ export function AppMenuSheet({
               variant="ghost"
               size="icon"
               aria-label="Back"
-              className="size-10 shrink-0"
+              className="size-11 shrink-0"
               onClick={() => setDrilled(null)}
             >
               <ChevronLeft />

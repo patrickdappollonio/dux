@@ -140,7 +140,8 @@ let lastNoticedLegacy: string | null = null
  * (browsers reliably pick up a fresh element). Self-guards so it is a no-op when
  * there is no real DOM (e.g. the store's Node test environment). When the value is
  * a no-longer-supported legacy setting, fires a one-time toast (per distinct bad
- * value) pointing the operator at the command palette.
+ * value) pointing the operator at the Preferences dialog, opened from the cog
+ * menu in the top-right.
  *
  * Only touches the DOM when the resolved favicon actually changed: `config.changed`
  * fires on every unrelated rename, and re-creating an identical `<link>` each time
@@ -155,9 +156,9 @@ export function applyFavicon(raw: string | null | undefined): void {
     if (raw !== lastNoticedLegacy) {
       lastNoticedLegacy = raw ?? null
       toast.info(
-        `The configured favicon '${(raw ?? "").trim()}' is no longer supported — ` +
-          `showing the default duck. Pick a color from the command palette ` +
-          `(Rename this instance).`,
+        `The configured favicon '${(raw ?? "").trim()}' is no longer supported, ` +
+          `showing the default duck. Pick a color in the Preferences dialog, ` +
+          `opened from the cog menu in the top-right.`,
       )
     }
   } else {

@@ -407,8 +407,9 @@ enum ConfigEntry {
 }
 
 /// KEEP IN SYNC WITH `crates/dux-web/web/src/lib/settingsDescriptors.ts`: the
-/// web Ctrl+K "Settings" modal renders a first-cut subset of these `[ui]`/
-/// `[capabilities]` fields (plus `server.title`/`server.favicon`) with
+/// web Preferences dialog, opened from the app menu's cog, renders a
+/// first-cut subset of these `[ui]`/`[capabilities]` fields (plus
+/// `server.title`/`server.favicon`) with
 /// descriptions adapted from this table's `comment` text into readable
 /// prose. If you change a field's default, zero-value meaning, or comment
 /// here, check whether `settingsDescriptors.ts`'s matching entry needs the

@@ -92,6 +92,15 @@ describe("applyFavicon legacy migration notice", () => {
     expect(toastInfo).toHaveBeenCalledTimes(1)
   })
 
+  it("points the toast at the Preferences dialog, not the removed command palette", () => {
+    applyFavicon("#863bff")
+    const message = toastInfo.mock.calls[0][0] as string
+    expect(message).toContain("Preferences dialog")
+    expect(message).toContain("cog menu")
+    expect(message).not.toMatch(/command palette/i)
+    expect(message).not.toContain("—")
+  })
+
   it("re-notifies when a DIFFERENT legacy value appears after a curated one", () => {
     applyFavicon("#863bff") // legacy → notice
     applyFavicon("blue") // curated → clears the latch, no notice

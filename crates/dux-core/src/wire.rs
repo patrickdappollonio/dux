@@ -225,9 +225,10 @@ pub enum WireCommand {
     ToggleAlwaysShowTabStrip {},
     /// Set explicit values for the "Settings" modal's `[ui]`/`[capabilities]`
     /// knobs in one request, mirroring `SetInstanceIdentity`'s all-optional
-    /// present-field pattern but for the generic settings surface (Ctrl+K
-    /// "Customize webapp", see `crates/dux-web/web/src/lib/settingsDescriptors.ts`
-    /// for the exact field set and descriptions). Every field is optional; an
+    /// present-field pattern but for the generic settings surface (the
+    /// Preferences dialog, opened from the app menu's cog, see
+    /// `crates/dux-web/web/src/lib/settingsDescriptors.ts` for the exact
+    /// field set and descriptions). Every field is optional; an
     /// absent field is left untouched, and a body with every field absent is a
     /// no-op (no write, no `config.changed`). Numeric fields are clamped to a
     /// sane documented ceiling (0 stays 0 where the config documents a zero
