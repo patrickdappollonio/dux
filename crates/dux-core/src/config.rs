@@ -492,7 +492,7 @@ pub struct UiConfig {
     /// Show the right-hand Changes pane (the changed-files list) by default.
     /// Toggling it from the TUI's command palette, the web's Changes actions
     /// menu, or the web's Preferences dialog persists the new value here
-    /// immediately — it is not a per-session override.
+    /// immediately; it is not a per-session override.
     pub show_changes_pane: bool,
     /// Always show the agent tab strip, even when a session has only one tab.
     /// Default false shows the strip only once a session has two or more

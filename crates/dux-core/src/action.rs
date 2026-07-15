@@ -98,16 +98,18 @@ pub enum Action {
     ToggleMarked,
     // Palette-only (no direct keybinding)
     KillRunning,
-    /// Web-only: open the Monaco config.toml editor. Has no TUI behavior (the
-    /// TUI edits config via `dux config` and the configure-* commands), but it
-    /// still needs an `Action` + a palette-only binding so it can join the shared
-    /// palette registry. See `PaletteSurface::Web`.
+    /// Web-only: open the Monaco config.toml editor, reached from the web app
+    /// menu's Configuration submenu. Has no TUI behavior (the TUI edits config
+    /// via `dux config` and the configure-* commands) and no palette registry
+    /// row, so the TUI never lists or dispatches it. The variant and its
+    /// `BINDING_DEFS` entry stay because `config.rs::validate_keys` accepts a
+    /// user `[keys]` action name only if it is present in that table.
     EditConfig,
-    /// Web-only: open the customize-webapp dialog (browser tab title + favicon
-    /// color + Changes pane visibility). Has no TUI behavior (the TUI sets
-    /// `config.server.title`/`favicon` via `dux config`), but it still needs an
-    /// `Action` + a palette-only binding so it can join the shared palette
-    /// registry. See `PaletteSurface::Web`.
+    /// Web-only: open the Preferences dialog (browser tab title + favicon color
+    /// plus the grouped ui/capabilities/defaults preferences), reached from the
+    /// web app menu's cog. Has no TUI behavior (the TUI sets
+    /// `config.server.title`/`favicon` via `dux config`) and no palette registry
+    /// row. Kept for the same `validate_keys` reason as `EditConfig` above.
     RenameWebInstance,
     NewTerminal,
     RenameSession,

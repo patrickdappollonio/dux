@@ -6,7 +6,7 @@
 // palette, and nothing else. The two surfaces are now independent: there is no
 // bootstrap projection and no cross-language pin holding them together. When you
 // add a `Ctrl-p` palette command, decide explicitly whether it warrants an entry
-// here (see CLAUDE.md) — nothing will fail if you skip it, which is exactly why
+// here (see CLAUDE.md). Nothing will fail if you skip it, which is exactly why
 // it has to be a deliberate step.
 //
 // The web has no command palette and this menu has NO keyboard shortcut. It is
@@ -80,7 +80,7 @@ export interface AppMenuSeparator {
  * The app menu, top level first.
  *
  * Takes no context today: every entry is unconditional. Resist adding gating
- * without a real reason — an entry that appears and disappears is harder to
+ * without a real reason: an entry that appears and disappears is harder to
  * learn than one that is always there and explains itself when used.
  */
 export function appMenuModel(): AppMenuEntry[] {

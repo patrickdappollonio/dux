@@ -20,7 +20,7 @@
 //! comment had already rotted (it claimed no row used `Web` while three did).
 //!
 //! When you add a command here, decide explicitly whether it also warrants an
-//! entry in the web app menu (see CLAUDE.md) — nothing will fail if you skip
+//! entry in the web app menu (see CLAUDE.md); nothing will fail if you skip
 //! it. Many commands here are inherently per-project, per-session, or
 //! per-terminal; on the web those live as parameterized row/menu/dialog
 //! actions rather than global menu entries. The per-row comments below record
@@ -118,7 +118,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ReloadConfig,
         name: "reload-config",
         description: "Reload config.toml after validating it",
-        // GLOBAL: reloads the whole config — acts on no selected target.
+        // GLOBAL: reloads the whole config; it acts on no selected target.
         // Web equivalent: the app menu's Configuration submenu.
     },
     PaletteCommand {
@@ -150,7 +150,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::ConfigureGlobalEnv,
         name: "configure-global-env",
         description: "Configure environment variables inherited by every project",
-        // GLOBAL: the global env applies to every project — no target.
+        // GLOBAL: the global env applies to every project; no target.
         // Web equivalent: the app menu's Configuration submenu.
     },
     PaletteCommand {
@@ -280,7 +280,7 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::KillRunning,
         name: "kill-running",
         description: "Open a modal to kill running agents and companion terminals",
-        // GLOBAL: acts on every running agent/terminal — no target. Web
+        // GLOBAL: acts on every running agent/terminal; no target. Web
         // equivalent: the app menu's "Stop running agents…" opens
         // KillRunningDialog, which lists active agents and live terminals and
         // force-kills each (agents detach via WireCommand::KillSessionPty;
@@ -321,21 +321,21 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         action: Action::SortAgentsByUpdated,
         name: "sort-agents-by-updated",
         description: "Sort agents by most recently updated",
-        // GLOBAL: reorders every project's agents — no target.
+        // GLOBAL: reorders every project's agents; no target.
         // Web equivalent: the app menu's "Sort agents by" submenu.
     },
     PaletteCommand {
         action: Action::SortAgentsByCreated,
         name: "sort-agents-by-created",
         description: "Sort agents by creation date (newest first)",
-        // GLOBAL: reorders every project's agents — no target.
+        // GLOBAL: reorders every project's agents; no target.
         // Web equivalent: the app menu's "Sort agents by" submenu.
     },
     PaletteCommand {
         action: Action::SortAgentsByName,
         name: "sort-agents-by-name",
         description: "Sort agents alphabetically by name",
-        // GLOBAL: reorders every project's agents — no target.
+        // GLOBAL: reorders every project's agents; no target.
         // Web equivalent: the app menu's "Sort agents by" submenu.
     },
     PaletteCommand {
@@ -472,5 +472,5 @@ mod tests {
     // (`crates/dux-web/web/src/lib/appMenu.ts`) is now an independent,
     // client-owned surface with its own titles, its own item set, and submenus,
     // so a pin claiming a relationship between the two would be a false record.
-    // Keeping the surfaces in step is a deliberate human step — see CLAUDE.md.
+    // Keeping the surfaces in step is a deliberate human step; see CLAUDE.md.
 }

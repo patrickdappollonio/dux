@@ -18,7 +18,7 @@ use crate::action::Action;
 pub type KeyLabelResolver<'a> = &'a dyn Fn(Action) -> String;
 
 pub struct WelcomeTip {
-    /// Web rendering. Keybinding-free — reference web affordances (the cog app
+    /// Web rendering. Keybinding-free: reference web affordances (the cog app
     /// menu, buttons, the ⋯ menu). The web has NO command palette and no
     /// keyboard shortcut for its menu, so never point a web tip at one.
     /// `None` = TUI-only tip.

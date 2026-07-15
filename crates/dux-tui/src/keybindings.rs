@@ -1033,7 +1033,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
     // Web-surface action, deliberately inert in the TUI (no key, no scope, no
     // help, no palette row): the web's app menu opens the Monaco config.toml
     // editor for it. The `BindingDef` stays because `config.rs` validates every
-    // user `[keys]` action name against BINDING_DEFS — dropping it would reject
+    // user `[keys]` action name against BINDING_DEFS, and dropping it would reject
     // an existing config that binds `edit_config`.
     BindingDef {
         action: Action::EditConfig,
@@ -2139,7 +2139,7 @@ mod tests {
     //   2. surface in the runtime palette listing with byte-identical name and
     //      description.
     // Conversely, the runtime palette listing must contain exactly the core
-    // commands — no more, no less. This makes name/description parity true by
+    // commands, no more and no less. This makes name/description parity true by
     // construction: adding or renaming a palette command in the core registry
     // without a matching action fails this gate.
     //
@@ -2227,7 +2227,7 @@ mod tests {
     /// refactor byte-for-byte.
     ///
     /// This is a deliberate hand-maintained list, NOT derived from
-    /// `PALETTE_COMMANDS` — a derived list would tautologically agree with any
+    /// `PALETTE_COMMANDS`: a derived list would tautologically agree with any
     /// registry edit and prove nothing. Adding or removing a TUI palette
     /// command is a real user-facing change: update this list in the same
     /// commit, on purpose.
