@@ -100,6 +100,9 @@ pub struct AppState {
     /// mutation handlers call `state.changes.invalidate(id)` after a successful
     /// stage/unstage/discard/commit/write so the pane refreshes immediately.
     pub changes: Arc<ChangesService>,
+    /// The resource-monitor sampler + single-flight TTL cache behind
+    /// `GET /api/v1/resources`, which the web Task Manager polls while open.
+    pub resources: Arc<crate::resource_routes::ResourceService>,
     /// `Idempotency-Key -> created resource id` cache (TTL-bounded) so a retried
     /// `POST /api/v1/sessions` or `/projects` after a lost response returns the
     /// same resource instead of creating a duplicate worktree/project.
@@ -370,6 +373,7 @@ pub fn build_app(
     // flip wraps its `build_app` in `runtime.enter()` (see `serve_with_engine`).
     let event_bus = Arc::new(EventBus::new());
     let changes = ChangesService::new(engine.clone(), Arc::clone(&event_bus));
+    let resources = crate::resource_routes::ResourceService::new(engine.clone());
     // Config-reload -> `config.changed` forwarder. The engine actor fires `()` on
     // its config-reload broadcast after a successful reload; we turn each into a
     // coarse `config.changed` event so clients on the `config` topic refetch
@@ -416,6 +420,7 @@ pub fn build_app(
         },
         event_bus,
         changes,
+        resources,
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
         pty_size_owners: Arc::new(PtySizeOwners::default()),
         connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
@@ -437,6 +442,7 @@ pub fn build_app(
         .merge(crate::git_routes::routes())
         .merge(crate::file_routes::routes())
         .merge(crate::changes_routes::routes())
+        .merge(crate::resource_routes::routes())
         .merge(crate::bootstrap_routes::routes())
         .merge(crate::spine_routes::routes())
         .merge(crate::session_actions::routes())

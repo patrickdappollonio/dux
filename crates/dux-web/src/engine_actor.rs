@@ -96,6 +96,11 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Snapshot the live process trees the resource monitor should sample: every
+    /// live agent tab and companion terminal, each with its spine id and root
+    /// pid. Instant map iteration only — the blocking sysinfo walk runs off both
+    /// the engine thread and the reactor, in [`crate::resource_routes::ResourceService`].
+    ResourceTargets(oneshot::Sender<Vec<dux_core::worker::ResourceTarget>>),
     /// Snapshot the build-/config-static bootstrap projection (providers, macros,
     /// palette commands, welcome tips, version, `ui.*` flags, gh availability,
     /// global env) served by `GET /api/v1/bootstrap`. Instant clone off engine
@@ -676,6 +681,22 @@ impl EngineHandle {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    /// Snapshot the process trees the resource monitor should sample. `None` if
+    /// the engine is gone (the handler then returns 503), distinguishing a dead
+    /// engine from a real "nothing is running" empty list.
+    pub async fn resource_targets(&self) -> Option<Vec<dux_core::worker::ResourceTarget>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::ResourceTargets(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
     }
 
     /// Snapshot the build-/config-static bootstrap projection for
@@ -1742,6 +1763,9 @@ fn handle_request(
                 .find(|s| s.id == session_id)
                 .map(|s| s.worktree_path.clone());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::ResourceTargets(reply) => {
+            let _ = reply.send(engine.resource_monitor_targets());
         }
         EngineRequest::Bootstrap(reply) => {
             let _ = reply.send(engine.bootstrap());
