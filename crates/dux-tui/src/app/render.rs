@@ -9429,6 +9429,8 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         let rows = vec![ResourceStats {
+            id: Some("s1".into()),
+            kind: ResourceKind::Agent,
             label: "Agent (claude): some-branch-name".into(),
             pid: Some(100),
             cpu_percent: 5.0,
@@ -9495,6 +9497,8 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         let rows = vec![ResourceStats {
+            id: Some("s1".into()),
+            kind: ResourceKind::Agent,
             label: "Agent (claude): some-branch-name".into(),
             pid: Some(100),
             cpu_percent: 5.0,
@@ -9545,6 +9549,8 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         let rows = vec![ResourceStats {
+            id: Some("s1".into()),
+            kind: ResourceKind::Agent,
             label: "Agent (claude): some-branch-name".into(),
             pid: Some(100),
             cpu_percent: 5.0,
@@ -9585,6 +9591,8 @@ mod tests {
 
         let mut app = test_app(default_bindings());
         let rows = vec![ResourceStats {
+            id: Some("s1".into()),
+            kind: ResourceKind::Agent,
             label: "Agent (claude): some-branch-name".into(),
             pid: Some(100),
             cpu_percent: 5.0,

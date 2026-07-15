@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::engine::Engine;
 use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
+use crate::worker::{ResourceKind, ResourceStats};
 
 /// The projects/sessions/sidebar "spine" a web client reads via `GET /api/v1/spine`
 /// (and the thin per-resource reads `GET /api/v1/projects`, `GET /api/v1/sessions`,
@@ -316,6 +317,73 @@ pub struct ChangedFileView {
     pub additions: usize,
     pub deletions: usize,
     pub binary: bool,
+}
+
+/// One process inside a sampled tree, projected for web clients.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProcessInfoView {
+    pub name: String,
+    pub pid: u32,
+    pub cpu_percent: f32,
+    pub rss_bytes: u64,
+}
+
+/// One resource-monitor row projected for web clients (`GET /api/v1/resources`).
+///
+/// Deliberately a separate type from [`crate::worker::ResourceStats`]: that is
+/// the engine's sampling type, this is the wire contract, and the browser joins
+/// a row to the spine by `id` rather than by parsing `label`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResourceStatsView {
+    /// The spine id to join on: a tab id for `agent`, a terminal id for
+    /// `terminal`. Absent for the `dux` and `total` rows, which describe no
+    /// single spine entity.
+    pub id: Option<String>,
+    /// One of `dux`, `agent`, `terminal`, `total`.
+    pub kind: String,
+    /// Human-readable description. Display only; never parse it.
+    pub label: String,
+    pub pid: Option<u32>,
+    /// May exceed 100: a multi-threaded tree spread across cores legitimately
+    /// does, so no surface may clamp it.
+    pub cpu_percent: f32,
+    pub rss_bytes: u64,
+    pub process_count: usize,
+    pub children: Vec<ProcessInfoView>,
+}
+
+impl ResourceStatsView {
+    /// Project sampled engine rows onto the wire, preserving order (the
+    /// collector emits dux first and total last).
+    pub fn from_stats(rows: Vec<ResourceStats>) -> Vec<Self> {
+        rows.into_iter()
+            .map(|r| Self {
+                id: r.id,
+                kind: match r.kind {
+                    ResourceKind::Dux => "dux",
+                    ResourceKind::Agent => "agent",
+                    ResourceKind::Terminal => "terminal",
+                    ResourceKind::Total => "total",
+                }
+                .to_string(),
+                label: r.label,
+                pid: r.pid,
+                cpu_percent: r.cpu_percent,
+                rss_bytes: r.rss_bytes,
+                process_count: r.process_count,
+                children: r
+                    .children
+                    .into_iter()
+                    .map(|c| ProcessInfoView {
+                        name: c.name,
+                        pid: c.pid,
+                        cpu_percent: c.cpu_percent,
+                        rss_bytes: c.rss_bytes,
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 impl ProjectView {

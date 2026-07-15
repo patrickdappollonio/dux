@@ -59,7 +59,7 @@ pub(crate) use dux_core::worker::{
     ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
 };
 #[cfg(test)]
-pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
+pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo, ResourceKind};
 
 /// Maximum agent-passthrough bytes written to the host terminal per tick. A larger
 /// burst is split, with the remainder carried to the next tick, so one oversized
@@ -4846,6 +4846,8 @@ leading_branch = "main"
     fn build_visual_rows_respects_expansion() {
         let rows = vec![
             ResourceStats {
+                id: None,
+                kind: ResourceKind::Dux,
                 label: "dux".into(),
                 pid: Some(1),
                 cpu_percent: 0.0,
@@ -4854,6 +4856,8 @@ leading_branch = "main"
                 children: Vec::new(),
             },
             ResourceStats {
+                id: Some("s1".into()),
+                kind: ResourceKind::Agent,
                 label: "Agent".into(),
                 pid: Some(100),
                 cpu_percent: 5.0,
@@ -4875,6 +4879,8 @@ leading_branch = "main"
                 ],
             },
             ResourceStats {
+                id: None,
+                kind: ResourceKind::Total,
                 label: "TOTAL".into(),
                 pid: None,
                 cpu_percent: 5.0,

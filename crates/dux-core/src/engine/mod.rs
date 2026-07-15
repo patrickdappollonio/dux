@@ -55,7 +55,10 @@ use crate::model::{
 };
 use crate::pty::{ProgressReport, PtyClient};
 use crate::storage::SessionStore;
-use crate::worker::{BranchSyncEntry, PrSyncEntry, ProjectPersistenceAction, WorkerEvent};
+use crate::worker::{
+    BranchSyncEntry, PrSyncEntry, ProjectPersistenceAction, ResourceKind, ResourceTarget,
+    WorkerEvent,
+};
 
 pub struct Engine {
     pub config: Config,
@@ -1780,10 +1783,16 @@ impl Engine {
         );
     }
 
-    /// Gather the labeled PIDs that the resource monitor should report on.
-    /// Each entry is `(label, root_pid)` — the worker will aggregate the
-    /// full process tree under each root.
-    fn resource_monitor_targets(&self) -> Vec<(String, u32)> {
+    /// Gather the process trees the resource monitor should report on: every
+    /// live agent tab and companion terminal. The worker aggregates the full
+    /// process tree under each root pid.
+    ///
+    /// Each target carries the spine id it was resolved from (a tab id, or a
+    /// terminal id) so a surface can join a sampled row back to the row it
+    /// renders. `label` is for display only and must never be parsed back into
+    /// its parts: a title containing `): ` would break the parse, and two agents
+    /// may share a title.
+    pub fn resource_monitor_targets(&self) -> Vec<ResourceTarget> {
         let mut targets = Vec::new();
         // `providers` is keyed by tab id (session-slot tab == session id). Iterate it so
         // every live tab's process is a target, not just one per session.
@@ -1795,7 +1804,12 @@ impl Engine {
                 // session-slot tab.
                 let title = session.title.as_deref().unwrap_or(&session.branch_name);
                 let provider = self.running_provider_for(session);
-                targets.push((format!("Agent ({}): {title}", provider.as_str()), pid));
+                targets.push(ResourceTarget {
+                    id: tab_id.clone(),
+                    kind: ResourceKind::Agent,
+                    label: format!("Agent ({}): {title}", provider.as_str()),
+                    pid,
+                });
             } else if let Some(tab) = self.agent_tabs.get(tab_id) {
                 // extra tab: resolve its owning session for a readable label.
                 let title = self
@@ -1809,16 +1823,26 @@ impl Engine {
                     .get(tab_id)
                     .cloned()
                     .unwrap_or_else(|| tab.provider.clone());
-                targets.push((format!("Tab ({}): {title}", provider.as_str()), pid));
+                targets.push(ResourceTarget {
+                    id: tab_id.clone(),
+                    kind: ResourceKind::Agent,
+                    label: format!("Tab ({}): {title}", provider.as_str()),
+                    pid,
+                });
             }
         }
-        for terminal in self.companion_terminals.values() {
+        for (terminal_id, terminal) in &self.companion_terminals {
             if let Some(pid) = terminal.client.child_process_id() {
                 let label = match &terminal.foreground_cmd {
                     Some(cmd) => format!("Terminal ({cmd}): {}", terminal.label),
                     None => format!("Terminal: {}", terminal.label),
                 };
-                targets.push((label, pid));
+                targets.push(ResourceTarget {
+                    id: terminal_id.clone(),
+                    kind: ResourceKind::Terminal,
+                    label,
+                    pid,
+                });
             }
         }
         targets
@@ -4544,5 +4568,144 @@ mod tab_ops_tests {
         engine.mark_in_flight(InFlightKey::AgentLaunch("tab-1".into()));
 
         assert_eq!(engine.first_live_tab("s1"), Some("tab-1".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod resource_monitor_targets_tests {
+    use super::*;
+    use crate::engine::test_support::{sample_project, sample_session, test_engine};
+    use crate::model::{AgentTab, CompanionTerminal};
+    use crate::pty::PtyClient;
+    use crate::worker::ResourceKind;
+
+    fn spawn_cat(cwd: &std::path::Path) -> PtyClient {
+        PtyClient::spawn_with_env("cat", &[], cwd, 24, 80, 1000, &[]).expect("spawn cat")
+    }
+
+    #[test]
+    fn resource_monitor_targets_is_empty_with_no_live_ptys() {
+        let (engine, _tmp) = test_engine();
+        assert!(
+            engine.resource_monitor_targets().is_empty(),
+            "no providers and no terminals means nothing to sample"
+        );
+    }
+
+    #[test]
+    fn resource_monitor_targets_labels_agent_tabs_and_terminals_with_ids() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session.title = Some("fix-auth".to_string());
+        engine.sessions.push(session);
+
+        // The session-slot tab (tab id == session id) plus one extra tab.
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(worktree.path()));
+        engine.agent_tabs.insert(
+            "tab-2".to_string(),
+            AgentTab {
+                id: "tab-2".to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: Utc::now(),
+            },
+        );
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(worktree.path()));
+        engine.companion_terminals.insert(
+            "term-1".to_string(),
+            CompanionTerminal {
+                session_id: "s1".to_string(),
+                label: "dev server".to_string(),
+                foreground_cmd: Some("npm".to_string()),
+                client: spawn_cat(worktree.path()),
+            },
+        );
+
+        let targets = engine.resource_monitor_targets();
+        assert_eq!(targets.len(), 3, "two tabs and one terminal");
+
+        // Every target carries the id the UI joins on, not just a label.
+        let slot = targets
+            .iter()
+            .find(|t| t.id == "s1")
+            .expect("the session-slot tab is a target keyed by session id");
+        assert_eq!(slot.kind, ResourceKind::Agent);
+        assert!(slot.label.contains("fix-auth"), "label: {}", slot.label);
+        assert!(slot.pid > 0);
+
+        let extra = targets
+            .iter()
+            .find(|t| t.id == "tab-2")
+            .expect("the extra tab is a target keyed by tab id");
+        assert_eq!(extra.kind, ResourceKind::Agent);
+        assert!(extra.label.contains("codex"), "label: {}", extra.label);
+
+        let terminal = targets
+            .iter()
+            .find(|t| t.id == "term-1")
+            .expect("the companion terminal is a target keyed by terminal id");
+        assert_eq!(terminal.kind, ResourceKind::Terminal);
+        assert!(
+            terminal.label.contains("dev server"),
+            "label: {}",
+            terminal.label
+        );
+    }
+
+    #[test]
+    fn collect_resource_stats_marks_kinds_and_ids() {
+        let mut collector = crate::resource_stats::ResourceCollector::new();
+        let rows = collector.sample(vec![ResourceTarget {
+            id: "term-1".to_string(),
+            kind: ResourceKind::Terminal,
+            label: "Terminal (npm): dev server".to_string(),
+            pid: std::process::id(),
+        }]);
+
+        let dux = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Dux)
+            .expect("the dux row is always present");
+        assert_eq!(dux.id, None, "the dux row has no spine identity");
+
+        let target = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Terminal)
+            .expect("the target row keeps its kind");
+        assert_eq!(
+            target.id.as_deref(),
+            Some("term-1"),
+            "the target row carries the id the UI joins on"
+        );
+
+        let total = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Total)
+            .expect("the total row is always last");
+        assert_eq!(total.id, None, "the total row has no spine identity");
+        assert_eq!(
+            rows.last().map(|r| r.kind),
+            Some(ResourceKind::Total),
+            "the total row is pinned last"
+        );
+    }
+
+    #[test]
+    fn collect_resource_stats_with_empty_targets_returns_dux_and_total_only() {
+        let mut collector = crate::resource_stats::ResourceCollector::new();
+        let rows = collector.sample(Vec::new());
+        let kinds: Vec<ResourceKind> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, vec![ResourceKind::Dux, ResourceKind::Total]);
     }
 }

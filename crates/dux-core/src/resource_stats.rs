@@ -19,6 +19,7 @@
 use std::time::{Duration, Instant};
 
 use crate::worker::{ProcessInfo, ResourceStats};
+pub use crate::worker::{ResourceKind, ResourceTarget};
 
 /// How old the previous refresh may be before a sample re-baselines instead of
 /// diffing against it. Both surfaces poll at roughly one second, so a gap beyond
@@ -69,7 +70,7 @@ impl ResourceCollector {
     /// establish a baseline (the first sample, or the first after a gap longer
     /// than [`STALE_BASELINE`]); steady-state samples cost a single walk. Call it
     /// from a background thread.
-    pub fn sample(&mut self, targets: Vec<(String, u32)>) -> Vec<ResourceStats> {
+    pub fn sample(&mut self, targets: Vec<ResourceTarget>) -> Vec<ResourceStats> {
         use sysinfo::Pid;
 
         let needs_baseline = match self.last_refresh {
@@ -91,6 +92,8 @@ impl ResourceCollector {
         let self_pid = Pid::from_u32(std::process::id());
         if let Some(proc_info) = sys.process(self_pid) {
             rows.push(ResourceStats {
+                id: None,
+                kind: ResourceKind::Dux,
                 label: "dux (this process)".into(),
                 pid: Some(std::process::id()),
                 cpu_percent: proc_info.cpu_usage(),
@@ -100,12 +103,16 @@ impl ResourceCollector {
             });
         }
 
-        // Rows: each labeled target (agents and companion terminals).
-        for (label, root_pid) in &targets {
-            let (cpu, rss, count, children) = aggregate_tree(sys, Pid::from_u32(*root_pid));
+        // Rows: each labeled target (agent tabs and companion terminals). The
+        // target's identity is carried through verbatim so the caller can join
+        // the row back to its spine entity by id.
+        for target in &targets {
+            let (cpu, rss, count, children) = aggregate_tree(sys, Pid::from_u32(target.pid));
             rows.push(ResourceStats {
-                label: label.clone(),
-                pid: Some(*root_pid),
+                id: Some(target.id.clone()),
+                kind: target.kind,
+                label: target.label.clone(),
+                pid: Some(target.pid),
                 cpu_percent: cpu,
                 rss_bytes: rss,
                 process_count: count,
@@ -119,6 +126,8 @@ impl ResourceCollector {
         let total_rss: u64 = rows.iter().map(|r| r.rss_bytes).sum();
         let total_procs: usize = rows.iter().map(|r| r.process_count).sum();
         rows.push(ResourceStats {
+            id: None,
+            kind: ResourceKind::Total,
             label: "TOTAL".into(),
             pid: None,
             cpu_percent: total_cpu,

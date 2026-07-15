@@ -122,8 +122,43 @@ pub struct ProcessInfo {
     pub rss_bytes: u64,
 }
 
+/// What a resource row describes. Lets a surface join a sampled row back to the
+/// spine entity it came from (and pin the dux/total rows) without parsing the
+/// human-readable `label`, which is ambiguous: a title containing `): ` would
+/// break the parse, and two agents may share a title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceKind {
+    /// dux itself.
+    Dux,
+    /// One agent tab's provider process (the session-slot tab is keyed by the
+    /// session id, extra tabs by their tab id).
+    Agent,
+    /// One companion terminal.
+    Terminal,
+    /// The synthetic sum row.
+    Total,
+}
+
+/// A process tree the resource monitor should sample, with the identity the
+/// caller already had when it picked the target.
+#[derive(Clone, Debug)]
+pub struct ResourceTarget {
+    /// The spine id: a tab id for [`ResourceKind::Agent`], a terminal id for
+    /// [`ResourceKind::Terminal`].
+    pub id: String,
+    pub kind: ResourceKind,
+    /// Human-readable description, for display only. Never parse it.
+    pub label: String,
+    /// Root of the process tree to aggregate.
+    pub pid: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct ResourceStats {
+    /// The spine id this row was sampled for, or `None` for the dux and total
+    /// rows, which describe no single spine entity.
+    pub id: Option<String>,
+    pub kind: ResourceKind,
     pub label: String,
     pub pid: Option<u32>,
     pub cpu_percent: f32,
