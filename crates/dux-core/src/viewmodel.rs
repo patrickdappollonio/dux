@@ -54,14 +54,14 @@ pub struct BootstrapView {
     pub gh_available: bool,
     /// Mirrors the raw `config.ui.github_integration` flag — distinct from
     /// `gh_available`, which is the composite (integration on AND `gh`
-    /// installed/authed). The web hides the PR-banner-position palette command
-    /// when integration is off, independent of whether `gh` is currently
-    /// reachable (a banner the user can't currently see is still a real
-    /// preference once `gh` comes back).
+    /// installed/authed). Distinct from `gh_available` so the web can reason
+    /// about the user's raw preference independently of whether `gh` is
+    /// currently reachable (a banner the user can't currently see is still a
+    /// real preference once `gh` comes back).
     pub github_integration: bool,
     /// Mirrors `config.ui.copy_on_select`: whether selecting text in the web
-    /// terminal auto-copies it (default true). Read by the terminal pane and the
-    /// web command palette's toggle.
+    /// terminal auto-copies it (default true). Read by the terminal pane and by
+    /// the web's Preferences dialog.
     pub copy_on_select: bool,
     /// Mirrors `config.ui.attention_grace_seconds`: seconds the attention
     /// indicators stay visible in the web UI after the browser tab returns to
@@ -95,8 +95,8 @@ pub struct BootstrapView {
     /// 1000-line default and trims the replayed history.
     pub agent_scrollback_lines: usize,
     /// Mirrors `config.ui.show_changes_pane`. The desktop web hides the
-    /// right-hand Changes pane when false; a runtime palette/menu toggle
-    /// overrides it per session. Older servers omit it, so the web treats a
+    /// right-hand Changes pane when false; the Changes actions menu's runtime
+    /// toggle overrides it per session. Older servers omit it, so the web treats a
     /// missing value as `true`.
     pub show_changes_pane: bool,
     /// Global environment variables from `[env]` in `config.toml`, applied to
@@ -128,7 +128,8 @@ pub struct BootstrapView {
     /// Mirrors `config.ui.always_show_tab_strip`: when true the web always
     /// renders the agent tab strip, even when a session has only one tab.
     /// Default false shows it only once a session has two or more tabs.
-    /// Toggling it from the web command palette persists the new value here.
+    /// Changing it from the web's Preferences dialog persists the new value
+    /// here.
     /// Older servers omit it, so the web treats a missing value as `false`.
     pub always_show_tab_strip: bool,
     /// Mirrors `config.ui.attention_indicator`: whether an attention

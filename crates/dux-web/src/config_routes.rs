@@ -285,15 +285,30 @@ struct CapabilitiesSettingsPatch {
     hyperlinks: Option<bool>,
 }
 
-/// `PATCH /api/v1/config/settings` body: `{"ui": {...}, "capabilities": {...}}`,
-/// either or both groups optional, every leaf field optional. `title`/
-/// `favicon` are deliberately absent here, they stay on
-/// `POST /api/v1/config/instance-identity`.
+/// The `[defaults]` half of a settings-PATCH body. Same optional/
+/// unknown-field-rejecting shape as [`UiSettingsPatch`]. Only the one field the
+/// Preferences dialog exposes lives here; flipping it is a plain field write, so
+/// it rides this generic patch rather than its dedicated toggle endpoint.
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct DefaultsSettingsPatch {
+    enable_randomized_pet_name_by_default: Option<bool>,
+}
+
+/// `PATCH /api/v1/config/settings` body:
+/// `{"ui": {...}, "capabilities": {...}, "defaults": {...}}`, every group
+/// optional, every leaf field optional. `title`/`favicon` are deliberately
+/// absent here, they stay on `POST /api/v1/config/instance-identity`, and
+/// `ui.github_integration` is deliberately absent too: flipping it arms or
+/// disarms background PR syncing, so it keeps its dedicated
+/// `POST /api/v1/config/toggle-github-integration` endpoint rather than forking
+/// that side-effect logic into this route.
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct SettingsBody {
     ui: UiSettingsPatch,
     capabilities: CapabilitiesSettingsPatch,
+    defaults: DefaultsSettingsPatch,
 }
 
 /// `PATCH /api/v1/config/settings`. Set explicit values for the Settings
@@ -347,6 +362,9 @@ async fn set_settings(
             attention_on_bell: body.ui.attention_on_bell,
             pr_banner_position: body.ui.pr_banner_position,
             hyperlinks: body.capabilities.hyperlinks,
+            enable_randomized_pet_name_by_default: body
+                .defaults
+                .enable_randomized_pet_name_by_default,
         },
     )
     .await
@@ -885,6 +903,47 @@ mod tests {
         let raw = read_raw_config_text(&app).await;
         assert!(raw.contains("web_notifications = false"), "raw: {raw}");
         assert!(raw.contains("hyperlinks = false"), "raw: {raw}");
+    }
+
+    // The `[defaults]` group is the first non-`ui`/`capabilities` group on this
+    // PATCH. It exists because the Preferences dialog now carries the random
+    // pet-name default, which used to be a web command-palette toggle. Unlike
+    // `github_integration` (whose flip has PR-sync side effects and therefore
+    // keeps its dedicated endpoint), this is a plain field write, so it rides
+    // the generic settings PATCH.
+    #[tokio::test]
+    async fn set_settings_accepts_a_defaults_patch() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"defaults":{"enable_randomized_pet_name_by_default":true}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains("enable_randomized_pet_name_by_default = true"),
+            "raw: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_settings_rejects_unknown_field_within_defaults_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"defaults":{"not_a_real_field":true}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

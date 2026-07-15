@@ -476,8 +476,8 @@ pub struct UiConfig {
     /// [`MAX_PR_POLL_INTERVAL_SECONDS`].
     pub pr_poll_interval_seconds: u16,
     /// Whether selecting text in the web terminal auto-copies it to the
-    /// clipboard (X11-style "highlight to copy"). Toggling it from the web
-    /// command palette persists the new value here. Web-only behavior.
+    /// clipboard (X11-style "highlight to copy"). Changing it from the web's
+    /// Preferences dialog persists the new value here. Web-only behavior.
     pub copy_on_select: bool,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
@@ -490,15 +490,15 @@ pub struct UiConfig {
     pub attention_grace_seconds: u64,
     pub auto_reopen_agents: bool,
     /// Show the right-hand Changes pane (the changed-files list) by default.
-    /// Toggling it from the command palette or the web's Changes actions menu
-    /// persists the new value here immediately — it is not a per-session
-    /// override.
+    /// Toggling it from the TUI's command palette, the web's Changes actions
+    /// menu, or the web's Preferences dialog persists the new value here
+    /// immediately — it is not a per-session override.
     pub show_changes_pane: bool,
     /// Always show the agent tab strip, even when a session has only one tab.
     /// Default false shows the strip only once a session has two or more
-    /// tabs. Toggling it from either surface's command palette (TUI or web)
-    /// persists the new value here immediately; it is a shared preference,
-    /// not a per-session override.
+    /// tabs. Changing it from the TUI's command palette or the web's
+    /// Preferences dialog persists the new value here immediately; it is a
+    /// shared preference, not a per-session override.
     pub always_show_tab_strip: bool,
     /// Show an indicator when an agent asks for attention (a permission prompt,
     /// a finished turn). Detected from the agent's terminal notifications and

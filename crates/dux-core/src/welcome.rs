@@ -18,8 +18,10 @@ use crate::action::Action;
 pub type KeyLabelResolver<'a> = &'a dyn Fn(Action) -> String;
 
 pub struct WelcomeTip {
-    /// Web rendering. Keybinding-free — reference web affordances (⌘K, buttons,
-    /// the ⋯ menu). `None` = TUI-only tip.
+    /// Web rendering. Keybinding-free — reference web affordances (the cog app
+    /// menu, buttons, the ⋯ menu). The web has NO command palette and no
+    /// keyboard shortcut for its menu, so never point a web tip at one.
+    /// `None` = TUI-only tip.
     pub web: Option<&'static str>,
     /// TUI rendering, given the live key-label resolver. `None` = web-only tip.
     pub tui: Option<fn(KeyLabelResolver) -> String>,
@@ -29,7 +31,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     // --- shared: feature exists on both surfaces ---
     WelcomeTip {
         web: Some(
-            "Lost? `⌘K` opens the command palette. Every action lives there, even the ones you forgot existed.",
+            "Lost? The `cog` up top opens the app menu. Preferences, config, macros, the lot, no keyboard archaeology required.",
         ),
         tui: Some(|resolve| {
             format!(

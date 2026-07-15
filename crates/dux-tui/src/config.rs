@@ -586,7 +586,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "github_integration",
             comment: Some(CommentSource::Static(
-                "# Enable GitHub PR tracking for agent sessions.\n# Requires the `gh` CLI installed and authenticated (`gh auth login`).\n# When enabled, a PR pill is shown in the agent pane for branches with\n# an open, merged, or closed pull request. Toggle at runtime from the\n# command palette.",
+                "# Enable GitHub PR tracking for agent sessions.\n# Requires the `gh` CLI installed and authenticated (`gh auth login`).\n# When enabled, a PR pill is shown in the agent pane for branches with\n# an open, merged, or closed pull request. Toggle at runtime from the TUI\n# command palette, or the web UI's Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.github_integration),
         },
@@ -600,7 +600,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "copy_on_select",
             comment: Some(CommentSource::Static(
-                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; a right-click menu and Ctrl-Shift-c /\n# Ctrl-Insert copy regardless. Toggle at runtime from the web command palette.",
+                "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it; Ctrl-Shift-c / Ctrl-Insert (or Cmd-c on a\n# Mac) copy regardless. Change it at runtime from the web UI's Preferences\n# dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
         },
@@ -614,21 +614,21 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "auto_reopen_agents",
             comment: Some(CommentSource::Static(
-                "# Reopen agent PTYs that were still running when dux last exited.\n# Disabled by default. Toggle project-level and agent-level opt-outs from the command palette.",
+                "# Reopen agent PTYs that were still running when dux last exited.\n# Disabled by default. Toggle project-level and agent-level opt-outs from the\n# TUI command palette, or the web UI's project and agent menus.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.auto_reopen_agents),
         },
         ConfigEntry::Field {
             key: "show_changes_pane",
             comment: Some(CommentSource::Static(
-                "# Show the Changes pane (the right-hand list of changed files).\n# Set to false to hide it by default; toggle it at runtime from the command palette.",
+                "# Show the Changes pane (the right-hand list of changed files).\n# Set to false to hide it by default; toggle it at runtime from the TUI\n# command palette, or the web UI's Changes actions menu.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.show_changes_pane),
         },
         ConfigEntry::Field {
             key: "always_show_tab_strip",
             comment: Some(CommentSource::Static(
-                "# Always show the agent tab strip, even when a session has only one tab.\n# Default false shows it only once a session has two or more tabs.\n# Toggle at runtime from either surface's command palette (TUI or web).",
+                "# Always show the agent tab strip, even when a session has only one tab.\n# Default false shows it only once a session has two or more tabs.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.always_show_tab_strip),
         },
@@ -649,7 +649,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
-                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the command palette.",
+                "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.pr_banner_position.clone()),
         },

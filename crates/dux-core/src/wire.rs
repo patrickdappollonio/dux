@@ -250,6 +250,13 @@ pub enum WireCommand {
         attention_on_bell: Option<bool>,
         pr_banner_position: Option<String>,
         hyperlinks: Option<bool>,
+        /// `defaults.enable_randomized_pet_name_by_default`. The only
+        /// `[defaults]` field on this patch. It rides the generic settings path
+        /// (rather than its dedicated toggle endpoint) because flipping it is a
+        /// plain field write with no side effects, unlike
+        /// `ui.github_integration`, which arms/disarms PR sync and therefore
+        /// keeps its own endpoint.
+        enable_randomized_pet_name_by_default: Option<bool>,
     },
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
     /// worktree, the web counterpart to the TUI's kill-running modal (for one
@@ -633,6 +640,7 @@ pub struct SettingsPatch {
     pub attention_on_bell: Option<bool>,
     pub pr_banner_position: Option<String>,
     pub hyperlinks: Option<bool>,
+    pub enable_randomized_pet_name_by_default: Option<bool>,
 }
 
 impl WireCommand {
@@ -669,6 +677,7 @@ impl WireCommand {
             attention_on_bell,
             pr_banner_position,
             hyperlinks,
+            enable_randomized_pet_name_by_default,
         } = self
         {
             return copy_on_select.is_some()
@@ -680,7 +689,8 @@ impl WireCommand {
                 || attention_indicator.is_some()
                 || attention_on_bell.is_some()
                 || pr_banner_position.is_some()
-                || hyperlinks.is_some();
+                || hyperlinks.is_some()
+                || enable_randomized_pet_name_by_default.is_some();
         }
         matches!(
             self,
@@ -1064,6 +1074,7 @@ impl Engine {
                 attention_on_bell,
                 pr_banner_position,
                 hyperlinks,
+                enable_randomized_pet_name_by_default,
             } => {
                 let status = self.set_settings(SettingsPatch {
                     copy_on_select,
@@ -1076,6 +1087,7 @@ impl Engine {
                     attention_on_bell,
                     pr_banner_position,
                     hyperlinks,
+                    enable_randomized_pet_name_by_default,
                 })?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
@@ -1219,9 +1231,9 @@ impl Engine {
         self.config.ui.show_changes_pane = visible;
         self.config_writer.save_lazy(self.config.clone());
         let message = if visible {
-            "Changes pane shown. Hide it again from the command palette or the Changes menu."
+            "Changes pane shown. Hide it again from the Changes actions menu, or set it permanently in Preferences."
         } else {
-            "Changes pane hidden. Reopen it from the command palette or the Changes menu."
+            "Changes pane hidden. Reopen it from the Changes actions menu, or set it permanently in Preferences."
         };
         WireStatus::new("info", message.to_string())
     }
@@ -1300,6 +1312,7 @@ impl Engine {
             attention_on_bell,
             pr_banner_position,
             hyperlinks,
+            enable_randomized_pet_name_by_default,
         } = patch;
 
         if copy_on_select.is_none()
@@ -1312,6 +1325,7 @@ impl Engine {
             && attention_on_bell.is_none()
             && pr_banner_position.is_none()
             && hyperlinks.is_none()
+            && enable_randomized_pet_name_by_default.is_none()
         {
             return Ok(WireStatus::new("info", "Nothing to update."));
         }
@@ -1328,6 +1342,9 @@ impl Engine {
         let mut candidate = self.config.clone();
         if let Some(v) = copy_on_select {
             candidate.ui.copy_on_select = v;
+        }
+        if let Some(v) = enable_randomized_pet_name_by_default {
+            candidate.defaults.enable_randomized_pet_name_by_default = v;
         }
         if let Some(v) = show_changes_pane {
             candidate.ui.show_changes_pane = v;
@@ -1372,6 +1389,8 @@ impl Engine {
             && candidate.ui.attention_on_bell == self.config.ui.attention_on_bell
             && candidate.ui.pr_banner_position == self.config.ui.pr_banner_position
             && candidate.capabilities.hyperlinks == self.config.capabilities.hyperlinks
+            && candidate.defaults.enable_randomized_pet_name_by_default
+                == self.config.defaults.enable_randomized_pet_name_by_default
         {
             return Ok(WireStatus::new("info", "Settings unchanged."));
         }
@@ -1407,9 +1426,9 @@ impl Engine {
         self.config.defaults.enable_randomized_pet_name_by_default = next;
         self.config_writer.save_lazy(self.config.clone());
         let message = if next {
-            "Random pet-name default enabled. New agents start with a random pet name. Toggle it back from the command palette."
+            "Random pet-name default enabled. New agents start with a random pet name. Change it back in Preferences."
         } else {
-            "Random pet-name default disabled. New agents start with an empty name. Toggle it back from the command palette."
+            "Random pet-name default disabled. New agents start with an empty name. Change it back in Preferences."
         };
         WireStatus::new("info", message.to_string())
     }
@@ -1453,9 +1472,9 @@ impl Engine {
         self.config.ui.always_show_tab_strip = next;
         self.config_writer.save_lazy(self.config.clone());
         let message = if next {
-            "Agent tab strip is now always shown, even with a single tab. Toggle it back from the command palette."
+            "Agent tab strip is now always shown, even with a single tab. Change it back in Preferences."
         } else {
-            "Agent tab strip now shows only once an agent has two or more tabs. Toggle it back from the command palette."
+            "Agent tab strip now shows only once an agent has two or more tabs. Change it back in Preferences."
         };
         WireStatus::new("info", message.to_string())
     }
@@ -1495,9 +1514,9 @@ impl Engine {
             self.pr_sync_enabled.store(false, Ordering::Relaxed);
         }
         let detail = if next {
-            "dux now syncs pull-request status in the background. Toggle it off from the command palette."
+            "dux now syncs pull-request status in the background. Turn it off again in Preferences."
         } else {
-            "Background PR syncing stopped and cached statuses cleared. Toggle it back on from the command palette."
+            "Background PR syncing stopped and cached statuses cleared. Turn it back on in Preferences."
         };
         WireStatus::new("info", format!("GitHub integration {state}. {detail}"))
     }
@@ -7883,6 +7902,7 @@ mod tests {
             attention_on_bell: None,
             pr_banner_position: None,
             hyperlinks: None,
+            enable_randomized_pet_name_by_default: None,
         }
     }
 
@@ -7902,6 +7922,7 @@ mod tests {
             attention_on_bell: None,
             pr_banner_position: Some(position.to_string()),
             hyperlinks: None,
+            enable_randomized_pet_name_by_default: None,
         }
     }
 
@@ -7941,6 +7962,7 @@ mod tests {
                 attention_on_bell: None,
                 pr_banner_position: Some("top".to_string()),
                 hyperlinks: None,
+                enable_randomized_pet_name_by_default: None,
             })
             .expect("dispatch ok");
         assert_eq!(outcome.status.expect("status").tone, "info");
@@ -7964,6 +7986,7 @@ mod tests {
                 attention_on_bell: None,
                 pr_banner_position: None,
                 hyperlinks: None,
+                enable_randomized_pet_name_by_default: None,
             })
             .expect("dispatch ok");
         assert_eq!(
@@ -7988,6 +8011,7 @@ mod tests {
                 attention_on_bell: None,
                 pr_banner_position: None,
                 hyperlinks: None,
+                enable_randomized_pet_name_by_default: None,
             })
             .expect("dispatch ok");
         assert_eq!(engine.config.ui.attention_grace_seconds, 0);
@@ -8035,6 +8059,7 @@ mod tests {
                 attention_on_bell: None,
                 pr_banner_position: None,
                 hyperlinks: None,
+                enable_randomized_pet_name_by_default: None,
             })
             .expect("dispatch ok");
         // pr_banner_position was absent from the patch, so it must be untouched.
