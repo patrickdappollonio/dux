@@ -289,12 +289,12 @@ export interface DuxState {
   //     inferred from an empty draft, so manually clearing the input doesn't
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
-  // The kill-running modal (the Ctrl+k "kill-running" command). Lists every
+  // The kill-running modal (the app menu's "Stop running agents…"). Lists every
   // active agent and live companion terminal and force-kills each on demand
   // (agents detach and can be reconnected; terminals are destroyed). The list is
   // derived live from the spine, so it needs no state beyond this open flag.
   killRunningOpen: boolean
-  // The Monaco config.toml editor (Ctrl+k "edit-config"). `configEditorOpen`
+  // The Monaco config.toml editor (the app menu's "Edit config file…"). `configEditorOpen`
   // gates the modal; the raw text is fetched into `configEditorContent` on open
   // so the editor seeds from a settled value (no set-state-in-effect).
   // `configEditorLoading` drives the load spinner; `configEditorError` shows the
@@ -304,7 +304,7 @@ export interface DuxState {
   configEditorContent: string
   configEditorLoading: boolean
   configEditorError: string | null
-  // The customize-webapp dialog (the Ctrl+k "customize-ui-preferences" command). Gates the
+  // The Preferences dialog (the app menu's "Preferences…"). Gates the
   // modal that sets the browser tab title + favicon colour + Changes pane
   // visibility; the dialog seeds its fields from the bootstrap document, so it
   // needs no state beyond this flag.
@@ -2951,7 +2951,7 @@ export function closeKillRunning(): void {
   setState({ killRunningOpen: false })
 }
 
-// The customize-webapp dialog (Ctrl+k "customize-ui-preferences"). Open/close just flip the
+// The Preferences dialog (the app menu's "Preferences…"). Open/close just flip the
 // gate; the dialog seeds its title, favicon, and Changes pane fields from the
 // bootstrap document.
 export function openCustomizeWebapp(): void {
@@ -3017,7 +3017,7 @@ export function killSessionPty(sessionId: string): void {
     )
 }
 
-// The Monaco config.toml editor (Ctrl+k "edit-config"). Open fetches the raw
+// The Monaco config.toml editor (the app menu's "Edit config file…"). Open fetches the raw
 // file text into the store so the editor seeds from a settled value. The
 // monotonic epoch makes each open session unique: a fetch reply is applied only
 // if its epoch still matches, so an open-close-open (or Retry) within the fetch
