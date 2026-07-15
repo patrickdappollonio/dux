@@ -528,6 +528,21 @@ describe("CustomizeWebappDialog", () => {
     expect(toggleGithubIntegration).not.toHaveBeenCalled()
   })
 
+  // The description text is adapted from a config.toml comment and contains
+  // markdown-style backtick spans (e.g. "the `gh` CLI"). These must render as
+  // actual <code> elements, not literal backtick characters.
+  it("renders the GitHub integration row's backtick spans as code elements", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    const row = screen.getByLabelText("GitHub integration").closest(".flex-col.gap-2")
+    expect(row).not.toBeNull()
+    const codeEls = row!.querySelectorAll("code")
+    expect(codeEls.length).toBeGreaterThan(0)
+    expect(Array.from(codeEls).some((el) => el.textContent === "gh")).toBe(true)
+    expect(row!.textContent).not.toContain("`")
+  })
+
   // ── Browser-notification permission (rehomed from the palette) ────────────
   //
   // This was the palette's only client-side item and the ONLY way to grant

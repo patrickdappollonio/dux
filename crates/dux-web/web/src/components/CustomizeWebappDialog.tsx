@@ -34,6 +34,7 @@ import {
   type SettingValue,
 } from "@/lib/settingsDescriptors"
 import { configApi } from "@/lib/configApi"
+import { renderInlineCode } from "@/lib/inlineMarkdown"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
@@ -358,7 +359,7 @@ function SettingRow({
     <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
       <div className="flex flex-col gap-1">
         {labelEl}
-        <p className="text-xs text-muted-foreground">{d.description}</p>
+        <p className="text-xs text-muted-foreground">{renderInlineCode(d.description)}</p>
         <p className="text-xs text-muted-foreground">
           {defaultLabel(d)}
           {d.control.kind === "number" && d.control.zeroMeaning
@@ -583,8 +584,9 @@ function CustomizeWebappForm({
       <DialogHeader>
         <DialogTitle>Settings</DialogTitle>
         <DialogDescription>
-          Configure dux. Saved to config.toml and applied to every connected
-          browser.
+          {renderInlineCode(
+            "Configure dux. Saved to `config.toml` and applied to every connected browser.",
+          )}
         </DialogDescription>
       </DialogHeader>
 
