@@ -251,13 +251,21 @@ pub enum WireCommand {
         attention_on_bell: Option<bool>,
         pr_banner_position: Option<String>,
         hyperlinks: Option<bool>,
-        /// `defaults.enable_randomized_pet_name_by_default`. The only
-        /// `[defaults]` field on this patch. It rides the generic settings path
-        /// (rather than its dedicated toggle endpoint) because flipping it is a
-        /// plain field write with no side effects, unlike
-        /// `ui.github_integration`, which arms/disarms PR sync and therefore
-        /// keeps its own endpoint.
+        /// `defaults.enable_randomized_pet_name_by_default`. It rides the
+        /// generic settings path (rather than its dedicated toggle endpoint)
+        /// because flipping it is a plain field write with no side effects,
+        /// unlike `ui.github_integration`, which arms/disarms PR sync and
+        /// therefore keeps its own endpoint.
         enable_randomized_pet_name_by_default: Option<bool>,
+        /// `defaults.provider`: the GLOBAL default provider for new agents in
+        /// projects without a project-specific override, mirroring the TUI's
+        /// `change-default-provider` palette command. Distinct from the
+        /// per-project `ProjectConfig::default_provider` override, which has
+        /// its own dedicated wire path and is out of scope here. Validated
+        /// against the configured provider list (same source as
+        /// `BootstrapView::available_providers`); an unrecognized name
+        /// rejects the WHOLE patch, matching `pr_banner_position`.
+        default_provider: Option<String>,
     },
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
     /// worktree, the web counterpart to the TUI's kill-running modal (for one
@@ -642,6 +650,7 @@ pub struct SettingsPatch {
     pub pr_banner_position: Option<String>,
     pub hyperlinks: Option<bool>,
     pub enable_randomized_pet_name_by_default: Option<bool>,
+    pub default_provider: Option<String>,
 }
 
 impl WireCommand {
@@ -679,6 +688,7 @@ impl WireCommand {
             pr_banner_position,
             hyperlinks,
             enable_randomized_pet_name_by_default,
+            default_provider,
         } = self
         {
             return copy_on_select.is_some()
@@ -691,7 +701,8 @@ impl WireCommand {
                 || attention_on_bell.is_some()
                 || pr_banner_position.is_some()
                 || hyperlinks.is_some()
-                || enable_randomized_pet_name_by_default.is_some();
+                || enable_randomized_pet_name_by_default.is_some()
+                || default_provider.is_some();
         }
         matches!(
             self,
@@ -1076,6 +1087,7 @@ impl Engine {
                 pr_banner_position,
                 hyperlinks,
                 enable_randomized_pet_name_by_default,
+                default_provider,
             } => {
                 let status = self.set_settings(SettingsPatch {
                     copy_on_select,
@@ -1089,6 +1101,7 @@ impl Engine {
                     pr_banner_position,
                     hyperlinks,
                     enable_randomized_pet_name_by_default,
+                    default_provider,
                 })?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
@@ -1295,7 +1308,8 @@ impl Engine {
     /// absent field is left untouched. Numeric fields are clamped into a sane
     /// documented ceiling (0 is preserved where the config documents a zero
     /// meaning, see each field's config.rs doc comment); `pr_banner_position`
-    /// is validated against a fixed accepted set and the WHOLE command is
+    /// is validated against a fixed accepted set, and `default_provider`
+    /// against the configured provider list, with the WHOLE command
     /// rejected (nothing written) if the present value is unrecognized,
     /// matching `set_instance_identity`'s all-or-nothing favicon validation.
     /// The write is eager and idempotent (unchanged values skip the
@@ -1314,6 +1328,7 @@ impl Engine {
             pr_banner_position,
             hyperlinks,
             enable_randomized_pet_name_by_default,
+            default_provider,
         } = patch;
 
         if copy_on_select.is_none()
@@ -1327,6 +1342,7 @@ impl Engine {
             && pr_banner_position.is_none()
             && hyperlinks.is_none()
             && enable_randomized_pet_name_by_default.is_none()
+            && default_provider.is_none()
         {
             return Ok(WireStatus::new("info", "Nothing to update."));
         }
@@ -1339,6 +1355,17 @@ impl Engine {
                     .ok_or_else(|| anyhow::anyhow!("unknown PR banner position \"{raw}\""))
             })
             .transpose()?;
+        // Validate against the configured provider list, the same source
+        // `BootstrapView::available_providers` is built from, so a forged or
+        // stale provider name from the client is rejected rather than silently
+        // written (mirrors `change_tab_provider_wire`'s validation).
+        if let Some(raw) = &default_provider
+            && !self.config.providers.commands.contains_key(raw.as_str())
+        {
+            anyhow::bail!(
+                "Provider \"{raw}\" is not configured. Pick one of the configured providers."
+            );
+        }
 
         let mut candidate = self.config.clone();
         if let Some(v) = copy_on_select {
@@ -1376,6 +1403,9 @@ impl Engine {
         if let Some(v) = hyperlinks {
             candidate.capabilities.hyperlinks = v;
         }
+        if let Some(v) = default_provider {
+            candidate.defaults.provider = v;
+        }
 
         // Idempotent: skip the write (and the fan-out) when nothing changed
         // after clamping/normalization.
@@ -1392,6 +1422,7 @@ impl Engine {
             && candidate.capabilities.hyperlinks == self.config.capabilities.hyperlinks
             && candidate.defaults.enable_randomized_pet_name_by_default
                 == self.config.defaults.enable_randomized_pet_name_by_default
+            && candidate.defaults.provider == self.config.defaults.provider
         {
             return Ok(WireStatus::new("info", "Settings unchanged."));
         }
@@ -1411,6 +1442,7 @@ impl Engine {
         self.config.ui.attention_on_bell = candidate.ui.attention_on_bell;
         self.config.ui.pr_banner_position = candidate.ui.pr_banner_position;
         self.config.capabilities.hyperlinks = candidate.capabilities.hyperlinks;
+        self.config.defaults.provider = candidate.defaults.provider;
         Ok(WireStatus::new(
             "info",
             "Settings updated. Every connected browser picks up the change now; a \
@@ -7904,6 +7936,7 @@ mod tests {
             pr_banner_position: None,
             hyperlinks: None,
             enable_randomized_pet_name_by_default: None,
+            default_provider: None,
         }
     }
 
@@ -7924,6 +7957,26 @@ mod tests {
             pr_banner_position: Some(position.to_string()),
             hyperlinks: None,
             enable_randomized_pet_name_by_default: None,
+            default_provider: None,
+        }
+    }
+
+    /// Build a `WireCommand::SetSettings` patch with only `default_provider`
+    /// set (every other field `None`), mirroring `pr_banner_position_only_patch`.
+    fn default_provider_only_patch(provider: &str) -> WireCommand {
+        WireCommand::SetSettings {
+            copy_on_select: None,
+            show_changes_pane: None,
+            web_notifications: None,
+            always_show_tab_strip: None,
+            status_clear_seconds: None,
+            attention_grace_seconds: None,
+            attention_indicator: None,
+            attention_on_bell: None,
+            pr_banner_position: None,
+            hyperlinks: None,
+            enable_randomized_pet_name_by_default: None,
+            default_provider: Some(provider.to_string()),
         }
     }
 
@@ -7931,6 +7984,33 @@ mod tests {
     fn set_settings_mutates_config_static_only_when_a_field_is_present() {
         assert!(!empty_settings_patch().mutates_config_static());
         assert!(pr_banner_position_only_patch("top").mutates_config_static());
+        assert!(default_provider_only_patch("codex").mutates_config_static());
+    }
+
+    #[test]
+    fn set_settings_accepts_a_valid_default_provider_patch() {
+        let (mut engine, _tmp) = test_engine();
+        let outcome = engine
+            .apply_wire(default_provider_only_patch("codex"))
+            .expect("dispatch ok");
+        assert_eq!(outcome.status.expect("status").tone, "info");
+        assert_eq!(engine.config.defaults.provider, "codex");
+        // The bootstrap projection picks up the new in-memory value immediately
+        // (no restart/reload needed for the running server to reflect it).
+        assert_eq!(engine.bootstrap().global_default_provider, "codex");
+    }
+
+    #[test]
+    fn set_settings_rejects_an_unconfigured_default_provider_and_leaves_config_unchanged() {
+        let (mut engine, _tmp) = test_engine();
+        let before = engine.config.defaults.provider.clone();
+        let err = engine
+            .apply_wire(default_provider_only_patch("not-a-real-provider"))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.to_string().contains("not-a-real-provider"), "{err}");
+        assert!(err.to_string().contains("not configured"), "{err}");
+        assert_eq!(engine.config.defaults.provider, before);
     }
 
     #[test]
@@ -7964,6 +8044,7 @@ mod tests {
                 pr_banner_position: Some("top".to_string()),
                 hyperlinks: None,
                 enable_randomized_pet_name_by_default: None,
+                default_provider: None,
             })
             .expect("dispatch ok");
         assert_eq!(outcome.status.expect("status").tone, "info");
@@ -7988,6 +8069,7 @@ mod tests {
                 pr_banner_position: None,
                 hyperlinks: None,
                 enable_randomized_pet_name_by_default: None,
+                default_provider: None,
             })
             .expect("dispatch ok");
         assert_eq!(
@@ -8013,6 +8095,7 @@ mod tests {
                 pr_banner_position: None,
                 hyperlinks: None,
                 enable_randomized_pet_name_by_default: None,
+                default_provider: None,
             })
             .expect("dispatch ok");
         assert_eq!(engine.config.ui.attention_grace_seconds, 0);
@@ -8061,6 +8144,7 @@ mod tests {
                 pr_banner_position: None,
                 hyperlinks: None,
                 enable_randomized_pet_name_by_default: None,
+                default_provider: None,
             })
             .expect("dispatch ok");
         // pr_banner_position was absent from the patch, so it must be untouched.

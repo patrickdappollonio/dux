@@ -6,7 +6,7 @@ import { SETTING_GROUPS, allSettingDescriptors } from "./settingsDescriptors"
 // A fully-populated bootstrap so every descriptor's `read()` has a real,
 // distinguishable value to check against (never the fallback default).
 const sampleBootstrap: Bootstrap = {
-  available_providers: [],
+  available_providers: ["claude", "codex"],
   macros: [],
   welcome_tips: [],
   dux_version: "v0.0.0",
@@ -29,6 +29,7 @@ const sampleBootstrap: Bootstrap = {
   always_show_tab_strip: true,
   attention_indicator: false,
   attention_on_bell: false,
+  global_default_provider: "codex",
 }
 
 describe("settingsDescriptors", () => {
@@ -63,6 +64,7 @@ describe("settingsDescriptors", () => {
         "capabilities.hyperlinks",
         "ui.github_integration",
         "defaults.enable_randomized_pet_name_by_default",
+        "defaults.provider",
       ]),
     )
     // No duplicate keys across groups.
@@ -101,6 +103,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["capabilities.hyperlinks"]).toBe(false)
     expect(byKey["ui.github_integration"]).toBe(false)
     expect(byKey["defaults.enable_randomized_pet_name_by_default"]).toBe(false)
+    expect(byKey["defaults.provider"]).toBe("codex")
   })
 
   // GitHub integration must NOT ride the generic settings PATCH. Flipping it
@@ -126,11 +129,23 @@ describe("settingsDescriptors", () => {
     const bare = { ...sampleBootstrap } as Partial<Bootstrap>
     delete bare.attention_indicator
     delete bare.attention_on_bell
+    delete bare.global_default_provider
     const byKey = Object.fromEntries(
       allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
     )
     expect(byKey["ui.attention_indicator"]).toBe(true)
     expect(byKey["ui.attention_on_bell"]).toBe(true)
+    expect(byKey["defaults.provider"]).toBe("claude")
+  })
+
+  // The global default-provider row's options aren't known statically: they
+  // come from the live bootstrap's `available_providers`, so the client can
+  // never offer a provider name the server doesn't have configured. It rides
+  // the generic settings PATCH (a plain field write, no side effects).
+  it("sources the default-provider row's options from available_providers, not a static list", () => {
+    const d = allSettingDescriptors().find((d) => d.key === "defaults.provider")
+    expect(d?.control).toEqual({ kind: "enum-dynamic", source: "available_providers" })
+    expect(d?.writeTarget).toBe("settings")
   })
 
   it("number controls declare a zeroMeaning where the config documents one", () => {

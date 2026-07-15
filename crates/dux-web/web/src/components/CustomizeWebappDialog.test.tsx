@@ -161,8 +161,9 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    // One enum row: pr_banner_position.
-    expect(screen.getAllByRole("combobox").length).toBe(1)
+    // Two select rows: pr_banner_position (static enum) and
+    // defaults.provider (enum-dynamic, sourced from available_providers).
+    expect(screen.getAllByRole("combobox").length).toBe(2)
   })
 
   it("shows the documented default for each row", () => {
@@ -482,6 +483,27 @@ describe("CustomizeWebappDialog", () => {
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     const [patch] = saveSettings.mock.calls[0]
     expect(patch.ui).toEqual({ pr_banner_position: "top" })
+  })
+
+  // The global default-provider row's options come from the live bootstrap's
+  // `available_providers`, never a hardcoded list, so the client can never
+  // offer a provider name the server doesn't have configured.
+  it("renders the default-provider row's options from available_providers and saves the chosen one under defaults", async () => {
+    seed({ available_providers: ["claude", "codex"], global_default_provider: "claude" })
+    render(<CustomizeWebappDialog />)
+
+    const trigger = screen.getByLabelText("Default provider for new agents")
+    fireEvent.click(trigger)
+    await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
+    expect(screen.getByRole("option", { name: "claude" })).toBeTruthy()
+    const option = await screen.findByRole("option", { name: "codex" })
+    fireEvent.pointerDown(option, { pointerType: "mouse" })
+    fireEvent.click(option)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.defaults).toEqual({ provider: "codex" })
   })
 
   // ── Rows rehomed from the deleted web command palette ──────────────────────

@@ -34,6 +34,12 @@ export type SettingControl =
   | { kind: "bool" }
   | { kind: "number"; min: number; max: number; zeroMeaning?: string; unit?: string }
   | { kind: "enum"; options: { value: string; label: string }[] }
+  /** Like "enum", but the option list isn't known statically: it is resolved
+   * at render time from a live `Bootstrap` field (currently only
+   * `available_providers`), so the client can never offer a provider name the
+   * server doesn't have configured. See `CustomizeWebappDialog.tsx`'s
+   * `SettingControl` for the resolution. */
+  | { kind: "enum-dynamic"; source: "available_providers" }
   | { kind: "favicon" }
   | { kind: "text"; maxLen: number }
 
@@ -283,6 +289,21 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // The bootstrap projects this as `randomize_agent_names_by_default`,
         // not under its config key's name.
         read: (b) => b.randomize_agent_names_by_default ?? false,
+      },
+      {
+        key: "defaults.provider",
+        label: "Default provider for new agents",
+        description:
+          "The global default provider used for new agents in projects that don't set their own project-specific override. A project's own default provider (set in that project's settings) always wins over this one.",
+        surface: "both",
+        control: { kind: "enum-dynamic", source: "available_providers" },
+        default: "claude",
+        writeTarget: "settings",
+        // The bootstrap projects this as `global_default_provider` (not
+        // `default_provider`), to keep it unambiguous next to the
+        // per-project `default_provider` field the project settings dialog
+        // reads.
+        read: (b) => b.global_default_provider ?? "claude",
       },
     ],
   },

@@ -74,6 +74,8 @@ function defaultLabel(d: SettingDescriptor): string {
       const opt = d.control.options.find((o) => o.value === d.default)
       return `Default: ${opt?.label ?? String(d.default)}`
     }
+    case "enum-dynamic":
+      return `Default: ${d.default}`
     case "text":
       return d.default ? `Default: ${d.default}` : "Default: empty"
     case "favicon":
@@ -200,11 +202,13 @@ function SettingControl({
   value,
   onChange,
   disabled,
+  availableProviders,
 }: {
   d: SettingDescriptor
   value: SettingValue
   onChange: (v: SettingValue) => void
   disabled: boolean
+  availableProviders: string[]
 }) {
   const id = rowId(d)
   switch (d.control.kind) {
@@ -249,6 +253,29 @@ function SettingControl({
           </SelectContent>
         </Select>
       )
+    case "enum-dynamic": {
+      // Only "available_providers" exists today; the source tag is kept for
+      // forward-compatibility with a future dynamic-option field.
+      const options = availableProviders
+      return (
+        <Select
+          value={value as string}
+          onValueChange={(v) => onChange(v as string)}
+          disabled={disabled}
+        >
+          <SelectTrigger id={id} aria-label={d.label} className="max-md:min-h-10">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((p) => (
+              <SelectItem key={p} value={p}>
+                {p}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )
+    }
     case "text":
       return (
         <Input
@@ -338,11 +365,13 @@ function SettingRow({
   value,
   onChange,
   disabled,
+  availableProviders,
 }: {
   d: SettingDescriptor
   value: SettingValue
   onChange: (v: SettingValue) => void
   disabled: boolean
+  availableProviders: string[]
 }) {
   const id = rowId(d)
   const labelEl =
@@ -368,7 +397,13 @@ function SettingRow({
         </p>
       </div>
       <div className="shrink-0 md:pt-0.5">
-        <SettingControl d={d} value={value} onChange={onChange} disabled={disabled} />
+        <SettingControl
+          d={d}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          availableProviders={availableProviders}
+        />
       </div>
     </div>
   )
@@ -617,6 +652,7 @@ function CustomizeWebappForm({
                       value={effective(d)}
                       onChange={(v) => setOverride(d.key, v)}
                       disabled={saving}
+                      availableProviders={bootstrap?.available_providers ?? []}
                     />
                     {/* Directly beneath the setting it is a precondition for. */}
                     {d.key === "capabilities.web_notifications" ? (

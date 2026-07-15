@@ -144,6 +144,14 @@ pub struct BootstrapView {
     /// `attention_indicator` is false). Older servers omit it, so the web
     /// treats a missing value as `true`.
     pub attention_on_bell: bool,
+    /// Mirrors `config.defaults.provider`: the GLOBAL default provider for new
+    /// agents in projects without a project-specific override, matching the
+    /// TUI's `change-default-provider` palette command. Distinct from
+    /// `ProjectView::default_provider`, which is the effective PER-PROJECT
+    /// value (global default or project override). Named `global_` here so it
+    /// cannot be confused with that per-project field when read alongside it.
+    /// Older servers omit it, so the web falls back to "claude".
+    pub global_default_provider: String,
 }
 
 /// A single text macro projected for web clients, from
@@ -589,6 +597,7 @@ impl Engine {
             always_show_tab_strip: self.config.ui.always_show_tab_strip,
             attention_indicator: self.config.ui.attention_indicator,
             attention_on_bell: self.config.ui.attention_on_bell,
+            global_default_provider: self.config.defaults.provider.clone(),
         }
     }
 }
@@ -1232,6 +1241,16 @@ mod tests {
     }
 
     #[test]
+    fn global_default_provider_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        assert_eq!(engine.bootstrap().global_default_provider, "claude");
+
+        engine.config.defaults.provider = "codex".to_string();
+        assert_eq!(engine.bootstrap().global_default_provider, "codex");
+    }
+
+    #[test]
     fn bootstrap_serializes_to_json_with_expected_fields() {
         let (engine, _tmp) = test_engine();
         let json = serde_json::to_string(&engine.bootstrap()).expect("serialize");
@@ -1258,6 +1277,7 @@ mod tests {
             "always_show_tab_strip",
             "attention_indicator",
             "attention_on_bell",
+            "global_default_provider",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),

@@ -286,13 +286,18 @@ struct CapabilitiesSettingsPatch {
 }
 
 /// The `[defaults]` half of a settings-PATCH body. Same optional/
-/// unknown-field-rejecting shape as [`UiSettingsPatch`]. Only the one field the
-/// Preferences dialog exposes lives here; flipping it is a plain field write, so
-/// it rides this generic patch rather than its dedicated toggle endpoint.
+/// unknown-field-rejecting shape as [`UiSettingsPatch`]. `provider` is the
+/// GLOBAL default provider for new agents in projects without a
+/// project-specific override (mirrors the TUI's `change-default-provider`
+/// palette command); it is validated engine-side against the configured
+/// provider list, the same source `BootstrapView::available_providers` is
+/// built from. This is distinct from a project's own `default_provider`
+/// override, which has its own dedicated wire path.
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 struct DefaultsSettingsPatch {
     enable_randomized_pet_name_by_default: Option<bool>,
+    provider: Option<String>,
 }
 
 /// `PATCH /api/v1/config/settings` body:
@@ -365,6 +370,7 @@ async fn set_settings(
             enable_randomized_pet_name_by_default: body
                 .defaults
                 .enable_randomized_pet_name_by_default,
+            default_provider: body.defaults.provider,
         },
     )
     .await
@@ -944,6 +950,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // `defaults.provider` is the GLOBAL default provider (distinct from a
+    // project's own `default_provider` override). It rides this generic patch
+    // because, like the pet-name default, flipping it is a plain field write
+    // with no side effects.
+    #[tokio::test]
+    async fn set_settings_accepts_a_valid_default_provider_patch() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"defaults":{"provider":"codex"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(raw.contains("provider = \"codex\""), "raw: {raw}");
+    }
+
+    // Test engines default to the four built-in providers (claude, codex,
+    // opencode, copilot; see `Config::default()`/`default_provider_commands()`),
+    // so a name outside that set is unconfigured and must be rejected with a
+    // plain-text 400, mirroring `set_settings_rejects_unknown_enum_value_with_400`
+    // for `pr_banner_position`.
+    #[tokio::test]
+    async fn set_settings_rejects_an_unconfigured_default_provider_with_400() {
+        let (_tmp, app) = router_no_auth();
+        let before = read_raw_config_text(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"defaults":{"provider":"not-a-real-provider"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let after = read_raw_config_text(&app).await;
+        assert_eq!(
+            before, after,
+            "an unconfigured provider must not mutate config"
+        );
     }
 
     #[tokio::test]

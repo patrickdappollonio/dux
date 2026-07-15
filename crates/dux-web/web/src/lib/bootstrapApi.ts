@@ -103,6 +103,13 @@ export interface Bootstrap {
    * `attention_indicator` is false). Older servers omit it, so consumers fall
    * back to true. */
   attention_on_bell?: boolean
+  /** Mirrors `config.defaults.provider`: the GLOBAL default provider for new
+   * agents in projects without a project-specific override, matching the
+   * TUI's `change-default-provider` palette command. Distinct from a
+   * project's own `default_provider` override (see `ProjectView` in
+   * `types.ts`), which is the effective per-project value. Older servers omit
+   * it, so consumers fall back to "claude". */
+  global_default_provider?: string
 }
 
 /** Fallback per-agent tab cap when the server omits `agent_tabs_max` (older
