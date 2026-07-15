@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { Fragment, useRef, useState } from "react"
 import { Check } from "lucide-react"
 import { toast } from "sonner"
 
@@ -33,6 +33,7 @@ import {
   type SettingDescriptor,
   type SettingValue,
 } from "@/lib/settingsDescriptors"
+import { configApi } from "@/lib/configApi"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
@@ -271,6 +272,66 @@ function SettingControl({
   }
 }
 
+// Browser-notification permission. NOT a SettingDescriptor: it writes no config,
+// it asks the BROWSER for permission, which is per-visitor and per-browser state
+// the server never sees. It sits directly under the "Desktop notifications"
+// (`capabilities.web_notifications`) row because that setting cannot do anything
+// until this permission is granted, so the setting and its precondition belong
+// together.
+//
+// This affordance used to be the command palette's one client-side entry, and it
+// is still the ONLY way to grant permission: dux deliberately never auto-prompts,
+// so the visitor must opt in explicitly. The row appears only while there is
+// something to ask for (notifications enabled in config, the API exists, and
+// permission is still "default"); once granted or denied, the browser owns the
+// decision and dux cannot re-ask.
+function NotificationPermissionRow({ enabledInConfig }: { enabledInConfig: boolean }) {
+  const apiAvailable = typeof Notification !== "undefined"
+  const [permission, setPermission] = useState<NotificationPermission>(
+    apiAvailable ? Notification.permission : "denied",
+  )
+
+  if (!enabledInConfig || !apiAvailable || permission !== "default") return null
+
+  const request = async () => {
+    try {
+      const result = await Notification.requestPermission()
+      setPermission(result)
+      if (result === "granted") {
+        toast.success("Browser notifications enabled for dux.")
+      } else {
+        toast.info("Browser notifications were not granted.")
+      }
+    } catch {
+      toast.error("Could not request notification permission.")
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
+      <div className="flex flex-col gap-1">
+        <span className="text-sm font-medium">Browser permission</span>
+        <p className="text-xs text-muted-foreground">
+          This browser hasn&rsquo;t granted dux permission to show notifications
+          yet, so the setting above can&rsquo;t do anything. dux never asks on its
+          own, so grant it here when you want it.
+        </p>
+      </div>
+      <div className="shrink-0 md:pt-0.5">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="max-md:min-h-10"
+          onClick={() => void request()}
+        >
+          Enable browser notifications
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function SettingRow({
   d,
   value,
@@ -332,36 +393,55 @@ function buildWrites(
   originalOf: (d: SettingDescriptor) => SettingValue,
 ): {
   identity: { title?: string; favicon?: string } | null
-  settings: { ui?: Record<string, SettingValue>; capabilities?: Record<string, SettingValue> } | null
+  settings: {
+    ui?: Record<string, SettingValue>
+    capabilities?: Record<string, SettingValue>
+    defaults?: Record<string, SettingValue>
+  } | null
   changesPane: boolean | null
+  github: boolean | null
 } {
   const identity: { title?: string; favicon?: string } = {}
   const ui: Record<string, SettingValue> = {}
   const capabilities: Record<string, SettingValue> = {}
+  const defaults: Record<string, SettingValue> = {}
   let changesPane: boolean | null = null
+  let github: boolean | null = null
   for (const [d, value] of entries) {
+    // THE unchanged-row skip. Load-bearing well beyond avoiding a redundant
+    // write: the `github` target below posts to a blind read-and-FLIP endpoint,
+    // so emitting an unchanged row would invert the setting. See the
+    // `writeTarget` doc in settingsDescriptors.ts.
     if (value === originalOf(d)) continue
     if (d.writeTarget === "identity") {
       const field = d.key.split(".")[1] as "title" | "favicon"
       identity[field] = value as string
     } else if (d.writeTarget === "changesPane") {
       changesPane = value as boolean
+    } else if (d.writeTarget === "github") {
+      github = value as boolean
     } else {
       const [group, field] = d.key.split(".")
       if (group === "capabilities") capabilities[field] = value
+      else if (group === "defaults") defaults[field] = value
       else ui[field] = value
     }
   }
+  const hasSettings =
+    Object.keys(ui).length ||
+    Object.keys(capabilities).length ||
+    Object.keys(defaults).length
   return {
     identity: Object.keys(identity).length ? identity : null,
-    settings:
-      Object.keys(ui).length || Object.keys(capabilities).length
-        ? {
-            ui: Object.keys(ui).length ? ui : undefined,
-            capabilities: Object.keys(capabilities).length ? capabilities : undefined,
-          }
-        : null,
+    settings: hasSettings
+      ? {
+          ui: Object.keys(ui).length ? ui : undefined,
+          capabilities: Object.keys(capabilities).length ? capabilities : undefined,
+          defaults: Object.keys(defaults).length ? defaults : undefined,
+        }
+      : null,
     changesPane,
+    github,
   }
 }
 
@@ -369,11 +449,30 @@ async function persist(
   entries: [SettingDescriptor, SettingValue][],
   originalOf: (d: SettingDescriptor) => SettingValue,
 ): Promise<boolean> {
-  const { identity, settings, changesPane } = buildWrites(entries, originalOf)
+  const { identity, settings, changesPane, github } = buildWrites(
+    entries,
+    originalOf,
+  )
   const writes: Promise<boolean>[] = []
   if (identity) writes.push(setInstanceIdentity(identity))
   if (settings) writes.push(saveSettings(settings))
   if (changesPane !== null) writes.push(setChangesPaneVisibility(changesPane))
+  // `github` is non-null ONLY when the row actually changed, which is what makes
+  // it safe to drive a read-and-flip endpoint from an explicit-value UI. Do NOT
+  // "simplify" this to write unconditionally.
+  if (github !== null) {
+    writes.push(
+      configApi
+        .toggleGithubIntegration()
+        .then(() => true)
+        .catch((e) => {
+          toast.error(
+            e instanceof Error ? e.message : "Could not toggle GitHub integration.",
+          )
+          return false
+        }),
+    )
+  }
   if (writes.length === 0) return true
   return (await Promise.all(writes)).every(Boolean)
 }
@@ -510,13 +609,20 @@ function CustomizeWebappForm({
               </div>
               <div className="divide-y divide-border">
                 {group.settings.map((d) => (
-                  <SettingRow
-                    key={d.key}
-                    d={d}
-                    value={effective(d)}
-                    onChange={(v) => setOverride(d.key, v)}
-                    disabled={saving}
-                  />
+                  <Fragment key={d.key}>
+                    <SettingRow
+                      d={d}
+                      value={effective(d)}
+                      onChange={(v) => setOverride(d.key, v)}
+                      disabled={saving}
+                    />
+                    {/* Directly beneath the setting it is a precondition for. */}
+                    {d.key === "capabilities.web_notifications" ? (
+                      <NotificationPermissionRow
+                        enabledInConfig={effective(d) as boolean}
+                      />
+                    ) : null}
+                  </Fragment>
                 ))}
               </div>
             </div>

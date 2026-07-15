@@ -22,6 +22,12 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 
+// The GitHub row does NOT ride the generic settings PATCH: it routes to the
+// dedicated endpoint that also drives the engine's PR-sync side effects.
+vi.mock("@/lib/configApi", () => ({
+  configApi: { toggleGithubIntegration: vi.fn() },
+}))
+
 // The real tooltip only mounts its popup on hover and needs a ResizeObserver
 // that jsdom lacks; render its trigger children directly so the swatch
 // buttons exist.
@@ -69,6 +75,8 @@ const setInstanceIdentity = vi.mocked(store.setInstanceIdentity)
 const closeCustomizeWebapp = vi.mocked(store.closeCustomizeWebapp)
 const saveSettings = vi.mocked(store.saveSettings)
 const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
+const { configApi } = await import("@/lib/configApi")
+const toggleGithubIntegration = vi.mocked(configApi.toggleGithubIntegration)
 
 const fullBootstrap: Bootstrap = {
   available_providers: [],
@@ -110,6 +118,7 @@ beforeEach(() => {
   closeCustomizeWebapp.mockClear()
   saveSettings.mockClear().mockResolvedValue(true)
   setChangesPaneVisibility.mockClear().mockResolvedValue(true)
+  toggleGithubIntegration.mockClear().mockResolvedValue(undefined as never)
 })
 
 afterEach(() => {
@@ -126,13 +135,16 @@ describe("CustomizeWebappDialog", () => {
     expect(screen.getByText(/Both surfaces/)).toBeTruthy()
   })
 
-  it("renders a Switch for each bool setting", () => {
+  it("renders a Switch for each bool setting", async () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    // copy_on_select, show_changes_pane, web_notifications, always_show_tab_strip,
-    // attention_indicator, attention_on_bell, hyperlinks.
-    expect(screen.getAllByRole("switch").length).toBe(7)
+    // Derived from the descriptors rather than hardcoded, so adding a bool row
+    // doesn't fail this test for the wrong reason.
+    const { allSettingDescriptors } = await import("@/lib/settingsDescriptors")
+    const bools = allSettingDescriptors().filter((d) => d.control.kind === "bool")
+    expect(bools.length).toBeGreaterThan(0)
+    expect(screen.getAllByRole("switch").length).toBe(bools.length)
   })
 
   it("renders a number input for u64 settings and shows the zero-value hint", () => {
@@ -470,5 +482,151 @@ describe("CustomizeWebappDialog", () => {
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     const [patch] = saveSettings.mock.calls[0]
     expect(patch.ui).toEqual({ pr_banner_position: "top" })
+  })
+
+  // ── Rows rehomed from the deleted web command palette ──────────────────────
+
+  it("renders a GitHub integration row", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(screen.getByLabelText("GitHub integration")).toBeTruthy()
+  })
+
+  it("saves GitHub integration through the dedicated endpoint, not the settings PATCH", async () => {
+    seed({ github_integration: false })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByLabelText("GitHub integration"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(toggleGithubIntegration).toHaveBeenCalledTimes(1)
+    // The generic PATCH must never carry this field: the endpoint owns the
+    // PR-sync side effects, and set_settings would only write the flag.
+    for (const [patch] of saveSettings.mock.calls) {
+      expect(patch.ui ?? {}).not.toHaveProperty("github_integration")
+    }
+  })
+
+  // THE HAZARD PIN. The endpoint is a blind read-and-flip while this modal saves
+  // explicit values; they only agree because an unchanged row is never sent. If
+  // `persist` ever writes unconditionally, this catches it before it silently
+  // inverts the user's setting.
+  it("does not call the GitHub endpoint when the row is unchanged", async () => {
+    seed({ github_integration: true })
+    render(<CustomizeWebappDialog />)
+
+    // Touch a DIFFERENT row, so there is a save to perform, then flip the GitHub
+    // row twice so it is "touched" but lands back on its original value.
+    fireEvent.click(screen.getByLabelText("Copy on select"))
+    fireEvent.click(screen.getByLabelText("GitHub integration"))
+    fireEvent.click(screen.getByLabelText("GitHub integration"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(toggleGithubIntegration).not.toHaveBeenCalled()
+  })
+
+  // ── Browser-notification permission (rehomed from the palette) ────────────
+  //
+  // This was the palette's only client-side item and the ONLY way to grant
+  // notification permission (dux never auto-prompts). It is not a config value,
+  // so it is not a SettingDescriptor; it lives next to the "Desktop
+  // notifications" row it depends on, and appears only while permission can
+  // still be asked for.
+
+  function stubNotifications(permission: NotificationPermission | null) {
+    if (permission === null) {
+      vi.stubGlobal("Notification", undefined)
+      return vi.fn()
+    }
+    const requestPermission = vi.fn(() => Promise.resolve("granted" as const))
+    vi.stubGlobal("Notification", { permission, requestPermission })
+    return requestPermission
+  }
+
+  it("offers the browser-notification permission row only when permission is default", () => {
+    stubNotifications("default")
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(
+      screen.getByRole("button", { name: /enable browser notifications/i }),
+    ).toBeTruthy()
+  })
+
+  it("hides the permission row once permission is granted", () => {
+    stubNotifications("granted")
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(
+      screen.queryByRole("button", { name: /enable browser notifications/i }),
+    ).toBeNull()
+  })
+
+  it("hides the permission row when permission was denied", () => {
+    stubNotifications("denied")
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(
+      screen.queryByRole("button", { name: /enable browser notifications/i }),
+    ).toBeNull()
+  })
+
+  it("hides the permission row when the browser has no Notification API", () => {
+    stubNotifications(null)
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(
+      screen.queryByRole("button", { name: /enable browser notifications/i }),
+    ).toBeNull()
+  })
+
+  it("hides the permission row when desktop notifications are disabled in config", () => {
+    stubNotifications("default")
+    seed({ web_notifications: false })
+    render(<CustomizeWebappDialog />)
+    expect(
+      screen.queryByRole("button", { name: /enable browser notifications/i }),
+    ).toBeNull()
+  })
+
+  it("requests permission when the row is used, and never before", async () => {
+    const requestPermission = stubNotifications("default")
+    seed()
+    render(<CustomizeWebappDialog />)
+    // dux never auto-prompts: merely opening the dialog must ask for nothing.
+    expect(requestPermission).not.toHaveBeenCalled()
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /enable browser notifications/i }),
+    )
+    await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1))
+  })
+
+  it("renders a randomized pet-name default row", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(
+      screen.getByLabelText("Random pet-name default for new agents"),
+    ).toBeTruthy()
+  })
+
+  it("saves the pet-name default through the settings PATCH", async () => {
+    seed({ randomize_agent_names_by_default: false })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(
+      screen.getByLabelText("Random pet-name default for new agents"),
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(toggleGithubIntegration).not.toHaveBeenCalled()
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.defaults).toEqual({
+      enable_randomized_pet_name_by_default: true,
+    })
   })
 })

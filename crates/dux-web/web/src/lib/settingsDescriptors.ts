@@ -1,5 +1,5 @@
-// Pure, data-driven model for the Ctrl+K "Settings" modal
-// (`CustomizeWebappDialog.tsx`). Each descriptor is one config field the
+// Pure, data-driven model for the Preferences modal, opened from the app menu's
+// cog (`CustomizeWebappDialog.tsx`). Each descriptor is one config field the
 // modal exposes: its label, a human-readable description, which surface(s)
 // it affects, its control type, its documented default, and how to read its
 // current value out of the `Bootstrap` document. The dialog renders from
@@ -13,12 +13,18 @@
 // the drift guard (it pins the exposed key SET, not exact description
 // strings, so a field's wording can evolve without the test going stale).
 //
-// First-cut subset only (see the architecture plan, section 2): this does
-// NOT expose every `[ui]`/`[capabilities]` field, just the ones judged safe,
-// portable, and low blast-radius for a first pass. `github_integration`,
-// `terminal_identity`, `clipboard_passthrough`, and the numeric infra knobs
-// (`agent_scrollback_lines`, `branch_sync_interval`, `pr_poll_interval_seconds`,
-// `agent_tabs_max`) are deliberately deferred.
+// A curated subset: this does NOT expose every `[ui]`/`[capabilities]` field,
+// just the ones judged safe, portable, and low blast-radius. `terminal_identity`,
+// `clipboard_passthrough`, and the numeric infra knobs (`agent_scrollback_lines`,
+// `branch_sync_interval`, `pr_poll_interval_seconds`, `agent_tabs_max`) are
+// deliberately deferred.
+//
+// THIS IS WHERE SETTINGS LIVE. A user preference is a row here, never an app-menu
+// item: the menu carries actions and dialogs. The web command palette used to
+// carry six preference-shaped toggles, four of which already existed here under a
+// second name; the other two (`ui.github_integration`,
+// `defaults.enable_randomized_pet_name_by_default`) became rows here when it was
+// removed.
 
 import type { Bootstrap } from "./bootstrapApi"
 
@@ -51,8 +57,22 @@ export interface SettingDescriptor {
    * field (the Changes menu toggles it live outside this dialog too), so its
    * row is wired directly to `changesPaneVisible()`/`setChangesPaneVisibility`
    * in `CustomizeWebappDialog.tsx` rather than through the generic
-   * read/buildWrites/saveSettings path every other row uses. */
-  writeTarget: "settings" | "identity" | "changesPane"
+   * read/buildWrites/saveSettings path every other row uses.
+   *
+   * `"github"` is bespoke for a different reason: flipping `ui.github_integration`
+   * has SIDE EFFECTS beyond the config write (it arms or disarms the background
+   * PR-sync poll, kicks an initial refresh, and clears cached PR statuses), and
+   * that logic lives behind `POST /api/v1/ui/toggle-github-integration`. Routing
+   * the row there reuses it instead of forking it into the generic settings PATCH.
+   *
+   * HAZARD, and the reason this is safe: that endpoint is a blind read-and-FLIP,
+   * while this modal saves EXPLICIT values. The two only agree because
+   * `buildWrites` diffs each row against its pre-touch baseline and emits it ONLY
+   * when it actually changed, so "present in the write" implies "flip". If anyone
+   * ever "simplifies" `persist` to write unconditionally, this silently INVERTS
+   * the setting. Pinned by `CustomizeWebappDialog.test.tsx`'s "does not call the
+   * GitHub endpoint when the row is unchanged". */
+  writeTarget: "settings" | "identity" | "changesPane" | "github"
   /** Reads the current value out of the live Bootstrap document, falling back
    * to `default` when an older server omits the field. NOTE: for the
    * `"changesPane"`-targeted row this is NOT the effective value shown in the
@@ -237,6 +257,32 @@ export const SETTING_GROUPS: SettingGroup[] = [
         default: true,
         writeTarget: "settings",
         read: (b) => b.hyperlinks ?? true,
+      },
+      {
+        key: "ui.github_integration",
+        label: "GitHub integration",
+        description:
+          "Syncs pull-request status for your agents in the background using the `gh` CLI, showing a PR pill on branches with an open, merged, or closed pull request. When off, dux stops polling and clears cached PR statuses. Requires `gh` to be installed and authenticated.",
+        surface: "both",
+        control: { kind: "bool" },
+        default: true,
+        // NOT "settings": see the writeTarget doc above. Flipping this drives
+        // engine-side PR-sync side effects that only the dedicated endpoint has.
+        writeTarget: "github",
+        read: (b) => b.github_integration ?? true,
+      },
+      {
+        key: "defaults.enable_randomized_pet_name_by_default",
+        label: "Random pet-name default for new agents",
+        description:
+          "New agent prompts start with a random pet name already filled in. The new-agent dialog still has its own per-open randomize checkbox, seeded from this default.",
+        surface: "both",
+        control: { kind: "bool" },
+        default: false,
+        writeTarget: "settings",
+        // The bootstrap projects this as `randomize_agent_names_by_default`,
+        // not under its config key's name.
+        read: (b) => b.randomize_agent_names_by_default ?? false,
       },
     ],
   },

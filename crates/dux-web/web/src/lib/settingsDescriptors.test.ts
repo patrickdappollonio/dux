@@ -61,6 +61,8 @@ describe("settingsDescriptors", () => {
         "ui.always_show_tab_strip",
         "ui.pr_banner_position",
         "capabilities.hyperlinks",
+        "ui.github_integration",
+        "defaults.enable_randomized_pet_name_by_default",
       ]),
     )
     // No duplicate keys across groups.
@@ -97,6 +99,27 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.always_show_tab_strip"]).toBe(true)
     expect(byKey["ui.pr_banner_position"]).toBe("top")
     expect(byKey["capabilities.hyperlinks"]).toBe(false)
+    expect(byKey["ui.github_integration"]).toBe(false)
+    expect(byKey["defaults.enable_randomized_pet_name_by_default"]).toBe(false)
+  })
+
+  // GitHub integration must NOT ride the generic settings PATCH. Flipping it
+  // arms/disarms background PR syncing and clears cached statuses, and that
+  // logic lives behind the dedicated endpoint; duplicating it into set_settings
+  // would fork it. Precedent: `changesPane` is already a bespoke target for the
+  // same reason.
+  it("routes github_integration to the dedicated toggle endpoint", () => {
+    const d = allSettingDescriptors().find((d) => d.key === "ui.github_integration")
+    expect(d?.writeTarget).toBe("github")
+  })
+
+  // The pet-name default is a plain field write with no side effects, so it
+  // rides the generic PATCH (which grew a `defaults` group for it).
+  it("routes the pet-name default through the generic settings PATCH", () => {
+    const d = allSettingDescriptors().find(
+      (d) => d.key === "defaults.enable_randomized_pet_name_by_default",
+    )
+    expect(d?.writeTarget).toBe("settings")
   })
 
   it("read() falls back to the documented default on an older bootstrap missing the field", () => {
