@@ -47,6 +47,7 @@ pub(crate) fn test_engine() -> (Engine, TempDir) {
         github_integration_enabled: false,
         single_instance_lock,
         surface_kind: crate::term_identity::SurfaceKind::Tui,
+        resource_collector: Default::default(),
         host_env: crate::term_identity::HostEnvProbe::default(),
         worker_tx,
         worker_rx,

@@ -77,6 +77,13 @@ pub struct Engine {
     /// Snapshot of the identity-relevant environment dux inherited, taken once at
     /// construction so [`Engine::resolved_identity`] stays a pure function of it.
     pub host_env: crate::term_identity::HostEnvProbe,
+    /// The resource monitor's sampler. It must outlive a single sample: sysinfo
+    /// derives per-process CPU from the delta between two refreshes, so a
+    /// collector rebuilt per sample reports 0% forever (see
+    /// [`crate::resource_stats`]). `spawn_resource_stats_worker` spawns a thread
+    /// per sample, hence the `Arc<Mutex<_>>` — the worker locks it for the walk,
+    /// and the in-flight guard already serialises those samples.
+    pub resource_collector: Arc<Mutex<crate::resource_stats::ResourceCollector>>,
 
     // Batch B fields
     pub worker_tx: Sender<WorkerEvent>,
@@ -1826,6 +1833,9 @@ impl Engine {
             return;
         }
         let targets = self.resource_monitor_targets();
+        // Hand the worker the long-lived collector rather than a fresh one: the
+        // CPU reading is a delta against the previous sample's refresh.
+        let collector = Arc::clone(&self.resource_collector);
         let reaction = self.spawn_command_worker(
             CommandWorkerSpec {
                 label: "resource-stats".into(),
@@ -1840,7 +1850,12 @@ impl Engine {
                 })),
             },
             move |tx| {
-                let rows = crate::resource_stats::collect_resource_stats(targets);
+                // Poison-tolerant: the collector is a plain sampler whose only
+                // state is sysinfo's process snapshot, re-established by the very
+                // next refresh, so recovering the guard beats propagating a panic
+                // into every later sample.
+                let mut collector = collector.lock().unwrap_or_else(|e| e.into_inner());
+                let rows = collector.sample(targets);
                 let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
             },
         );

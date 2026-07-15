@@ -1771,6 +1771,7 @@ impl App {
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
+            resource_collector: Default::default(),
             host_env: dux_core::term_identity::HostEnvProbe::from_env(),
             worker_tx,
             worker_rx,

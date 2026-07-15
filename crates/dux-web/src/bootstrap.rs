@@ -88,6 +88,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         github_integration_enabled,
         single_instance_lock,
         surface_kind: dux_core::term_identity::SurfaceKind::WebHeadless,
+        resource_collector: Default::default(),
         host_env: dux_core::term_identity::HostEnvProbe::from_env(),
         worker_tx,
         worker_rx,
