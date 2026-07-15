@@ -1030,9 +1030,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
-    // Web-only palette command (no TUI key, no TUI listing): it joins the shared
-    // palette registry by Action but `EditConfig`'s surface is `Web`, so the TUI
-    // never lists or dispatches it.
+    // Web-surface action, deliberately inert in the TUI (no key, no scope, no
+    // help, no palette row): the web's app menu opens the Monaco config.toml
+    // editor for it. The `BindingDef` stays because `config.rs` validates every
+    // user `[keys]` action name against BINDING_DEFS — dropping it would reject
+    // an existing config that binds `edit_config`.
     BindingDef {
         action: Action::EditConfig,
         default_keys: &[],
@@ -1040,8 +1042,8 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
-    // Web-only palette command (customize-webapp dialog): joins the registry by
-    // Action but its surface is `Web`, so the TUI never lists or dispatches it.
+    // Web-surface action, deliberately inert in the TUI (see `EditConfig`
+    // above): the web's app menu opens the Preferences dialog for it.
     BindingDef {
         action: Action::RenameWebInstance,
         default_keys: &[],
@@ -1049,9 +1051,11 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         help: None,
         hint_contexts: &[],
     },
-    // Web-only palette command (highlight-to-copy is a browser-terminal behavior):
-    // joins the registry by Action but its surface is `Web`, so the TUI never
-    // lists or dispatches it.
+    // Web-surface action, deliberately inert in the TUI (see `EditConfig`
+    // above): highlight-to-copy is a browser-terminal behavior, exposed on the
+    // web as the `ui.copy_on_select` Preferences row. That row writes through
+    // the generic settings PATCH, but `WireCommand::ToggleCopyOnSelect` still
+    // backs `POST /api/v1/ui/toggle-copy-on-select`.
     BindingDef {
         action: Action::ToggleCopyOnSelect,
         default_keys: &[],
@@ -1335,14 +1339,13 @@ impl RuntimeBindings {
             .iter()
             .map(|def| {
                 let keys = keys_for(def.action);
-                // The palette name/description come from the surface-aware core
-                // registry (`dux_core::palette`), the single source of truth, so
-                // the TUI and web cannot drift. Only commands surfaced to the TUI
-                // (`Tui` or `Both`) carry a palette name here; the exhaustiveness
-                // test guarantees every `BINDING_DEFS` palette entry has a
-                // matching core row.
-                let core_palette =
-                    dux_core::palette::find_by_action(def.action).filter(|c| c.surface.in_tui());
+                // The palette name/description come from the core registry
+                // (`dux_core::palette`), the single source of truth for the TUI
+                // palette. Every row there is listed by the TUI; an action with
+                // no row (e.g. `EditConfig`, which only ever had a web-palette
+                // row) simply carries no palette name and is never listed. The
+                // exhaustiveness test pins that join in both directions.
+                let core_palette = dux_core::palette::find_by_action(def.action);
                 RuntimeBinding {
                     action: def.action,
                     keys,
@@ -2128,21 +2131,26 @@ mod tests {
         assert_eq!(Action::ResourceMonitor.config_name(), "resource_monitor");
     }
 
-    // EXHAUSTIVENESS PIN: the surface-aware core registry
+    // EXHAUSTIVENESS PIN: the core registry
     // (`dux_core::palette::PALETTE_COMMANDS`) is the single source of truth for
-    // palette command names and descriptions. Every TUI-surfaced core command
-    // (Tui | Both) must:
+    // palette command names and descriptions. Every core command must:
     //   1. join to a BINDING_DEFS entry by Action (so the TUI can attach
     //      keybindings and dispatch), and
     //   2. surface in the runtime palette listing with byte-identical name and
     //      description.
-    // Conversely, the runtime palette listing must contain exactly the
-    // TUI-surfaced core commands — no more, no less. This makes name/description
-    // parity true by construction: adding or renaming a palette command in the
-    // core registry without a matching action fails this gate.
+    // Conversely, the runtime palette listing must contain exactly the core
+    // commands — no more, no less. This makes name/description parity true by
+    // construction: adding or renaming a palette command in the core registry
+    // without a matching action fails this gate.
+    //
+    // This is now a STRICTER invariant than it used to be. The registry once
+    // carried per-row `PaletteSurface` metadata and this test only required the
+    // `Tui`/`Both` rows to be listed, with an allowlist tolerating `Web`-only
+    // rows that the TUI deliberately hid. With the web projection gone, every
+    // row is a TUI row, so the listing must cover the registry exactly.
     #[test]
     fn palette_listing_matches_core_registry() {
-        use dux_core::palette::{self, PaletteSurface};
+        use dux_core::palette;
 
         let bindings = default_bindings();
         let listed: std::collections::HashMap<&str, &str> = bindings
@@ -2151,67 +2159,61 @@ mod tests {
             .filter_map(|b| Some((b.palette_name?, b.palette_description?)))
             .collect();
 
-        // Every core command (TUI, Web, or Both) has a BINDING_DEFS action entry
-        // to join on; the TUI-surfaced ones additionally appear in the runtime
-        // listing with matching name + description. Web-only commands (e.g.
-        // `edit-config`) intentionally do NOT appear in the TUI listing.
-        let mut tui_count = 0usize;
         for cmd in palette::PALETTE_COMMANDS {
             assert!(
                 BINDING_DEFS.iter().any(|d| d.action == cmd.action),
                 "core palette command \"{}\" has no BINDING_DEFS entry to join on",
                 cmd.name
             );
-            if cmd.surface.in_tui() {
-                tui_count += 1;
-                let desc = listed.get(cmd.name).unwrap_or_else(|| {
-                    panic!(
-                        "TUI-surfaced core palette command \"{}\" is missing from \
-                         the runtime palette listing",
-                        cmd.name
-                    )
-                });
-                assert_eq!(
-                    *desc, cmd.description,
-                    "palette description drift for \"{}\"",
+            let desc = listed.get(cmd.name).unwrap_or_else(|| {
+                panic!(
+                    "core palette command \"{}\" is missing from the runtime \
+                     palette listing",
                     cmd.name
-                );
-            }
+                )
+            });
+            assert_eq!(
+                *desc, cmd.description,
+                "palette description drift for \"{}\"",
+                cmd.name
+            );
         }
 
         // The listing contains nothing the core registry didn't surface.
         assert_eq!(
             listed.len(),
-            tui_count,
-            "the runtime palette listing has entries not present (TUI-surfaced) \
-             in the core registry"
+            palette::PALETTE_COMMANDS.len(),
+            "the runtime palette listing has entries not present in the core \
+             registry"
         );
+    }
 
-        // Structural guard restored as an allowlist: every Web-only palette
-        // command must be a deliberate, known exception (the TUI has no surface
-        // for it). A new Web-only command added without updating this list fails
-        // here — the same alarm the old "no Web-only commands" assertion gave,
-        // but now allowing intentional exceptions. Web-only commands are also
-        // intentionally absent from the TUI listing.
-        const KNOWN_WEB_ONLY: &[&str] = &[
-            "customize-ui-preferences",
-            "edit-config",
-            "toggle-copy-on-select",
-        ];
-        for cmd in palette::PALETTE_COMMANDS {
-            if cmd.surface == PaletteSurface::Web {
-                assert!(
-                    KNOWN_WEB_ONLY.contains(&cmd.name),
-                    "unexpected Web-only palette command \"{}\": add it to KNOWN_WEB_ONLY \
-                     if intentional (did you mean PaletteSurface::Both?)",
-                    cmd.name
-                );
-                assert!(
-                    !listed.contains_key(cmd.name),
-                    "Web-only command \"{}\" must not appear in the TUI listing",
-                    cmd.name
-                );
-            }
+    /// The three actions whose ONLY palette row was a web-palette row keep their
+    /// `BindingDef` but lose the row. Both halves matter:
+    ///
+    /// - No registry row: the web has no palette to surface them in, and the TUI
+    ///   never listed them (their surface was `Web`), so a row would be dead
+    ///   weight that the TUI palette would now wrongly list.
+    /// - Keeps its `BindingDef`: `config.rs::validate_keys` rejects any `[keys]`
+    ///   action name absent from `BINDING_DEFS`, so removing these would turn an
+    ///   existing user's `edit_config = ["ctrl-e"]` into a hard config error.
+    ///   They stay inert exactly as they are today (no keys, no scopes, no help).
+    #[test]
+    fn web_only_palette_rows_are_gone_but_their_actions_remain_bindable() {
+        for action in [
+            Action::EditConfig,
+            Action::RenameWebInstance,
+            Action::ToggleCopyOnSelect,
+        ] {
+            assert!(
+                dux_core::palette::find_by_action(action).is_none(),
+                "{action:?} should have no palette registry row"
+            );
+            assert!(
+                BINDING_DEFS.iter().any(|d| d.action == action),
+                "{action:?} must keep its BINDING_DEFS entry or config.rs's \
+                 validate_keys would reject a user config that binds it"
+            );
         }
     }
 

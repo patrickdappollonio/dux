@@ -39,12 +39,6 @@ pub struct BootstrapView {
     /// the web session is authenticated). A config reload that changes `[macros]`
     /// rebuilds this, delivered by a `config.changed` refetch.
     pub macros: Vec<MacroView>,
-    /// Surface-aware command-palette commands that the web should render as a
-    /// global "Commands" group, in canonical registry order. Derived from
-    /// `dux_core::palette` (the `Web`/`Both` subset). Each entry's `id` is the
-    /// dashed command name; the web's `paletteRegistry` maps it to a store
-    /// handler. Static for a given build.
-    pub palette_commands: Vec<PaletteCommandView>,
     /// Web-surface welcome-screen tips, from the shared `dux_core::welcome` list.
     pub welcome_tips: Vec<String>,
     /// Mirrors the binary's display version ('vX.Y.Z' or 'development'); the web shows it in the sidebar brand block.
@@ -163,17 +157,6 @@ pub struct MacroView {
     /// "agent" | "terminal" | "both" — matches the config serde casing for
     /// `MacroSurface`.
     pub surface: String,
-}
-
-/// A single global palette command surfaced to the web, projected from
-/// `dux_core::palette::PaletteCommand`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PaletteCommandView {
-    /// The dashed command name (e.g. `sort-agents-by-updated`). Stable id used
-    /// to look up the web handler in `paletteRegistry`.
-    pub id: &'static str,
-    /// One-line description shown alongside the id in the palette.
-    pub description: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -576,12 +559,6 @@ impl Engine {
                 .iter()
                 .map(|(name, entry)| MacroView::from_entry(name, entry))
                 .collect(),
-            palette_commands: crate::palette::web_palette_commands()
-                .map(|c| PaletteCommandView {
-                    id: c.name,
-                    description: c.description,
-                })
-                .collect(),
             welcome_tips: crate::welcome::web_tips(),
             dux_version: crate::display_version().to_string(),
             randomize_agent_names_by_default: self
@@ -666,42 +643,6 @@ mod tests {
             !engine.bootstrap().welcome_tips.is_empty(),
             "welcome_tips should carry the shared web tips"
         );
-    }
-
-    #[test]
-    fn palette_commands_project_web_subset_in_registry_order() {
-        let (engine, _tmp) = test_engine();
-        let boot = engine.bootstrap();
-
-        // The projected ids equal the Web/Both subset of the core registry, in
-        // canonical registry order.
-        let expected: Vec<&str> = crate::palette::web_palette_commands()
-            .map(|c| c.name)
-            .collect();
-        let actual: Vec<&str> = boot.palette_commands.iter().map(|c| c.id).collect();
-        assert_eq!(actual, expected);
-
-        // Descriptions are carried verbatim from the registry.
-        for (view, cmd) in boot
-            .palette_commands
-            .iter()
-            .zip(crate::palette::web_palette_commands())
-        {
-            assert_eq!(view.id, cmd.name);
-            assert_eq!(view.description, cmd.description);
-        }
-
-        // Spot-check that known web commands are present and known TUI-only
-        // commands are absent.
-        assert!(actual.contains(&"edit-macros"));
-        assert!(!actual.contains(&"start-web-server"));
-        assert!(!actual.contains(&"change-theme"));
-        // Demoted to TUI-only: the web renders diffs in Monaco's DiffEditor,
-        // which manages its own line-number gutters.
-        assert!(!actual.contains(&"toggle-diff-line-numbers"));
-        // TUI-only: the web surfaces this via a dedicated Add-project button,
-        // not the command palette.
-        assert!(!actual.contains(&"add-project"));
     }
 
     #[test]
@@ -1296,7 +1237,6 @@ mod tests {
         for field in [
             "available_providers",
             "macros",
-            "palette_commands",
             "welcome_tips",
             "dux_version",
             "randomize_agent_names_by_default",

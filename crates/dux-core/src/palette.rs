@@ -1,71 +1,47 @@
-//! Surface-aware command-palette registry: the single source of truth for
-//! every command the `Ctrl-p` palette can run.
+//! The command-palette registry: the single source of truth for every command
+//! the TUI's `Ctrl-p` palette can run.
 //!
-//! Each [`PaletteCommand`] carries the action it dispatches, the dashed command
-//! name and description shown in the palette, and the [`PaletteSurface`] that
-//! declares which UI(s) surface it as a *global, parameter-free* palette entry.
+//! Each [`PaletteCommand`] carries the action it dispatches plus the dashed
+//! command name and description shown in the palette. Keybindings remain
+//! TUI-side (`keybindings.rs`), because they are a TUI concern; this table is
+//! transport-agnostic.
 //!
-//! Parity is by construction: name and description live here once, so the TUI
-//! and the web cannot drift. Keybindings remain TUI-side (`keybindings.rs`),
-//! because they are a TUI concern; this table is transport-agnostic.
+//! ## Scope: this table is the TUI palette, and only the TUI palette
 //!
-//! ## What "surface" means
+//! The web UI has no command palette. Its equivalent surface is the cog **app
+//! menu**, which is defined client-side in
+//! `crates/dux-web/web/src/lib/appMenu.ts` and does NOT read this table. The
+//! two surfaces are independent: there is no projection and no cross-language
+//! pin holding them together.
 //!
-//! A command is [`PaletteSurface::Both`] or [`PaletteSurface::Web`] only when
-//! the web has a *global* handler that needs no per-row context. Many TUI
-//! palette commands are inherently per-project, per-session, or per-terminal:
-//! on the web those live as parameterized row/menu/dialog actions, not as
-//! global palette entries, so they are marked [`PaletteSurface::Tui`] here with
-//! a comment naming the web's equivalent surface. The exhaustiveness test in
-//! `keybindings.rs` guarantees every TUI palette command appears in this table
-//! exactly once.
+//! This table therefore carries no per-surface metadata. It previously had a
+//! `PaletteSurface` enum marking rows as Tui/Web/Both, which existed only to
+//! feed a web projection; that projection is gone, and the enum's own doc
+//! comment had already rotted (it claimed no row used `Web` while three did).
+//!
+//! When you add a command here, decide explicitly whether it also warrants an
+//! entry in the web app menu (see CLAUDE.md) — nothing will fail if you skip
+//! it. Many commands here are inherently per-project, per-session, or
+//! per-terminal; on the web those live as parameterized row/menu/dialog
+//! actions rather than global menu entries. The per-row comments below record
+//! that reasoning. The exhaustiveness test in `keybindings.rs` guarantees
+//! every command in this table is listed by the TUI palette exactly once.
 
 use crate::action::Action;
-
-/// Which UI surfaces expose a command as a global, parameter-free palette entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaletteSurface {
-    /// TUI palette only. Either the command makes no sense on the web, or the
-    /// web exposes the same capability through a parameterized per-row /
-    /// per-project / per-session action (a menu, dialog, or inline control)
-    /// rather than a global palette command.
-    Tui,
-    /// Web palette only. (None today — every web palette command is also a TUI
-    /// command — but the variant exists so a future web-only command is honest.)
-    #[allow(dead_code)]
-    Web,
-    /// Both surfaces expose it as a global palette command.
-    Both,
-}
-
-impl PaletteSurface {
-    /// Whether this command should appear in the TUI palette listing.
-    pub fn in_tui(self) -> bool {
-        matches!(self, PaletteSurface::Tui | PaletteSurface::Both)
-    }
-
-    /// Whether this command should appear in the web palette listing.
-    pub fn in_web(self) -> bool {
-        matches!(self, PaletteSurface::Web | PaletteSurface::Both)
-    }
-}
 
 /// One row of the palette registry.
 pub struct PaletteCommand {
     /// The action this command dispatches (the join key to TUI keybindings).
     pub action: Action,
     /// The dashed command name shown and matched in the palette (e.g.
-    /// `start-web-server`). This is the stable command id for both surfaces.
+    /// `start-web-server`). This is the stable command id.
     pub name: &'static str,
     /// One-line description shown alongside the name in the palette.
     pub description: &'static str,
-    /// Which surfaces expose this as a global palette command.
-    pub surface: PaletteSurface,
 }
 
 /// The palette registry. Order mirrors `keybindings::BINDING_DEFS` so the TUI
-/// palette listing stays byte-identical to its previous (BINDING_DEFS-ordered)
-/// output, and the web "Commands" group renders in the same canonical order.
+/// palette listing renders in a stable, canonical order.
 ///
 /// Every entry here joins 1:1 to a `BINDING_DEFS` entry by [`Action`] (the TUI
 /// attaches keybindings and dispatches through that join). The exhaustiveness
@@ -77,55 +53,47 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         name: "toggle-project",
         description: "Collapse or expand the selected project's agents",
         // Per-project: web collapses/expands projects directly in the sidebar.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::NewAgent,
         name: "new-agent",
         description: "Create a new agent for the selected project",
         // Per-project: web's new-agent dialog is launched per project row/menu.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::NewAgentFromPr,
         name: "new-agent-from-pr",
         description: "Create a new agent from a GitHub pull request",
         // Per-project: web exposes "New agent from PR in <project>" per project.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::NewAgentFromWorktree,
         name: "new-agent-from-worktree",
         description: "Create a new agent from an existing git worktree",
         // Per-project: web's attach-worktree dialog is launched per project.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ForkAgent,
         name: "fork-agent",
         description: "Fork the selected agent into a fresh worktree and session",
         // Per-session: web exposes "Fork agent…" from the session context.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ChangeAgentProvider,
         name: "change-agent-provider",
         description: "Swap this worktree's provider",
         // Per-session: web exposes the provider picker from the session menu.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::NewTab,
         name: "new-agent-tab",
         description: "Add a tab to the selected agent, choosing its provider",
         // Per-session: web adds tabs from the tab strip's + button.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::CloseTab,
         name: "close-tab",
         description: "Close the focused tab of the selected agent",
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ChangeDefaultProvider,
@@ -133,29 +101,25 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Change the global default provider for new agents in projects without a project-specific override",
         // TUI-only: the web has no wire command or UI for the global default
         // provider; project defaults are edited per project instead.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ChangeProjectDefaultProvider,
         name: "change-project-default-provider",
         description: "Change the selected project's default provider for future agents in that project only",
         // Per-project: web edits this in the project settings dialog.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ChangeTheme,
         name: "change-theme",
         description: "Switch the dux color theme",
         // TUI-only: the web has no theme switcher (it follows the browser/CSS).
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ReloadConfig,
         name: "reload-config",
         description: "Reload config.toml after validating it",
-        // Both (GLOBAL): reloads the whole config — acts on no selected target.
-        // Web sends the `reload_config` wire command from the palette.
-        surface: PaletteSurface::Both,
+        // GLOBAL: reloads the whole config — acts on no selected target.
+        // Web equivalent: the app menu's Configuration submenu.
     },
     PaletteCommand {
         action: Action::StartWebServer,
@@ -163,50 +127,43 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Stop the TUI and serve the dux web UI over your running agents",
         // TUI-only: this IS the escape hatch INTO the web UI; meaningless once
         // you are already in the web UI.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ToggleProjectAutoReopenAgents,
         name: "toggle-project-auto-reopen-agents",
         description: "Opt the selected project in or out of startup agent reopening",
         // Per-project: web edits this in the project settings dialog.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ToggleAgentAutoReopen,
         name: "toggle-agent-auto-reopen",
         description: "Opt the selected agent in or out of startup reopening",
         // Per-session: web toggles this from the session actions group.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ConfigureStartupCommand,
         name: "configure-startup-command",
         description: "Configure the selected project's startup command",
         // Per-project: web edits this in the project settings dialog.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ConfigureGlobalEnv,
         name: "configure-global-env",
         description: "Configure environment variables inherited by every project",
-        // Both (GLOBAL): the global env applies to every project — no target.
-        // Web opens the global-environment dialog from the palette.
-        surface: PaletteSurface::Both,
+        // GLOBAL: the global env applies to every project — no target.
+        // Web equivalent: the app menu's Configuration submenu.
     },
     PaletteCommand {
         action: Action::ConfigureProjectEnv,
         name: "configure-project-env",
         description: "Configure environment variables for the selected project's agents and terminals",
         // Per-project: web edits this in the project settings dialog.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::RerunStartupCommandOnAgent,
         name: "rerun-startup-command-on-agent",
         description: "Rerun the selected agent's startup command",
         // Per-session: not surfaced as a global web command.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ReadStartupCommandLogs,
@@ -214,23 +171,19 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Read startup command logs for the selected agent or project",
         // TUI-only: opens server-side log files in a local viewer (a server-side
         // footgun on the web; no remote log viewer is built).
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::FocusAgent,
         name: "show-agent",
         description: "Show and focus the selected agent",
         // Per-session: web's "Switch session" group selects an agent.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::OpenProjectBrowser,
         name: "add-project",
         description: "Open the project browser",
         // TUI-only: opens the project browser to add a NEW project. The web
-        // UI surfaces this through a dedicated Add-project button instead of
-        // the command palette.
-        surface: PaletteSurface::Tui,
+        // UI surfaces this through a dedicated Add-project button.
     },
     PaletteCommand {
         action: Action::CopyPath,
@@ -238,7 +191,6 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Copy the selected agent's worktree path",
         // TUI-only: a server-side filesystem path is meaningless to copy in a
         // remote browser.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::OpenWorktreeInEditor,
@@ -246,28 +198,24 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Open the selected agent worktree in the configured editor",
         // TUI-only: launches a local editor on the server host (server-side
         // footgun; nothing the browser can do).
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ChooseWorktreeEditor,
         name: "open-worktree-with",
         description: "Choose which editor should open the selected agent worktree",
         // TUI-only: same server-side editor launch as `open-worktree`.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::RefreshProject,
         name: "pull-project",
         description: "Git pull the selected project checkout",
         // Per-project: web exposes "Pull <project>…" per project row.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::CheckoutProjectDefaultBranch,
         name: "checkout-project-default-branch",
         description: "Check out the selected project's default branch",
         // Per-project: web exposes "Checkout default branch for <project>…".
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ReconnectAgent,
@@ -275,35 +223,30 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Restart the CLI for the selected agent",
         // TUI-only: plain (resume) reconnect has no web surface; the web's
         // agent menu deliberately offers only the confirmed force variant.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ShowTerminal,
         name: "show-terminal",
         description: "Open the first companion terminal, or launch a new one",
         // Per-session: web manages companion terminals per session inline.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::DeleteSession,
         name: "delete-agent",
         description: "Delete the selected agent session",
         // Per-session: web deletes a session via its per-row delete + confirm.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::DeleteTerminal,
         name: "delete-terminal",
         description: "Delete the selected companion terminal",
         // Per-terminal: web deletes terminals via their per-row delete + confirm.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::OpenCurrentPullRequest,
         name: "open-current-pr",
         description: "Open the selected agent's current pull request in the default browser",
         // Per-session: web links to the PR directly from the session's PR badge.
-        surface: PaletteSurface::Tui,
     },
     // ── Global ────────────────────────────────────────────────────
     PaletteCommand {
@@ -312,14 +255,12 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Collapse or expand the projects sidebar",
         // TUI-only: web layout is responsive; focus is the mode, no manual
         // pane collapse command.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ToggleGitPane,
         name: "toggle-git-pane",
         description: "Collapse or expand the git pane",
         // TUI-only: TUI-specific pane layout.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ToggleHelp,
@@ -327,67 +268,41 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Open the help overlay",
         // TUI-only: the help overlay enumerates TUI keybindings, which do not
         // apply to the web.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ForceRedraw,
         name: "force-redraw",
         description: "Force a full terminal redraw (clears rendering artifacts)",
         // TUI-only: a terminal-redraw concept with no web analog.
-        surface: PaletteSurface::Tui,
     },
     // ── Palette-only (no direct keybinding) ────────────────────────
     PaletteCommand {
         action: Action::KillRunning,
         name: "kill-running",
         description: "Open a modal to kill running agents and companion terminals",
-        // Web: opens KillRunningDialog, which lists active agents and live
-        // terminals and force-kills each (agents detach via
-        // WireCommand::KillSessionPty; terminals via DeleteTerminal).
-        surface: PaletteSurface::Both,
-    },
-    PaletteCommand {
-        action: Action::EditConfig,
-        name: "edit-config",
-        description: "Edit config.toml in an editor",
-        // Web-only: opens the Monaco config.toml editor (GET/PUT
-        // /api/v1/config/raw). The TUI edits config through `dux config` and the
-        // configure-* commands, so it does not list this. First user of
-        // PaletteSurface::Web.
-        surface: PaletteSurface::Web,
-    },
-    PaletteCommand {
-        action: Action::RenameWebInstance,
-        name: "customize-ui-preferences",
-        description: "Open Settings: instance name/favicon, web preferences, and shared ui/capabilities options",
-        // Web-only: opens the Settings modal (instance identity via
-        // /api/v1/config/instance-identity, plus the grouped ui/capabilities
-        // knobs via PATCH /api/v1/config/settings, see
-        // crates/dux-web/web/src/lib/settingsDescriptors.ts for the exact field
-        // set). The TUI sets config through `dux config` and its own palette
-        // commands, so it does not list this.
-        surface: PaletteSurface::Web,
+        // GLOBAL: acts on every running agent/terminal — no target. Web
+        // equivalent: the app menu's "Stop running agents…" opens
+        // KillRunningDialog, which lists active agents and live terminals and
+        // force-kills each (agents detach via WireCommand::KillSessionPty;
+        // terminals via DeleteTerminal).
     },
     PaletteCommand {
         action: Action::NewTerminal,
         name: "new-terminal",
         description: "Spawn a new companion terminal for the selected agent",
         // Per-session: web spawns companion terminals per session inline.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::RenameSession,
         name: "rename-agent",
         description: "Rename the selected agent session",
         // Per-session: web exposes "Rename…" from the session actions group.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::OpenAgentInfo,
         name: "agent-info",
         description: "Show the selected agent's details and branch lineage",
         // Per-session: the web exposes "Agent info…" from the session ⋯ menu.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::DeleteProject,
@@ -395,65 +310,57 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Remove the selected project and its sessions",
         // TUI-only (audit decision): web offers remove-only (keeps files), not
         // a destructive project-and-sessions delete.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::RemoveProject,
         name: "remove-project",
         description: "Remove project from app (keeps files on disk)",
         // Per-project: web removes a project from its per-project menu/dialog.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::SortAgentsByUpdated,
         name: "sort-agents-by-updated",
         description: "Sort agents by most recently updated",
-        // Both (GLOBAL): sets the app-wide agent sort order — no target.
-        // Web sorts via `sortAgents("updated")` from the palette.
-        surface: PaletteSurface::Both,
+        // GLOBAL: reorders every project's agents — no target.
+        // Web equivalent: the app menu's "Sort agents by" submenu.
     },
     PaletteCommand {
         action: Action::SortAgentsByCreated,
         name: "sort-agents-by-created",
         description: "Sort agents by creation date (newest first)",
-        // Both (GLOBAL): sets the app-wide agent sort order — no target.
-        // Web sorts via `sortAgents("created")` from the palette.
-        surface: PaletteSurface::Both,
+        // GLOBAL: reorders every project's agents — no target.
+        // Web equivalent: the app menu's "Sort agents by" submenu.
     },
     PaletteCommand {
         action: Action::SortAgentsByName,
         name: "sort-agents-by-name",
         description: "Sort agents alphabetically by name",
-        // Both (GLOBAL): sets the app-wide agent sort order — no target.
-        // Web sorts via `sortAgents("name")` from the palette.
-        surface: PaletteSurface::Both,
+        // GLOBAL: reorders every project's agents — no target.
+        // Web equivalent: the app menu's "Sort agents by" submenu.
     },
     PaletteCommand {
         action: Action::RemoveGitPane,
         name: "toggle-remove-git-pane",
         description: "Remove or restore the git pane entirely",
-        // Both: the web mirrors this as hide/show of its Changes pane. The
-        // paletteRegistry handler toggles the client-side visibility, seeded
-        // from config.ui.show_changes_pane.
-        surface: PaletteSurface::Both,
+        // The web mirrors this as hide/show of its Changes pane, but as a
+        // PREFERENCE (ui.show_changes_pane in the Preferences dialog) plus a
+        // live toggle in the Changes actions menu, not as an app-menu entry.
     },
     PaletteCommand {
         action: Action::EditMacros,
         name: "edit-macros",
         description: "Edit text macros for interactive mode",
-        // Both: editing macros is GLOBAL config (the whole `[macros]` map), not a
-        // per-target action — exactly the app-menu-shaped command a user searches
-        // the palette for. The web opens its macro-editor dialog (list/add/edit/
-        // delete; saves wholesale via `update_macros`). Running a macro is the
-        // per-target action and stays OFF the palette (the terminal-pane popover).
-        surface: PaletteSurface::Both,
+        // GLOBAL: editing macros is config-wide (the whole `[macros]` map), not a
+        // per-target action. Web equivalent: the app menu's Configuration submenu
+        // opens the macro-editor dialog (list/add/edit/delete; saves wholesale via
+        // `update_macros`). Running a macro is the per-target action and stays off
+        // both surfaces' global menus (it lives in the terminal-pane popover).
     },
     PaletteCommand {
         action: Action::DebugInput,
         name: "input-debugging",
         description: "Open input event debugger to inspect keyboard and mouse events",
         // TUI-only: inspects raw terminal input events.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ToggleDiffLineNumbers,
@@ -461,59 +368,45 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Toggle line numbers in diff view",
         // TUI-only: toggles the TUI diff overlay's gutters. The web renders diffs
         // in Monaco's DiffEditor, which manages its own line-number gutters.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ResourceMonitor,
         name: "resource-monitor",
         description: "Show CPU and memory usage for dux and all running agents",
         // TUI-only (audit decision): the resource monitor is not built for web.
-        surface: PaletteSurface::Tui,
     },
     PaletteCommand {
         action: Action::ToggleGithubIntegration,
         name: "toggle-github-integration",
         description: "Toggle GitHub PR integration",
-        // Web: WireCommand::ToggleGithubIntegration flips ui.github_integration
-        // and drives the engine's PR-sync side effects.
-        surface: PaletteSurface::Both,
+        // The web exposes this as a PREFERENCE row (ui.github_integration in the
+        // Preferences dialog), not an app-menu entry. That row still writes through
+        // WireCommand::ToggleGithubIntegration, which flips the flag AND drives the
+        // engine's PR-sync side effects.
     },
     PaletteCommand {
         action: Action::ToggleAlwaysShowTabs,
         name: "toggle-always-show-tabs",
         description: "Toggle always showing the agent tab strip, even with a single tab",
-        // Web: WireCommand::ToggleAlwaysShowTabStrip flips ui.always_show_tab_strip
-        // via `POST /api/v1/ui/toggle-always-show-tab-strip`; the web command
-        // palette's TS handler/pin (`paletteRegistry.ts` + `paletteRegistry.test.ts`)
-        // is wired up, so this is surfaced on both the TUI and web palettes.
-        surface: PaletteSurface::Both,
-    },
-    PaletteCommand {
-        action: Action::ToggleCopyOnSelect,
-        name: "toggle-copy-on-select",
-        description: "Toggle auto-copying selected terminal text (web only)",
-        // Web-only: WireCommand::ToggleCopyOnSelect flips ui.copy_on_select. The
-        // behavior (highlight-to-copy) exists only in the browser terminal, so it
-        // is not surfaced in the TUI palette.
-        surface: PaletteSurface::Web,
+        // The web exposes this as a PREFERENCE row (ui.always_show_tab_strip in
+        // the Preferences dialog), not an app-menu entry.
     },
     PaletteCommand {
         action: Action::ToggleRandomizedPetNameDefault,
         name: "toggle-randomized-pet-name-default",
         description: "Toggle whether new agent prompts start with a random pet name",
-        // Web: WireCommand::ToggleRandomizedPetNameDefault flips the default; the
-        // web new-agent dialog still has its own per-open randomize checkbox,
-        // seeded from this default.
-        surface: PaletteSurface::Both,
+        // The web exposes this as a PREFERENCE row
+        // (defaults.enable_randomized_pet_name_by_default in the Preferences
+        // dialog), not an app-menu entry. The web new-agent dialog still has its
+        // own per-open randomize checkbox, seeded from this default.
     },
     PaletteCommand {
         action: Action::TogglePrBannerPosition,
         name: "toggle-pr-banner-position",
         description: "Move PR banner between top and bottom of agent pane",
-        // Web: WireCommand::TogglePrBannerPosition flips ui.pr_banner_position;
-        // the web hides this entry when GitHub PRs are unavailable (no banner to
-        // move) and mobile always pins the banner to the top.
-        surface: PaletteSurface::Both,
+        // The web exposes this as a PREFERENCE row (ui.pr_banner_position in the
+        // Preferences dialog), not an app-menu entry. Mobile always pins the
+        // banner to the top regardless.
     },
     PaletteCommand {
         action: Action::ForceReconnectAgent,
@@ -521,14 +414,8 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         description: "Force-reconnect the agent with a fresh session (no --continue)",
         // Per-session: web exposes "Force recreate agent…" in the agent menu,
         // gated by a confirmation dialog.
-        surface: PaletteSurface::Tui,
     },
 ];
-
-/// All palette commands surfaced on the web, in registry (canonical) order.
-pub fn web_palette_commands() -> impl Iterator<Item = &'static PaletteCommand> {
-    PALETTE_COMMANDS.iter().filter(|c| c.surface.in_web())
-}
 
 /// Look up a palette command by the action it dispatches.
 pub fn find_by_action(action: Action) -> Option<&'static PaletteCommand> {
@@ -577,68 +464,13 @@ mod tests {
         }
     }
 
-    // TWO-SIDED PIN (Rust half): the exact set of web-surfaced palette command
-    // ids. The vitest counterpart pins the TS handler-map keys to this same
-    // list — see `crates/dux-web/web/src/lib/paletteRegistry.test.ts`. Changing
-    // one surface without the other fails a gate. Keep this list alphabetized.
-    #[test]
-    fn web_surface_ids_match_expected_pin() {
-        let expected = [
-            "configure-global-env",
-            "customize-ui-preferences",
-            "edit-config",
-            "edit-macros",
-            "kill-running",
-            "reload-config",
-            "sort-agents-by-created",
-            "sort-agents-by-name",
-            "sort-agents-by-updated",
-            "toggle-always-show-tabs",
-            "toggle-copy-on-select",
-            "toggle-github-integration",
-            "toggle-pr-banner-position",
-            "toggle-randomized-pet-name-default",
-            "toggle-remove-git-pane",
-        ];
-        let mut actual: Vec<&str> = web_palette_commands().map(|c| c.name).collect();
-        actual.sort_unstable();
-        assert_eq!(
-            actual, expected,
-            "web-surfaced palette ids drifted from the pin. If this is intentional, \
-             update BOTH this list and EXPECTED_WEB_COMMANDS in paletteRegistry.test.ts."
-        );
-    }
-
-    /// The CROSS-LANGUAGE half of the pin: parse EXPECTED_WEB_COMMANDS out of
-    /// the vitest file and assert it equals the registry's web-surfaced set.
-    /// Without this, the Rust and TS pins were two hand-mirrored lists that
-    /// merely happened to agree — a Rust-side addition with only the Rust pin
-    /// updated would ship a ViewModel id with no web handler and degrade
-    /// SILENTLY (the palette hides handler-less entries). Now that desync
-    /// fails `cargo test`. Skips (rather than fails) when the web tree isn't
-    /// present, e.g. a published crate build outside the workspace.
-    #[test]
-    fn web_pin_matches_the_typescript_pin() {
-        let ts_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../dux-web/web/src/lib/paletteRegistry.test.ts");
-        let Ok(source) = std::fs::read_to_string(&ts_path) else {
-            eprintln!("skipping: {} not present", ts_path.display());
-            return;
-        };
-        let array = source
-            .split("const EXPECTED_WEB_COMMANDS = [")
-            .nth(1)
-            .and_then(|rest| rest.split(']').next())
-            .expect("EXPECTED_WEB_COMMANDS array not found in paletteRegistry.test.ts");
-        let mut ts_ids: Vec<&str> = array.split('"').skip(1).step_by(2).collect();
-        ts_ids.sort_unstable();
-        let mut rust_ids: Vec<&str> = web_palette_commands().map(|c| c.name).collect();
-        rust_ids.sort_unstable();
-        assert_eq!(
-            rust_ids, ts_ids,
-            "the Rust registry's web-surfaced ids and the TS EXPECTED_WEB_COMMANDS \
-             pin have drifted apart — update paletteRegistry.ts (handlers) and its \
-             test alongside the dux_core::palette surface change."
-        );
-    }
+    // NOTE: this registry deliberately has NO cross-language pin to the web.
+    // It used to carry two: `web_surface_ids_match_expected_pin` (the exact set
+    // of web-surfaced ids) and `web_pin_matches_the_typescript_pin` (which
+    // parsed the vitest file to catch a one-sided edit). Both are gone along
+    // with the web projection they guarded: the web app menu
+    // (`crates/dux-web/web/src/lib/appMenu.ts`) is now an independent,
+    // client-owned surface with its own titles, its own item set, and submenus,
+    // so a pin claiming a relationship between the two would be a false record.
+    // Keeping the surfaces in step is a deliberate human step — see CLAUDE.md.
 }

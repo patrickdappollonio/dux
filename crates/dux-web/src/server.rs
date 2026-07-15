@@ -3653,7 +3653,6 @@ mod tests {
         for field in [
             "available_providers",
             "macros",
-            "palette_commands",
             "welcome_tips",
             "dux_version",
             "randomize_agent_names_by_default",
