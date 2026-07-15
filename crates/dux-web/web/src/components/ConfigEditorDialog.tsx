@@ -67,7 +67,7 @@ function ConfigEditorForm({
   )
 }
 
-// The Monaco config.toml editor (Ctrl+k "edit-config"). The server validates the
+// The Monaco config.toml editor (the app menu's "Edit config file…"). The server validates the
 // TOML before writing; saving PERSISTS the file but does not apply it (the
 // running config is unchanged until the user runs "Reload config"). A callout in
 // the form states this.
