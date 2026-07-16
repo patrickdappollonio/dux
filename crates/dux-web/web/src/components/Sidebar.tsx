@@ -18,6 +18,7 @@ import {
   ClipboardCopy,
   Cpu,
   Ellipsis,
+  EllipsisVertical,
   FileCode2,
   Folder,
   FolderOpen,
@@ -44,6 +45,7 @@ import { defaultProviderForSession } from "@/lib/agentTabs"
 import { copyToClipboard } from "@/lib/clipboard"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 
+import { AddProjectMenuItems } from "@/components/AddProjectMenuItems"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { ConnDot } from "@/components/ConnDot"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
@@ -51,6 +53,7 @@ import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StatusBadge } from "@/components/StatusBadge"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ButtonGroup } from "@/components/ui/button-group"
 import {
   Empty,
   EmptyDescription,
@@ -1194,15 +1197,57 @@ export function AppSidebar() {
             open and collapses to just the + icon on the icon rail. On mobile the
             hub keeps its own "Add project" entry — this footer is desktop-only. */}
         <div className="flex items-center gap-2 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center">
+          {/* Split button: the primary segment keeps today's one-click "Add
+              project"; the attached ⋯ segment opens the add-variants menu.
+              Misclick tenet, resolved concretely: the tenet prevents an
+              imprecise click from firing a DIFFERENT action. A misclick on the
+              ⋯ segment opens a menu (nothing executes; one tap dismisses), and
+              every item opens the same non-destructive picker, so the worst
+              adjacency outcome is one extra click, never a wrong action. The
+              segment gets min-w-8 and the group's border seam as the visual
+              separator. */}
+          <ButtonGroup className="flex-1 group-data-[collapsible=icon]:hidden">
+            <Button
+              variant="outline"
+              size="sm"
+              aria-label="Add project"
+              onClick={openAddProject}
+              className="flex-1"
+            >
+              <Plus />
+              <span>Add project</span>
+            </Button>
+            <DropdownMenu>
+              {/* Open-state styling keys off data-popup-open (base-ui does not
+                  flip aria-expanded on an open menu trigger). */}
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    aria-label="More ways to add a project"
+                    className="min-w-8"
+                  >
+                    <EllipsisVertical />
+                  </Button>
+                }
+              />
+              <DropdownMenuContent align="end" side="top">
+                <AddProjectMenuItems />
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </ButtonGroup>
+          {/* Collapsed icon rail: the 32px rail cannot hold two honest
+              targets, so it keeps today's single + (the menu's actions remain
+              reachable by expanding the sidebar or via the picker). */}
           <Button
             variant="outline"
             size="sm"
             aria-label="Add project"
             onClick={openAddProject}
-            className="flex-1 group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
+            className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
           >
             <Plus />
-            <span className="group-data-[collapsible=icon]:hidden">Add project</span>
           </Button>
           <SidebarTrigger />
         </div>

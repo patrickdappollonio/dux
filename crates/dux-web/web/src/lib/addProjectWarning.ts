@@ -12,7 +12,7 @@
 // The strings below are byte-for-byte the TUI's lines, joined into prose for the
 // web dialog. Keep them in sync with crates/dux-tui/src/app/render.rs.
 
-import type { BranchWarningView } from "./types"
+import type { BranchWarningView, InspectKind } from "./types"
 
 export interface BranchWarningCopy {
   // The headline sentence describing the situation.
@@ -76,7 +76,57 @@ export function noCommitsCopy(): NoCommitsCopy {
   }
 }
 
-export type AddProjectAction = "plain" | "checkout-default" | "initial-commit"
+export interface InitRepoCopy {
+  // Headline: the folder is not a git repository.
+  message: string
+  // What dux will do: init, seed (when candidates exist), empty commit.
+  note: string
+}
+
+/**
+ * Copy for the plain-folder case: dux offers to initialize a repository. The
+ * note names what dux will do and lists the actual seed candidates found in
+ * the folder, omitting the seed clause entirely when there are none (never
+ * promise a seed that will not happen).
+ */
+export function initRepoCopy(candidates: string[]): InitRepoCopy {
+  const seedClause =
+    candidates.length > 0
+      ? `, seed a starter .gitignore covering ${candidates.join(", ")},`
+      : ""
+  return {
+    message: "This folder is not a git repository.",
+    note: `Dux will run git init${seedClause} and make an empty initial commit — your existing files are left untouched (untracked).`,
+  }
+}
+
+export interface InsideRepoCopy {
+  message: string
+}
+
+/**
+ * Copy for the blocked case: the folder sits inside an existing repository
+ * (or inside git's internal directory, where `root` is null and the copy
+ * degrades to not naming a root).
+ */
+export function insideRepoCopy(root: string | null): InsideRepoCopy {
+  if (root) {
+    return {
+      message: `This folder is inside the git repository at ${root}. Add that repository instead.`,
+    }
+  }
+  return {
+    message:
+      "This folder is inside a git repository's internal directory. Add the repository itself instead.",
+  }
+}
+
+export type AddProjectAction =
+  | "plain"
+  | "checkout-default"
+  | "initial-commit"
+  | "init-repo"
+  | "blocked"
 
 export interface AddProjectPrimaryAction {
   action: AddProjectAction
@@ -85,15 +135,25 @@ export interface AddProjectPrimaryAction {
 
 /**
  * Decide the add dialog's primary action + button label from the inspection
- * state. An unborn repo (no commits) takes precedence over any branch warning:
- * there is no default branch to check out, and after the initial commit the
- * current branch simply becomes the leading branch.
+ * state. `blocked` (a folder inside a repository) outranks everything; a
+ * `plain` kind outranks `hasCommits` (the plain reply carries
+ * `has_commits: false`, and init subsumes the commit). An unborn repo (no
+ * commits) takes precedence over any branch warning: there is no default
+ * branch to check out, and after the initial commit the current branch simply
+ * becomes the leading branch.
  */
 export function addProjectPrimaryAction(opts: {
+  kind: InspectKind
   hasCommits: boolean
   willCheckout: boolean
   hasBranchWarning: boolean
 }): AddProjectPrimaryAction {
+  if (opts.kind === "repo_subdir") {
+    return { action: "blocked", label: "Add project" }
+  }
+  if (opts.kind === "plain") {
+    return { action: "init-repo", label: "Initialize Repository & Add" }
+  }
   if (!opts.hasCommits) {
     return { action: "initial-commit", label: "Create Initial Commit & Add" }
   }
