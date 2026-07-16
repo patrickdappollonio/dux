@@ -16,6 +16,7 @@ pub mod editor;
 pub mod engine;
 pub mod gh;
 pub mod git;
+pub mod gitignore_seed;
 pub mod io_retry;
 pub mod lockfile;
 pub mod logger;
