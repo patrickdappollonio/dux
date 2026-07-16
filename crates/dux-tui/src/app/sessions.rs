@@ -585,6 +585,70 @@ impl App {
         });
     }
 
+    /// Dispatch the adopt-a-folder flow (git init, seed a starter .gitignore,
+    /// create the initial commit, then add the project) to a background
+    /// worker, mirroring `dispatch_create_initial_commit`. Shares
+    /// `InFlightKey::InitialCommit` so init-and-commit and commit-only on the
+    /// same path are mutually exclusive. Worker completion posts
+    /// `InitialCommitCreated`, whose `AddProjectAfterInitialCommit` reaction
+    /// registers the project.
+    pub(crate) fn dispatch_init_repo(&mut self, path: String, name: String) {
+        if !self
+            .engine
+            .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(path.clone()))
+        {
+            self.set_warning(format!(
+                "A repository is already being initialized in \"{path}\". Please wait for it to finish."
+            ));
+            return;
+        }
+        let add = dux_core::worker::InitialCommitAdd {
+            path: path.clone(),
+            name,
+            // The worker resolves the real branch after the commit lands;
+            // these placeholders are rewritten by `init_repo_and_commit`.
+            branch: String::new(),
+            leading_branch: String::new(),
+            initialized_repo: false,
+            seeded_gitignore: false,
+            seed_warning: None,
+        };
+        // Keyed busy dismissed by the op's `Final::Clear` when the worker
+        // reports back (see `drain_events`); the visible final is the
+        // add-project view handler's success message or the engine's error.
+        let op = dux_core::engine::status_op(format!(
+            "Initializing a git repository in {path} before adding the project..."
+        ))
+        .resolve_in_handler(|o: &TuiCheckoutInspectOutcome| match o {
+            TuiCheckoutInspectOutcome::Done => dux_core::engine::Final::clear(),
+        });
+        let pending = op.pending_status();
+        let status_op_id = op.id().to_string();
+        self.pending_checkout_inspect_ops
+            .insert(status_op_id.clone(), op);
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        let worker_tx = self.engine.worker_tx.clone();
+        thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            let tx_panic = worker_tx.clone();
+            let add_panic = add.clone();
+            let op_id_panic = status_op_id.clone();
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                dux_core::project_browser::run_init_repo_job(add, worker_tx, Some(status_op_id));
+            })) {
+                let reason = dux_core::engine::format_panic_payload(payload);
+                dux_core::logger::error(&format!(
+                    "repository-initialization worker panicked: {reason}"
+                ));
+                let _ = tx_panic.send(WorkerEvent::InitialCommitCreated {
+                    add: add_panic,
+                    result: Err(format!("Worker panicked: {reason}")),
+                    status_op_id: Some(op_id_panic),
+                });
+            }
+        });
+    }
+
     pub(crate) fn dispatch_create_agent_branch_inspection(&mut self, project: Project) {
         // The keyed busy is dismissed by the op's `Final::Clear` when
         // `CreateAgentBranchInspected` returns carrying this id; the visible final

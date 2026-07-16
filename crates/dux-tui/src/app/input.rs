@@ -107,6 +107,8 @@ enum PromptMouseTarget {
     ConfirmDiscardConfirm,
     ConfirmCreateInitialCommitCancel,
     ConfirmCreateInitialCommitConfirm,
+    ConfirmInitRepoCancel,
+    ConfirmInitRepoConfirm,
     ConfirmNonDefaultBranchCancel,
     ConfirmNonDefaultBranchAdd,
     ConfirmUseExistingBranchCancel,
@@ -193,6 +195,12 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::ConfirmCreateInitialCommitConfirm => {
                 Some(ButtonPressedTarget::ConfirmCreateInitialCommitConfirm)
+            }
+            PromptMouseTarget::ConfirmInitRepoCancel => {
+                Some(ButtonPressedTarget::ConfirmInitRepoCancel)
+            }
+            PromptMouseTarget::ConfirmInitRepoConfirm => {
+                Some(ButtonPressedTarget::ConfirmInitRepoConfirm)
             }
             PromptMouseTarget::ConfirmNonDefaultBranchCancel => {
                 Some(ButtonPressedTarget::ConfirmNonDefaultBranchCancel)
@@ -3117,6 +3125,31 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::ConfirmInitRepo {
+            confirm_selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => {
+                    self.resolve_confirm_init_repo(false);
+                }
+                Some(Action::ToggleSelection) => {
+                    *confirm_selected = !*confirm_selected;
+                }
+                Some(Action::Confirm) => {
+                    let confirm = *confirm_selected;
+                    self.resolve_confirm_init_repo(confirm);
+                }
+                // Space activates the focused button (dialog tenet).
+                _ if key.code == KeyCode::Char(' ') => {
+                    let confirm = *confirm_selected;
+                    self.resolve_confirm_init_repo(confirm);
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ConfirmNonDefaultBranch {
             action,
             focus,
@@ -3959,6 +3992,18 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::ConfirmInitRepo {
+                cancel_button,
+                init_button,
+            } => {
+                if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmInitRepoCancel)
+                } else if contains_point(init_button, column, row) {
+                    Some(PromptMouseTarget::ConfirmInitRepoConfirm)
+                } else {
+                    None
+                }
+            }
             OverlayMouseLayout::ConfirmNonDefaultBranch {
                 cancel_button,
                 add_button,
@@ -4566,6 +4611,23 @@ impl App {
     fn add_project_from_browser_path(&mut self, path: String) {
         let return_prompt = self.prompt.clone();
         if let Err(message) = self.engine.validate_project_add_path(&path) {
+            // Not addable as-is. A plain folder gets the adopt-a-folder prompt
+            // (git init + seed + initial commit); anything else (a subfolder,
+            // a .git dir, an already-registered path) keeps the failure modal
+            // with the ORIGINAL add error, which now names the enclosing root.
+            if let Ok(canonical) = self.engine.validate_project_init_path(&path) {
+                let candidates = dux_core::gitignore_seed::matched_candidates(&canonical)
+                    .iter()
+                    .map(|c| c.dir.to_string())
+                    .collect();
+                self.prompt = PromptState::ConfirmInitRepo {
+                    path: canonical.to_string_lossy().to_string(),
+                    name: String::new(),
+                    candidates,
+                    confirm_selected: false,
+                };
+                return;
+            }
             self.open_add_project_failed_modal(message, return_prompt);
             return;
         }
@@ -4977,6 +5039,27 @@ impl App {
         // completion posts `InitialCommitCreated`, whose reaction registers the
         // project. Keeps the UI thread free per the CLAUDE.md workers tenet.
         self.dispatch_create_initial_commit(path, name);
+        false
+    }
+
+    /// Resolve the adopt-a-folder prompt shown when adding a plain folder that
+    /// is not a git repository. On confirm: dispatch git init + seed + initial
+    /// commit to a background worker (which registers the project on
+    /// completion). On cancel: leave the folder untouched and restore the
+    /// project browser. Always returns `false` (never quits).
+    pub(crate) fn resolve_confirm_init_repo(&mut self, confirm: bool) -> bool {
+        let (path, name) = match &self.prompt {
+            PromptState::ConfirmInitRepo { path, name, .. } => (path.clone(), name.clone()),
+            _ => return false,
+        };
+        self.prompt = PromptState::None;
+        if !confirm {
+            if let Err(e) = self.open_project_browser() {
+                self.set_error(format!("{e:#}"));
+            }
+            return false;
+        }
+        self.dispatch_init_repo(path, name);
         false
     }
 
@@ -5553,6 +5636,8 @@ impl App {
             | PromptMouseTarget::ConfirmDiscardConfirm
             | PromptMouseTarget::ConfirmCreateInitialCommitCancel
             | PromptMouseTarget::ConfirmCreateInitialCommitConfirm
+            | PromptMouseTarget::ConfirmInitRepoCancel
+            | PromptMouseTarget::ConfirmInitRepoConfirm
             | PromptMouseTarget::ConfirmNonDefaultBranchCancel
             | PromptMouseTarget::ConfirmNonDefaultBranchAdd
             | PromptMouseTarget::ConfirmUseExistingBranchCancel
@@ -5669,6 +5754,8 @@ impl App {
             ButtonPressedTarget::ConfirmCreateInitialCommitConfirm => {
                 self.resolve_confirm_create_initial_commit(true)
             }
+            ButtonPressedTarget::ConfirmInitRepoCancel => self.resolve_confirm_init_repo(false),
+            ButtonPressedTarget::ConfirmInitRepoConfirm => self.resolve_confirm_init_repo(true),
             ButtonPressedTarget::ConfirmNonDefaultBranchCancel => {
                 self.prompt = PromptState::None;
                 false
@@ -10764,10 +10851,27 @@ cyan = "#00ffff"
 
     #[test]
     fn project_browser_typed_enter_failure_opens_modal_and_restores_path() {
+        // A folder INSIDE an existing repository must open the failure modal
+        // (with the root-naming message from the shared engine gate), never
+        // the adopt-a-folder prompt; dismissing it restores the typed path.
+        // (A plain non-repo folder now opens ConfirmInitRepo instead — see
+        // project_browser_plain_folder_opens_init_repo_prompt.)
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.engine.projects[0].path);
         let outside = tempdir().expect("outside tempdir");
-        let typed = outside.path().join("not-a-repo");
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(outside.path())
+                    .output()
+                    .expect("spawn git")
+                    .status
+                    .success()
+            );
+        };
+        run(&["init", "-q"]);
+        let typed = outside.path().join("subdir");
         std::fs::create_dir_all(&typed).expect("typed dir");
         app.prompt = PromptState::BrowseProjects {
             current_dir: root,
@@ -10787,7 +10891,10 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::AddProjectFailed { message, .. } => {
-                assert!(message.contains("not a git repository"));
+                assert!(
+                    message.contains("is inside the git repository at"),
+                    "the modal must name the enclosing root, got: {message}"
+                );
             }
             other => panic!("expected add-project failure modal, got {other:?}"),
         }
@@ -10806,6 +10913,72 @@ cyan = "#00ffff"
             }
             other => panic!("expected browser prompt restored, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn project_browser_plain_folder_opens_init_repo_prompt() {
+        // The flow this feature exists to open: a plain (non-repo) folder gets
+        // the adopt-a-folder prompt, not a dead-end failure modal. Confirming
+        // marks the shared in-flight gate; cancelling restores the browser.
+        let mut app = test_app(default_bindings());
+        let root = PathBuf::from(&app.engine.projects[0].path);
+        let outside = tempdir().expect("outside tempdir");
+        let typed = outside.path().join("plain");
+        std::fs::create_dir_all(&typed).expect("typed dir");
+        std::fs::create_dir_all(typed.join("node_modules")).expect("candidate dir");
+        let browser = PromptState::BrowseProjects {
+            current_dir: root,
+            entries: Vec::new(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: true,
+            path_input: TextInput::with_text(typed.to_string_lossy().to_string()),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+        app.prompt = browser.clone();
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        let canonical = typed
+            .canonicalize()
+            .expect("canonical")
+            .to_string_lossy()
+            .to_string();
+        match &app.prompt {
+            PromptState::ConfirmInitRepo {
+                path, candidates, ..
+            } => {
+                assert_eq!(path, &canonical);
+                assert_eq!(candidates, &vec!["node_modules".to_string()]);
+            }
+            other => panic!("expected the init-repo prompt, got {other:?}"),
+        }
+
+        // Cancel restores the project browser.
+        app.resolve_confirm_init_repo(false);
+        assert!(
+            matches!(app.prompt, PromptState::BrowseProjects { .. }),
+            "cancel must restore the browser, got {:?}",
+            app.prompt
+        );
+
+        // Re-open and confirm: the shared in-flight gate is marked.
+        app.prompt = PromptState::ConfirmInitRepo {
+            path: canonical.clone(),
+            name: String::new(),
+            candidates: vec!["node_modules".to_string()],
+            confirm_selected: true,
+        };
+        app.resolve_confirm_init_repo(true);
+        assert!(
+            !app.engine
+                .mark_in_flight(dux_core::engine::InFlightKey::InitialCommit(canonical)),
+            "confirm must mark InFlightKey::InitialCommit"
+        );
     }
 
     #[test]

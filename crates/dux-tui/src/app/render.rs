@@ -5700,6 +5700,101 @@ impl App {
                     create_button: create_area,
                 };
             }
+            PromptState::ConfirmInitRepo {
+                path,
+                candidates,
+                confirm_selected,
+                ..
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(60, 40, frame.area());
+                self.clear_overlay_area(frame, area);
+                let outer = self.themed_overlay_block("Not a Git Repository");
+                let inner = outer.inner(area);
+                outer.render(area, frame.buffer_mut());
+
+                let [body_area, _, buttons_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                    ])
+                    .areas(inner);
+
+                let mut lines = vec![
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" \""),
+                        Span::styled(path.as_str(), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw("\" is not a git repository."),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Dux can initialize one and make an empty initial commit.",
+                        Style::default().fg(self.theme.warning_fg),
+                    )),
+                ];
+                if !candidates.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            " A starter .gitignore will cover: {}.",
+                            candidates.join(", ")
+                        ),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )));
+                }
+                lines.push(Line::from(Span::styled(
+                    " Your existing files are left untouched (untracked).",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )));
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(body_area, frame.buffer_mut());
+
+                let btn_width = 22u16;
+                let gap = 2u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+
+                let cancel_area = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let init_area = Rect {
+                    x: cancel_area.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmInitRepoCancel,
+                        self.pressed_button,
+                        !confirm_selected,
+                        true,
+                    ))
+                    .render(frame, cancel_area, &self.theme);
+
+                Button::new("Initialize & Add")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfirmInitRepoConfirm,
+                        self.pressed_button,
+                        *confirm_selected,
+                        true,
+                    ))
+                    .render(frame, init_area, &self.theme);
+
+                self.overlay_layout.active = OverlayMouseLayout::ConfirmInitRepo {
+                    cancel_button: cancel_area,
+                    init_button: init_area,
+                };
+            }
             PromptState::ConfirmNonDefaultBranch {
                 action,
                 current_branch,
