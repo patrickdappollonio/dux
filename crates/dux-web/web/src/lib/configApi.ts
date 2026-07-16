@@ -11,6 +11,7 @@
 // refetches `GET /api/v1/bootstrap`. A non-2xx throws so the caller can toast it.
 
 import { getConnectionId } from "./connection"
+import type { SettingValue } from "./settingsDescriptors"
 import type { MacroView } from "./types"
 
 async function send(method: string, path: string, body: unknown): Promise<void> {
@@ -68,29 +69,34 @@ export const configApi = {
     favicon?: string
   }): Promise<void> =>
     send("POST", "/api/v1/config/instance-identity", body),
-  // Persist an explicit patch of the Settings modal's other `[ui]`/
-  // `[capabilities]` fields in one request. Body shape mirrors the server's
-  // typed, `deny_unknown_fields` sub-structs: `{ui: {...}, capabilities:
-  // {...}}`, both optional, every leaf field optional. An absent field is left
-  // untouched server-side; the server clamps numeric fields to a documented
-  // ceiling and rejects an unrecognized enum value (pr_banner_position) with
-  // a 400 that leaves config unchanged. `title`/`favicon` are NOT here, they
-  // stay on `setInstanceIdentity`.
+  // Persist an explicit patch of the Settings modal's `[ui]`/`[capabilities]`/
+  // `[defaults]` fields in one request. Groups and leaf fields are all
+  // optional; an absent field is left untouched server-side. The server clamps
+  // numeric fields to a documented ceiling and rejects an unrecognized enum
+  // value (`pr_banner_position`, `defaults.provider`) with a 400 that leaves
+  // config unchanged. `title`/`favicon` are NOT here, they stay on
+  // `setInstanceIdentity`, and `ui.github_integration` keeps its own endpoint.
+  //
+  // AUTHORITY: `SettingsBody` in `crates/dux-web/src/config_routes.rs` decides
+  // which keys are accepted. It is `deny_unknown_fields`, so a key invented
+  // here comes back as a 400 rather than being silently dropped.
+  //
+  // The leaf type is deliberately `Record<string, SettingValue>` and NOT a
+  // hand-listed key union. The only caller (`buildWrites` in
+  // `CustomizeWebappDialog.tsx`) builds exactly that and passes it as a
+  // variable, not an object literal: excess-property checking only fires on
+  // literals, and an index signature declares no properties for an
+  // all-optional target to compare against. A hand-listed union here therefore
+  // matches everything and rejects nothing. The previous one omitted the whole
+  // `defaults` group while that group shipped, and `tsc` never noticed, which
+  // is worse than no type because it reads as a guard. The real cross-language
+  // guard is a pair of loud tests: "the settings-PATCH key set matches the
+  // server's accepted fields" in `settingsDescriptors.test.ts` and
+  // `set_settings_accepts_every_key_the_modal_can_send` in `config_routes.rs`.
   patchSettings: (patch: {
-    ui?: {
-      copy_on_select?: boolean
-      show_changes_pane?: boolean
-      always_show_tab_strip?: boolean
-      status_clear_seconds?: number
-      attention_grace_seconds?: number
-      attention_indicator?: boolean
-      attention_on_bell?: boolean
-      pr_banner_position?: string
-    }
-    capabilities?: {
-      web_notifications?: boolean
-      hyperlinks?: boolean
-    }
+    ui?: Record<string, SettingValue>
+    capabilities?: Record<string, SettingValue>
+    defaults?: Record<string, SettingValue>
   }): Promise<void> => send("PATCH", "/api/v1/config/settings", patch),
   // Read the raw config.toml text for the Monaco editor. Returns the file
   // verbatim (or the plain render of the running config if none exists yet).

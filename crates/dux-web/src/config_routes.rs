@@ -792,6 +792,135 @@ mod tests {
         );
     }
 
+    /// CROSS-LANGUAGE PIN. The Preferences modal's PATCH keys live twice: in
+    /// `SettingsBody` here, and in the `writeTarget: "settings"` descriptors in
+    /// `crates/dux-web/web/src/lib/settingsDescriptors.ts`. There is no codegen
+    /// between them, so both halves are pinned by a loud test. This is the
+    /// server half; the twin is the set-equality assertion in
+    /// `settingsDescriptors.test.ts` ("the settings-PATCH key set matches the
+    /// server's accepted fields").
+    ///
+    /// This PATCHes every key that modal can emit, in one body, across all
+    /// three groups. Because `SettingsBody` is `deny_unknown_fields`, a key the
+    /// modal sends but the server dropped fails here with a 400 rather than
+    /// being silently ignored. Each value is asserted to land, so a key that
+    /// parses but is never mapped fails too.
+    ///
+    /// `ui.show_changes_pane` is deliberately absent: the server accepts it,
+    /// but the modal routes that row to the dedicated Changes-pane endpoint.
+    /// `ui.github_integration` and `server.title`/`favicon` are absent for the
+    /// same reason, each keeping its own endpoint.
+    #[tokio::test]
+    async fn set_settings_accepts_every_key_the_modal_can_send() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{
+                    "ui": {
+                        "copy_on_select": false,
+                        "always_show_tab_strip": true,
+                        "status_clear_seconds": 42,
+                        "attention_grace_seconds": 11,
+                        "attention_indicator": false,
+                        "attention_on_bell": false,
+                        "pr_banner_position": "top"
+                    },
+                    "capabilities": {
+                        "web_notifications": true,
+                        "hyperlinks": false
+                    },
+                    "defaults": {
+                        "enable_randomized_pet_name_by_default": true,
+                        "provider": "codex"
+                    }
+                }"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "every key the modal can send must be accepted"
+        );
+
+        let raw = read_raw_config_text(&app).await;
+        for expected in [
+            "copy_on_select = false",
+            "always_show_tab_strip = true",
+            "status_clear_seconds = 42",
+            "attention_grace_seconds = 11",
+            "attention_indicator = false",
+            "attention_on_bell = false",
+            "pr_banner_position = \"top\"",
+            "web_notifications = true",
+            "hyperlinks = false",
+            "enable_randomized_pet_name_by_default = true",
+            "provider = \"codex\"",
+        ] {
+            assert!(
+                raw.contains(expected),
+                "expected {expected:?} to persist, got:\n{raw}"
+            );
+        }
+    }
+
+    /// The `defaults` group is the one that drifted out of the TS body type
+    /// unnoticed, so pin it end to end at the HTTP boundary on its own.
+    #[tokio::test]
+    async fn set_settings_applies_the_defaults_group_end_to_end() {
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"defaults":{"enable_randomized_pet_name_by_default":true,"provider":"codex"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let raw = read_raw_config_text(&app).await;
+        assert!(
+            raw.contains("enable_randomized_pet_name_by_default = true"),
+            "the defaults group must persist: {raw}"
+        );
+        assert!(
+            raw.contains("provider = \"codex\""),
+            "the defaults group must persist: {raw}"
+        );
+    }
+
+    /// A rejected value must take the WHOLE patch down, including valid fields
+    /// in OTHER groups. `set_settings_rejects_an_unconfigured_default_provider_with_400`
+    /// covers the lone-invalid-field case; this covers the all-or-nothing part,
+    /// which is the half a partial apply would break.
+    #[tokio::test]
+    async fn set_settings_rejects_a_whole_patch_when_one_group_is_invalid() {
+        let (_tmp, app) = router_no_auth();
+        let before = read_raw_config_text(&app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"copy_on_select":false},"defaults":{"provider":"not-a-real-provider"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let after = read_raw_config_text(&app).await;
+        assert_eq!(
+            before, after,
+            "a rejected provider must not partially apply the rest of the patch"
+        );
+    }
+
     #[tokio::test]
     async fn set_settings_rejects_unknown_enum_value_with_400() {
         let (_tmp, app) = router_no_auth();

@@ -106,6 +106,47 @@ describe("settingsDescriptors", () => {
     expect(byKey["defaults.provider"]).toBe("codex")
   })
 
+  // CROSS-LANGUAGE PIN. The keys this modal can PATCH live twice: here, and in
+  // `SettingsBody` in `crates/dux-web/src/config_routes.rs`. There is no codegen
+  // path between them, so both halves are pinned by a loud test instead: this
+  // one, and `set_settings_accepts_every_key_the_modal_can_send` on the server,
+  // which PATCHes exactly this key set and asserts every value lands.
+  //
+  // This asserts SET EQUALITY, not a spot check, because the `patchSettings`
+  // body type cannot catch a drift (see the comment on it in `configApi.ts`).
+  // Adding a `writeTarget: "settings"` descriptor fails here until the server's
+  // `SettingsBody` grows the same key, and `deny_unknown_fields` means a key the
+  // server lacks is a 400 at runtime, not a silent no-op.
+  it("the settings-PATCH key set matches the server's accepted fields", () => {
+    const sent = allSettingDescriptors()
+      .filter((d) => d.writeTarget === "settings")
+      .map((d) => d.key)
+      .sort()
+    expect(sent).toEqual([
+      "capabilities.hyperlinks",
+      "capabilities.web_notifications",
+      "defaults.enable_randomized_pet_name_by_default",
+      "defaults.provider",
+      "ui.always_show_tab_strip",
+      "ui.attention_grace_seconds",
+      "ui.attention_indicator",
+      "ui.attention_on_bell",
+      "ui.copy_on_select",
+      "ui.pr_banner_position",
+      "ui.status_clear_seconds",
+    ])
+  })
+
+  // The server's `SettingsBody` also accepts `ui.show_changes_pane`, which this
+  // modal deliberately never sends through the PATCH: its row is bespoke because
+  // the store keeps an optimistic override for it and routes it to the dedicated
+  // Changes-pane endpoint. The asymmetry is intentional, so it is pinned rather
+  // than left to look like an oversight in the set above.
+  it("routes show_changes_pane to the dedicated Changes-pane endpoint", () => {
+    const d = allSettingDescriptors().find((d) => d.key === "ui.show_changes_pane")
+    expect(d?.writeTarget).toBe("changesPane")
+  })
+
   // GitHub integration must NOT ride the generic settings PATCH. Flipping it
   // arms/disarms background PR syncing and clears cached statuses, and that
   // logic lives behind the dedicated endpoint; duplicating it into set_settings
