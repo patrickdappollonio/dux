@@ -172,6 +172,61 @@ describe("MobileShell home row agent ⋯ menu — Add tab (G7)", () => {
   })
 })
 
+describe("MobileShell project terminals", () => {
+  function projectTerminalSpine(): DuxState["spine"] {
+    return {
+      projects: [
+        {
+          id: "p1",
+          name: "Repo",
+          path: "/tmp/p1",
+          path_missing: false,
+          default_provider: "claude",
+          current_branch: "main",
+          branch_status: "leading",
+          terminals: [
+            {
+              id: "pt-1",
+              label: "Terminal 2",
+              has_output: true,
+              foreground_cmd: null,
+            },
+          ],
+        },
+      ],
+      sessions: [],
+      sidebar: {
+        groups: [{ project_id: "p1", name: "Repo", orphaned: false, session_ids: [] }],
+        agentless_start: null,
+      },
+    } as unknown as DuxState["spine"]
+  }
+
+  it("renders the project terminal row under the project block on the hub", () => {
+    // T14's mobile half: before this, a project terminal rendered nowhere in
+    // the hub — invisible and unreachable on a phone.
+    mockState = makeState({
+      spine: projectTerminalSpine(),
+      bootstrap: { title: "dux", dux_version: "v1" },
+    })
+    render(<MobileShell />)
+    expect(screen.getByText("Terminal 2")).toBeTruthy()
+  })
+
+  it("offers 'New project terminal' in the project ⋯ menu", () => {
+    mockState = makeState({
+      spine: projectTerminalSpine(),
+      bootstrap: { title: "dux", dux_version: "v1" },
+    })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Project actions"))
+    const item = screen.getByText("New project terminal")
+    expect(
+      item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
+    ).not.toBe("true")
+  })
+})
+
 describe("MobileShell attention dot", () => {
   it("renders the attention dot when the agent needs attention", () => {
     const spine = makeSessionSpine(1) as unknown as {

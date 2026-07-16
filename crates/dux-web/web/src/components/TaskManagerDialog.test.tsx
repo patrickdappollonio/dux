@@ -234,6 +234,80 @@ describe("TaskManagerDialog", () => {
     expect(openDeleteTerminal).toHaveBeenCalledWith("term-1")
   })
 
+  it("project_terminal_row_renders_and_its_stop_opens_the_delete_confirm", async () => {
+    // The traps this guards (T3 + T5): a project terminal must appear as a row
+    // at all (it lives on a project, not a session), and its Stop button must
+    // not be dead (its sessionId is null; the old guard early-returned on that).
+    seed({
+      spine: {
+        sessions: [],
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
+          },
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const stop = await screen.findByLabelText("Stop Terminal 2")
+    fireEvent.click(stop)
+    expect(openDeleteTerminal).toHaveBeenCalledWith("pt-1")
+    // The row's detail column names the owning project.
+    expect(screen.getByText("Repo")).toBeTruthy()
+  })
+
+  it("does_not_say_nothing_is_running_while_a_project_terminal_lives", async () => {
+    // The trap this guards (T6): with only a project terminal running the
+    // dialog claimed "Nothing is running." and auto-closed.
+    seed({
+      spine: {
+        sessions: [],
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
+          },
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    await screen.findByLabelText("Stop Terminal 2")
+    expect(screen.queryByText("Nothing is running.")).toBeNull()
+    expect(closeTaskManager).not.toHaveBeenCalled()
+  })
+
+  it("stop_all_confirmation_counts_project_terminals", async () => {
+    // The trap this guards (T4's undercount): the confirmation copy summed
+    // only sessions' terminals, so a project terminal was stopped without
+    // ever being counted.
+    seed({
+      stopAllOpen: true,
+      spine: {
+        sessions: [
+          session({
+            id: "s1",
+            terminals: [terminal({ id: "term-1", label: "Terminal 1" })],
+          }),
+        ],
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
+          },
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    expect(
+      await screen.findByText(/This stops 1 agent and 2 terminals\./),
+    ).toBeTruthy()
+  })
+
   it("stop_all_confirms_before_killing", async () => {
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     const { rerender } = render(<TaskManagerDialog />)

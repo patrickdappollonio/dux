@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { taskManagerRows, taskManagerSummary } from "./resourceRows"
 import type { ResourceStatsView } from "./resourcesApi"
-import type { AgentTabView, SessionView, TerminalView } from "./types"
+import type { AgentTabView, ProjectView, SessionView, TerminalView } from "./types"
 
 function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
   return {
@@ -70,7 +70,62 @@ const duxStat = stat({
 })
 const totalStat = stat({ id: null, kind: "total", label: "TOTAL" })
 
+function project(over: Partial<ProjectView> & { id: string }): ProjectView {
+  return {
+    name: over.id,
+    terminals: [],
+    ...over,
+  } as unknown as ProjectView
+}
+
 describe("taskManagerRows", () => {
+  it("emits_project_terminal_rows_with_stats_joined_and_project_detail", () => {
+    // The trap this guards (T5): project terminals never appeared in the Task
+    // Manager at all, even though the server samples them (the resource
+    // monitor iterates the whole terminal map).
+    const projects = [
+      project({
+        id: "p1",
+        name: "Repo",
+        terminals: [terminal({ id: "pt-1", label: "Terminal 2" })],
+      }),
+    ]
+    const stats = [
+      duxStat,
+      stat({
+        id: "pt-1",
+        kind: "terminal",
+        label: "Terminal: Terminal 2",
+        cpu_percent: 2.5,
+        rss_bytes: 10_485_760,
+        process_count: 2,
+      }),
+      totalStat,
+    ]
+    const rows = taskManagerRows([], stats, projects)
+    const row = rows.find((r) => r.key === "term:pt-1")
+    expect(row).toBeDefined()
+    expect(row?.kind).toBe("terminal")
+    expect(row?.detail).toBe("Repo")
+    expect(row?.sessionId).toBeNull()
+    expect(row?.projectId).toBe("p1")
+    expect(row?.targetId).toBe("pt-1")
+    expect(row?.stoppable).toBe(true)
+    // A broken stats join would render blank CPU/RSS for a sampled terminal.
+    expect(row?.stats?.cpu_percent).toBe(2.5)
+    expect(row?.stats?.rss_bytes).toBe(10_485_760)
+  })
+
+  it("a_lone_project_terminal_means_something_is_running", () => {
+    // The trap this guards (T6): with only a project terminal live the dialog
+    // said "Nothing is running." and auto-closed.
+    const projects = [
+      project({ id: "p1", terminals: [terminal({ id: "pt-1" })] }),
+    ]
+    const rows = taskManagerRows([], [duxStat, totalStat], projects)
+    expect(rows.some((r) => r.stoppable)).toBe(true)
+  })
+
   it("joins_stats_to_tabs_by_id", () => {
     const sessions = [session({ id: "s1", title: "fix-auth" })]
     const stats = [

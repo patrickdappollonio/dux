@@ -80,6 +80,44 @@ describe("InsetHeader app menu", () => {
   })
 })
 
+describe("InsetHeader project terminal crumbs", () => {
+  it("renders project and terminal crumbs for a focused project terminal", () => {
+    // The trap this guards (T8): every crumb was gated on a resolved SESSION,
+    // so a focused project terminal rendered a completely blank breadcrumb bar.
+    mockState = {
+      selectedSessionId: null,
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      spine: {
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            terminals: [
+              {
+                id: "pt-1",
+                label: "Terminal 2",
+                has_output: true,
+                foreground_cmd: null,
+              },
+            ],
+          },
+        ],
+        sessions: [],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(screen.getByText("Repo")).toBeTruthy()
+    expect(screen.getByText("Terminal 2")).toBeTruthy()
+    // The crumb keys name the owner kind.
+    expect(screen.getByText(/project:/)).toBeTruthy()
+    expect(screen.getByText(/terminal:/)).toBeTruthy()
+  })
+})
+
 describe("InsetHeader branch drift cue", () => {
   it("shows the original branch only when the current branch differs", () => {
     mockState = stateFor("agent-tabs", "server-mode")

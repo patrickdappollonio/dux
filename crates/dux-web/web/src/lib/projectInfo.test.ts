@@ -51,6 +51,26 @@ describe("projectLiveCounts", () => {
     })
   })
 
+  it("includes the project's own project terminals", () => {
+    // The trap this guards (T7): the info dialog summed only the sessions'
+    // terminals, so a project terminal never counted.
+    const sessions = [
+      session({
+        id: "a",
+        project_id: "p1",
+        terminals: [{ id: "t1" }],
+      } as unknown as SessionView),
+    ]
+    const projectTerminals = [
+      { id: "pt1" },
+      { id: "pt2" },
+    ] as unknown as import("./types").TerminalView[]
+    expect(projectLiveCounts("p1", sessions, projectTerminals)).toEqual({
+      agents: 1,
+      terminals: 3,
+    })
+  })
+
   it("returns zeros for a project with no sessions", () => {
     expect(projectLiveCounts("ghost", [])).toEqual({ agents: 0, terminals: 0 })
   })

@@ -86,8 +86,12 @@ class FakePtySocket {
 vi.mock("@xterm/xterm", () => ({ Terminal: TermStub }))
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FitStub }))
 vi.mock("@/lib/suppressViewerReports", () => ({ suppressViewerReports: () => {} }))
+const notifyRegistrations: { title: () => string }[] = []
 vi.mock("@/lib/agentNotifications", () => ({
-  registerAgentNotifications: () => () => {},
+  registerAgentNotifications: (_term: unknown, opts: { title: () => string }) => {
+    notifyRegistrations.push(opts)
+    return () => {}
+  },
 }))
 vi.mock("@/components/MacroPopover", () => ({ MacroPopover: () => null }))
 vi.mock("@/lib/ptySocket", async (importOriginal) => {
@@ -194,6 +198,7 @@ function last(): FakePtySocket {
 
 beforeEach(() => {
   FakePtySocket.instances = []
+  notifyRegistrations.length = 0
   mockState = makeState()
   installStubs()
   // The `pty.owner` epoch high-water marks are module-global; reset so a handover
@@ -303,5 +308,88 @@ describe("TerminalPane take-over device naming", () => {
     act(() => rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />))
     expect(screen.queryByText("Open on Chrome on macOS")).toBeNull()
     expect(screen.getByText("Active on another device")).toBeTruthy()
+  })
+})
+
+// T9: a project terminal must resolve its OWNER (a project), not scan sessions.
+// With the old session-only resolution, its desktop notifications were titled
+// "Agent", its readiness never latched (hasOutput stayed false), and the pane
+// opened the session-nested PTY route (a silent 404).
+describe("TerminalPane project-terminal owner resolution", () => {
+  function projectState(hasOutput: boolean): DuxState {
+    const base = makeState()
+    return {
+      ...base,
+      spine: {
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            terminals: [
+              {
+                id: "pt-1",
+                label: "Terminal 2",
+                has_output: hasOutput,
+                foreground_cmd: null,
+              },
+            ],
+          },
+        ],
+        sessions: [],
+        sidebar: { groups: [], agentless_start: null },
+      },
+    } as unknown as DuxState
+  }
+
+  it("opens the PROJECT-nested PTY socket URL", () => {
+    mockState = projectState(true)
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="pt-1"
+        owner={{ kind: "project", projectId: "p1" }}
+      />,
+    )
+    expect(last().url).toMatch(/\/ws\/projects\/p1\/terminals\/pt-1\/pty$/)
+  })
+
+  it("titles desktop notifications with the project name, not 'Agent'", () => {
+    mockState = projectState(true)
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="pt-1"
+        owner={{ kind: "project", projectId: "p1" }}
+      />,
+    )
+    expect(notifyRegistrations).toHaveLength(1)
+    expect(notifyRegistrations[0].title()).toBe("Repo")
+  })
+
+  it("reads readiness from the project's own TerminalView", () => {
+    // has_output true on the PROJECT's terminal: the readiness spinner is
+    // skipped. The old session scan saw `undefined ?? false` forever, so the
+    // "Launching terminal…" card never cleared.
+    mockState = projectState(true)
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="pt-1"
+        owner={{ kind: "project", projectId: "p1" }}
+      />,
+    )
+    expect(screen.queryByText("Launching terminal…")).toBeNull()
+  })
+
+  it("shows the launch spinner while the project terminal has no output yet", () => {
+    mockState = projectState(false)
+    render(
+      <TerminalPane
+        kind="terminal"
+        id="pt-1"
+        owner={{ kind: "project", projectId: "p1" }}
+      />,
+    )
+    expect(screen.getByText("Launching terminal…")).toBeTruthy()
   })
 })
