@@ -142,6 +142,22 @@ enum BranchWarningView {
 
 #[derive(Serialize)]
 struct InspectReply {
+    /// How the path classifies for the add flow: `"repo"` (work-tree root),
+    /// `"bare"` (bare root), `"repo_subdir"` (inside a repo or inside git's
+    /// internal directory; blocked client-side), or `"plain"` (not a repo; the
+    /// client offers to initialize one). Old bundles never see the new kinds
+    /// because they only inspect rows they already believe are repos; a new
+    /// bundle treats a missing `kind` as `"repo"`.
+    kind: &'static str,
+    /// The enclosing repository root, for the `repo_subdir` kind. `None` when
+    /// the path is inside git's internal directory (no user-facing root to
+    /// name) and for every other kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_root: Option<String>,
+    /// For the `plain` kind: names of starter-.gitignore candidate directories
+    /// present in the folder, so the client can say what a seed would cover.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    gitignore_candidates: Vec<String>,
     current_branch: Option<String>,
     warning: Option<BranchWarningView>,
     /// `false` for a freshly `git init`'d repo with an unborn HEAD (no
@@ -179,6 +195,56 @@ async fn inspect_path(
     // A non-repo path still fails with a non-Ok result, which is returned as 400.
     let result = tokio::task::spawn_blocking(move || {
         let repo = Path::new(&path);
+        // Classify first so the add flow can distinguish a plain folder (offer
+        // init), a repo subfolder / git-internal dir (blocked), and a bare or
+        // work-tree root (the existing probes). Indeterminate falls through to
+        // the probes, whose error becomes the 400 it always was.
+        let kind = dux_core::git::repo_path_kind(repo);
+        match kind {
+            dux_core::git::RepoPathKind::NotARepo => {
+                let gitignore_candidates = dux_core::gitignore_seed::matched_candidates(repo)
+                    .iter()
+                    .map(|c| c.dir.to_string())
+                    .collect();
+                return Ok(InspectReply {
+                    kind: "plain",
+                    repo_root: None,
+                    gitignore_candidates,
+                    current_branch: None,
+                    warning: None,
+                    has_commits: false,
+                });
+            }
+            dux_core::git::RepoPathKind::InsideWorkTree { root } => {
+                return Ok(InspectReply {
+                    kind: "repo_subdir",
+                    repo_root: Some(root.to_string_lossy().to_string()),
+                    gitignore_candidates: Vec::new(),
+                    current_branch: None,
+                    warning: None,
+                    has_commits: true,
+                });
+            }
+            dux_core::git::RepoPathKind::InsideGitDir { .. } => {
+                // Same blocked treatment client-side; the panel copy degrades
+                // to not naming a root.
+                return Ok(InspectReply {
+                    kind: "repo_subdir",
+                    repo_root: None,
+                    gitignore_candidates: Vec::new(),
+                    current_branch: None,
+                    warning: None,
+                    has_commits: true,
+                });
+            }
+            dux_core::git::RepoPathKind::BareRoot
+            | dux_core::git::RepoPathKind::WorkTreeRoot
+            | dux_core::git::RepoPathKind::Indeterminate => {}
+        }
+        let reply_kind = match kind {
+            dux_core::git::RepoPathKind::BareRoot => "bare",
+            _ => "repo",
+        };
         let branch = dux_core::git::current_branch_opt(repo).map_err(|e| format!("{e:#}"))?;
         let warning = match branch.as_deref() {
             Some(b) => dux_core::git::branch_warning_kind(repo, b).map(|kind| match kind {
@@ -190,17 +256,19 @@ async fn inspect_path(
             None => None, // detached HEAD: no "not on default branch" warning
         };
         let has_commits = dux_core::git::repo_has_commits(repo);
-        Ok::<_, String>((branch, warning, has_commits))
-    })
-    .await;
-
-    match result {
-        Ok(Ok((branch, warning, has_commits))) => Json(InspectReply {
+        Ok::<_, String>(InspectReply {
+            kind: reply_kind,
+            repo_root: None,
+            gitignore_candidates: Vec::new(),
             current_branch: branch,
             warning,
             has_commits,
         })
-        .into_response(),
+    })
+    .await;
+
+    match result {
+        Ok(Ok(reply)) => Json(reply).into_response(),
         Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -408,10 +476,7 @@ mod tests {
         assert_eq!(value["has_commits"], false, "got {value}");
     }
 
-    #[tokio::test]
-    async fn inspect_non_repo_reports_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_string_lossy().to_string();
+    async fn inspect_json(path: &str) -> (StatusCode, serde_json::Value) {
         let (_tmp, app) = router_no_auth();
         let resp = app
             .oneshot(
@@ -422,7 +487,87 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn inspect_classifies_a_plain_folder_with_candidates() {
+        // Was a 400; the adopt-a-folder flow now classifies a non-repo as
+        // `kind: "plain"` and names the starter-.gitignore candidates so the
+        // client can offer to initialize it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        let (status, value) = inspect_json(&dir.path().to_string_lossy()).await;
+        assert_eq!(status, StatusCode::OK, "got {value}");
+        assert_eq!(value["kind"], "plain");
+        assert_eq!(value["has_commits"], false);
+        let candidates: Vec<&str> = value["gitignore_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(candidates, vec!["node_modules"]);
+    }
+
+    #[tokio::test]
+    async fn inspect_classifies_repo_subdirs_and_git_dirs_as_blocked() {
+        // Catches the client offering add (or init) on a folder inside a repo:
+        // the server is the authority over the picker's `.git`-existence label.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let (status, value) = inspect_json(&sub.to_string_lossy()).await;
+        assert_eq!(status, StatusCode::OK, "got {value}");
+        assert_eq!(value["kind"], "repo_subdir");
+        assert_eq!(
+            value["repo_root"].as_str().unwrap(),
+            repo.path().canonicalize().unwrap().to_string_lossy()
+        );
+
+        let git_dir = repo.path().join(".git");
+        let (status, value) = inspect_json(&git_dir.to_string_lossy()).await;
+        assert_eq!(status, StatusCode::OK, "got {value}");
+        assert_eq!(value["kind"], "repo_subdir");
+        assert!(
+            value.get("repo_root").is_none() || value["repo_root"].is_null(),
+            "a git-internal dir names no user-facing root, got {value}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_classifies_a_bare_root_with_branch_fields() {
+        // Catches the client offering `git init` on a bare repository.
+        let bare = tempfile::tempdir().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok);
+        let (status, value) = inspect_json(&bare.path().to_string_lossy()).await;
+        assert_eq!(status, StatusCode::OK, "got {value}");
+        assert_eq!(value["kind"], "bare");
+        // The existing probes still run for a bare repo.
+        assert_eq!(value["current_branch"], "main");
+        assert_eq!(value["has_commits"], false);
+    }
+
+    #[tokio::test]
+    async fn inspect_work_tree_root_reports_kind_repo() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let (status, value) = inspect_json(&repo.path().to_string_lossy()).await;
+        assert_eq!(status, StatusCode::OK, "got {value}");
+        assert_eq!(value["kind"], "repo");
+        assert_eq!(value["current_branch"], "main");
     }
 
     #[tokio::test]

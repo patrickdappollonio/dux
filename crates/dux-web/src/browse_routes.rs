@@ -20,7 +20,7 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,7 @@ const MAX_PATH_LEN: usize = 4096;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/browse", get(browse))
+        .route("/api/v1/browse/mkdir", post(mkdir))
         .route("/api/v1/agent-name", get(agent_name))
 }
 
@@ -98,6 +99,114 @@ async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>)
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("browse failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct MkdirBody {
+    parent: String,
+    name: String,
+}
+
+/// The mkdir reply: the created directory's full path.
+#[derive(Serialize)]
+struct MkdirReply {
+    path: String,
+}
+
+/// `POST /api/v1/browse/mkdir` — create ONE new directory inside an existing
+/// parent, for the add-project picker's "New folder" affordance (built for the
+/// terminal-less phone-over-Tailscale case).
+///
+/// Safety argument, from the threat model rather than borrowed helpers: the
+/// server is single-tenant/trusted by design — every client can already browse
+/// the entire filesystem via this module's GET (no containment, by design), so
+/// this endpoint's job is shape discipline and non-destructiveness, not
+/// containment. `name` is validated to a single path component (no `/`, no
+/// NUL, not `.`/`..`), so there is NO path arithmetic to defeat (the dde64db
+/// lesson: that escape lived in containment math over a multi-segment path);
+/// one `join` of an absolute parent with a vetted component. A symlinked
+/// parent resolves exactly as if the user had browsed there, which the GET
+/// already permits. `create_dir` never overwrites, follows, or removes; the
+/// worst case is a new empty directory where the operator's own account can
+/// write. As a POST it sits inside `rest_mutation_origin_check` and the host
+/// allowlist layered in `server.rs`, guarding cross-site requests.
+async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> Response {
+    let parent = body.parent;
+    // Mirror the inspect endpoint's path checks, check for check.
+    if parent.is_empty() {
+        return (StatusCode::BAD_REQUEST, "parent is required").into_response();
+    }
+    if !std::path::Path::new(&parent).is_absolute() {
+        // A relative parent would silently resolve against the server cwd.
+        return (StatusCode::BAD_REQUEST, "path must be absolute").into_response();
+    }
+    if parent.chars().count() > MAX_PATH_LEN {
+        return (StatusCode::BAD_REQUEST, "path is too long").into_response();
+    }
+    // `name` must be exactly one path component.
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "folder name is required").into_response();
+    }
+    if name.len() > 255 {
+        return (StatusCode::BAD_REQUEST, "folder name is too long").into_response();
+    }
+    if name.contains('/') || name.contains('\0') {
+        return (
+            StatusCode::BAD_REQUEST,
+            "folder name can't contain path separators",
+        )
+            .into_response();
+    }
+    if name == "." || name == ".." {
+        return (StatusCode::BAD_REQUEST, "that folder name is reserved").into_response();
+    }
+    if name.starts_with('.') {
+        // The picker hides dotfolders, so a dot-named folder would be created
+        // invisible and unreachable.
+        return (
+            StatusCode::BAD_REQUEST,
+            "folder names starting with a dot are hidden in the picker; pick another name",
+        )
+            .into_response();
+    }
+
+    // Filesystem write off the reactor (the browse precedent). `create_dir`,
+    // not `create_dir_all`: the picker only navigates existing directories, so
+    // a missing parent is an error, not a request.
+    let result = tokio::task::spawn_blocking(move || {
+        let target = std::path::Path::new(&parent).join(&name);
+        std::fs::create_dir(&target).map(|()| target.to_string_lossy().to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(path)) => Json(MkdirReply { path }).into_response(),
+        Ok(Err(err)) => match err.kind() {
+            // Measured: AlreadyExists covers an existing dir, file, dangling
+            // symlink, and symlink-to-dir, with no follow-through.
+            std::io::ErrorKind::AlreadyExists => (
+                StatusCode::CONFLICT,
+                "a file or folder with that name already exists",
+            )
+                .into_response(),
+            std::io::ErrorKind::NotFound => (
+                StatusCode::BAD_REQUEST,
+                "the parent folder no longer exists",
+            )
+                .into_response(),
+            _ => (
+                StatusCode::BAD_REQUEST,
+                format!("couldn't create the folder: {err}"),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("mkdir failed: {e}"),
         )
             .into_response(),
     }
@@ -241,6 +350,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn post_mkdir(app: axum::Router, parent: &str, name: &str) -> axum::response::Response {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/browse/mkdir")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({ "parent": parent, "name": name }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mkdir_creates_a_folder_and_returns_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().to_string();
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &parent, "projects").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let created = value["path"].as_str().unwrap();
+        assert_eq!(created, dir.path().join("projects").to_string_lossy());
+        assert!(dir.path().join("projects").is_dir());
+    }
+
+    #[tokio::test]
+    async fn mkdir_rejects_malformed_names_and_parents() {
+        // Catches traversal-by-name, cwd-relative writes, and invisible
+        // dot-folders (the picker hides them).
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().to_string();
+        for bad_name in ["a/b", ".", "..", ".hidden", ""] {
+            let (_tmp, app) = router_no_auth();
+            let resp = post_mkdir(app, &parent, bad_name).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "name {bad_name:?} must be rejected"
+            );
+        }
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, "relative/parent", "ok").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a relative parent must be rejected"
+        );
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "no rejected request may have created anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn mkdir_conflicts_on_existing_and_400s_on_missing_parent() {
+        // Catches clobbering: an existing entry (dir or file) is a 409, never
+        // an overwrite; a vanished parent is a 400, not a create_dir_all.
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().to_string();
+        std::fs::create_dir(dir.path().join("taken")).unwrap();
+        std::fs::write(dir.path().join("file"), b"x").unwrap();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &parent, "taken").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &parent, "file").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(dir.path().join("file")).unwrap(), b"x");
+
+        let missing = dir.path().join("gone").to_string_lossy().to_string();
+        let (_tmp, app) = router_no_auth();
+        let resp = post_mkdir(app, &missing, "child").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn mkdir_with_a_mismatched_origin_is_403() {
+        // Catches cross-site directory creation: the new POST must sit inside
+        // the layered `rest_mutation_origin_check`.
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().to_string_lossy().to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = crate::test_support::test_engine_handle(tmp.path());
+        let app = crate::server::build_app(
+            handle,
+            axum::Router::new(),
+            crate::server::RouterParams::plain_http(),
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/browse/mkdir")
+                    .header("Host", "localhost")
+                    .header("Origin", "http://evil.example.com")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "parent": parent, "name": "pwned" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !dir.path().join("pwned").exists(),
+            "the cross-origin request must not have created anything"
+        );
     }
 
     #[tokio::test]
