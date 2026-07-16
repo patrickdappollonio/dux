@@ -192,6 +192,20 @@ fn aggregate_tree(
     let mut count = 0usize;
     let mut children = Vec::new();
     for (pid, proc_info) in sys.processes() {
+        // On Linux, `sysinfo` lists userland/kernel THREADS alongside real
+        // processes in `sys.processes()`. A thread shares its process's
+        // address space, so `Process::memory()` on a thread entry reports the
+        // WHOLE process's RSS, and `thread_kind()` is `Some(_)` only for
+        // these thread entries (real processes report `None`). Without this
+        // filter, every thread of the root (or of any descendant) gets
+        // counted as a distinct "child" with duplicated RSS, which both
+        // inflates `rss`/`process_count` and lists fake subprocesses in the
+        // UI. A process's own `cpu_usage()` already aggregates all its
+        // threads' CPU on Linux, so skipping thread entries here also avoids
+        // double-counting CPU, not just memory.
+        if proc_info.thread_kind().is_some() {
+            continue;
+        }
         if *pid == root || is_descendant_of(sys, *pid, root) {
             cpu += proc_info.cpu_usage();
             rss += proc_info.memory();
@@ -402,6 +416,234 @@ mod tests {
         let (_cpu, rss, count, _children) = aggregate_tree(&sys, self_pid);
         assert!(count >= 1, "should include at least the root process");
         assert!(rss > 0, "current process should have nonzero RSS");
+    }
+
+    /// Serializes the tests below that spawn real child processes
+    /// (`sleep`/`sh`). All tests in this binary share one OS process, so a
+    /// child spawned by one test is, for that instant, also a real child of
+    /// every other test running concurrently in the same binary: without
+    /// this lock, `aggregate_tree(self_pid)` in one test would pick up
+    /// another test's still-running `sleep` and inflate `process_count`,
+    /// which is exactly the kind of cross-test flake that looks like a
+    /// regression but is a test isolation bug, not a code bug.
+    static CHILD_PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Spin `n` extra userland threads inside the current process and return
+    /// their stop flag and join handles. The caller must stop and join them
+    /// before the test ends.
+    fn spin_threads(n: usize) -> (Arc<AtomicBool>, Vec<std::thread::JoinHandle<()>>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handles = (0..n)
+            .map(|_| {
+                let flag = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !flag.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                })
+            })
+            .collect();
+        (stop, handles)
+    }
+
+    fn fresh_system() -> sysinfo::System {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        // Establish a CPU baseline, then refresh again so cpu_usage() is real.
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+        sys
+    }
+
+    /// Threads share their process's address space, so on Linux `sysinfo`
+    /// lists each userland thread in `sys.processes()` reporting the WHOLE
+    /// process's RSS. Without filtering `thread_kind().is_some()` entries,
+    /// `aggregate_tree` lists these threads as fake "children" and sums their
+    /// duplicated RSS into the parent total. This test proves the fix: no
+    /// child entry duplicates the root process's own RSS, and the real
+    /// `sleep` child process is still present.
+    #[test]
+    fn aggregate_tree_excludes_threads_from_children() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (stop, handles) = spin_threads(4);
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("3")
+            .spawn()
+            .expect("failed to spawn sleep child");
+        let child_pid = child.id();
+
+        // Let sysinfo see the new child and threads.
+        std::thread::sleep(Duration::from_millis(200));
+        let sys = fresh_system();
+
+        let self_pid = sysinfo::Pid::from_u32(std::process::id());
+        let self_rss = sys
+            .process(self_pid)
+            .expect("current process must be visible")
+            .memory();
+
+        let (_cpu, _rss, _count, children) = aggregate_tree(&sys, self_pid);
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let duplicate_count = children
+            .iter()
+            .filter(|c| c.pid != self_pid.as_u32() && c.rss_bytes == self_rss && self_rss > 0)
+            .count();
+        assert_eq!(
+            duplicate_count, 0,
+            "no child should duplicate the root process's own RSS (threads masquerading as children): {children:?}"
+        );
+
+        assert!(
+            children.iter().any(|c| c.pid == child_pid),
+            "the real sleep child process must be present in children: {children:?}"
+        );
+    }
+
+    /// With N extra threads and one real child process, the aggregated RSS
+    /// must not be inflated by summing each thread's duplicated whole-process
+    /// RSS on top of the process's own RSS. Assert a loose upper bound rather
+    /// than an exact byte value to avoid flakiness.
+    #[test]
+    fn aggregate_tree_does_not_multiply_count_thread_memory() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (stop, handles) = spin_threads(5);
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("3")
+            .spawn()
+            .expect("failed to spawn sleep child");
+
+        std::thread::sleep(Duration::from_millis(200));
+        let sys = fresh_system();
+
+        let self_pid = sysinfo::Pid::from_u32(std::process::id());
+        let self_rss = sys
+            .process(self_pid)
+            .expect("current process must be visible")
+            .memory();
+
+        let (_cpu, rss, _count, _children) = aggregate_tree(&sys, self_pid);
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            rss < self_rss * 2,
+            "aggregated rss ({rss}) must be close to self ({self_rss}) plus the \
+             sleep child, not inflated by summing duplicated thread memory"
+        );
+    }
+
+    /// `process_count` must count real processes only: self plus the one
+    /// spawned child, never the extra threads spun up inside this process.
+    #[test]
+    fn aggregate_tree_counts_processes_not_threads() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (stop, handles) = spin_threads(3);
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("3")
+            .spawn()
+            .expect("failed to spawn sleep child");
+
+        std::thread::sleep(Duration::from_millis(200));
+        let sys = fresh_system();
+
+        let self_pid = sysinfo::Pid::from_u32(std::process::id());
+        let (_cpu, _rss, count, _children) = aggregate_tree(&sys, self_pid);
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            count, 2,
+            "process_count must be self + the one real child, not threads"
+        );
+    }
+
+    /// A real grandchild process (spawned by an intermediate `sh -c`) must
+    /// still be discovered as a descendant even though threads are filtered
+    /// out of the walk, proving the thread filter did not break descendant
+    /// discovery through a threaded intermediate parent.
+    #[test]
+    fn aggregate_tree_finds_real_grandchild_process() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (stop, handles) = spin_threads(2);
+
+        // `sleep 3 &` backgrounds sleep as a real forked child of the `sh`
+        // process (not an exec-replace), guaranteeing a genuine grandchild of
+        // the test process; `wait` keeps `sh` alive until sleep exits.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 3 & wait")
+            .spawn()
+            .expect("failed to spawn sh child");
+
+        std::thread::sleep(Duration::from_millis(300));
+        let sys = fresh_system();
+
+        let self_pid = sysinfo::Pid::from_u32(std::process::id());
+        let (_cpu, _rss, count, children) = aggregate_tree(&sys, self_pid);
+
+        // Find the grandchild: a process whose parent is the `sh` child.
+        let sh_pid = sysinfo::Pid::from_u32(child.id());
+        let grandchild = sys
+            .processes()
+            .iter()
+            .find(|(pid, proc_info)| **pid != sh_pid && proc_info.parent() == Some(sh_pid));
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let (grandchild_pid, _) = grandchild.expect(
+            "the sh process must have forked a real sleep grandchild; \
+             if this fails the shell execed instead of forking on this platform",
+        );
+        assert!(
+            children.iter().any(|c| c.pid == grandchild_pid.as_u32()),
+            "a real grandchild process must still be aggregated through an intermediate parent: {children:?}"
+        );
+        assert!(
+            count >= 3,
+            "process_count must include self, the sh child, and the grandchild: got {count}"
+        );
     }
 
     #[test]
