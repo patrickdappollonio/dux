@@ -104,6 +104,9 @@ pub fn run_create_agent_job(
                     creation_notes.push(format!(
                         "Warning: could not switch the project checkout to \"{leading_branch}\": {err}. The agent starts from the local branch state."
                     ));
+                    // Deliberately skip the pull after a failed switch:
+                    // `pull_branch` re-runs the same switch internally, so it
+                    // would just re-fail and duplicate the warning.
                 } else {
                     match git::has_origin_remote(&repo_path) {
                         Ok(true) => {
@@ -649,52 +652,27 @@ pub fn run_create_agent_job(
         });
         let worktree = Path::new(&session.worktree_path);
         // Porcelain status is relative to the HEAD commit's tree, so the copy
-        // is only faithful when both sides sit on the same commit.
-        let heads = (git::head_commit(&copy.source), git::head_commit(worktree));
-        match heads {
-            (Ok(source_head), Ok(worktree_head)) if source_head == worktree_head => {
-                match git::copy_uncommitted_changes(&copy.source, worktree) {
-                    Ok(summary) => {
-                        if !summary.skipped_paths.is_empty() {
-                            creation_notes.push(format!(
+        // is only faithful when both sides sit on the same commit. A failed
+        // `head_commit` is NOT a branch mismatch: it is reported as its own
+        // verification failure so the user is not told the wrong cause.
+        let head_check = match (git::head_commit(&copy.source), git::head_commit(worktree)) {
+            (Ok(source_head), Ok(worktree_head)) if source_head == worktree_head => Ok(true),
+            (Ok(_), Ok(_)) => Ok(false),
+            (Err(err), _) | (_, Err(err)) => Err(err),
+        };
+        match head_check {
+            Ok(true) => match git::copy_uncommitted_changes(&copy.source, worktree) {
+                Ok(summary) => {
+                    if !summary.skipped_paths.is_empty() {
+                        creation_notes.push(format!(
                                 "Some paths were not copied (submodules, embedded repositories, or special files): {}.",
                                 summary.skipped_paths.join(", ")
                             ));
-                        }
-                    }
-                    Err(err) => {
-                        logger::error(&format!(
-                            "failed to copy uncommitted changes from {} into {}: {err}",
-                            copy.source.display(),
-                            session.worktree_path
-                        ));
-                        if owns_worktree {
-                            let _ = git::remove_worktree(
-                                &repo_path,
-                                Path::new(&session.worktree_path),
-                                &session.branch_name,
-                            );
-                        }
-                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                            status_op_id: create_key.clone(),
-                            message: format!(
-                                "Failed to copy uncommitted changes from {}: {err}",
-                                copy.source_desc
-                            ),
-                        });
-                        return;
                     }
                 }
-            }
-            _ => match copy.on_head_mismatch {
-                HeadMismatch::SkipWithNote { branch } => {
-                    creation_notes.push(format!(
-                        "Uncommitted changes were not copied: the project checkout is not on \"{branch}\"'s commit."
-                    ));
-                }
-                HeadMismatch::Fail => {
+                Err(err) => {
                     logger::error(&format!(
-                        "uncommitted-changes copy aborted: {} is no longer on the commit {} was created from",
+                        "failed to copy uncommitted changes from {} into {}: {err}",
                         copy.source.display(),
                         session.worktree_path
                     ));
@@ -708,13 +686,69 @@ pub fn run_create_agent_job(
                     let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
                         status_op_id: create_key.clone(),
                         message: format!(
-                            "Failed to copy uncommitted changes from {}: the source moved to a different commit during creation.",
+                            "Failed to copy uncommitted changes from {}: {err}",
                             copy.source_desc
                         ),
                     });
                     return;
                 }
             },
+            not_equal_or_failed => {
+                let check_error = match not_equal_or_failed {
+                    Err(err) => {
+                        logger::error(&format!(
+                            "uncommitted-changes copy: could not resolve HEAD for {} or {}: {err}",
+                            copy.source.display(),
+                            session.worktree_path
+                        ));
+                        Some(err)
+                    }
+                    _ => None,
+                };
+                match copy.on_head_mismatch {
+                    HeadMismatch::SkipWithNote { branch } => {
+                        creation_notes.push(match &check_error {
+                            Some(err) => format!(
+                                "Uncommitted changes were not copied: could not verify the checkout's commit: {err}."
+                            ),
+                            None => format!(
+                                "Uncommitted changes were not copied: the project checkout is not on \"{branch}\"'s commit."
+                            ),
+                        });
+                    }
+                    HeadMismatch::Fail => {
+                        if check_error.is_none() {
+                            logger::error(&format!(
+                                "uncommitted-changes copy aborted: {} is no longer on the commit {} was created from",
+                                copy.source.display(),
+                                session.worktree_path
+                            ));
+                        }
+                        if owns_worktree {
+                            let _ = git::remove_worktree(
+                                &repo_path,
+                                Path::new(&session.worktree_path),
+                                &session.branch_name,
+                            );
+                        }
+                        let message = match &check_error {
+                            Some(err) => format!(
+                                "Failed to copy uncommitted changes from {}: could not verify the source worktree's commit: {err}.",
+                                copy.source_desc
+                            ),
+                            None => format!(
+                                "Failed to copy uncommitted changes from {}: the source moved to a different commit during creation.",
+                                copy.source_desc
+                            ),
+                        };
+                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                            status_op_id: create_key.clone(),
+                            message,
+                        });
+                        return;
+                    }
+                }
+            }
         }
     }
     // Notes ride the keyed create-op final so they surface as the visible
