@@ -28,6 +28,9 @@ export interface Bootstrap {
   dux_version: string
   /** Whether the new-agent name dialog pre-checks "Use randomized pet name". */
   randomize_agent_names_by_default: boolean
+  /** Whether the new-agent dialog pre-checks "Copy uncommitted changes from
+   * the project checkout". Older servers omit it; consumers fall back to true. */
+  copy_uncommitted_changes_by_default?: boolean
   /** Whether the new-agent-from-PR flow is available (GitHub integration + `gh`). */
   gh_available: boolean
   /** Raw `config.ui.github_integration` flag (distinct from `gh_available`, the

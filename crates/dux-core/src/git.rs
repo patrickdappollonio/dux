@@ -503,24 +503,27 @@ pub fn switch_branch_if_needed(repo_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn has_tracked_changes(repo_path: &Path) -> Result<bool> {
-    let output = Command::new("git")
+/// True when the repo has an `origin` remote. Exit-status only, per the
+/// git-safety rules for imperative commands.
+pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
+    let status = Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=no",
+            "remote",
+            "get-url",
+            "origin",
         ])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(!output.stdout.is_empty())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to run git remote get-url in {}",
+                repo_path.display()
+            )
+        })?;
+    Ok(status.success())
 }
 
 fn pull_origin_branch(repo_path: &Path, branch: &str) -> Result<()> {
@@ -725,7 +728,26 @@ pub fn head_commit(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn mirror_worktree_contents(source: &Path, destination: &Path) -> Result<()> {
+#[derive(Debug, Default)]
+pub struct UncommittedCopySummary {
+    pub copied: usize,
+    pub deleted: usize,
+    /// Records skipped because the source is not a regular file or symlink:
+    /// dirty submodules (" M dir"), untracked embedded repos ("?? dir/"), and
+    /// non-regular files such as FIFOs, sockets, and devices (which would
+    /// block or fail a byte copy). Relative paths, for the user-facing note.
+    pub skipped_paths: Vec<String>,
+}
+
+/// Copies exactly what `git status --porcelain=v1 -z --untracked-files=all`
+/// reports in `source` into `destination`. Nothing gitignored travels.
+/// PRECONDITION: both worktrees are at the SAME HEAD commit; callers enforce
+/// this with the HEAD-equality guard (agent_job.rs), because status deltas
+/// are relative to the HEAD commit's tree.
+pub fn copy_uncommitted_changes(
+    source: &Path,
+    destination: &Path,
+) -> Result<UncommittedCopySummary> {
     let source = source
         .canonicalize()
         .with_context(|| format!("failed to resolve {}", source.display()))?;
@@ -737,7 +759,190 @@ pub fn mirror_worktree_contents(source: &Path, destination: &Path) -> Result<()>
             "source and destination worktrees must be different"
         ));
     }
-    sync_directory_contents(&source, &destination)
+
+    let output = Command::new("git")
+        .args([
+            "-C",
+            source.to_string_lossy().as_ref(),
+            // Pin rename/copy detection off so every record carries exactly
+            // one path (rename records are two-path and config-dependent).
+            "-c",
+            "status.renames=false",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Classify every record before touching the filesystem, then run all
+    // deletions before any copies (one path can appear twice, e.g. a staged
+    // delete plus an untracked recreate, and a tracked file can be replaced
+    // by a directory).
+    let mut deletions: Vec<PathBuf> = Vec::new();
+    let mut copies: Vec<PathBuf> = Vec::new();
+    let mut skipped_paths: Vec<String> = Vec::new();
+
+    for record in output.stdout.split(|byte| *byte == 0) {
+        if record.len() < 4 {
+            continue;
+        }
+        let index_status = record[0] as char;
+        let worktree_status = record[1] as char;
+        if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
+            return Err(anyhow!(
+                "rename/copy detection produced a two-path record despite `-c status.renames=false`; this needs git >= 2.18"
+            ));
+        }
+        let path_bytes = &record[3..];
+        let rel: &Path =
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path_bytes).as_ref();
+        // Defensive guard: status never emits absolute paths, `..`, or paths
+        // under `.git`, but corrupt output must not escape the destination.
+        let mut components = rel.components();
+        let first_is_git_dir =
+            matches!(components.next(), Some(Component::Normal(name)) if name == ".git");
+        if rel.is_absolute()
+            || first_is_git_dir
+            || rel
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        {
+            continue;
+        }
+
+        if path_bytes.ends_with(b"/") {
+            // An untracked directory git will not descend into (an embedded
+            // repo): never a recursive copy, skip with a note.
+            skipped_paths.push(rel.to_string_lossy().trim_end_matches('/').to_string());
+            continue;
+        }
+        let unmerged = index_status == 'U'
+            || worktree_status == 'U'
+            || (index_status == 'A' && worktree_status == 'A')
+            || (index_status == 'D' && worktree_status == 'D');
+        if unmerged {
+            // Unmerged records cannot be classified by status code: both `UD`
+            // and `DU` leave a file on disk (with different contents). The
+            // copy phase decides by source disk state, the only honest source
+            // for a mid-merge tree.
+            copies.push(rel.to_path_buf());
+        } else if worktree_status == 'D' || (index_status == 'D' && worktree_status == ' ') {
+            // ` D`/`MD`/`AD` (the worktree delete wins) and a staged delete;
+            // an untracked recreate arrives as its own `??` record.
+            deletions.push(rel.to_path_buf());
+        } else {
+            copies.push(rel.to_path_buf());
+        }
+    }
+
+    let mut summary = UncommittedCopySummary {
+        skipped_paths,
+        ..Default::default()
+    };
+
+    // Phase 1: deletions. Classified purely by status code, never by probing
+    // the source filesystem (a `D` means the tracked thing is gone from the
+    // working tree regardless of what occupies the path now).
+    for rel in &deletions {
+        remove_path_if_exists(&destination.join(rel))?;
+        summary.deleted += 1;
+        prune_empty_ancestors(&destination, rel);
+    }
+
+    // Phase 2: copies. The source filesystem is probed on this side only.
+    for rel in &copies {
+        let source_path = source.join(rel);
+        let destination_path = destination.join(rel);
+        let metadata = match fs::symlink_metadata(&source_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // The unmerged-record-absent-on-disk branch (e.g. `DD`), and
+                // race tolerance for plain copies.
+                remove_path_if_exists(&destination_path)?;
+                summary.deleted += 1;
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            // A dirty submodule (` M smdir`), an unmerged record that turned
+            // out to be a directory, or a non-regular file (FIFO, socket,
+            // device): skip with a note, touch nothing. `sync_entry` must
+            // only ever see regular files and symlinks, because opening a
+            // FIFO with no writer blocks forever.
+            summary
+                .skipped_paths
+                .push(rel.to_string_lossy().to_string());
+            continue;
+        }
+        ensure_destination_parents(&source, &destination, rel)?;
+        sync_entry(&source_path, &destination_path)?;
+        summary.copied += 1;
+    }
+
+    Ok(summary)
+}
+
+/// Best-effort removal of now-empty ancestor directories of `rel` inside
+/// `destination`, walking up toward (never past) `destination` and stopping
+/// at the first non-empty directory. Errors are ignored.
+fn prune_empty_ancestors(destination: &Path, rel: &Path) {
+    let mut ancestor = rel.parent();
+    while let Some(dir) = ancestor {
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        // `remove_dir` refuses to remove a non-empty directory.
+        if fs::remove_dir(destination.join(dir)).is_err() {
+            break;
+        }
+        ancestor = dir.parent();
+    }
+}
+
+/// Create the missing parent directories of `rel` under `destination`,
+/// copying the corresponding source directory's mode when it exists (see the
+/// umask-safety rationale in `sync_entry`), and tolerating races.
+fn ensure_destination_parents(source: &Path, destination: &Path, rel: &Path) -> Result<()> {
+    let Some(parent) = rel.parent() else {
+        return Ok(());
+    };
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        prefix.push(component);
+        let destination_dir = destination.join(&prefix);
+        if fs::symlink_metadata(&destination_dir).is_ok() {
+            continue;
+        }
+        let mut builder = fs::DirBuilder::new();
+        if let Ok(source_meta) = fs::symlink_metadata(source.join(&prefix))
+            && source_meta.file_type().is_dir()
+        {
+            builder.mode(source_meta.permissions().mode());
+        }
+        match builder.create(&destination_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Like `remove_path`, but an already-absent path is success.
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => remove_path(path),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 pub struct RemoveResult {
@@ -1729,32 +1934,6 @@ fn is_github_host(host: &str) -> bool {
     host == "github.com" || host.starts_with("github.")
 }
 
-fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
-    let mut source_entries = Vec::new();
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if is_git_admin_entry(&name) {
-            continue;
-        }
-        source_entries.push(name);
-        sync_entry(&entry.path(), &destination.join(entry.file_name()))?;
-    }
-
-    for entry in fs::read_dir(destination)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if is_git_admin_entry(&name) {
-            continue;
-        }
-        if !source_entries.iter().any(|candidate| candidate == &name) {
-            remove_path(&entry.path())?;
-        }
-    }
-
-    Ok(())
-}
-
 fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     let file_type = metadata.file_type();
@@ -1766,31 +1945,12 @@ fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
     let source_mode = metadata.permissions().mode();
 
     if file_type.is_dir() {
-        // If something already lives at the destination but isn't a directory
-        // (or is a symlink — which `Path::exists()` follows and would lie
-        // about), tear it down first so we don't sync into the wrong target.
-        if let Ok(destination_meta) = fs::symlink_metadata(destination) {
-            let dest_type = destination_meta.file_type();
-            if !dest_type.is_dir() || dest_type.is_symlink() {
-                remove_path(destination)?;
-            }
-        }
-
-        // Create with the source's mode in a single syscall instead of
-        // creating with the umask default and fixing it up afterwards. The
-        // post-creation `set_permissions` race is exactly the "delayed
-        // permission" pitfall: between `mkdir` and `chmod`, the directory
-        // briefly exists with whatever the user's umask permitted.
-        match fs::DirBuilder::new().mode(source_mode).create(destination) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                // Pre-existing directory — align mode with source explicitly.
-                fs::set_permissions(destination, metadata.permissions())?;
-            }
-            Err(err) => return Err(err.into()),
-        }
-        sync_directory_contents(source, destination)?;
-        return Ok(());
+        // The status-driven copy expands directories into per-file records
+        // before syncing, so a directory reaching this point is a caller bug.
+        return Err(anyhow!(
+            "sync_entry called on a directory: {}",
+            source.display()
+        ));
     }
 
     // Regular file: copy contents through an explicitly-moded handle so the
@@ -1843,16 +2003,12 @@ fn sync_symlink(source: &Path, destination: &Path) -> Result<()> {
 
 fn remove_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)?;
     } else {
         fs::remove_file(path)?;
     }
     Ok(())
-}
-
-fn is_git_admin_entry(name: &std::ffi::OsStr) -> bool {
-    name == ".git"
 }
 
 #[cfg(test)]
@@ -2356,85 +2512,491 @@ mod tests {
         );
     }
 
+    // ── copy_uncommitted_changes tests ───────────────────────────
+    //
+    // The copy is driven by `git status --porcelain=v1 -z --untracked-files=all`
+    // in the source; each test names the bug it catches.
+
+    /// Two sibling worktrees of the same test repo, at the same HEAD commit.
+    fn copy_test_worktrees(repo: &Path) -> (PathBuf, PathBuf) {
+        let source = add_worktree(repo, "copy-source");
+        let destination = add_worktree(repo, "copy-destination");
+        (source, destination)
+    }
+
+    /// The core rule: files matched by .gitignore never travel.
     #[test]
-    fn mirror_worktree_contents_copies_visible_tree_and_preserves_git_admin_state() {
+    fn copy_excludes_gitignored_files() {
         let repo = init_test_repo();
-        fs::write(repo.path().join("tracked.txt"), "original tracked\n").unwrap();
-        fs::write(repo.path().join("delete-me.txt"), "delete me\n").unwrap();
-        commit_all(repo.path(), "tracked files");
+        fs::write(repo.path().join(".gitignore"), "*.log\n").unwrap();
+        fs::write(repo.path().join("tracked.txt"), "original\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
 
-        let source = add_worktree(repo.path(), "mirror-source");
-        let destination = add_worktree(repo.path(), "mirror-destination");
+        fs::write(source.join("tracked.txt"), "modified\n").unwrap();
+        fs::write(source.join("note.txt"), "untracked\n").unwrap();
+        fs::write(source.join("junk.log"), "ignored\n").unwrap();
 
-        fs::write(source.join("tracked.txt"), "modified tracked\n").unwrap();
-        fs::remove_file(source.join("delete-me.txt")).unwrap();
-        fs::write(source.join(".env"), "TOKEN=abc\n").unwrap();
-        fs::create_dir_all(source.join("scratch").join("nested")).unwrap();
-        fs::write(
-            source.join("scratch").join("nested").join("note.txt"),
-            "untracked\n",
-        )
-        .unwrap();
-
-        let destination_git_before = fs::read_to_string(destination.join(".git")).unwrap();
-        mirror_worktree_contents(&source, &destination).unwrap();
+        let summary = copy_uncommitted_changes(&source, &destination).unwrap();
 
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).unwrap(),
-            "modified tracked\n"
-        );
-        assert!(!destination.join("delete-me.txt").exists());
-        assert_eq!(
-            fs::read_to_string(destination.join(".env")).unwrap(),
-            "TOKEN=abc\n"
+            "modified\n"
         );
         assert_eq!(
-            fs::read_to_string(destination.join("scratch").join("nested").join("note.txt"))
-                .unwrap(),
+            fs::read_to_string(destination.join("note.txt")).unwrap(),
             "untracked\n"
         );
+        assert!(!destination.join("junk.log").exists());
+        assert_eq!(summary.copied, 2);
+        assert!(summary.skipped_paths.is_empty());
+    }
+
+    /// Catches routing `?? dir/` through a bulk directory copy (which would
+    /// drag ignored files along) and the missing-destination-parent case.
+    #[test]
+    fn copy_expands_untracked_dirs_and_still_excludes_ignored_files_inside_them() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join(".gitignore"), "*.log\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        fs::create_dir_all(source.join("newdir").join("nested")).unwrap();
+        fs::write(source.join("newdir").join("keep.txt"), "keep\n").unwrap();
+        fs::write(
+            source.join("newdir").join("nested").join("deep.txt"),
+            "deep\n",
+        )
+        .unwrap();
+        fs::write(source.join("newdir").join("junk.log"), "ignored\n").unwrap();
+
+        copy_uncommitted_changes(&source, &destination).unwrap();
+
         assert_eq!(
-            fs::read_to_string(destination.join(".git")).unwrap(),
-            destination_git_before
+            fs::read_to_string(destination.join("newdir").join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("newdir").join("nested").join("deep.txt")).unwrap(),
+            "deep\n"
+        );
+        assert!(!destination.join("newdir").join("junk.log").exists());
+    }
+
+    /// Catches the proven defect: ` D foo` + `?? foo/bar.txt` must delete the
+    /// stale destination file before copying into the new directory, or the
+    /// copy fails with `File exists` / leaves a stale file behind.
+    #[test]
+    fn copy_handles_tracked_file_replaced_by_directory() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("foo"), "a file\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        fs::remove_file(source.join("foo")).unwrap();
+        fs::create_dir(source.join("foo")).unwrap();
+        fs::write(source.join("foo").join("bar.txt"), "inner\n").unwrap();
+
+        copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(destination.join("foo").is_dir());
+        assert_eq!(
+            fs::read_to_string(destination.join("foo").join("bar.txt")).unwrap(),
+            "inner\n"
+        );
+    }
+
+    /// `D  f` + `?? f` is one path reported twice; delete-then-copy phase
+    /// ordering must land the recreated contents, not the deletion.
+    #[test]
+    fn copy_handles_staged_delete_with_untracked_recreate() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("f"), "old\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        run_git(&source, &["rm", "f"]);
+        fs::write(source.join("f"), "new\n").unwrap();
+
+        copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert_eq!(fs::read_to_string(destination.join("f")).unwrap(), "new\n");
+    }
+
+    /// `MD`: the worktree delete (Y) wins over the staged modify (X).
+    #[test]
+    fn copy_applies_worktree_delete_over_staged_modify() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("a.txt"), "base\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        fs::write(source.join("a.txt"), "staged edit\n").unwrap();
+        run_git(&source, &["add", "a.txt"]);
+        fs::remove_file(source.join("a.txt")).unwrap();
+
+        let summary = copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(!destination.join("a.txt").exists());
+        assert_eq!(summary.deleted, 1);
+    }
+
+    /// Build a repo stuck mid-merge with `UD`, `DU`, and `UU` records plus a
+    /// rename/rename conflict yielding a `DD` record. Returns (repo, contents
+    /// currently on disk for ud.txt/du.txt/c.txt).
+    fn conflicted_repo() -> (tempfile::TempDir, String, String, String) {
+        let repo = init_test_repo();
+        let p = repo.path();
+        fs::write(p.join("ud.txt"), "base ud\n").unwrap();
+        fs::write(p.join("du.txt"), "base du\n").unwrap();
+        fs::write(p.join("c.txt"), "base c\n").unwrap();
+        fs::write(p.join("orig.txt"), "base orig\n").unwrap();
+        commit_all(p, "base");
+
+        run_git(p, &["switch", "-c", "theirs"]);
+        run_git(p, &["rm", "ud.txt"]);
+        fs::write(p.join("du.txt"), "theirs du\n").unwrap();
+        fs::write(p.join("c.txt"), "theirs c\n").unwrap();
+        run_git(p, &["mv", "orig.txt", "theirs.txt"]);
+        commit_all(p, "theirs side");
+
+        run_git(p, &["switch", "main"]);
+        fs::write(p.join("ud.txt"), "my local edit\n").unwrap();
+        run_git(p, &["rm", "du.txt"]);
+        fs::write(p.join("c.txt"), "ours c\n").unwrap();
+        run_git(p, &["mv", "orig.txt", "ours.txt"]);
+        commit_all(p, "ours side");
+
+        let merge = Command::new("git")
+            .args(["merge", "theirs"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the merge must conflict");
+
+        let ud = fs::read_to_string(p.join("ud.txt")).unwrap();
+        let du = fs::read_to_string(p.join("du.txt")).unwrap();
+        let c = fs::read_to_string(p.join("c.txt")).unwrap();
+        (repo, ud, du, c)
+    }
+
+    /// Catches any code-based classification of unmerged records: both `UD`
+    /// and `DU` leave a file on disk (with different contents), so the copy
+    /// must be decided by source disk state, never by the status code.
+    #[test]
+    fn copy_keeps_on_disk_files_from_modify_delete_conflicts() {
+        let (repo, ud, du, c) = conflicted_repo();
+        assert_eq!(ud, "my local edit\n");
+        assert_eq!(du, "theirs du\n");
+
+        let destination = tempfile::tempdir().unwrap();
+        fs::write(destination.path().join("ud.txt"), "stale\n").unwrap();
+        fs::write(destination.path().join("du.txt"), "stale\n").unwrap();
+        fs::write(destination.path().join("c.txt"), "stale\n").unwrap();
+
+        copy_uncommitted_changes(repo.path(), destination.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.path().join("ud.txt")).unwrap(),
+            ud
+        );
+        assert_eq!(
+            fs::read_to_string(destination.path().join("du.txt")).unwrap(),
+            du
+        );
+        assert_eq!(
+            fs::read_to_string(destination.path().join("c.txt")).unwrap(),
+            c
+        );
+    }
+
+    /// The disk-state rule's delete branch: a `DD` record (rename/rename
+    /// conflict on the original path) is absent on disk, so it is deleted
+    /// at the destination.
+    #[test]
+    fn copy_deletes_both_deleted_conflict_paths() {
+        let (repo, _, _, _) = conflicted_repo();
+        assert!(!repo.path().join("orig.txt").exists());
+
+        let destination = tempfile::tempdir().unwrap();
+        fs::write(destination.path().join("orig.txt"), "stale\n").unwrap();
+
+        copy_uncommitted_changes(repo.path(), destination.path()).unwrap();
+
+        assert!(!destination.path().join("orig.txt").exists());
+        // The rename/rename sides are on disk and travel.
+        assert_eq!(
+            fs::read_to_string(destination.path().join("ours.txt")).unwrap(),
+            "base orig\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.path().join("theirs.txt")).unwrap(),
+            "base orig\n"
+        );
+    }
+
+    /// Kills two-path `R`/`C` parse corruption: hostile rename/copy detection
+    /// config in the source repo must not corrupt the record stream.
+    #[test]
+    fn copy_is_immune_to_rename_and_copy_detection_config() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("a.txt"), "contents a\n").unwrap();
+        fs::write(repo.path().join("b.txt"), "contents b\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        run_git(&source, &["config", "status.renames", "copies"]);
+        run_git(&source, &["mv", "a.txt", "renamed.txt"]);
+        // A staged copy: identical contents under a new name.
+        fs::write(source.join("copied.txt"), "contents b\n").unwrap();
+        run_git(&source, &["add", "copied.txt"]);
+
+        copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(!destination.join("a.txt").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("renamed.txt")).unwrap(),
+            "contents a\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("copied.txt")).unwrap(),
+            "contents b\n"
         );
     }
 
     #[test]
-    fn mirror_worktree_contents_propagates_source_file_modes() {
-        // Assert that file/dir modes match the source after mirroring. The
-        // previous implementation created with umask defaults and fixed up
-        // permissions afterwards, leaving a brief window where the entry was
-        // visible with the wrong mode. The current implementation creates
-        // with the mode in a single syscall (DirBuilderExt / OpenOptionsExt).
+    fn copy_deletes_removed_tracked_files_and_prunes_empty_dirs() {
         let repo = init_test_repo();
+        fs::create_dir_all(repo.path().join("dir").join("sub")).unwrap();
+        fs::write(repo.path().join("dir").join("sub").join("file.txt"), "x\n").unwrap();
+        fs::write(repo.path().join("dir").join("keeper.txt"), "keep\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
 
-        let source = add_worktree(repo.path(), "mode-source");
-        let destination = add_worktree(repo.path(), "mode-destination");
+        fs::remove_file(source.join("dir").join("sub").join("file.txt")).unwrap();
+
+        let summary = copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(
+            !destination
+                .join("dir")
+                .join("sub")
+                .join("file.txt")
+                .exists()
+        );
+        // `sub` became empty and is pruned; `dir` still holds keeper.txt.
+        assert!(!destination.join("dir").join("sub").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("dir").join("keeper.txt")).unwrap(),
+            "keep\n"
+        );
+        assert_eq!(summary.deleted, 1);
+    }
+
+    /// Replaces the mode/symlink coverage the mirror tests used to provide.
+    #[test]
+    fn copy_preserves_file_modes_and_symlinks() {
+        let repo = init_test_repo();
+        let (source, destination) = copy_test_worktrees(repo.path());
 
         let secret = source.join("secret.txt");
         fs::write(&secret, "shh\n").unwrap();
         fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(Path::new("secret.txt"), source.join("link")).unwrap();
 
-        let private_dir = source.join("private");
-        fs::create_dir(&private_dir).unwrap();
-        fs::set_permissions(&private_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(private_dir.join("inner.txt"), "inside\n").unwrap();
-
-        mirror_worktree_contents(&source, &destination).unwrap();
+        copy_uncommitted_changes(&source, &destination).unwrap();
 
         let dest_secret = fs::metadata(destination.join("secret.txt")).unwrap();
+        assert_eq!(dest_secret.permissions().mode() & 0o777, 0o600);
         assert_eq!(
-            dest_secret.permissions().mode() & 0o777,
-            0o600,
-            "file mode should match source after sync_entry"
+            fs::read_link(destination.join("link")).unwrap(),
+            PathBuf::from("secret.txt")
         );
+    }
 
-        let dest_dir = fs::metadata(destination.join("private")).unwrap();
-        assert_eq!(
-            dest_dir.permissions().mode() & 0o777,
-            0o700,
-            "directory mode should match source after sync_entry"
+    /// A dirty submodule surfaces as ` M smdir` (a directory on disk); the
+    /// copy must skip it with a note rather than fail or bulk-copy it.
+    #[test]
+    fn copy_skips_dirty_submodule_without_failing() {
+        let sub_origin = init_test_repo();
+        fs::write(sub_origin.path().join("subfile.txt"), "sub\n").unwrap();
+        commit_all(sub_origin.path(), "sub base");
+
+        let repo = init_test_repo();
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                sub_origin.path().to_str().unwrap(),
+                "smdir",
+            ])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "submodule add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        commit_all(repo.path(), "add submodule");
+        // Dirty the submodule with an untracked file.
+        fs::write(repo.path().join("smdir").join("dirt.txt"), "dirt\n").unwrap();
+
+        let destination = tempfile::tempdir().unwrap();
+        let summary = copy_uncommitted_changes(repo.path(), destination.path()).unwrap();
+
+        assert!(summary.skipped_paths.iter().any(|p| p.contains("smdir")));
+        assert!(!destination.path().join("smdir").exists());
+    }
+
+    /// An untracked embedded git repo collapses to `?? embedded/` even under
+    /// `--untracked-files=all`; it is skipped with a note. This test also
+    /// guards the `--untracked-files=all` flag itself: without it ordinary
+    /// untracked dirs collapse the same way and the expansion tests fail.
+    #[test]
+    fn copy_skips_untracked_embedded_repo_dir() {
+        let repo = init_test_repo();
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        let embedded = source.join("embedded");
+        fs::create_dir(&embedded).unwrap();
+        run_git(&embedded, &["init"]);
+        fs::write(embedded.join("inner.txt"), "inner\n").unwrap();
+
+        let summary = copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(summary.skipped_paths.iter().any(|p| p.contains("embedded")));
+        assert!(!destination.join("embedded").exists());
+    }
+
+    /// A tracked file replaced by a FIFO is reported as an ordinary ` M`
+    /// copy record, but opening a FIFO with no writer blocks forever. The
+    /// copy must skip it with a note and still complete.
+    #[test]
+    fn copy_skips_tracked_file_replaced_by_fifo_without_hanging() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("f"), "regular\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        fs::remove_file(source.join("f")).unwrap();
+        let out = Command::new("mkfifo")
+            .arg(source.join("f"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mkfifo failed");
+
+        let summary = copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(summary.skipped_paths.iter().any(|p| p == "f"));
+        // The destination is untouched: it keeps the tracked contents.
+        assert_eq!(
+            fs::read_to_string(destination.join("f")).unwrap(),
+            "regular\n"
+        );
+    }
+
+    /// Recursively snapshot every path under `root` (skipping `.git`) to its
+    /// on-disk representation: file bytes, symlink target, or directory marker.
+    fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut snapshot = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                if meta.file_type().is_symlink() {
+                    snapshot.insert(
+                        rel,
+                        fs::read_link(&path)
+                            .unwrap()
+                            .into_os_string()
+                            .into_encoded_bytes(),
+                    );
+                } else if meta.is_dir() {
+                    snapshot.insert(rel, b"<dir>".to_vec());
+                    stack.push(path);
+                } else {
+                    snapshot.insert(rel, fs::read(&path).unwrap());
+                }
+            }
+        }
+        snapshot
+    }
+
+    /// Data-loss tripwire: the copy must NEVER mutate the source checkout,
+    /// which holds the user's uncommitted work. Uses the richest fixture (a
+    /// mid-merge tree with UD/DU/UU/DD records) and asserts the source is
+    /// byte-identical afterwards.
+    #[test]
+    fn copy_never_mutates_the_source_checkout() {
+        let (repo, _, _, _) = conflicted_repo();
+        let before = snapshot_tree(repo.path());
+        assert!(!before.is_empty());
+
+        let destination = tempfile::tempdir().unwrap();
+        copy_uncommitted_changes(repo.path(), destination.path()).unwrap();
+
+        let after = snapshot_tree(repo.path());
+        assert_eq!(before, after, "the source checkout must be untouched");
+    }
+
+    /// Kills line-based or quote-unaware status parsing.
+    #[test]
+    fn copy_handles_paths_with_spaces_quotes_and_unicode() {
+        let repo = init_test_repo();
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        fs::write(source.join("my file \"quoted\".txt"), "spaces\n").unwrap();
+        fs::write(source.join("日本語 ファイル.txt"), "unicode\n").unwrap();
+        fs::create_dir(source.join("dir with space")).unwrap();
+        fs::write(
+            source.join("dir with space").join("inner file.txt"),
+            "nested\n",
+        )
+        .unwrap();
+
+        copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("my file \"quoted\".txt")).unwrap(),
+            "spaces\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("日本語 ファイル.txt")).unwrap(),
+            "unicode\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("dir with space").join("inner file.txt")).unwrap(),
+            "nested\n"
+        );
+    }
+
+    #[test]
+    fn copy_rejects_same_source_and_destination() {
+        let repo = init_test_repo();
+        assert!(copy_uncommitted_changes(repo.path(), repo.path()).is_err());
+    }
+
+    #[test]
+    fn has_origin_remote_true_with_bare_remote_false_without() {
+        let repo = init_test_repo();
+        assert!(!has_origin_remote(repo.path()).unwrap());
+
+        let bare = tempfile::tempdir().unwrap();
+        run_git(bare.path(), &["init", "--bare", "-b", "main"]);
+        run_git(
+            repo.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        assert!(has_origin_remote(repo.path()).unwrap());
     }
 
     // ── rename_branch tests ──────────────────────────────────────
@@ -3591,21 +4153,6 @@ mod tests {
         pull_branch(clone, "main").unwrap();
 
         assert_eq!(current_branch(clone).unwrap(), "main");
-    }
-
-    #[test]
-    fn has_tracked_changes_ignores_untracked_files() {
-        let repo = init_test_repo();
-
-        fs::write(repo.path().join("scratch.txt"), "untracked\n").unwrap();
-        assert!(!has_tracked_changes(repo.path()).unwrap());
-
-        fs::write(repo.path().join("tracked.txt"), "clean\n").unwrap();
-        commit_all(repo.path(), "add tracked file");
-        assert!(!has_tracked_changes(repo.path()).unwrap());
-
-        fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
-        assert!(has_tracked_changes(repo.path()).unwrap());
     }
 
     #[test]

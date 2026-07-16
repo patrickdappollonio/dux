@@ -276,6 +276,7 @@ pub enum CreateAgentRequest {
         custom_name: Option<String>,
         use_existing_branch: bool,
         pull_before_create: bool,
+        copy_uncommitted_changes: bool,
     },
     PullRequest {
         project: Project,
@@ -364,7 +365,7 @@ pub enum WorkerEvent {
     PullCompleted {
         repo_path: String,
         target: PullTarget,
-        result: Result<Option<String>, String>,
+        result: Result<PullOutcome, String>,
         /// The status final resolved by the dispatch-site StatusOp (the success
         /// or failure message, already keyed). The handler still uses `result`
         /// for its domain mutations and emits this for the user-facing status.
@@ -505,6 +506,27 @@ pub enum WorkerEvent {
         result: Result<(Vec<std::net::TcpListener>, Vec<String>), String>,
         warning: Option<String>,
     },
+}
+
+/// How a successful (non-erroring) pull worker run ended. `current_branch` is
+/// the checkout's branch after the run, when the worker re-read it.
+#[derive(Clone, Debug)]
+pub enum PullOutcome {
+    /// The branch was pulled from origin.
+    Pulled { current_branch: Option<String> },
+    /// The repo has no `origin` remote: nothing to pull, and that is a normal
+    /// state for local-only repos, not a failure.
+    NoOrigin { current_branch: Option<String> },
+}
+
+impl PullOutcome {
+    pub fn current_branch(&self) -> Option<&String> {
+        match self {
+            PullOutcome::Pulled { current_branch } | PullOutcome::NoOrigin { current_branch } => {
+                current_branch.as_ref()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

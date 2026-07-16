@@ -3286,9 +3286,23 @@ impl App {
                     }
                     // Take ownership of the prompt to extract the request.
                     let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
-                    let PromptState::NameNewAgent { mut request, .. } = old_prompt else {
+                    let PromptState::NameNewAgent {
+                        mut request,
+                        copy_changes,
+                        ..
+                    } = old_prompt
+                    else {
                         unreachable!()
                     };
+                    // The per-agent checkbox decides the copy for fresh project
+                    // agents; the other flows have fixed copy semantics.
+                    if let CreateAgentRequest::NewProject {
+                        copy_uncommitted_changes,
+                        ..
+                    } = &mut request
+                    {
+                        *copy_uncommitted_changes = copy_changes;
+                    }
 
                     // For fresh project agents, check whether the branch already
                     // exists locally or on the remote before creating a new one.
@@ -3358,7 +3372,8 @@ impl App {
                         let checkbox_focused = matches!(
                             self.prompt,
                             PromptState::NameNewAgent {
-                                focus: NameNewAgentFocus::RandomizedNameCheckbox,
+                                focus: NameNewAgentFocus::RandomizedNameCheckbox
+                                    | NameNewAgentFocus::CopyChangesCheckbox,
                                 ..
                             }
                         );
@@ -4024,9 +4039,17 @@ impl App {
                     contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
                 }
             }
-            OverlayMouseLayout::NameNewAgent { input, checkbox } => {
+            OverlayMouseLayout::NameNewAgent {
+                input,
+                checkbox,
+                copy_checkbox,
+            } => {
                 if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
                     checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
+                } else if copy_checkbox
+                    .is_some_and(|checkbox| contains_point(checkbox.rect, column, row))
+                {
+                    copy_checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
                 } else {
                     contains_point(input, column, row)
                         .then_some(PromptMouseTarget::NameNewAgentInput)
@@ -5106,12 +5129,29 @@ impl App {
     }
 
     fn focus_next_name_new_agent_control(&mut self, forward: bool) {
-        if let PromptState::NameNewAgent { focus, .. } = &mut self.prompt {
-            *focus = match (*focus, forward) {
-                (NameNewAgentFocus::Input, true) => NameNewAgentFocus::RandomizedNameCheckbox,
-                (NameNewAgentFocus::RandomizedNameCheckbox, true) => NameNewAgentFocus::Input,
-                (NameNewAgentFocus::Input, false) => NameNewAgentFocus::RandomizedNameCheckbox,
-                (NameNewAgentFocus::RandomizedNameCheckbox, false) => NameNewAgentFocus::Input,
+        if let PromptState::NameNewAgent { request, focus, .. } = &mut self.prompt {
+            // Only fresh project agents expose the copy checkbox: forks always
+            // copy, and the other flows never do.
+            let has_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
+            *focus = if has_copy_checkbox {
+                match (*focus, forward) {
+                    (NameNewAgentFocus::Input, true) => NameNewAgentFocus::RandomizedNameCheckbox,
+                    (NameNewAgentFocus::RandomizedNameCheckbox, true) => {
+                        NameNewAgentFocus::CopyChangesCheckbox
+                    }
+                    (NameNewAgentFocus::CopyChangesCheckbox, true) => NameNewAgentFocus::Input,
+                    (NameNewAgentFocus::Input, false) => NameNewAgentFocus::CopyChangesCheckbox,
+                    (NameNewAgentFocus::CopyChangesCheckbox, false) => {
+                        NameNewAgentFocus::RandomizedNameCheckbox
+                    }
+                    (NameNewAgentFocus::RandomizedNameCheckbox, false) => NameNewAgentFocus::Input,
+                }
+            } else {
+                match *focus {
+                    NameNewAgentFocus::Input => NameNewAgentFocus::RandomizedNameCheckbox,
+                    NameNewAgentFocus::RandomizedNameCheckbox
+                    | NameNewAgentFocus::CopyChangesCheckbox => NameNewAgentFocus::Input,
+                }
             };
         }
     }
@@ -5125,7 +5165,22 @@ impl App {
             NameNewAgentFocus::RandomizedNameCheckbox => {
                 self.toggle_name_new_agent_randomized_name()
             }
+            NameNewAgentFocus::CopyChangesCheckbox => self.toggle_name_new_agent_copy_changes(),
             NameNewAgentFocus::Input => {}
+        }
+    }
+
+    fn toggle_name_new_agent_copy_changes(&mut self) {
+        if let PromptState::NameNewAgent {
+            request,
+            copy_changes,
+            focus,
+            ..
+        } = &mut self.prompt
+            && matches!(request, CreateAgentRequest::NewProject { .. })
+        {
+            *focus = NameNewAgentFocus::CopyChangesCheckbox;
+            *copy_changes = !*copy_changes;
         }
     }
 
@@ -5190,6 +5245,9 @@ impl App {
             }
             OverlayCheckboxId::NameNewAgentRandomizedPetName => {
                 self.toggle_name_new_agent_randomized_name();
+            }
+            OverlayCheckboxId::NameNewAgentCopyChanges => {
+                self.toggle_name_new_agent_copy_changes();
             }
             OverlayCheckboxId::ConfigReloadRecoverOldConfig => {
                 if let PromptState::ConfigReloadFailed {
@@ -7184,6 +7242,7 @@ not_a_real_action = ["x"]
                 id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
                 rect: Rect::new(24, 12, 34, 2),
             }),
+            copy_checkbox: None,
         };
     }
 
@@ -7286,7 +7345,9 @@ not_a_real_action = ["x"]
                     project_name: app.engine.projects[0].name.clone(),
                     leading_branch: app.engine.projects[0].leading_branch.clone(),
                 },
-                result: Ok(Some("feature/demo".to_string())),
+                result: Ok(dux_core::worker::PullOutcome::Pulled {
+                    current_branch: Some("feature/demo".to_string()),
+                }),
                 status: dux_core::engine::ResolvedFinal::new(
                     format!("pull-project:{}", app.engine.projects[0].id),
                     dux_core::engine::Final::info(format!(
@@ -8287,10 +8348,12 @@ not_a_real_action = ["x"]
                 custom_name: None,
                 use_existing_branch: false,
                 pull_before_create: false,
+                copy_uncommitted_changes: false,
             },
             input: TextInput::with_text("reuse-me".to_string()),
             randomize_name: false,
             randomized_name: None,
+            copy_changes: false,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -8335,6 +8398,7 @@ not_a_real_action = ["x"]
             input: TextInput::with_text("feature/pr-42".to_string()),
             randomize_name: false,
             randomized_name: None,
+            copy_changes: false,
             focus: NameNewAgentFocus::Input,
         };
 
@@ -8782,6 +8846,8 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// The fresh-agent prompt has exactly three focus stops (input, pet-name
+    /// checkbox, copy checkbox) and no pull-before-create checkbox.
     #[test]
     fn fresh_agent_prompt_does_not_expose_pull_before_create_checkbox() {
         let mut app = test_app(default_bindings());
@@ -8792,6 +8858,38 @@ not_a_real_action = ["x"]
 
         app.create_agent_for_selected_project().unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
+
+        let expect_focus = |app: &App, expected: NameNewAgentFocus| match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => assert_eq!(*focus, expected),
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        expect_focus(&app, NameNewAgentFocus::RandomizedNameCheckbox);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        expect_focus(&app, NameNewAgentFocus::CopyChangesCheckbox);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        expect_focus(&app, NameNewAgentFocus::Input);
+    }
+
+    /// Fork prompts never show the copy checkbox: forks always copy, so the
+    /// focus cycle stays two stops.
+    #[test]
+    fn fork_prompt_has_no_copy_checkbox_focus_stop() {
+        let mut app = test_app(default_bindings());
+        app.fork_selected_session().unwrap();
+        assert!(matches!(
+            &app.prompt,
+            PromptState::NameNewAgent {
+                request: CreateAgentRequest::ForkSession { .. },
+                ..
+            }
+        ));
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
@@ -8807,6 +8905,49 @@ not_a_real_action = ["x"]
         match &app.prompt {
             PromptState::NameNewAgent { focus, .. } => assert_eq!(*focus, NameNewAgentFocus::Input),
             other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    /// Confirming the prompt writes the checkbox value into the `NewProject`
+    /// request (verified via the use-existing-branch detour, which carries the
+    /// finished request without dispatching a worker).
+    #[test]
+    fn name_prompt_confirm_writes_copy_checkbox_into_request() {
+        let mut app = test_app(default_bindings());
+        let repo_path = PathBuf::from(&app.engine.projects[0].path);
+        run_git(&repo_path, &["branch", "reuse-me"]);
+
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                // Deliberately stale: the checkbox value must overwrite it.
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("reuse-me".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: true,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::ConfirmUseExistingBranch { request, .. } => match request {
+                CreateAgentRequest::NewProject {
+                    copy_uncommitted_changes,
+                    ..
+                } => assert!(
+                    *copy_uncommitted_changes,
+                    "the checkbox value must be written into the request"
+                ),
+                other => panic!("expected NewProject request, got {other:?}"),
+            },
+            other => panic!("expected use-existing-branch prompt, got {other:?}"),
         }
     }
 

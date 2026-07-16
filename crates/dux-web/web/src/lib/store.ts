@@ -278,6 +278,11 @@ export interface DuxState {
   //     semantics); null once the user edits away from it or no name is pending.
   createAgentDraft: string
   createAgentRandomize: boolean
+  //   - `createAgentCopyChanges`: the "Copy uncommitted changes from the
+  //     project checkout" checkbox. Seeded from the bootstrap's config default
+  //     when the dialog opens; only "new" mode surfaces it (forks always copy,
+  //     the other flows never do).
+  createAgentCopyChanges: boolean
   createAgentGeneratedName: string | null
   //   - `createAgentPrInput`: the raw PR reference (URL, `#123`, or `123`) for
   //     the "From PR" mode. Free text (NOT agent-name-sanitized); the server
@@ -482,6 +487,7 @@ let state: DuxState = {
   changeProviderTarget: null,
   createAgentDraft: "",
   createAgentRandomize: false,
+  createAgentCopyChanges: true,
   createAgentGeneratedName: null,
   createAgentNamePending: false,
   createAgentPrInput: "",
@@ -2609,6 +2615,10 @@ function openNameDialog(target: CreateAgentTarget): void {
     createAgentTarget: target,
     createAgentDraft: "",
     createAgentRandomize: randomize,
+    // Seeded from the config default; older servers omit the field, so fall
+    // back to true (the server-side default). Only "new" mode surfaces it.
+    createAgentCopyChanges:
+      state.bootstrap?.copy_uncommitted_changes_by_default ?? true,
     createAgentGeneratedName: null,
     createAgentNamePending: randomize,
     createAgentPrInput: "",
@@ -2641,6 +2651,11 @@ export function setCreateAgentDraft(raw: string): void {
   const generated =
     draft === state.createAgentGeneratedName ? state.createAgentGeneratedName : null
   setState({ createAgentDraft: draft, createAgentGeneratedName: generated })
+}
+
+// Toggle the "Copy uncommitted changes from the project checkout" checkbox.
+export function toggleCreateAgentCopyChanges(): void {
+  setState({ createAgentCopyChanges: !state.createAgentCopyChanges })
 }
 
 // Toggle the "Use randomized pet name" checkbox with the TUI's exact semantics:
@@ -2680,9 +2695,18 @@ function toastCreateError(e: unknown, fallback: string): void {
 // server auto-generate a branch name (the equivalent outcome to the TUI's
 // generate-a-pet-name path). With the checkbox checked the input is effectively
 // never empty, so the empty path is the unchecked-and-blank case.
-export function createAgent(projectId: string, name: string): void {
+export function createAgent(
+  projectId: string,
+  name: string,
+  copyUncommittedChanges?: boolean,
+): void {
   sessionsApi
-    .create({ kind: "new", project_id: projectId, name })
+    .create({
+      kind: "new",
+      project_id: projectId,
+      name,
+      copy_uncommitted_changes: copyUncommittedChanges,
+    })
     .catch((e) => toastCreateError(e, "Could not create the agent."))
 }
 
@@ -2713,7 +2737,7 @@ export function submitNameDialog(name: string): void {
   if (!target) return
   if (target.kind === "new") {
     armCreateFocus(target.projectId)
-    createAgent(target.projectId, name)
+    createAgent(target.projectId, name, state.createAgentCopyChanges)
   } else if (target.kind === "fork") {
     // A fork lands in the same project as its source session; resolve it so the
     // focus diff is scoped to that project. If the source vanished from the

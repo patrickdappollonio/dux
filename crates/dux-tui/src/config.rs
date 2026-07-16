@@ -470,6 +470,17 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Bool(c.defaults.pull_before_creating_agent_by_default),
         },
+        ConfigEntry::Field {
+            key: "copy_uncommitted_changes_by_default",
+            comment: Some(CommentSource::Static(
+                "# When true, creating an agent copies the project checkout's uncommitted and\n\
+                 # untracked changes into the new worktree, when the checkout and the new\n\
+                 # worktree are on the same commit. Files matched by .gitignore never travel.\n\
+                 # Forks always copy regardless of this setting. The new-agent prompt has a\n\
+                 # per-agent checkbox.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.defaults.copy_uncommitted_changes_by_default),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Env,
         ConfigEntry::Blank,
@@ -1480,6 +1491,7 @@ mod tests {
         assert!(rendered.contains("provider = \"claude\""));
         assert!(rendered.contains("enable_randomized_pet_name_by_default = false"));
         assert!(rendered.contains("pull_before_creating_agent_by_default = true"));
+        assert!(rendered.contains("copy_uncommitted_changes_by_default = true"));
         assert!(!rendered.contains("prompt_for_name"));
         assert!(rendered.contains("[providers.claude]"));
         assert!(rendered.contains("[providers.codex]"));
@@ -1686,6 +1698,22 @@ enable_randomized_pet_name_by_default = false
         .expect("config should parse");
 
         assert!(parsed.defaults.pull_before_creating_agent_by_default);
+    }
+
+    #[test]
+    fn old_config_missing_copy_uncommitted_changes_defaults_to_true() {
+        let parsed: Config = toml::from_str(
+            r#"
+[defaults]
+provider = "claude"
+start_directory = "/tmp"
+enable_randomized_pet_name_by_default = false
+pull_before_creating_agent_by_default = true
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(parsed.defaults.copy_uncommitted_changes_by_default);
     }
 
     #[test]

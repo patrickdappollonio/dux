@@ -13,7 +13,7 @@ use crate::engine::events::{
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
 use crate::worker::{
     AgentLaunchFailedData, AgentLaunchRequest, CreateAgentRequest, ProjectPersistenceAction,
-    PullTarget, WorkerEvent,
+    PullOutcome, PullTarget, WorkerEvent,
 };
 
 /// What the Engine should do. Variants are payload-carrying — the caller
@@ -753,23 +753,11 @@ impl Engine {
                 // the domain mutations.
                 let op = match &target {
                     PullTarget::Project { project_name, .. } => {
-                        let pn_ok = project_name.clone();
-                        let pn_err = project_name.clone();
-                        crate::engine::status_op(busy_message)
-                            .on_success(move |_: &Option<String>| {
-                                crate::engine::Final::info(format!(
-                                    "Refreshed project \"{pn_ok}\". Local branch is up to date with remote."
-                                ))
-                            })
-                            .on_failure(move |e: &String| {
-                                crate::engine::Final::error(format!(
-                                    "Project refresh failed for \"{pn_err}\": {e}"
-                                ))
-                            })
+                        project_refresh_status_op(busy_message, project_name)
                     }
                     PullTarget::Session => {
                         crate::engine::status_op(busy_message)
-                            .on_success(|_: &Option<String>| {
+                            .on_success(|_: &PullOutcome| {
                                 crate::engine::Final::info(
                                     "Pulled latest changes from remote successfully. Local branch is up to date.",
                                 )
@@ -808,31 +796,12 @@ impl Engine {
                     move |tx| {
                         let result = match &target {
                             PullTarget::Project { leading_branch, .. } => {
-                                let leading_branch = match leading_branch.clone() {
-                                    Some(branch) => Ok(branch),
-                                    None => {
-                                        crate::git::current_branch_opt(&repo_path).map(|opt_branch| {
-                                            crate::project_browser::leading_branch_for_project(
-                                                &repo_path, opt_branch.as_deref(),
-                                            )
-                                        })
-                                    }
-                                };
-                                leading_branch
-                                    .and_then(|branch| {
-                                        crate::git::switch_branch_if_needed(&repo_path, &branch)?;
-                                        if crate::git::has_tracked_changes(&repo_path)? {
-                                            return Err(anyhow::anyhow!(
-                                                "Refresh blocked because the source checkout has uncommitted changes."
-                                            ));
-                                        }
-                                        crate::git::pull_branch(&repo_path, &branch)
-                                    })
-                                    .map(|_| crate::git::current_branch(&repo_path).ok())
-                                    .map_err(|e| e.to_string())
+                                run_project_refresh(&repo_path, leading_branch.clone())
                             }
                             PullTarget::Session => crate::git::pull_current_branch(&repo_path)
-                                .map(|_| None)
+                                .map(|_| PullOutcome::Pulled {
+                                    current_branch: None,
+                                })
                                 .map_err(|e| e.to_string()),
                         };
                         // Resolve the tri-state op where the typed result is in
@@ -1217,6 +1186,64 @@ fn reorder_in_place<T>(items: &mut Vec<T>, position: impl Fn(&T) -> Option<usize
         .into_iter()
         .map(|i| taken[i].take().expect("each index visited once"))
         .collect();
+}
+
+/// The tri-state status op for a `PullTarget::Project` refresh. Extracted so
+/// the tone mapping is unit-testable without a worker thread: a pulled or
+/// no-origin refresh is an info final, and a FAILED refresh is a WARNING (the
+/// refresh is best-effort; the project keeps working from local branch state,
+/// and the user is told so).
+fn project_refresh_status_op(
+    busy_message: String,
+    project_name: &str,
+) -> crate::engine::StatusOp<crate::worker::PullOutcome, String> {
+    let pn_ok = project_name.to_string();
+    let pn_err = project_name.to_string();
+    crate::engine::status_op(busy_message)
+        .on_success(move |outcome: &crate::worker::PullOutcome| match outcome {
+            crate::worker::PullOutcome::Pulled { .. } => crate::engine::Final::info(format!(
+                "Refreshed project \"{pn_ok}\". Local branch is up to date with remote."
+            )),
+            crate::worker::PullOutcome::NoOrigin { .. } => crate::engine::Final::info(format!(
+                "Project \"{pn_ok}\" has no origin remote; nothing to pull. Local branch state refreshed."
+            )),
+        })
+        .on_failure(move |e: &String| {
+            crate::engine::Final::warning(format!(
+                "Could not refresh \"{pn_err}\" from origin: {e}. Continuing from the local branch state."
+            ))
+        })
+}
+
+/// Body of the `PullTarget::Project` refresh worker, extracted so tests can
+/// exercise it without a worker thread. A dirty checkout never gates the
+/// refresh: git itself refuses a fast-forward only when it would clobber a
+/// locally edited file, which surfaces through the error path.
+fn run_project_refresh(
+    repo_path: &std::path::Path,
+    leading_branch: Option<String>,
+) -> Result<crate::worker::PullOutcome, String> {
+    use crate::worker::PullOutcome;
+    let leading_branch = match leading_branch {
+        Some(branch) => branch,
+        None => crate::git::current_branch_opt(repo_path)
+            .map(|opt_branch| {
+                crate::project_browser::leading_branch_for_project(repo_path, opt_branch.as_deref())
+            })
+            .map_err(|e| e.to_string())?,
+    };
+    crate::git::switch_branch_if_needed(repo_path, &leading_branch).map_err(|e| e.to_string())?;
+    if !crate::git::has_origin_remote(repo_path).map_err(|e| e.to_string())? {
+        // Nothing to pull, and that is fine; still re-read the current branch
+        // so the sidebar stays fresh.
+        return Ok(PullOutcome::NoOrigin {
+            current_branch: crate::git::current_branch(repo_path).ok(),
+        });
+    }
+    crate::git::pull_branch(repo_path, &leading_branch).map_err(|e| e.to_string())?;
+    Ok(PullOutcome::Pulled {
+        current_branch: crate::git::current_branch(repo_path).ok(),
+    })
 }
 
 #[cfg(test)]
@@ -2083,5 +2110,125 @@ mod tests {
                 .iter()
                 .any(|f| f.path == "unstaged.txt")
         );
+    }
+
+    // ── run_project_refresh / project_refresh_status_op ──────────────────
+
+    fn refresh_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "user.email", "t@t"]);
+        std::fs::write(dir.path().join("tracked.txt"), "base\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-m", "base"]);
+        dir
+    }
+
+    fn git_ok(cwd: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Kills the old blanket dirty gate: a dirty tracked file no longer blocks
+    /// the refresh, and git fast-forwards when nothing conflicts.
+    #[test]
+    fn project_refresh_proceeds_with_dirty_checkout() {
+        let repo = refresh_test_repo();
+        let bare = tempfile::tempdir().unwrap();
+        git_ok(bare.path(), &["init", "--bare", "-b", "main"]);
+        git_ok(
+            repo.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git_ok(repo.path(), &["push", "origin", "main"]);
+        // The dirt that used to abort the refresh.
+        std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
+
+        let outcome = run_project_refresh(repo.path(), Some("main".to_string()))
+            .expect("a dirty checkout must not block the refresh");
+        match outcome {
+            PullOutcome::Pulled { current_branch } => {
+                assert_eq!(current_branch.as_deref(), Some("main"));
+            }
+            other => panic!("expected Pulled, got {other:?}"),
+        }
+    }
+
+    /// A local-only repo is "nothing to pull", not a failure, and the current
+    /// branch is still re-read so the sidebar stays fresh.
+    #[test]
+    fn project_refresh_without_origin_is_nothing_to_pull_info() {
+        let repo = refresh_test_repo();
+
+        let outcome = run_project_refresh(repo.path(), Some("main".to_string()))
+            .expect("no origin must not be an error");
+        match &outcome {
+            PullOutcome::NoOrigin { current_branch } => {
+                assert_eq!(current_branch.as_deref(), Some("main"));
+            }
+            other => panic!("expected NoOrigin, got {other:?}"),
+        }
+
+        // The op maps the no-origin outcome to an INFO final.
+        let op = project_refresh_status_op("Refreshing...".to_string(), "demo");
+        let resolved = op.resolve(&Ok(outcome));
+        match resolved.outcome {
+            crate::engine::Final::Message { tone, text } => {
+                assert_eq!(tone, StatusTone::Info);
+                assert!(text.contains("no origin remote"), "got: {text}");
+            }
+            other => panic!("expected a message final, got {other:?}"),
+        }
+    }
+
+    /// Catches both the old error tone and over-softening to info: a failed
+    /// refresh resolves as a WARNING that says the project continues from the
+    /// local branch state.
+    #[test]
+    fn project_refresh_pull_failure_resolves_warning_not_error() {
+        let repo = refresh_test_repo();
+        git_ok(
+            repo.path(),
+            &["remote", "add", "origin", "/nonexistent/dux-test-origin"],
+        );
+
+        let result = run_project_refresh(repo.path(), Some("main".to_string()));
+        assert!(result.is_err(), "the pull must fail");
+
+        let op = project_refresh_status_op("Refreshing...".to_string(), "demo");
+        let resolved = op.resolve(&result);
+        match resolved.outcome {
+            crate::engine::Final::Message { tone, text } => {
+                assert_eq!(tone, StatusTone::Warning, "got: {text}");
+                assert!(
+                    text.contains("Continuing from the local branch state"),
+                    "got: {text}"
+                );
+            }
+            other => panic!("expected a message final, got {other:?}"),
+        }
     }
 }

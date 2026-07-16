@@ -69,6 +69,8 @@ enum CreateSessionBody {
         project_id: String,
         #[serde(default)]
         name: String,
+        #[serde(default)]
+        copy_uncommitted_changes: Option<bool>,
     },
     Fork {
         session_id: String,
@@ -92,9 +94,15 @@ enum CreateSessionBody {
 impl CreateSessionBody {
     fn into_wire(self) -> WireCommand {
         match self {
-            CreateSessionBody::New { project_id, name } => {
-                WireCommand::CreateAgent { project_id, name }
-            }
+            CreateSessionBody::New {
+                project_id,
+                name,
+                copy_uncommitted_changes,
+            } => WireCommand::CreateAgent {
+                project_id,
+                name,
+                copy_uncommitted_changes,
+            },
             CreateSessionBody::Fork { session_id, name } => {
                 WireCommand::ForkSession { session_id, name }
             }

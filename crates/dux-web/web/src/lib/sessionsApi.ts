@@ -34,7 +34,7 @@ export class SessionsApiError extends Error {
 
 // The discriminated create body the server matches on `kind`.
 export type CreateSessionBody =
-  | { kind: "new"; project_id: string; name?: string }
+  | { kind: "new"; project_id: string; name?: string; copy_uncommitted_changes?: boolean }
   | { kind: "fork"; session_id: string; name?: string }
   | { kind: "from_worktree"; project_id: string; worktree_path: string; name?: string }
   | { kind: "from_pr"; project_id: string; pr: string; name?: string }

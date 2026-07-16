@@ -1831,8 +1831,12 @@ mod tests {
         assert!(worker_rx.try_recv().is_err());
     }
 
+    /// The pull is best-effort: a broken checkout no longer aborts creation at
+    /// the pull stage. The job proceeds and fails later, on the real problem
+    /// (here: the leading branch cannot exist in a directory that is not a
+    /// repo), never with the old pull-abort message.
     #[test]
-    fn fresh_worker_reports_pre_create_pull_failure_before_worktree_creation() {
+    fn fresh_worker_survives_pull_failure_and_fails_on_the_missing_repo_instead() {
         let tmp = tempdir().expect("tempdir");
         let paths = DuxPaths {
             config_path: tmp.path().join("config.toml"),
@@ -1864,6 +1868,7 @@ mod tests {
                 custom_name: Some("agent-branch".to_string()),
                 use_existing_branch: false,
                 pull_before_create: true,
+                copy_uncommitted_changes: false,
             },
             paths,
             Config::default(),
@@ -1888,14 +1893,20 @@ mod tests {
             }
             _ => panic!("expected pre-create pull progress"),
         }
-        match worker_rx.recv().expect("worker event") {
-            WorkerEvent::CreateAgentFailed { message, .. } => {
-                assert!(message.contains(
-                    "Failed to pull latest changes for project \"demo\" before creating the agent"
-                ));
+        let mut failure = None;
+        while let Ok(event) = worker_rx.try_recv() {
+            if let WorkerEvent::CreateAgentFailed { message, .. } = event {
+                failure = Some(message);
             }
-            _ => panic!("expected pre-create pull failure"),
         }
-        assert!(worker_rx.try_recv().is_err());
+        let failure = failure.expect("a directory that is not a repo must still fail creation");
+        assert!(
+            !failure.contains("Failed to pull latest changes"),
+            "the pull must not abort creation: {failure}"
+        );
+        assert!(
+            failure.contains("leading branch \"main\" no longer exists locally"),
+            "creation fails on the real problem instead: {failure}"
+        );
     }
 }

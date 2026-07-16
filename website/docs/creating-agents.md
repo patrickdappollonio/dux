@@ -73,8 +73,28 @@ agent starts from the freshest upstream commit. You can change the default in
 pull_before_creating_agent_by_default = true
 ```
 
-The pull only proceeds if the source checkout has no uncommitted changes; if it
-does, creation fails with a clear error rather than silently clobbering your work.
+The pull is best-effort: it uses `git pull --ff-only` (never a merge or rebase),
+it is skipped entirely for repos with no `origin` remote, and a failed pull no
+longer blocks creation. If the pull cannot complete, the agent simply starts
+from the local branch state and the status message tells you so.
+
+### Copying uncommitted changes
+
+By default, creating an agent also copies the project checkout's uncommitted
+and untracked changes into the new worktree, so in-progress work travels with
+the agent. Both surfaces have a per-agent checkbox in the naming prompt, and
+the default lives in `config.toml`:
+
+```toml
+[defaults]
+copy_uncommitted_changes_by_default = true
+```
+
+The copy is guarded by a same-commit check: changes are copied only when the
+project checkout and the new worktree are on the same commit. When they are
+not, creation still proceeds and the status message notes that the changes were
+not copied. Some things never travel: files matched by `.gitignore`, submodule
+and embedded-repository contents, and empty directories.
 
 ## Creating an agent from a GitHub PR
 
@@ -134,7 +154,8 @@ Worktrees are grouped into two categories:
   outside dux's managed directory (for example, one you created with
   `git worktree add` yourself). dux forks these: it creates a new managed
   worktree branched from the external worktree's current `HEAD` commit and copies
-  any dirty and untracked files across so you don't lose in-progress work.
+  any dirty and untracked files across (gitignored files do not travel) so you
+  don't lose in-progress work.
 
 The main checkout itself is not selectable; dux keeps that for you to work in
 outside of agent sessions.
@@ -146,9 +167,11 @@ selected; the error "That worktree already has an agent." is shown if you try.
 
 Select an agent in the left pane and run the `fork-agent` palette command.
 Forking creates a brand-new worktree branched from the source agent's current
-`HEAD` commit, then copies the entire
-working tree across (including uncommitted edits) so the fork starts in the
-exact same state the original agent is in right now.
+`HEAD` commit, then copies the uncommitted and untracked changes across so the
+fork starts where the original agent is right now. Files matched by
+`.gitignore`, submodule and embedded-repository contents, and empty directories
+do not travel (nor do edits hidden with `assume-unchanged` or `skip-worktree`,
+which are invisible to git status).
 
 This is useful for exploring two different approaches to the same problem: fork
 the agent at the decision point and let each branch go its own way.
