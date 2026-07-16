@@ -206,6 +206,11 @@ pub struct BrowserEntry {
     pub path: PathBuf,
     pub label: String,
     pub is_git_repo: bool,
+    /// True only for the synthetic parent-directory ("../") row synthesized at
+    /// the top of `browser_entries`. Real directory entries are always `false`.
+    /// Consumers use this typed flag rather than matching the `"../"` label
+    /// string to special-case the parent row.
+    pub is_parent: bool,
 }
 
 #[derive(Clone, Debug)]

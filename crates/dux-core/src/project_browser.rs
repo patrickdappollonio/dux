@@ -40,6 +40,7 @@ pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
                 is_git_repo,
                 path,
                 label,
+                is_parent: false,
             })
         })
         .collect::<Vec<_>>();
@@ -55,6 +56,7 @@ pub fn browser_entries(dir: &Path) -> Vec<BrowserEntry> {
                 path: parent.to_path_buf(),
                 label: "../".to_string(),
                 is_git_repo: false,
+                is_parent: true,
             },
         );
     }
@@ -492,6 +494,49 @@ mod tests {
             cwd.display(),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn browser_entries_flags_only_the_parent_row_as_parent() {
+        // A tempdir with two child directories, one a git repo. The synthesized
+        // "../" row must carry is_parent == true and keep its literal "../"
+        // label; every real child directory must carry is_parent == false.
+        let base = tempdir().expect("base tempdir");
+        let plain = base.path().join("plain");
+        let repo = base.path().join("repo");
+        fs::create_dir(&plain).unwrap();
+        fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]);
+
+        let entries = browser_entries(base.path());
+
+        let parent = entries
+            .iter()
+            .find(|e| e.is_parent)
+            .expect("a parent row must be synthesized");
+        assert_eq!(
+            parent.label, "../",
+            "the parent row keeps its literal label"
+        );
+        assert_eq!(
+            entries.iter().filter(|e| e.is_parent).count(),
+            1,
+            "exactly one row is the parent"
+        );
+
+        let plain_entry = entries
+            .iter()
+            .find(|e| e.path == plain)
+            .expect("the plain child must be listed");
+        assert!(!plain_entry.is_parent, "a real child is not the parent");
+        assert!(!plain_entry.is_git_repo);
+
+        let repo_entry = entries
+            .iter()
+            .find(|e| e.path == repo)
+            .expect("the git child must be listed");
+        assert!(!repo_entry.is_parent, "a real child is not the parent");
+        assert!(repo_entry.is_git_repo, "the git child is flagged a repo");
     }
 
     #[test]

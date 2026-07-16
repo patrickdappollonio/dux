@@ -10685,6 +10685,7 @@ not_a_real_action = ["x"]
                 path: child.clone(),
                 label: "child/".to_string(),
                 is_git_repo: false,
+                is_parent: false,
             }],
             loading: false,
             selected: 0,

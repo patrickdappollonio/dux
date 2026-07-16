@@ -2906,7 +2906,7 @@ impl App {
                         .iter()
                         .enumerate()
                         .map(|(i, entry)| {
-                            let prefix = if entry.label == "../" {
+                            let prefix = if entry.is_parent {
                                 ""
                             } else if i == last {
                                 "└── "

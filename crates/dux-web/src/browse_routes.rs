@@ -52,6 +52,7 @@ struct DirEntryView {
     path: String,
     label: String,
     is_git_repo: bool,
+    is_parent: bool,
 }
 
 /// The browse reply: the resolved directory plus its child entries.
@@ -88,6 +89,7 @@ async fn browse(State(state): State<AppState>, Query(query): Query<BrowseQuery>)
                 path: e.path.to_string_lossy().to_string(),
                 label: e.label,
                 is_git_repo: e.is_git_repo,
+                is_parent: e.is_parent,
             })
             .collect::<Vec<_>>();
         (dir, entries)
@@ -279,6 +281,21 @@ mod tests {
             .collect();
         assert!(labels.contains(&"alpha/"));
         assert!(labels.contains(&"beta/"));
+
+        // The parent ("../") row carries is_parent == true; the real child
+        // directories carry is_parent == false. This is the typed flag the web
+        // picker branches on rather than matching the "../" label string.
+        let entries = value["entries"].as_array().unwrap();
+        let parent = entries
+            .iter()
+            .find(|e| e["label"] == "../")
+            .expect("a parent row is synthesized");
+        assert_eq!(parent["is_parent"], true);
+        let alpha = entries
+            .iter()
+            .find(|e| e["label"] == "alpha/")
+            .expect("alpha is listed");
+        assert_eq!(alpha["is_parent"], false);
     }
 
     /// With `path` omitted, the picker must open at the configured
