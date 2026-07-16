@@ -1628,6 +1628,7 @@ impl LeftItem {
 pub(crate) fn build_left_items(
     projects: &[Project],
     sessions: &[AgentSession],
+    projects_with_terminals: &HashSet<String>,
     collapsed_projects: &HashSet<String>,
     empty_project_separator_min_projects: u16,
 ) -> Vec<LeftItem> {
@@ -1635,8 +1636,12 @@ pub(crate) fn build_left_items(
     // dux_core::sidebar so the TUI and web render an identical tree. Here we only
     // translate that core model into the TUI's index-based render items and apply
     // display state (collapse).
-    let model =
-        dux_core::sidebar::build_sidebar(projects, sessions, empty_project_separator_min_projects);
+    let model = dux_core::sidebar::build_sidebar(
+        projects,
+        sessions,
+        projects_with_terminals,
+        empty_project_separator_min_projects,
+    );
     let project_index: std::collections::HashMap<&str, usize> = projects
         .iter()
         .enumerate()
@@ -3004,6 +3009,7 @@ impl App {
         self.left_items_cache = build_left_items(
             &self.engine.projects,
             &self.engine.sessions,
+            &self.engine.project_ids_with_terminals(),
             &self.collapsed_projects,
             self.engine.config.ui.empty_project_separator_min_projects,
         );
@@ -4409,7 +4415,7 @@ mod tests {
         ];
         let sessions = vec![test_session("session-1", "project-2", 0)];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
 
         assert_eq!(
             items,
@@ -4437,7 +4443,7 @@ mod tests {
             test_session("session-2", "project-4", 0),
         ];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
 
         assert_eq!(
             items,
@@ -4470,7 +4476,7 @@ mod tests {
             test_session("session-3", "project-3", 0),
         ];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
 
         assert_eq!(
             items,
@@ -4505,7 +4511,7 @@ mod tests {
         ];
         sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
 
         assert_eq!(
             items,
@@ -4535,7 +4541,7 @@ mod tests {
         ];
         let sessions = vec![test_session("session-1", "project-2", 0)];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 0);
 
         assert!(!items.contains(&LeftItem::EmptyProjectsSeparator));
         assert!(!items.contains(&LeftItem::EmptyProjectsSpacer));
@@ -4552,7 +4558,7 @@ mod tests {
             test_project("project-5"),
         ];
 
-        let items = build_left_items(&projects, &[], &HashSet::new(), 5);
+        let items = build_left_items(&projects, &[], &HashSet::new(), &HashSet::new(), 5);
 
         assert_eq!(
             items,
@@ -4581,7 +4587,7 @@ mod tests {
         collapsed.insert("real".to_string());
         collapsed.insert("ghost".to_string());
 
-        let items = build_left_items(&projects, &sessions, &collapsed, 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), &collapsed, 5);
 
         let session_id = |idx: &usize| sessions[*idx].id.as_str();
         // The real project is collapsed: header shown, its session hidden.

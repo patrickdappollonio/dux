@@ -224,9 +224,7 @@ impl Engine {
                 Some(TerminalOwner::Session(sid)) => !self.any_tab_active(sid),
                 Some(TerminalOwner::Project(_)) | None => false,
             };
-            if agent_detached
-                && let Some(TerminalOwner::Session(sid)) = &owner
-            {
+            if agent_detached && let Some(TerminalOwner::Session(sid)) = &owner {
                 // A clean exit of the session-slot tab is the "user quit the
                 // agent" signal that cancels auto-reopen; an extra tab exiting
                 // (or any crash) leaves the auto-reopen intent untouched.
@@ -1225,6 +1223,132 @@ mod tests {
             assert!(Instant::now() < deadline, "terminal was never reaped");
             sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn begin_close_session_terminals_leaves_project_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (session_tid, _) = engine
+            .create_companion_terminal("s1")
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1")
+            .expect("project terminal");
+
+        engine.begin_close_session_terminals("s1");
+
+        assert!(
+            !engine.companion_terminals.contains_key(&session_tid),
+            "the session's terminal is closed"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&project_tid),
+            "an over-broad close must not take the project terminal with it"
+        );
+    }
+
+    #[test]
+    fn begin_close_project_terminals_leaves_session_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (session_tid, _) = engine
+            .create_companion_terminal("s1")
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1")
+            .expect("project terminal");
+
+        engine.begin_close_project_terminals("p1");
+
+        assert!(
+            !engine.companion_terminals.contains_key(&project_tid),
+            "the project's terminal is closed"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&session_tid),
+            "the session terminal must be untouched"
+        );
+    }
+
+    #[test]
+    fn pruned_project_terminal_carries_project_owner_and_never_detaches_agent() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.mark_session_status("s1", SessionStatus::Active);
+
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (terminal_id, _label) = engine
+            .create_project_terminal("p1")
+            .expect("create project terminal");
+
+        // Ctrl-d (EOF) makes cat exit.
+        engine
+            .companion_terminals
+            .get(&terminal_id)
+            .unwrap()
+            .client
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if !pruned.is_empty() {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "project terminal never exited");
+            sleep(Duration::from_millis(50));
+        };
+
+        let p = pruned
+            .iter()
+            .find(|p| p.id == terminal_id)
+            .expect("project terminal pruned");
+        assert_eq!(p.kind, PrunedPtyKind::Terminal);
+        assert_eq!(
+            p.owner,
+            Some(crate::model::TerminalOwner::Project("p1".to_string())),
+            "the prune must carry the project owner, not an empty-string orphan"
+        );
+        assert!(
+            !p.agent_detached,
+            "a project terminal exit never detaches an agent"
+        );
+        let status = engine
+            .sessions
+            .iter()
+            .find(|s| s.id == "s1")
+            .map(|s| s.status.clone());
+        assert_eq!(
+            status,
+            Some(SessionStatus::Active),
+            "the agent's session status is untouched by a project terminal exit"
+        );
     }
 
     #[test]

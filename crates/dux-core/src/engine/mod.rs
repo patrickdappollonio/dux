@@ -4593,6 +4593,25 @@ mod resource_monitor_targets_tests {
     }
 
     #[test]
+    fn resource_targets_include_project_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (terminal_id, _label) = engine
+            .create_project_terminal("p1")
+            .expect("create project terminal");
+
+        let targets = engine.resource_monitor_targets();
+        assert_eq!(targets.len(), 1, "the project terminal must be sampled");
+        assert_eq!(targets[0].id, terminal_id);
+        assert_eq!(targets[0].kind, ResourceKind::Terminal);
+    }
+
+    #[test]
     fn resource_monitor_targets_labels_agent_tabs_and_terminals_with_ids() {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");

@@ -905,6 +905,10 @@ impl Engine {
                 project_id,
                 project_name,
             } => {
+                // A removed project takes its project terminals with it (graceful
+                // SIGTERM via the terminating set) — otherwise they would be
+                // orphaned with no sidebar row and no owner to route through.
+                self.begin_close_project_terminals(project_id);
                 self.projects.retain(|p| p.id != *project_id);
                 ProjectPersistenceView::Removed {
                     project_name: project_name.clone(),
@@ -914,6 +918,7 @@ impl Engine {
                 project_id,
                 project_name,
             } => {
+                self.begin_close_project_terminals(project_id);
                 self.projects.retain(|p| p.id != *project_id);
                 ProjectPersistenceView::Deleted {
                     project_name: project_name.clone(),
@@ -2648,6 +2653,46 @@ mod tests {
                 .values()
                 .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string())),
             "deleted session's companion terminals should be removed"
+        );
+    }
+
+    #[test]
+    fn finish_delete_session_leaves_project_terminals() {
+        let (mut engine, _tmp) = test_engine();
+
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .create_companion_terminal("s1")
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1")
+            .expect("project terminal");
+
+        engine
+            .finish_delete_session("s1")
+            .unwrap()
+            .expect("outcome");
+
+        assert!(
+            engine.companion_terminals.contains_key(&project_tid),
+            "deleting an agent must not delete the project's own terminals"
+        );
+        assert!(
+            !engine
+                .companion_terminals
+                .values()
+                .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string())),
+            "the session's own terminals are removed"
         );
     }
 

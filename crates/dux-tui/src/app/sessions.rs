@@ -1095,6 +1095,9 @@ impl App {
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
         self.input_target = InputTarget::Terminal;
+        // A project terminal keeps its project above the "no agents" separator,
+        // so the sidebar grouping may have changed.
+        self.rebuild_left_items();
         self.set_info(format!(
             "Launched project terminal at the repo root of \"{}\".",
             project.name

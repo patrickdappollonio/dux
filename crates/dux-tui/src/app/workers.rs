@@ -292,6 +292,9 @@ impl App {
                 self.set_info("Terminal exited. Press the terminal key to launch a new one.");
             }
             self.clamp_terminal_cursor();
+            // An exited project terminal can change the sidebar grouping (its
+            // project may now be agent-less and sink below the separator).
+            self.rebuild_left_items();
         }
 
         // Refresh companion-terminal foreground commands. The engine throttles
@@ -810,6 +813,8 @@ impl App {
                     self.active_terminal_id = None;
                 }
                 self.clamp_terminal_cursor();
+                // A deleted project terminal can change the sidebar grouping.
+                self.rebuild_left_items();
                 if let Some(label) = label {
                     self.set_info(format!("Deleted terminal \"{label}\""));
                 }

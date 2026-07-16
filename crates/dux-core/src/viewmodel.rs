@@ -192,6 +192,10 @@ pub struct ProjectView {
     /// Empty when no store row exists yet (a freshly constructed project that
     /// has not been persisted). Surfaced so a client can show an "added" date.
     pub created_at: String,
+    /// Project terminals open at this project's repo root (owned by the project,
+    /// with no agent attached), sorted by `id` for stability. Session-owned
+    /// companion terminals live on `SessionView::terminals` instead.
+    pub terminals: Vec<TerminalView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -400,7 +404,7 @@ impl ResourceStatsView {
 }
 
 impl ProjectView {
-    fn from_project(p: &Project) -> Self {
+    fn from_project(p: &Project, terminals: Vec<TerminalView>) -> Self {
         Self {
             id: p.id.clone(),
             name: p.name.clone(),
@@ -423,6 +427,7 @@ impl ProjectView {
             path_missing: p.path_missing,
             leading_branch: p.leading_branch.clone(),
             created_at: p.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            terminals,
         }
     }
 }
@@ -510,7 +515,7 @@ impl Engine {
             projects: self
                 .projects
                 .iter()
-                .map(ProjectView::from_project)
+                .map(|p| ProjectView::from_project(p, self.project_terminal_views(&p.id)))
                 .collect(),
             sessions: self
                 .sessions
@@ -526,9 +531,43 @@ impl Engine {
             sidebar: crate::sidebar::build_sidebar(
                 &self.projects,
                 &self.sessions,
+                &self.project_ids_with_terminals(),
                 self.config.ui.empty_project_separator_min_projects,
             ),
         }
+    }
+
+    /// The project-owned terminals of `project_id` as [`TerminalView`]s, sorted
+    /// by id for stability (mirrors the session-terminal projection below).
+    fn project_terminal_views(&self, project_id: &str) -> Vec<TerminalView> {
+        let mut terminals: Vec<TerminalView> = self
+            .companion_terminals
+            .iter()
+            .filter(
+                |(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Project(pid) if pid == project_id),
+            )
+            .map(|(id, t)| TerminalView {
+                id: id.clone(),
+                label: t.label.clone(),
+                has_output: t.client.has_output(),
+                foreground_cmd: t.foreground_cmd.clone(),
+            })
+            .collect();
+        terminals.sort_by(|a, b| a.id.cmp(&b.id));
+        terminals
+    }
+
+    /// The set of project ids that own at least one live project terminal. Feeds
+    /// the sidebar split so a project with a live terminal never sinks below the
+    /// "no agents" separator.
+    pub fn project_ids_with_terminals(&self) -> std::collections::HashSet<String> {
+        self.companion_terminals
+            .values()
+            .filter_map(|t| match &t.owner {
+                crate::model::TerminalOwner::Project(pid) => Some(pid.clone()),
+                crate::model::TerminalOwner::Session(_) => None,
+            })
+            .collect()
     }
 
     /// Project a single session into its [`SessionView`], looking up its companion
@@ -1046,6 +1085,37 @@ mod tests {
         assert_eq!(terminals[0].label, label);
         // A freshly-created terminal has no foreground command yet.
         assert_eq!(terminals[0].foreground_cmd, None);
+    }
+
+    #[test]
+    fn spine_projects_project_terminals_onto_project_view_not_sessions() {
+        let (mut engine, _tmp) = test_engine();
+
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (terminal_id, label) = engine
+            .create_project_terminal("p1")
+            .expect("create project terminal");
+
+        let vm = engine.spine();
+        // The project carries the terminal...
+        let project_terminals = &vm.projects[0].terminals;
+        assert_eq!(project_terminals.len(), 1);
+        assert_eq!(project_terminals[0].id, terminal_id);
+        assert_eq!(project_terminals[0].label, label);
+        // ...and the session does NOT (the owner filter must not mix up).
+        assert!(
+            vm.sessions[0].terminals.is_empty(),
+            "a project terminal must never be projected onto a session"
+        );
     }
 
     #[test]
