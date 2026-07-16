@@ -3,6 +3,7 @@ import { EllipsisVertical, Plus } from "lucide-react"
 import { AddProjectMenuItems } from "@/components/AddProjectMenuItems"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
+import { cn } from "@/lib/utils"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,7 +20,14 @@ import { openAddProject } from "@/lib/store"
 // (nothing executes), and every item opens the same non-destructive picker.
 export function AddProjectSplitButton({ className }: { className?: string }) {
   return (
-    <ButtonGroup className={className}>
+    // [&>button:last-of-type]:rounded-r-lg keeps the trigger's right corners
+    // rounded while the menu is open: base-ui renders a visually-hidden
+    // <span data-base-ui-focus-guard> after the trigger, which would otherwise
+    // steal :last-child and let the group seam square the trigger's right side.
+    // Targeting the last <button> (guards are spans) sidesteps that.
+    <ButtonGroup
+      className={cn("[&>button:last-of-type]:rounded-r-lg", className)}
+    >
       <Button
         variant="outline"
         className="min-h-11 flex-1"

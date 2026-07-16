@@ -1233,8 +1233,15 @@ export function AppSidebar() {
               every item opens the same non-destructive picker, so the worst
               adjacency outcome is one extra click, never a wrong action. The
               segment gets min-w-8 and the group's border seam as the visual
-              separator. */}
-          <ButtonGroup className="flex-1 group-data-[collapsible=icon]:hidden">
+              separator.
+
+              [&>button:last-of-type]:rounded-r-lg keeps the trigger's right
+              corners rounded while the menu is open: base-ui renders a
+              visually-hidden <span data-base-ui-focus-guard> after the trigger,
+              which would otherwise steal :last-child and let the group seam
+              square the trigger's right side. Targeting the last <button>
+              (guards are spans) sidesteps that. */}
+          <ButtonGroup className="flex-1 group-data-[collapsible=icon]:hidden [&>button:last-of-type]:rounded-r-lg">
             <Button
               variant="outline"
               size="sm"
