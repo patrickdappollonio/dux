@@ -124,9 +124,12 @@ Two very different endings, and the difference matters:
 
 - **Kill (detach)** stops the running session but keeps the agent and its
   worktree. It moves to a detached, reopenable state, and you can reconnect to it
-  later. The palette's **kill-running** command opens a modal listing every active
-  agent and companion terminal so you can stop them one by one. Companion
-  terminals, unlike agents, are **destroyed** when killed, not detached.
+  later. The **Task Manager**, in the app menu behind the cog button, is where you
+  do this: it lists every running agent tab and companion terminal with its CPU,
+  memory, and process count, expands any of them to show the child processes
+  underneath, and stops them one by one or all at once. Every stop asks for
+  confirmation first. Companion terminals, unlike agents, are **destroyed** when
+  killed, not detached.
 - **Delete** removes the agent from dux entirely. The confirmation includes an
   unchecked "Also delete the git worktree on disk (irreversible)" box, so by
   default your worktree and its work survive even a delete. This is the one

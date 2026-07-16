@@ -56,7 +56,8 @@ use text_input::TextInput;
 pub(crate) use dux_core::worker::{
     AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, BrowserEntry,
     CreateAgentBranchInspection, CreateAgentRequest, NonDefaultBranchAction,
-    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
+    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceKind, ResourceStats,
+    WorkerEvent,
 };
 #[cfg(test)]
 pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
@@ -1171,7 +1172,17 @@ pub(crate) enum PromptState {
         selected_row: usize,
         expanded: HashSet<u32>,
         last_refresh: Instant,
-        first_sample: bool,
+        /// Whether the MOST RECENT delivered sample had to re-establish its
+        /// CPU baseline (`ResourceCollector::sample`'s `was_baseline`), and so
+        /// is a real reading measured over the short baseline window rather
+        /// than the normal ~2s poll interval. Drives the `~` marker in
+        /// `render_resource_monitor`. This is a per-sample fact, not a
+        /// "first sample since the overlay opened" guess: reopening the
+        /// overlay within `STALE_BASELINE` of the collector's last refresh
+        /// does not re-baseline, so it must not show `~` either. Starts
+        /// `true` on open, since the very first sample of the app's lifetime
+        /// (or after any real gap) always re-baselines.
+        short_window_sample: bool,
     },
 }
 
@@ -1771,6 +1782,7 @@ impl App {
             github_integration_enabled: gh_integration_val,
             single_instance_lock,
             surface_kind: dux_core::term_identity::SurfaceKind::Tui,
+            resource_collector: Default::default(),
             host_env: dux_core::term_identity::HostEnvProbe::from_env(),
             worker_tx,
             worker_rx,
@@ -2539,7 +2551,7 @@ impl App {
             selected_row: 0,
             expanded: HashSet::new(),
             last_refresh: Instant::now(),
-            first_sample: true,
+            short_window_sample: true,
         };
         self.engine.spawn_resource_stats_worker();
     }
@@ -4845,6 +4857,8 @@ leading_branch = "main"
     fn build_visual_rows_respects_expansion() {
         let rows = vec![
             ResourceStats {
+                id: None,
+                kind: ResourceKind::Dux,
                 label: "dux".into(),
                 pid: Some(1),
                 cpu_percent: 0.0,
@@ -4853,6 +4867,8 @@ leading_branch = "main"
                 children: Vec::new(),
             },
             ResourceStats {
+                id: Some("s1".into()),
+                kind: ResourceKind::Agent,
                 label: "Agent".into(),
                 pid: Some(100),
                 cpu_percent: 5.0,
@@ -4874,6 +4890,8 @@ leading_branch = "main"
                 ],
             },
             ResourceStats {
+                id: None,
+                kind: ResourceKind::Total,
                 label: "TOTAL".into(),
                 pid: None,
                 cpu_percent: 5.0,

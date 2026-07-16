@@ -504,19 +504,23 @@ impl App {
                 }
             }
 
-            EventReaction::ResourceStatsArrived(stats) => {
+            EventReaction::ResourceStatsArrived(stats, was_baseline) => {
                 if let PromptState::ResourceMonitor {
                     rows,
                     selected_row,
                     expanded,
                     last_refresh,
-                    first_sample,
+                    short_window_sample,
                     ..
                 } = &mut self.prompt
                 {
                     *rows = stats;
                     *last_refresh = Instant::now();
-                    *first_sample = false;
+                    // Reflects what THIS sample actually did (see
+                    // `ResourceCollector::sample`), not merely whether this is
+                    // the first sample delivered since the overlay opened: a
+                    // reopen inside `STALE_BASELINE` does not re-baseline.
+                    *short_window_sample = was_baseline;
                     // Clamp cursor to the (possibly changed) visual row count.
                     let visual = build_visual_rows(rows, expanded);
                     let max_row = visual.len().saturating_sub(1);

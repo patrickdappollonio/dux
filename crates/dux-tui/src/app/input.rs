@@ -6764,8 +6764,8 @@ mod tests {
         LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
         NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
         PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
-        ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt, TextInput,
-        WorkerEvent,
+        ResourceKind, ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt,
+        TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
@@ -10549,6 +10549,8 @@ cyan = "#00ffff"
         app.prompt = PromptState::ResourceMonitor {
             rows: vec![
                 ResourceStats {
+                    id: None,
+                    kind: ResourceKind::Dux,
                     label: "dux".into(),
                     pid: Some(1),
                     cpu_percent: 0.0,
@@ -10557,6 +10559,8 @@ cyan = "#00ffff"
                     children: Vec::new(),
                 },
                 ResourceStats {
+                    id: Some("s1".into()),
+                    kind: ResourceKind::Agent,
                     label: "Agent".into(),
                     pid: Some(100),
                     cpu_percent: 5.0,
@@ -10578,6 +10582,8 @@ cyan = "#00ffff"
                     ],
                 },
                 ResourceStats {
+                    id: None,
+                    kind: ResourceKind::Total,
                     label: "TOTAL".into(),
                     pid: None,
                     cpu_percent: 5.0,
@@ -10590,7 +10596,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            first_sample: false,
+            short_window_sample: false,
         };
         install_resource_monitor_overlay(&mut app, 3);
 

@@ -12,7 +12,7 @@ vi.mock("@/lib/store", () => ({
   openConfigEditor: vi.fn(),
   openMacrosDialog: vi.fn(),
   openGlobalEnv: vi.fn(),
-  openKillRunning: vi.fn(),
+  openTaskManager: vi.fn(),
   sortAgents: vi.fn(),
 }))
 vi.mock("@/lib/configApi", () => ({

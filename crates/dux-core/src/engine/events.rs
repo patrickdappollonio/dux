@@ -214,7 +214,9 @@ pub enum EventReaction {
     BeginDeleteSessionView(Box<BeginDeleteSessionView>),
 
     // -- Resource monitor. --
-    ResourceStatsArrived(Vec<ResourceStats>),
+    /// Rows plus whether this sample had to re-establish its CPU baseline
+    /// (see [`WorkerEvent::ResourceStatsReady`]).
+    ResourceStatsArrived(Vec<ResourceStats>, bool),
 
     // -- Add-project / branch-checkout follow-ups (App helpers). --
     AddProjectAfterBranchCheckout {
@@ -2139,9 +2141,9 @@ impl Engine {
                     },
                 }
             }
-            WorkerEvent::ResourceStatsReady(stats) => {
+            WorkerEvent::ResourceStatsReady(stats, was_baseline) => {
                 self.clear_in_flight(&InFlightKey::ResourceStats);
-                EventReaction::ResourceStatsArrived(stats)
+                EventReaction::ResourceStatsArrived(stats, was_baseline)
             }
             WorkerEvent::NonDefaultBranchCheckoutCompleted {
                 action,
@@ -2692,7 +2694,7 @@ mod tests {
             EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",
             EventReaction::WorktreeRemoveSucceeded { .. } => "WorktreeRemoveSucceeded",
             EventReaction::WorktreeRemoveFailed { .. } => "WorktreeRemoveFailed",
-            EventReaction::ResourceStatsArrived(_) => "ResourceStatsArrived",
+            EventReaction::ResourceStatsArrived(_, _) => "ResourceStatsArrived",
             EventReaction::AddProjectAfterBranchCheckout { .. } => "AddProjectAfterBranchCheckout",
             EventReaction::AddProjectAfterInitialCommit { .. } => "AddProjectAfterInitialCommit",
             EventReaction::ContinueCreateAgentAfterInspection { .. } => {
@@ -4970,14 +4972,14 @@ mod tests {
                 panic_event: None,
             },
             |tx| {
-                let _ = tx.send(WorkerEvent::ResourceStatsReady(Vec::new()));
+                let _ = tx.send(WorkerEvent::ResourceStatsReady(Vec::new(), false));
             },
         );
         assert!(matches!(reaction, EventReaction::Nothing));
 
         let first = try_recv_worker_event(&engine).expect("job must produce a single event");
         assert!(
-            matches!(first, WorkerEvent::ResourceStatsReady(ref rows) if rows.is_empty()),
+            matches!(first, WorkerEvent::ResourceStatsReady(ref rows, _) if rows.is_empty()),
             "expected ResourceStatsReady(empty), the silent-spawn path must not synthesise a CommandWorkerStarted event",
         );
         // No further events should be queued.
