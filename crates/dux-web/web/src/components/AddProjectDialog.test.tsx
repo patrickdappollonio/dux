@@ -88,8 +88,25 @@ describe("AddProjectDialog picker", () => {
     const pinned = screen.getByText("Use this folder").closest("button")!
     fireEvent.click(pinned)
     expect(inspectProjectPath).toHaveBeenCalledWith("/home/u/notes")
-    // The selection footer shows the pinned target's path.
-    expect(screen.getAllByText("/home/u/notes").length).toBeGreaterThan(0)
+    // Selecting opens the footer (project-name field), and the target path is
+    // echoed there as a read-only field. Both the header and the footer now
+    // render the path in a field, so it appears more than once by display
+    // value (proving the footer echo showed up, not just the header).
+    expect(screen.getByPlaceholderText("Project name (optional)")).toBeTruthy()
+    expect(
+      screen.getAllByDisplayValue("/home/u/notes").length,
+    ).toBeGreaterThan(1)
+  })
+
+  it("shows the current path in a read-only, copyable field, not a nowrap span", () => {
+    // Long paths must not stretch the dialog: the current directory renders in
+    // a read-only input (scrollable and selectable so it can be copied) rather
+    // than a truncating span that widened the modal.
+    seed()
+    render(<AddProjectDialog />)
+    const field = screen.getByDisplayValue("/home/u/notes") as HTMLInputElement
+    expect(field.tagName).toBe("INPUT")
+    expect(field.readOnly).toBe(true)
   })
 
   it("renders the target folder name pill on the pinned row", () => {
@@ -129,13 +146,13 @@ describe("AddProjectDialog picker", () => {
     })
     render(<AddProjectDialog />)
 
-    // The parent row reads "Up to <basename>" with the parent's full path as a
-    // separate muted suffix, and renders the CornerLeftUp glyph rather than the
-    // plain "../" label. Asserting the basename and the path as distinct text
-    // nodes keeps this from passing on an accidental substring.
+    // The parent row reads "Up to <basename>" and renders the CornerLeftUp
+    // glyph rather than the plain "../" label. It deliberately shows NO path
+    // (the header field is the authoritative path), so the full parent path
+    // must not appear anywhere in the row.
     const upRow = screen.getByText("Up to").closest("button")!
     expect(within(upRow).getByText("alice")).toBeTruthy()
-    expect(within(upRow).getByText("/home/alice")).toBeTruthy()
+    expect(upRow.textContent).not.toContain("/home/alice")
     expect(upRow.querySelector("svg.lucide-corner-left-up")).toBeTruthy()
     expect(screen.queryByText("../")).toBeNull()
 
@@ -145,8 +162,8 @@ describe("AddProjectDialog picker", () => {
   })
 
   it("does not repeat the path on a parent row that points at the filesystem root", () => {
-    // baseName("/") === "/", so the muted full-path suffix would just echo the
-    // basename. The row must read "Up to /" once, never "Up to / /".
+    // The parent row shows no path, so a root parent renders "Up to /" from
+    // just the basename (baseName("/") === "/"), never a doubled "/ /".
     seed({
       browseEntries: [
         {
@@ -159,7 +176,7 @@ describe("AddProjectDialog picker", () => {
     })
     render(<AddProjectDialog />)
     const upRow = screen.getByText("Up to").closest("button")!
-    // Exactly one "/" text node (the basename); the suffix is suppressed.
+    // Exactly one "/" node: the basename. No path suffix is ever rendered.
     expect(within(upRow).getAllByText("/")).toHaveLength(1)
   })
 

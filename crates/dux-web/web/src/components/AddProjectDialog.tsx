@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 import {
   AlertTriangle,
   Ban,
@@ -43,7 +43,8 @@ import {
 } from "@/lib/store"
 import type { DirEntryView } from "@/lib/types"
 
-// Basename of a browse path for the pinned row's muted suffix.
+// Trailing path segment, used for the pinned row's target pill and the parent
+// row's "Up to <folder>" label.
 function baseName(path: string): string {
   const trimmed = path.endsWith("/") && path !== "/" ? path.slice(0, -1) : path
   const idx = trimmed.lastIndexOf("/")
@@ -138,6 +139,39 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
         Cancel
       </Button>
     </div>
+  )
+}
+
+// A read-only field for a full filesystem path. It is scrolled to the END
+// whenever the value changes so the most specific (rightmost) segment stays
+// visible by default, which is what matters when paths are long; the field
+// remains scrollable back to the start and selectable so the path can be
+// copied. Styling mirrors the app Input in a compact text-xs form. Used for
+// both the current-directory header and the selected-target line so the two
+// render identically.
+function PathField({ value }: { value: string }) {
+  const ref = useRef<HTMLInputElement>(null)
+  // useLayoutEffect (not useEffect) so the scroll-to-end happens before paint:
+  // otherwise the browser paints the leading segment for one frame and snaps to
+  // the tail, which is exactly the flash this feature exists to avoid. Runs on
+  // every value change so navigation re-reveals the tail. scrollWidth is 0 under
+  // jsdom (no layout), so this is a harmless no-op in tests.
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [value])
+  return (
+    <input
+      ref={ref}
+      readOnly
+      // tabIndex=-1 keeps this out of the tab order and the dialog's initial
+      // focus (it is an inert, read-only field), while staying click-selectable
+      // so the path can still be copied.
+      tabIndex={-1}
+      value={value}
+      aria-label="Path"
+      className="w-full min-w-0 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+    />
   )
 }
 
@@ -253,9 +287,7 @@ function AddProjectBrowser() {
           </span>
         ) : null}
         <div className="flex items-center justify-between gap-2">
-          <span className="font-mono text-xs text-muted-foreground truncate">
-            {browsePath}
-          </span>
+          <PathField value={browsePath} />
           <NewFolderControl browsePath={browsePath} />
         </div>
       </DialogHeader>
@@ -295,10 +327,11 @@ function AddProjectBrowser() {
             </div>
             {browseEntries.map((entry) => {
               // The synthetic parent ("../") row reads as an "up" action, not a
-              // folder: a distinct glyph, the parent's basename, and its full
-              // path as a muted suffix. No git badge.
+              // folder: a distinct glyph and the parent's basename. It shows no
+              // path, because the header field above is the authoritative path
+              // for where you are and repeating it here only widened the row and
+              // duplicated that path. No git badge.
               if (entry.is_parent) {
-                const parentBase = baseName(entry.path)
                 return (
                   <button
                     key={entry.path}
@@ -309,17 +342,9 @@ function AddProjectBrowser() {
                     className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
                   >
                     <CornerLeftUp className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="flex-1 truncate">
+                    <span className="min-w-0 flex-1 truncate">
                       Up to{" "}
-                      <span className="font-medium">{parentBase}</span>
-                      {/* At the filesystem root the parent path IS the basename
-                          ("/"), so the muted suffix would just repeat it. Show it
-                          only when it adds the fuller path. */}
-                      {parentBase !== entry.path ? (
-                        <span className="ml-2 text-muted-foreground">
-                          {entry.path}
-                        </span>
-                      ) : null}
+                      <span className="font-medium">{baseName(entry.path)}</span>
                     </span>
                   </button>
                 )
@@ -352,15 +377,13 @@ function AddProjectBrowser() {
       </ScrollArea>
 
       {selected ? (
-        <div className="grid gap-2">
+        <div className="flex flex-col gap-2">
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Project name (optional)"
           />
-          <span className="font-mono text-xs text-muted-foreground truncate">
-            {selected}
-          </span>
+          <PathField value={selected} />
           {inspecting ? (
             <span className="flex items-center gap-2 text-xs text-muted-foreground">
               <BrailleSpinner className="text-muted-foreground" />
