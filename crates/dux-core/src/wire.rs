@@ -1408,43 +1408,36 @@ impl Engine {
         }
 
         // Idempotent: skip the write (and the fan-out) when nothing changed
-        // after clamping/normalization.
-        if candidate.ui.copy_on_select == self.config.ui.copy_on_select
-            && candidate.ui.show_changes_pane == self.config.ui.show_changes_pane
-            && candidate.capabilities.web_notifications
-                == self.config.capabilities.web_notifications
-            && candidate.ui.always_show_tab_strip == self.config.ui.always_show_tab_strip
-            && candidate.ui.status_clear_seconds == self.config.ui.status_clear_seconds
-            && candidate.ui.attention_grace_seconds == self.config.ui.attention_grace_seconds
-            && candidate.ui.attention_indicator == self.config.ui.attention_indicator
-            && candidate.ui.attention_on_bell == self.config.ui.attention_on_bell
-            && candidate.ui.pr_banner_position == self.config.ui.pr_banner_position
-            && candidate.capabilities.hyperlinks == self.config.capabilities.hyperlinks
-            && candidate.defaults.enable_randomized_pet_name_by_default
-                == self.config.defaults.enable_randomized_pet_name_by_default
-            && candidate.defaults.provider == self.config.defaults.provider
-        {
+        // after clamping/normalization. `candidate` is a clone of `self.config`
+        // with only the patched fields touched, so every other field compares
+        // equal by construction and this whole-struct compare asks exactly the
+        // question the old field-by-field chain asked: did any patched field
+        // actually change? Unlike that chain, it cannot go stale when a field
+        // is added.
+        if candidate == self.config {
             return Ok(WireStatus::new("info", "Settings unchanged."));
         }
 
         // Persist eagerly so a disk failure is surfaced before the endpoint
         // replies; only commit to the running config once the write succeeds.
+        //
+        // INVARIANT: `candidate` was cloned from `self.config` above and only
+        // patched fields were mutated in between, so adopting it wholesale is a
+        // no-op for every unpatched field. Keep the clone and this assign
+        // adjacent: a `&mut self` call that mutated `self.config` between them
+        // would be silently discarded here, so do not add one. Adjacency is the
+        // only thing enforcing that, deliberately, since a discarded write
+        // cannot be observed from outside and no test can catch it.
+        //
+        // The whole-struct assign is also what keeps memory in step with disk.
+        // `save_eager` already persists all of `candidate`, so a field-by-field
+        // copy-back can only make the running config adopt LESS than what was
+        // just written. That asymmetry is how a value once landed on disk while
+        // the engine kept serving the stale one until the next reload.
         self.config_writer
             .save_eager(candidate.clone())
             .map_err(|err| anyhow::anyhow!("saving to config failed: {err}"))?;
-        self.config.ui.copy_on_select = candidate.ui.copy_on_select;
-        self.config.ui.show_changes_pane = candidate.ui.show_changes_pane;
-        self.config.capabilities.web_notifications = candidate.capabilities.web_notifications;
-        self.config.ui.always_show_tab_strip = candidate.ui.always_show_tab_strip;
-        self.config.ui.status_clear_seconds = candidate.ui.status_clear_seconds;
-        self.config.ui.attention_grace_seconds = candidate.ui.attention_grace_seconds;
-        self.config.ui.attention_indicator = candidate.ui.attention_indicator;
-        self.config.ui.attention_on_bell = candidate.ui.attention_on_bell;
-        self.config.ui.pr_banner_position = candidate.ui.pr_banner_position;
-        self.config.capabilities.hyperlinks = candidate.capabilities.hyperlinks;
-        self.config.defaults.enable_randomized_pet_name_by_default =
-            candidate.defaults.enable_randomized_pet_name_by_default;
-        self.config.defaults.provider = candidate.defaults.provider;
+        self.config = candidate;
         Ok(WireStatus::new(
             "info",
             "Settings updated. Every connected browser picks up the change now; a \
@@ -8183,6 +8176,91 @@ mod tests {
             .expect("dispatch ok");
         // pr_banner_position was absent from the patch, so it must be untouched.
         assert_eq!(engine.config.ui.pr_banner_position, "top");
+    }
+
+    /// A settings patch must disturb nothing outside the fields it carries.
+    /// Seeds distinctive values across config areas the patch has no business
+    /// touching, applies a single-field patch, and asserts everything else
+    /// survived byte for byte. This catches a patch field mapped to the wrong
+    /// config field, and it pins that `self.config = candidate` only ever
+    /// adopts a candidate differing from the running config in patched fields.
+    ///
+    /// What it deliberately does NOT catch, stated so nobody mistakes it for a
+    /// guard it is not: a future `&mut self` call inserted BETWEEN the clone
+    /// and the assign in `set_settings`, whose write the assign would silently
+    /// discard. A discarded write is indistinguishable from a write that never
+    /// happened, so no black-box test here can observe it. Keeping the clone
+    /// and the assign adjacent is what prevents that, not this test.
+    #[test]
+    fn set_settings_leaves_unpatched_fields_untouched() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Both,
+            },
+        );
+        engine
+            .config
+            .env
+            .insert("DUX_TEST_KEY".to_string(), "value".to_string());
+        engine.config.server.title = "My dux".to_string();
+        engine
+            .config
+            .keys
+            .bindings
+            .insert("quit".to_string(), vec!["ctrl-q".to_string()]);
+        engine.config.shutdown_timeout_seconds = 17;
+        let before = engine.config.clone();
+
+        engine
+            .apply_wire(pr_banner_position_only_patch("top"))
+            .expect("dispatch ok");
+
+        assert_eq!(
+            engine.config.ui.pr_banner_position, "top",
+            "the patch lands"
+        );
+        assert_eq!(engine.config.macros, before.macros);
+        assert_eq!(engine.config.env, before.env);
+        assert_eq!(engine.config.projects, before.projects);
+        assert_eq!(engine.config.server, before.server);
+        assert_eq!(engine.config.keys, before.keys);
+        assert_eq!(engine.config.providers, before.providers);
+        assert_eq!(engine.config.defaults, before.defaults);
+        assert_eq!(
+            engine.config.shutdown_timeout_seconds,
+            before.shutdown_timeout_seconds
+        );
+    }
+
+    /// Pins the whole-struct idempotence compare: a patch whose values already
+    /// match the running config reports "Settings unchanged." and writes
+    /// nothing. Distinct from the empty-patch no-op, which reports
+    /// "Nothing to update." because the client sent no fields at all.
+    #[test]
+    fn set_settings_unchanged_values_do_not_write() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.ui.pr_banner_position = "top".to_string();
+        assert!(
+            !engine.paths.config_path.exists(),
+            "no config file written yet"
+        );
+
+        let outcome = engine
+            .apply_wire(pr_banner_position_only_patch("top"))
+            .expect("dispatch ok");
+
+        assert_eq!(
+            outcome.status.expect("status").message,
+            "Settings unchanged."
+        );
+        engine.config_writer.flush();
+        assert!(
+            !engine.paths.config_path.exists(),
+            "an unchanged patch must not touch disk"
+        );
     }
 
     /// One accepted `SetSettings` field, described end to end: how to seed the

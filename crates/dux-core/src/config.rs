@@ -87,7 +87,7 @@ impl MacroSurface {
 }
 
 /// A single text macro entry with surface restriction.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MacroEntry {
     pub text: String,
     pub surface: MacroSurface,
@@ -95,14 +95,14 @@ pub struct MacroEntry {
 
 /// Text macros: a map from name to entry.
 /// Each entry is triggered from the macro bar (Ctrl+\).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MacrosConfig {
     #[serde(flatten)]
     pub entries: IndexMap<String, MacroEntry>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Defaults {
     pub provider: String,
@@ -112,35 +112,35 @@ pub struct Defaults {
     pub pull_before_creating_agent_by_default: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
     #[serde(flatten)]
     pub commands: IndexMap<String, ProviderCommandConfig>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
     pub command: String,
     pub args: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StartupCommandTerminalConfig {
     pub command: String,
     pub args: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub path: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorConfig {
     pub default: String,
@@ -289,7 +289,7 @@ pub fn shutdown_grace(seconds: u16) -> std::time::Duration {
     std::time::Duration::from_secs(u64::from(seconds.min(MAX_SHUTDOWN_TIMEOUT_SECONDS)))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     /// LOCAL MODE bind host. `dux server` binds `host:port` (plus the machine's
@@ -446,7 +446,7 @@ pub fn default_true() -> bool {
     true
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub left_width_pct: u16,
@@ -521,7 +521,7 @@ pub struct UiConfig {
 /// `terminal_identity` and `clipboard_passthrough` are stored as strings and
 /// parsed at use so a typo degrades gracefully (warn and fall back) instead of
 /// failing the whole config load, mirroring the theme/color-config convention.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapabilitiesConfig {
     /// How dux presents itself to the agent: `auto` (mirror the host terminal in
@@ -1127,7 +1127,7 @@ fn is_valid_var_name(name: &str) -> bool {
 // Top-level Config and KeysConfig
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Seconds the TUI waits for agents and companion terminals to exit after
@@ -1158,7 +1158,7 @@ pub struct Config {
     pub macros: MacrosConfig,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeysConfig {
     pub show_terminal_keys: bool,
