@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { STALE_STATS_THRESHOLD_MS } from "@/lib/resourcePoll"
 import type { ResourceStatsView } from "@/lib/resourcesApi"
 import type { AgentTabView, SessionView, TerminalView } from "@/lib/types"
 
@@ -145,6 +146,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -279,7 +281,10 @@ describe("TaskManagerDialog", () => {
 
     const row = await screen.findByTestId("task-row-tab:t2")
     expect(row.textContent).toContain("—")
-    expect(screen.getByLabelText("Stop codex")).toBeTruthy()
+    // The extra tab's Stop label carries the owning agent and its position,
+    // not just the bare provider (finding 4): "Stop codex" alone would
+    // collide with any other codex extra tab on any other agent.
+    expect(screen.getByLabelText("Stop codex tab 1 in feat")).toBeTruthy()
   })
 
   it("expands_child_processes_for_a_terminal", async () => {
@@ -323,6 +328,70 @@ describe("TaskManagerDialog", () => {
     render(<TaskManagerDialog />)
     await new Promise((r) => setTimeout(r, 20))
     expect(getResources).not.toHaveBeenCalled()
+  })
+
+  it("mobile_expand_toggle_meets_the_touch_target_floor_beside_stop", async () => {
+    // The chevron sits directly beside the Stop button in the mobile row; a
+    // sub-40px target there is a misclick hazard on the one control a
+    // misclick would be worst on (CLAUDE.md's touch-target tenet).
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      })),
+    )
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "s1",
+          kind: "agent",
+          label: "Agent (claude): fix-auth",
+          children: [
+            { name: "node", pid: 4242, cpu_percent: 1, rss_bytes: 1024 },
+          ],
+        }),
+        totalStat,
+      ],
+    })
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const toggle = await screen.findByLabelText("Show fix-auth child processes")
+    expect(toggle.className).toMatch(/max-md:size-10|max-md:min-h-10/)
+  })
+
+  it("shows_a_stale_indicator_after_repeated_poll_failures_and_stops_after_a_recovery", async () => {
+    // The poll's catch is empty by design: a single dropped sample renders the
+    // last good numbers, unremarked. But a run of failures must not render
+    // those numbers as fresh forever (finding 7).
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    // First sample succeeds, so the numbers land and the indicator is absent.
+    await vi.waitFor(() => expect(getResources).toHaveBeenCalledTimes(1))
+    expect(screen.queryByText(/stalled/i)).toBeNull()
+
+    // Every poll after that fails. Advance past the staleness threshold.
+    getResources.mockRejectedValue(new Error("offline"))
+    await vi.advanceTimersByTimeAsync(STALE_STATS_THRESHOLD_MS + 2000)
+
+    expect(screen.getByText(/stalled/i)).toBeTruthy()
+
+    // A later success clears the indicator: the numbers are fresh again.
+    getResources.mockResolvedValue({ rows: [duxStat, totalStat] })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(screen.queryByText(/stalled/i)).toBeNull()
+
+    vi.useRealTimers()
   })
 
   it("does_not_clamp_cpu_above_one_hundred_percent", async () => {

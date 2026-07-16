@@ -56,10 +56,11 @@ use text_input::TextInput;
 pub(crate) use dux_core::worker::{
     AgentLaunchKind, AgentLaunchRequest, BranchWarningKind, BrowserEntry,
     CreateAgentBranchInspection, CreateAgentRequest, NonDefaultBranchAction,
-    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
+    ProjectPersistenceAction, ProjectWorktreeEntry, PullTarget, ResourceKind, ResourceStats,
+    WorkerEvent,
 };
 #[cfg(test)]
-pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo, ResourceKind};
+pub(crate) use dux_core::worker::{AgentLaunchReadyData, ProcessInfo};
 
 /// Maximum agent-passthrough bytes written to the host terminal per tick. A larger
 /// burst is split, with the remainder carried to the next tick, so one oversized
@@ -1171,7 +1172,17 @@ pub(crate) enum PromptState {
         selected_row: usize,
         expanded: HashSet<u32>,
         last_refresh: Instant,
-        first_sample: bool,
+        /// Whether the MOST RECENT delivered sample had to re-establish its
+        /// CPU baseline (`ResourceCollector::sample`'s `was_baseline`), and so
+        /// is a real reading measured over the short baseline window rather
+        /// than the normal ~2s poll interval. Drives the `~` marker in
+        /// `render_resource_monitor`. This is a per-sample fact, not a
+        /// "first sample since the overlay opened" guess: reopening the
+        /// overlay within `STALE_BASELINE` of the collector's last refresh
+        /// does not re-baseline, so it must not show `~` either. Starts
+        /// `true` on open, since the very first sample of the app's lifetime
+        /// (or after any real gap) always re-baselines.
+        short_window_sample: bool,
     },
 }
 
@@ -2540,7 +2551,7 @@ impl App {
             selected_row: 0,
             expanded: HashSet::new(),
             last_refresh: Instant::now(),
-            first_sample: true,
+            short_window_sample: true,
         };
         self.engine.spawn_resource_stats_worker();
     }

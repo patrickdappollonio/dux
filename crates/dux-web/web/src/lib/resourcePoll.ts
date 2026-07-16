@@ -45,3 +45,23 @@ export function nextPollDelay(
 ): number {
   return Math.max(0, intervalMs - elapsedMs)
 }
+
+/** How long the poll may go without a successful sample before the Task
+ * Manager flags the numbers as stalled instead of silently rendering an
+ * increasingly-stale last-good reading forever. A small multiple of the poll
+ * interval so a single dropped or slow request does not flash the indicator;
+ * a genuinely broken poll (server gone, network down) crosses it quickly. */
+export const STALE_STATS_THRESHOLD_MS = RESOURCE_POLL_INTERVAL_MS * 4
+
+// Whether the last successful sample is old enough that the numbers on
+// screen should no longer be presented as fresh. `lastSuccessAt` is `null`
+// before the first sample ever lands, which is never stale: there is nothing
+// to judge yet, just the initial dashes.
+export function statsAreStale(
+  now: number,
+  lastSuccessAt: number | null,
+  thresholdMs: number = STALE_STATS_THRESHOLD_MS,
+): boolean {
+  if (lastSuccessAt === null) return false
+  return now - lastSuccessAt > thresholdMs
+}

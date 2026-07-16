@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest"
 
 import {
   RESOURCE_POLL_INTERVAL_MS,
+  STALE_STATS_THRESHOLD_MS,
   nextPollDelay,
   shouldPoll,
+  statsAreStale,
 } from "./resourcePoll"
 
 describe("shouldPoll", () => {
@@ -53,5 +55,32 @@ describe("nextPollDelay", () => {
   it("pins_the_cadence_at_one_second", () => {
     // The server caches for 1s, so polling faster only burns requests.
     expect(RESOURCE_POLL_INTERVAL_MS).toBe(1000)
+  })
+})
+
+describe("statsAreStale", () => {
+  it("is_never_stale_before_the_first_sample_ever_lands", () => {
+    // Nothing to judge staleness against yet; the dialog is still showing its
+    // initial dashes, not stale numbers.
+    expect(statsAreStale(1_000_000, null)).toBe(false)
+  })
+
+  it("is_not_stale_immediately_after_a_success", () => {
+    expect(statsAreStale(1_000_000, 1_000_000)).toBe(false)
+  })
+
+  it("is_not_stale_after_a_single_missed_interval", () => {
+    // One dropped poll is normal jitter, not a stall worth alarming over.
+    const lastSuccessAt = 1_000_000
+    expect(
+      statsAreStale(lastSuccessAt + RESOURCE_POLL_INTERVAL_MS, lastSuccessAt),
+    ).toBe(false)
+  })
+
+  it("becomes_stale_after_repeated_missed_intervals", () => {
+    const lastSuccessAt = 1_000_000
+    expect(
+      statsAreStale(lastSuccessAt + STALE_STATS_THRESHOLD_MS + 1, lastSuccessAt),
+    ).toBe(true)
   })
 })

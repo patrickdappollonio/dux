@@ -6134,21 +6134,21 @@ impl App {
                 scroll_offset,
                 selected_row,
                 expanded,
-                first_sample,
+                short_window_sample,
                 ..
             } => {
                 let rows = rows.clone();
                 let scroll_offset = *scroll_offset;
                 let selected_row = *selected_row;
                 let expanded = expanded.clone();
-                let first_sample = *first_sample;
+                let short_window_sample = *short_window_sample;
                 self.render_resource_monitor(
                     frame,
                     &rows,
                     scroll_offset,
                     selected_row,
                     &expanded,
-                    first_sample,
+                    short_window_sample,
                 );
             }
             PromptState::DebugInput {
@@ -7312,7 +7312,7 @@ impl App {
         scroll_offset: u16,
         selected_row: usize,
         expanded: &HashSet<u32>,
-        first_sample: bool,
+        short_window_sample: bool,
     ) {
         use ratatui::widgets::{Cell, Row, Table, TableState};
 
@@ -7360,7 +7360,15 @@ impl App {
                 VisualRow::Parent(idx) => {
                     let stat = &rows[*idx];
                     let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
-                    let cpu_str = if first_sample {
+                    // `~` marks a genuinely different, real measurement: the
+                    // collector had to re-establish its CPU baseline for this
+                    // sample (freshly opened, or reopened after a gap), so
+                    // the reading spans only sysinfo's short
+                    // MINIMUM_CPU_UPDATE_INTERVAL window rather than the
+                    // monitor's normal ~2s poll interval. Real numbers, just
+                    // noisier because they cover less wall-clock time; see
+                    // `ResourceCollector::sample`'s `was_baseline`.
+                    let cpu_str = if short_window_sample {
                         format!("~{:.1}%", stat.cpu_percent)
                     } else {
                         format!("{:.1}%", stat.cpu_percent)
@@ -7368,7 +7376,11 @@ impl App {
                     let rss_str = format_bytes(stat.rss_bytes);
                     let procs_str = stat.process_count.to_string();
 
-                    let is_total = stat.label == "TOTAL";
+                    // Classify by `kind`, never by matching the label string:
+                    // an agent or terminal literally titled "TOTAL" is a
+                    // real, distinct row and must not render as the totals
+                    // row just because its name happens to match.
+                    let is_total = stat.kind == ResourceKind::Total;
                     let style = if is_total {
                         Style::default().add_modifier(Modifier::BOLD)
                     } else {
@@ -7408,7 +7420,7 @@ impl App {
                     let connector = if is_last { "└" } else { "├" };
                     let label =
                         truncate_status_text(&format!("    {connector} {}", child.name), name_w);
-                    let cpu_str = if first_sample {
+                    let cpu_str = if short_window_sample {
                         format!("~{:.1}%", child.cpu_percent)
                     } else {
                         format!("{:.1}%", child.cpu_percent)
@@ -9628,5 +9640,81 @@ mod tests {
         assert!(rendered.contains("PID"));
         assert!(rendered.contains("Procs"));
         assert!(rendered.contains("100"), "parent PID should render");
+    }
+
+    /// An agent (or terminal) literally titled "TOTAL" must not be
+    /// misclassified as the totals row: the row's `kind` is what marks the
+    /// real totals row bold, never a label string match, precisely the
+    /// class of bug the `ResourceKind` refactor exists to eliminate.
+    #[test]
+    fn resource_monitor_only_the_total_kind_row_renders_bold() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+
+        let mut app = test_app(default_bindings());
+        let rows = vec![
+            ResourceStats {
+                id: None,
+                kind: ResourceKind::Total,
+                label: "TOTAL".into(),
+                pid: None,
+                cpu_percent: 9.0,
+                rss_bytes: 2048,
+                process_count: 3,
+                children: Vec::new(),
+            },
+            ResourceStats {
+                id: Some("s1".into()),
+                kind: ResourceKind::Agent,
+                label: "TOTAL".into(),
+                pid: Some(200),
+                cpu_percent: 1.0,
+                rss_bytes: 1024,
+                process_count: 1,
+                children: Vec::new(),
+            },
+        ];
+        let expanded = HashSet::new();
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_resource_monitor(frame, &rows, 0, 0, &expanded, false);
+            })
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let mut bold_by_row_y: Vec<(u16, bool)> = Vec::new();
+        for y in 0..buf.area.height {
+            let row_text: String = (0..buf.area.width)
+                .map(|x| buf.cell((x, y)).expect("cell in bounds").symbol())
+                .collect();
+            if let Some(byte_idx) = row_text.find("TOTAL") {
+                let x = row_text[..byte_idx].chars().count() as u16;
+                let bold = buf
+                    .cell((x, y))
+                    .expect("cell in bounds")
+                    .modifier
+                    .contains(Modifier::BOLD);
+                bold_by_row_y.push((y, bold));
+            }
+        }
+
+        assert_eq!(
+            bold_by_row_y.len(),
+            2,
+            "expected both rows literally named TOTAL to render; found: {bold_by_row_y:?}"
+        );
+        assert!(
+            bold_by_row_y[0].1,
+            "the real ResourceKind::Total row must render bold"
+        );
+        assert!(
+            !bold_by_row_y[1].1,
+            "an Agent row merely titled \"TOTAL\" must NOT render bold: \
+             classification must key off `kind`, not the label string"
+        );
     }
 }

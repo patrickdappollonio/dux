@@ -281,10 +281,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         name: "kill-running",
         description: "Open a modal to kill running agents and companion terminals",
         // GLOBAL: acts on every running agent/terminal; no target. Web
-        // equivalent: the app menu's "Stop running agents…" opens
-        // KillRunningDialog, which lists active agents and live terminals and
-        // force-kills each (agents detach via WireCommand::KillSessionPty;
-        // terminals via DeleteTerminal).
+        // equivalent: the app menu's "Task Manager…" opens TaskManagerDialog,
+        // which lists dux itself, every running agent tab, and every
+        // companion terminal with live CPU/RSS numbers. Each row's Stop
+        // control CONFIRMS before acting (via the existing close-tab/delete-
+        // terminal dialogs) rather than force-killing on click; agents
+        // detach via WireCommand::KillSessionPty, terminals via
+        // DeleteTerminal. A "Stop all…" action confirms once and stops
+        // everything.
     },
     PaletteCommand {
         action: Action::NewTerminal,

@@ -199,7 +199,10 @@ impl ResourceService {
         let sampled = tokio::task::spawn_blocking(move || lock(&collector).sample(targets)).await;
 
         match sampled {
-            Ok(rows) => {
+            // `was_baseline` (a short-window sample) is a TUI-only concern
+            // (the `~` marker in `render_resource_monitor`); the web client
+            // has no equivalent indicator, so it is discarded here.
+            Ok((rows, _was_baseline)) => {
                 let rows = ResourceStatsView::from_stats(rows);
                 *lock(&self.cache) = Some(Cached {
                     at: Instant::now(),

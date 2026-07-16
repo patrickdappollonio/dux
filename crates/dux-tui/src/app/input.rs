@@ -10596,7 +10596,7 @@ cyan = "#00ffff"
             selected_row: 0,
             expanded: std::collections::HashSet::new(),
             last_refresh: std::time::Instant::now(),
-            first_sample: false,
+            short_window_sample: false,
         };
         install_resource_monitor_overlay(&mut app, 3);
 

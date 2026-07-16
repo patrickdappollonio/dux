@@ -376,7 +376,11 @@ pub enum WorkerEvent {
         /// runs its domain revert/persist and emits this for the user message.
         status: crate::engine::ResolvedFinal,
     },
-    ResourceStatsReady(Vec<ResourceStats>),
+    /// Rows plus whether this sample had to re-establish its CPU baseline
+    /// (see [`crate::resource_stats::ResourceCollector::sample`]): a real
+    /// reading measured over the short baseline window rather than the
+    /// caller's normal poll interval.
+    ResourceStatsReady(Vec<ResourceStats>, bool),
     GhStatusChecked(crate::model::GhStatus),
     PrStatusReady(Vec<(String, Option<crate::model::PrInfo>)>),
     /// A one-shot PR check worker panicked; carries the session id so its

@@ -35,6 +35,13 @@ export interface TaskRow {
   nested: boolean
   /** Whether this row offers a Stop control (dux and TOTAL do not). */
   stoppable: boolean
+  /** The Stop control's accessible name. Distinct from `name`: a nested extra
+   * tab's `name` is only its provider ("claude"), which collides across
+   * sibling tabs of the same provider (a supported configuration, see
+   * CLAUDE.md's agent-tabs tenets) and carries no agent identity on its own.
+   * This field always includes the owning agent and the tab's position so it
+   * stays unique and meaningful even when `name` alone would not. */
+  stopLabel: string
   /** The owning session, for the stop action. Null for dux/total. */
   sessionId: string | null
   /** The tab id or terminal id to act on. Null for dux/total. */
@@ -71,54 +78,72 @@ export function taskManagerRows(
     // dux is the app you are looking at: there is nothing to tell the user, so
     // the renderer shows a muted dash rather than a disabled button.
     stoppable: false,
+    stopLabel: "dux",
     sessionId: null,
     targetId: null,
     stats: dux,
   })
 
-  // Only agents with a live PTY are running tasks. A detached/exited agent is
-  // not a task, so it is not listed (matching the modal this replaces).
   for (const session of sessions) {
-    if (session.status !== "active") continue
+    const sessionLabel = session.title ?? session.branch_name
 
-    // The session-slot tab (id === session id) leads the group; extra tabs nest
-    // under it in creation order. `sort_order` is append-only, so `order` is a
-    // stable sort key.
-    const tabs = [...session.tabs].sort((a, b) => {
-      if (a.id === session.id) return -1
-      if (b.id === session.id) return 1
-      return a.order - b.order
-    })
-
-    for (const tab of tabs) {
-      const isSlot = tab.id === session.id
-      rows.push({
-        key: `tab:${tab.id}`,
-        kind: "agent",
-        // The slot tab carries the agent's identity; an extra tab is
-        // identified by the provider running in it.
-        name: isSlot ? (session.title ?? session.branch_name) : tab.provider,
-        detail: isSlot ? tab.provider : null,
-        nested: !isSlot,
-        // A dormant tab has no process but is still closeable, so it keeps its
-        // Stop control.
-        stoppable: true,
-        sessionId: session.id,
-        targetId: tab.id,
-        stats: byId.get(tab.id) ?? null,
+    // Only agent TABS gate on liveness: a detached/exited agent's tabs have no
+    // live PTY, so they are not a running task (matching the modal this
+    // replaces). This gate must NOT reach the terminals loop below.
+    if (session.status === "active") {
+      // The session-slot tab (id === session id) leads the group; extra tabs
+      // nest under it in creation order. `sort_order` is append-only, so
+      // `order` is a stable sort key.
+      const tabs = [...session.tabs].sort((a, b) => {
+        if (a.id === session.id) return -1
+        if (b.id === session.id) return 1
+        return a.order - b.order
       })
+
+      // 1-based position among this session's EXTRA tabs, in the same stable
+      // order, so two same-provider tabs never share a Stop label (finding 4).
+      let nestedIndex = 0
+
+      for (const tab of tabs) {
+        const isSlot = tab.id === session.id
+        if (!isSlot) nestedIndex += 1
+        rows.push({
+          key: `tab:${tab.id}`,
+          kind: "agent",
+          // The slot tab carries the agent's identity; an extra tab is
+          // identified by the provider running in it.
+          name: isSlot ? sessionLabel : tab.provider,
+          detail: isSlot ? tab.provider : null,
+          nested: !isSlot,
+          // A dormant tab has no process but is still closeable, so it keeps
+          // its Stop control.
+          stoppable: true,
+          stopLabel: isSlot
+            ? `Stop ${sessionLabel}`
+            : `Stop ${tab.provider} tab ${nestedIndex} in ${sessionLabel}`,
+          sessionId: session.id,
+          targetId: tab.id,
+          stats: byId.get(tab.id) ?? null,
+        })
+      }
     }
 
-    // Every companion terminal in the spine is a live PTY: terminals are never
-    // persisted or detached, so existence means running.
+    // Companion terminals are independent of the owning session's status:
+    // detaching an agent DELIBERATELY leaves its terminals running (a live
+    // PTY the user may still want to reach or stop), so this loop must never
+    // sit inside the `status === "active"` gate above. Every terminal in the
+    // spine is a live PTY (terminals are never persisted dormant), so
+    // existence always means running, regardless of the agent's own status.
     for (const terminal of session.terminals) {
+      const title = terminalTitle(terminal, session.terminals)
       rows.push({
         key: `term:${terminal.id}`,
         kind: "terminal",
-        name: terminalTitle(terminal, session.terminals),
-        detail: session.title ?? session.branch_name,
+        name: title,
+        detail: sessionLabel,
         nested: false,
         stoppable: true,
+        stopLabel: `Stop ${title}`,
         sessionId: session.id,
         targetId: terminal.id,
         stats: byId.get(terminal.id) ?? null,
@@ -134,6 +159,7 @@ export function taskManagerRows(
     detail: null,
     nested: false,
     stoppable: false,
+    stopLabel: "TOTAL",
     sessionId: null,
     targetId: null,
     stats: total,

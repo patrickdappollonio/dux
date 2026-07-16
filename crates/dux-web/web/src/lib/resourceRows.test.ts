@@ -251,4 +251,48 @@ describe("taskManagerRows", () => {
     const rows = taskManagerRows(sessions, [duxStat, totalStat])
     expect(rows.map((r) => r.kind)).toEqual(["dux", "total"])
   })
+
+  it("lists_a_detached_agents_companion_terminal_because_detach_leaves_it_running", () => {
+    // Detaching an agent deliberately leaves its companion terminals running:
+    // only the agent TABS are gated on session status, never terminals. A
+    // live terminal on a detached agent must stay visible and stoppable, or
+    // it becomes an invisible, unstoppable resource drain.
+    const sessions = [
+      session({
+        id: "s1",
+        status: "detached",
+        tabs: [tab({ id: "s1", has_live_process: false })],
+        terminals: [terminal({ id: "term-1", label: "dev server" })],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    expect(rows.map((r) => r.kind)).toEqual(["dux", "terminal", "total"])
+    const term = rows.find((r) => r.key === "term:term-1")
+    expect(term?.stoppable).toBe(true)
+  })
+
+  it("gives_each_same_provider_extra_tab_a_unique_meaningful_stop_label", () => {
+    // Two extra tabs on the same provider is a supported configuration. Their
+    // Stop control's accessible name must not collide, and must say more than
+    // just the provider.
+    const sessions = [
+      session({
+        id: "s1",
+        title: "fix-auth",
+        tabs: [
+          tab({ id: "s1", order: 0 }),
+          tab({ id: "t2", order: 1, provider: "claude" }),
+          tab({ id: "t3", order: 2, provider: "claude" }),
+        ],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat])
+    const t2 = rows.find((r) => r.key === "tab:t2")
+    const t3 = rows.find((r) => r.key === "tab:t3")
+    expect(t2?.stopLabel).toBeTruthy()
+    expect(t3?.stopLabel).toBeTruthy()
+    expect(t2?.stopLabel).not.toBe(t3?.stopLabel)
+    expect(t2?.stopLabel).toContain("fix-auth")
+    expect(t3?.stopLabel).toContain("fix-auth")
+  })
 })

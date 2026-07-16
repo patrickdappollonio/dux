@@ -1870,7 +1870,7 @@ impl Engine {
                     // No error variant exists for resource stats; an empty
                     // refresh is the most defensible signal — the in-flight
                     // key clears and the next refresh runs normally.
-                    WorkerEvent::ResourceStatsReady(Vec::new())
+                    WorkerEvent::ResourceStatsReady(Vec::new(), false)
                 })),
             },
             move |tx| {
@@ -1879,8 +1879,8 @@ impl Engine {
                 // next refresh, so recovering the guard beats propagating a panic
                 // into every later sample.
                 let mut collector = collector.lock().unwrap_or_else(|e| e.into_inner());
-                let rows = collector.sample(targets);
-                let _ = tx.send(WorkerEvent::ResourceStatsReady(rows));
+                let (rows, was_baseline) = collector.sample(targets);
+                let _ = tx.send(WorkerEvent::ResourceStatsReady(rows, was_baseline));
             },
         );
         // Historical signature is `&mut self` → `()`. The primitive returns
@@ -4666,7 +4666,7 @@ mod resource_monitor_targets_tests {
     #[test]
     fn collect_resource_stats_marks_kinds_and_ids() {
         let mut collector = crate::resource_stats::ResourceCollector::new();
-        let rows = collector.sample(vec![ResourceTarget {
+        let (rows, _) = collector.sample(vec![ResourceTarget {
             id: "term-1".to_string(),
             kind: ResourceKind::Terminal,
             label: "Terminal (npm): dev server".to_string(),
@@ -4704,7 +4704,7 @@ mod resource_monitor_targets_tests {
     #[test]
     fn collect_resource_stats_with_empty_targets_returns_dux_and_total_only() {
         let mut collector = crate::resource_stats::ResourceCollector::new();
-        let rows = collector.sample(Vec::new());
+        let (rows, _) = collector.sample(Vec::new());
         let kinds: Vec<ResourceKind> = rows.iter().map(|r| r.kind).collect();
         assert_eq!(kinds, vec![ResourceKind::Dux, ResourceKind::Total]);
     }

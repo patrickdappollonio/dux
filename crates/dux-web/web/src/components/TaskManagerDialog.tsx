@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight } from "lucide-react"
+import { ChevronDown, ChevronRight, TriangleAlert } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -13,7 +13,12 @@ import {
 } from "@/components/ui/dialog"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { formatBytes, formatCpu } from "@/lib/formatStats"
-import { RESOURCE_POLL_INTERVAL_MS, nextPollDelay, shouldPoll } from "@/lib/resourcePoll"
+import {
+  RESOURCE_POLL_INTERVAL_MS,
+  nextPollDelay,
+  shouldPoll,
+  statsAreStale,
+} from "@/lib/resourcePoll"
 import { nothingRunning, taskManagerRows, type TaskRow } from "@/lib/resourceRows"
 import { resourcesApi, type ResourceStatsView } from "@/lib/resourcesApi"
 import {
@@ -83,10 +88,21 @@ function TaskManagerBody() {
   const isMobile = useIsMobile()
   const [stats, setStats] = useState<ResourceStatsView[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // When the last poll actually succeeded, or `null` before the first sample
+  // ever lands. Drives the staleness indicator below: a permanently failing
+  // poll must not go on rendering the last good numbers as if they were live.
+  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null)
+  // The time as of the last poll attempt (success or failure), or `null`
+  // before any attempt has run. Rendering must stay pure (no `Date.now()` at
+  // render time), so "now" is captured in an effect and stored as state; this
+  // is also what forces a re-render to re-evaluate `statsAreStale` while
+  // every fetch is failing (a failure alone touches no other state).
+  const [now, setNow] = useState<number | null>(null)
 
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
   const rows = useMemo(() => taskManagerRows(sessions, stats), [sessions, stats])
   const empty = nothingRunning(rows)
+  const stale = now !== null && statsAreStale(now, lastSuccessAt)
 
   // Poll while visible. Wall-clock: each tick schedules the next from how long
   // the fetch actually took, so a slow round-trip does not stretch the cadence.
@@ -106,12 +122,18 @@ function TaskManagerBody() {
       const startedAt = Date.now()
       try {
         const resp = await resourcesApi.get(controller.signal)
-        if (!cancelled) setStats(resp.rows)
+        if (!cancelled) {
+          setStats(resp.rows)
+          setLastSuccessAt(Date.now())
+        }
       } catch {
         // A failed or aborted sample is not worth a toast: the next tick (one
         // second later) either recovers or the user closes the dialog. The
-        // rows keep rendering from the spine with dashes meanwhile.
+        // rows keep rendering from the spine with dashes meanwhile. A run of
+        // failures surfaces as the "stats stalled" indicator instead, driven
+        // by `lastSuccessAt` rather than a per-failure toast.
       }
+      if (!cancelled) setNow(Date.now())
       if (cancelled) return
       timer = setTimeout(
         tick,
@@ -181,6 +203,19 @@ function TaskManagerBody() {
               detach and can be reconnected; terminals are destroyed.
             </DialogDescription>
           </DialogHeader>
+
+          {/* A permanently failing poll must not go on rendering the last good
+              numbers as though they were live: this surfaces once a run of
+              failures crosses the staleness threshold, and clears the moment
+              a poll succeeds again. Subtle by design, no toast: this is a
+              persistent state of the numbers, not a one-off event. */}
+          {stale ? (
+            <p className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
+              <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+              Stats stalled: showing the last successful sample, not live
+              numbers.
+            </p>
+          ) : null}
 
           {/* The table scrolls HORIZONTALLY before any name is ellipsized: child
               rows are command names ("node", "rg", "nvim") and a name truncated
@@ -286,7 +321,12 @@ function ExpandToggle({
           ? `Hide ${row.name} child processes`
           : `Show ${row.name} child processes`
       }
-      className="inline-flex size-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+      // >=40px touch target on phones (CLAUDE.md's touch-target tenet): this
+      // control sits directly beside the correctly-sized Stop button in the
+      // mobile row, and a tiny chevron next to it is a misclick hazard on the
+      // one control a misclick would be worst on. Desktop keeps the compact
+      // 16px density.
+      className="inline-flex size-4 max-md:size-10 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
     >
       <Icon className="size-3.5" />
     </button>
@@ -355,7 +395,7 @@ function DesktopRow({
               size="sm"
               variant="outline"
               onClick={onStop}
-              aria-label={`Stop ${row.name}`}
+              aria-label={row.stopLabel}
             >
               Stop
             </Button>
@@ -438,7 +478,7 @@ function MobileRow({
             size="sm"
             variant="outline"
             onClick={onStop}
-            aria-label={`Stop ${row.name}`}
+            aria-label={row.stopLabel}
             className="max-md:min-h-10 shrink-0"
           >
             Stop

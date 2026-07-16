@@ -70,7 +70,19 @@ impl ResourceCollector {
     /// establish a baseline (the first sample, or the first after a gap longer
     /// than [`STALE_BASELINE`]); steady-state samples cost a single walk. Call it
     /// from a background thread.
-    pub fn sample(&mut self, targets: Vec<ResourceTarget>) -> Vec<ResourceStats> {
+    ///
+    /// Returns `(rows, was_baseline)`. `was_baseline` is `true` exactly when
+    /// THIS sample had to re-establish its CPU baseline, meaning its reading
+    /// spans only the short `MINIMUM_CPU_UPDATE_INTERVAL` window rather than
+    /// the caller's normal poll interval: real numbers, just noisier because
+    /// they cover less wall-clock time. Callers that surface a "this reading
+    /// is a short-window sample" marker to the user (the TUI's `~` prefix)
+    /// should show it exactly when this is `true`, not merely on the first
+    /// sample delivered to that UI session: a monitor closed and reopened
+    /// inside [`STALE_BASELINE`] does NOT re-baseline, so a UI-session-scoped
+    /// "first sample" flag would mark a normal steady-state reading as short-
+    /// window when it is not.
+    pub fn sample(&mut self, targets: Vec<ResourceTarget>) -> (Vec<ResourceStats>, bool) {
         use sysinfo::Pid;
 
         let needs_baseline = match self.last_refresh {
@@ -136,7 +148,7 @@ impl ResourceCollector {
             children: Vec::new(),
         });
 
-        rows
+        (rows, needs_baseline)
     }
 }
 
@@ -228,7 +240,7 @@ mod tests {
         let (stop, handle) = burn_a_core();
 
         let mut collector = ResourceCollector::new();
-        let first = collector.sample(Vec::new());
+        let (first, first_was_baseline) = collector.sample(Vec::new());
         let first_cpu = first
             .iter()
             .find(|r| r.label == "dux (this process)")
@@ -236,7 +248,7 @@ mod tests {
             .cpu_percent;
 
         std::thread::sleep(Duration::from_millis(300));
-        let second = collector.sample(Vec::new());
+        let (second, second_was_baseline) = collector.sample(Vec::new());
         let second_cpu = second
             .iter()
             .find(|r| r.label == "dux (this process)")
@@ -253,6 +265,43 @@ mod tests {
         assert!(
             second_cpu > 0.0,
             "a steady-state sample must report real CPU, got {second_cpu}"
+        );
+        assert!(first_was_baseline, "the first sample always re-baselines");
+        assert!(
+            !second_was_baseline,
+            "a steady-state sample within STALE_BASELINE must not re-baseline"
+        );
+    }
+
+    /// `was_baseline` must reflect what THIS sample actually did, not a
+    /// UI-session-scoped guess: true on the very first sample, false on an
+    /// immediate follow-up, and true again after a gap longer than
+    /// `STALE_BASELINE` with no sampling in between (the monitor was closed
+    /// and reopened later). This is the fact the TUI's `~` short-window
+    /// marker is built on (finding 3).
+    #[test]
+    fn sample_reports_was_baseline_accurately() {
+        let mut collector = ResourceCollector::new();
+
+        let (_, first_was_baseline) = collector.sample(Vec::new());
+        assert!(
+            first_was_baseline,
+            "the very first sample has no prior refresh and must baseline"
+        );
+
+        let (_, second_was_baseline) = collector.sample(Vec::new());
+        assert!(
+            !second_was_baseline,
+            "a sample taken immediately after must not re-baseline"
+        );
+
+        // Simulate the monitor being closed and reopened after a gap longer
+        // than STALE_BASELINE, with no sampling in between.
+        collector.last_refresh = Some(Instant::now() - STALE_BASELINE - Duration::from_millis(1));
+        let (_, third_was_baseline) = collector.sample(Vec::new());
+        assert!(
+            third_was_baseline,
+            "a sample after a stale gap must re-baseline"
         );
     }
 
@@ -274,7 +323,7 @@ mod tests {
         let mut collector = ResourceCollector::new();
         let _ = collector.sample(Vec::new());
         std::thread::sleep(Duration::from_millis(400));
-        let rows = collector.sample(Vec::new());
+        let (rows, _) = collector.sample(Vec::new());
         let cpu = rows
             .iter()
             .find(|r| r.label == "dux (this process)")
@@ -305,7 +354,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let _ = collector.sample(Vec::new());
         // Immediately again, with no sleep at all.
-        let rows = collector.sample(Vec::new());
+        let (rows, _) = collector.sample(Vec::new());
         let cpu = rows
             .iter()
             .find(|r| r.label == "dux (this process)")
