@@ -1,6 +1,6 @@
 # dux
 
-[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/patrickdappollonio/dux/total)](https://github.com/patrickdappollonio/dux/releases/latest) [![NPM Downloads](https://img.shields.io/npm/dm/%40patrickdappollonio%2Fdux)](https://www.npmjs.com/package/@patrickdappollonio/dux) ![GitHub License](https://img.shields.io/github/license/patrickdappollonio/dux)
+[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/patrickdappollonio/dux/total)](https://github.com/patrickdappollonio/dux/releases/latest) [![NPM Downloads](https://img.shields.io/npm/dm/%40patrickdappollonio%2Fdux)](https://www.npmjs.com/package/@patrickdappollonio/dux) ![GitHub License](https://img.shields.io/github/license/patrickdappollonio/dux) [![Newsletter](https://img.shields.io/badge/newsletter-subscribe-blue)](https://buttondown.com/getduxapp)
 
 <img src="assets/dux-logo.png" width="200" align="right" />
 

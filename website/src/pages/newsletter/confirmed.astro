@@ -1,0 +1,40 @@
+---
+// Landing page after someone confirms their newsletter subscription.
+// Buttondown's "redirect after confirming" setting should point here.
+// Utility page: kept out of search engines and the sitemap.
+import Layout from "../../layouts/Layout.astro";
+import Header from "../../components/Header.astro";
+import Footer from "../../components/Footer.astro";
+import NewsletterStatus from "../../components/NewsletterStatus.astro";
+
+const title = "You're in the flock | getdux.app";
+const description = "Subscription confirmed. Welcome to the dux newsletter.";
+---
+
+<Layout title={title} description={description} noIndex emitStructuredData={false}>
+  <Header />
+  <main>
+    <NewsletterStatus pill="▸ subscription confirmed">
+      <Fragment slot="title">
+        You're <span class="text-[color:var(--color-accent)]">in</span>. Welcome
+        to the flock.
+      </Fragment>
+      <Fragment slot="body">
+        <p>
+          That's it: no more clicking, no forms, no hoops. Release notes, new
+          tricks, and the occasional behind-the-scenes will now land in your
+          inbox. No spam, no daily drip, and every email carries an
+          unsubscribe link we'll pretend you'll never need.
+        </p>
+      </Fragment>
+      <Fragment slot="actions">
+        <a href="/#install" class="btn-primary">Install dux</a>
+        <a href="/blog" class="btn-ghost">Read the blog</a>
+      </Fragment>
+      <Fragment slot="footnote">
+        In the meantime: dux is pronounced "dooks". Now you know more than most.
+      </Fragment>
+    </NewsletterStatus>
+  </main>
+  <Footer />
+</Layout>
