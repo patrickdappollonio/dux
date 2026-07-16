@@ -1041,6 +1041,24 @@ pub(crate) enum PromptState {
         message: String,
         return_prompt: Box<PromptState>,
     },
+    /// Shown when adding a plain folder that is not a git repository (the
+    /// adopt-a-folder flow). Confirming runs `git init`, seeds a starter
+    /// `.gitignore` for the named candidate directories, creates an empty
+    /// initial commit, then registers the project.
+    ConfirmInitRepo {
+        /// Absolute, canonical path of the folder being adopted.
+        path: String,
+        /// Display name entered by the user (empty derives it from the path).
+        name: String,
+        /// Starter-.gitignore candidate directory names found in the folder
+        /// (display only; the worker re-derives the real list when seeding).
+        candidates: Vec<String>,
+        confirm_selected: bool, // false = Cancel (default), true = Initialize & Add
+        /// The prompt to restore on cancel (the project browser with the
+        /// user's location and typed path intact), the `AddProjectFailed`
+        /// pattern.
+        return_prompt: Box<PromptState>,
+    },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     AgentInfo(AgentInfoPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
@@ -1554,6 +1572,10 @@ pub(crate) enum OverlayMouseLayout {
     ConfirmCreateInitialCommit {
         cancel_button: Rect,
         create_button: Rect,
+    },
+    ConfirmInitRepo {
+        cancel_button: Rect,
+        init_button: Rect,
     },
     ConfirmNonDefaultBranch {
         cancel_button: Rect,

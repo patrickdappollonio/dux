@@ -1090,9 +1090,15 @@ impl Engine {
     }
 
     /// Validate a raw path string before registering it as a project. Checks
-    /// that the path exists, is a git repository, and is not already
-    /// registered. Returns the canonicalized path on success or a
-    /// user-facing error string on failure.
+    /// that the path exists, is a git repository root (not a folder inside
+    /// one, and not git's internal directory), and is not already registered.
+    /// Returns the canonicalized path on success or a user-facing error
+    /// string on failure.
+    ///
+    /// This gate stops new interactive adds only. Already-registered projects
+    /// and config/SQLite-sourced entries load through `load_projects`, whose
+    /// looser `is_git_repo` probe is deliberately untouched so existing
+    /// subfolder projects keep working.
     pub fn validate_project_add_path(
         &self,
         raw_path: &str,
@@ -1104,6 +1110,85 @@ impl Engine {
         if !path.exists() || !crate::git::is_git_repo(&path) {
             crate::logger::error(&format!("add project rejected for {}", path.display()));
             return Err(format!("\"{}\" is not a git repository.", path.display()));
+        }
+        // Fail-open on Indeterminate (a gate, per the CommitState doctrine);
+        // WorkTreeRoot and BareRoot pass (bare adds are shipped behavior).
+        // NotARepo is unreachable after the is_git_repo check above.
+        match crate::git::repo_path_kind(&path) {
+            crate::git::RepoPathKind::InsideWorkTree { root } => {
+                return Err(format!(
+                    "\"{}\" is inside the git repository at \"{}\". Add \"{}\" instead.",
+                    path.display(),
+                    root.display(),
+                    root.display()
+                ));
+            }
+            crate::git::RepoPathKind::InsideGitDir { .. } => {
+                return Err(format!(
+                    "\"{}\" is inside git's internal directory. Add the repository itself instead.",
+                    path.display()
+                ));
+            }
+            _ => {}
+        }
+        if self.projects.iter().any(|project| {
+            PathBuf::from(&project.path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&project.path))
+                == path
+        }) {
+            return Err(format!(
+                "\"{}\" is already registered as a project.",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Validate a raw path string before initializing it as a brand-new git
+    /// repository and registering it as a project. The folder must exist, must
+    /// not already be (or sit inside) a git repository, and must not already
+    /// be registered. Unlike the add gate, `Indeterminate` fails closed here:
+    /// this validation front-runs a mutation (`git init`).
+    pub fn validate_project_init_path(
+        &self,
+        raw_path: &str,
+    ) -> std::result::Result<PathBuf, String> {
+        let trimmed = raw_path.trim();
+        let path = match PathBuf::from(trimmed).canonicalize() {
+            Ok(path) if path.is_dir() => path,
+            _ => {
+                return Err(format!("\"{trimmed}\" is not an existing folder."));
+            }
+        };
+        match crate::git::repo_path_kind(&path) {
+            crate::git::RepoPathKind::NotARepo => {}
+            crate::git::RepoPathKind::WorkTreeRoot | crate::git::RepoPathKind::BareRoot => {
+                return Err(format!(
+                    "\"{}\" is already a git repository. Use Add project instead.",
+                    path.display()
+                ));
+            }
+            crate::git::RepoPathKind::InsideWorkTree { root } => {
+                return Err(format!(
+                    "\"{}\" is inside the git repository at \"{}\". Add \"{}\" instead.",
+                    path.display(),
+                    root.display(),
+                    root.display()
+                ));
+            }
+            crate::git::RepoPathKind::InsideGitDir { .. } => {
+                return Err(format!(
+                    "\"{}\" is inside git's internal directory. Add the repository itself instead.",
+                    path.display()
+                ));
+            }
+            crate::git::RepoPathKind::Indeterminate => {
+                return Err(format!(
+                    "couldn't determine whether \"{}\" is already a git repository, so refusing to initialize one there.",
+                    path.display()
+                ));
+            }
         }
         if self.projects.iter().any(|project| {
             PathBuf::from(&project.path)
@@ -2631,6 +2716,135 @@ pub struct ChangeAgentProviderOutcome {
 mod tests {
     use super::*;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
+
+    fn init_plain_repo(path: &std::path::Path) {
+        let out = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn validate_project_add_path_rejects_repo_subdirectories_and_git_dirs() {
+        // Catches the goal-5 gate missing (a subfolder registered as a
+        // project) plus the panel's hole (<repo>/.git accepted because
+        // --show-toplevel fails there and the gate fails open).
+        let (engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().unwrap();
+        init_plain_repo(repo.path());
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let err = engine
+            .validate_project_add_path(sub.to_string_lossy().as_ref())
+            .expect_err("a repo subdirectory must be rejected");
+        assert!(
+            err.contains("is inside the git repository at"),
+            "error must name the root, got: {err}"
+        );
+        assert!(
+            err.contains(
+                repo.path()
+                    .canonicalize()
+                    .unwrap()
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "error must contain the repo root path, got: {err}"
+        );
+
+        let git_dir = repo.path().join(".git");
+        let err = engine
+            .validate_project_add_path(git_dir.to_string_lossy().as_ref())
+            .expect_err("<repo>/.git must be rejected");
+        assert!(
+            err.contains("git's internal directory"),
+            "error must explain the git-dir rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_project_add_path_still_accepts_a_bare_repo_root() {
+        // Regression guard for shipped bare-repo support.
+        let (engine, _tmp) = test_engine();
+        let bare = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        engine
+            .validate_project_add_path(bare.path().to_string_lossy().as_ref())
+            .expect("a bare repository root must remain addable");
+    }
+
+    #[test]
+    fn validate_project_init_path_rejects_everything_but_a_plain_folder() {
+        // Catches `git init` atop or inside existing repositories.
+        let (mut engine, _tmp) = test_engine();
+
+        let repo = tempfile::tempdir().unwrap();
+        init_plain_repo(repo.path());
+        let err = engine
+            .validate_project_init_path(repo.path().to_string_lossy().as_ref())
+            .expect_err("a work-tree root must not be re-initialized");
+        assert!(err.contains("already a git repository"), "got: {err}");
+
+        let bare = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let err = engine
+            .validate_project_init_path(bare.path().to_string_lossy().as_ref())
+            .expect_err("a bare root must not be re-initialized");
+        assert!(err.contains("already a git repository"), "got: {err}");
+
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let err = engine
+            .validate_project_init_path(sub.to_string_lossy().as_ref())
+            .expect_err("a repo subdirectory must not be initialized");
+        assert!(
+            err.contains("is inside the git repository at"),
+            "got: {err}"
+        );
+
+        let err = engine
+            .validate_project_init_path(repo.path().join(".git").to_string_lossy().as_ref())
+            .expect_err("a .git directory must not be initialized");
+        assert!(err.contains("git's internal directory"), "got: {err}");
+
+        let err = engine
+            .validate_project_init_path("/definitely/not/an/existing/folder")
+            .expect_err("a nonexistent path must be rejected");
+        assert!(err.contains("not an existing folder"), "got: {err}");
+
+        // An already-registered plain folder must be rejected too.
+        let plain = tempfile::tempdir().unwrap();
+        let project = sample_project("p1", plain.path().to_string_lossy().as_ref());
+        engine.projects.push(project);
+        let err = engine
+            .validate_project_init_path(plain.path().to_string_lossy().as_ref())
+            .expect_err("an already-registered path must be rejected");
+        assert!(err.contains("already registered"), "got: {err}");
+
+        // And a fresh plain folder passes, returning the canonical path.
+        let fresh = tempfile::tempdir().unwrap();
+        let ok = engine
+            .validate_project_init_path(fresh.path().to_string_lossy().as_ref())
+            .expect("a plain folder must validate for init");
+        assert_eq!(ok, fresh.path().canonicalize().unwrap());
+    }
 
     #[test]
     fn is_agent_streaming_honors_the_hysteresis_window() {

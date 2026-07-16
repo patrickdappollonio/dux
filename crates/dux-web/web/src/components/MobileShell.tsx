@@ -38,6 +38,7 @@ import {
 import type { CSSProperties } from "react"
 import { Suspense, useState } from "react"
 
+import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
 import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -88,7 +89,6 @@ import {
   addTab,
   createTerminal,
   mobileNavigate,
-  openAddProject,
   openAgentInfo,
   openAgentEnv,
   openForceReconnect,
@@ -720,14 +720,7 @@ function HomeScreen() {
               </div>
             ) : null}
 
-            <Button
-              variant="outline"
-              className="min-h-11 w-full"
-              onClick={openAddProject}
-            >
-              <Plus />
-              Add project
-            </Button>
+            <AddProjectSplitButton className="w-full" />
           </div>
         </ScrollArea>
       ) : (
@@ -741,14 +734,7 @@ function HomeScreen() {
               <EmptyDescription>Add a project to get started.</EmptyDescription>
             </EmptyHeader>
           </Empty>
-          <Button
-            variant="outline"
-            className="min-h-11"
-            onClick={openAddProject}
-          >
-            <Plus />
-            Add project
-          </Button>
+          <AddProjectSplitButton />
         </div>
       )}
     </div>

@@ -178,6 +178,13 @@ export type BranchWarningView =
   | { kind: "known"; default_branch: string }
   | { kind: "heuristic" }
 
+// How an inspected add-project candidate path classifies, mirroring the
+// server's `InspectReply.kind`: "repo" (work-tree root), "bare" (bare root),
+// "repo_subdir" (inside a repo, or inside git's internal directory; blocked),
+// or "plain" (not a repo; dux offers to initialize one). An older backend
+// omits the field entirely; the client treats a missing kind as "repo".
+export type InspectKind = "repo" | "bare" | "repo_subdir" | "plain"
+
 export interface ChangedFileView {
   status: string
   path: string

@@ -565,6 +565,9 @@ impl App {
                 name,
                 branch,
                 leading_branch,
+                initialized_repo,
+                seeded_gitignore,
+                seed_warning,
                 status_op_id: _,
             } => {
                 let display_name = if name.trim().is_empty() {
@@ -576,9 +579,19 @@ impl App {
                 } else {
                     name.trim().to_string()
                 };
-                let status_message = format!(
-                    "Created an initial commit and added project \"{display_name}\" to workspace."
-                );
+                let status_message = if initialized_repo && seeded_gitignore {
+                    format!(
+                        "Initialized a git repository, seeded a starter .gitignore, created an initial commit, and added project \"{display_name}\" to workspace."
+                    )
+                } else if initialized_repo {
+                    format!(
+                        "Initialized a git repository, created an initial commit, and added project \"{display_name}\" to workspace."
+                    )
+                } else {
+                    format!(
+                        "Created an initial commit and added project \"{display_name}\" to workspace."
+                    )
+                };
                 if let Err(e) = self.finish_add_project_with_status(
                     path,
                     name,
@@ -587,6 +600,11 @@ impl App {
                     status_message,
                 ) {
                     self.set_error(format!("{e:#}"));
+                }
+                // Surface a non-fatal seed failure AFTER the success status so
+                // the persistent warning is what remains on screen.
+                if let Some(warning) = seed_warning {
+                    self.set_warning(warning);
                 }
             }
 

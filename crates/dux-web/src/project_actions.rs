@@ -71,6 +71,13 @@ struct AddProjectBody {
     /// add-project dialog after inspect reports `has_commits: false`.
     #[serde(default)]
     create_initial_commit: bool,
+    /// Adopt a plain (non-repo) folder: run `git init`, seed a starter
+    /// `.gitignore`, create an empty initial commit, then register. The user
+    /// opts in via the add-project dialog after inspect reports
+    /// `kind: "plain"`. The engine re-validates (the folder must not already
+    /// be, or sit inside, a repository).
+    #[serde(default)]
+    init_repo: bool,
 }
 
 async fn add_project(
@@ -94,14 +101,20 @@ async fn add_project(
         None => return engine_unavailable(),
     };
 
-    // Pick the add variant. `create_initial_commit` takes precedence over
+    // Pick the add variant, a strict precedence ladder: `init_repo` outranks
+    // `create_initial_commit` (init subsumes the commit), which outranks
     // `checkout_default` (an unborn repo has no default branch to check out).
     // Like the checkout-default flow, the engine validates the path, serializes
     // per repo path, and runs the commit on a worker before registering — so the
     // mutating git work never runs on the async reactor here, and a failure (or
     // a repo that gained commits since inspect, which the handler registers as a
     // plain add) surfaces through the keyed status stream.
-    let cmd = if body.create_initial_commit {
+    let cmd = if body.init_repo {
+        WireCommand::AddProjectInitRepo {
+            path: body.path,
+            name: body.name,
+        }
+    } else if body.create_initial_commit {
         WireCommand::AddProjectCreateInitialCommit {
             path: body.path,
             name: body.name,
@@ -476,6 +489,52 @@ mod tests {
         assert!(
             !dux_core::git::repo_has_commits(repo.path()),
             "a rejected plain add must not create a commit"
+        );
+    }
+
+    fn post_add_init_repo(path: &str) -> Request<Body> {
+        let body = format!(
+            r#"{{"path":{},"init_repo":true}}"#,
+            serde_json::to_string(path).unwrap()
+        );
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/projects")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn add_with_init_repo_flag_rejects_subdirs_and_existing_repos() {
+        // Catches validation bypass at the HTTP boundary: `init_repo: true`
+        // must be refused for a repo subdirectory and for an existing repo
+        // root, with the engine's validation messages surfacing as 400s.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_no_commit(repo.path());
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(post_add_init_repo(&sub.to_string_lossy()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            !sub.join(".git").exists(),
+            "no nested repository may have been created"
+        );
+
+        let (_tmp, app) = router_no_auth();
+        let resp = app
+            .oneshot(post_add_init_repo(&repo.path().to_string_lossy()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "an existing repo root must not be re-initialized"
         );
     }
 

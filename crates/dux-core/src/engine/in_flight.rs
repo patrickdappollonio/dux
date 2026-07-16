@@ -26,6 +26,9 @@ pub enum InFlightKey {
     /// Creating an initial commit for the repo at this path, then registering
     /// it. Keyed by canonical path so two concurrent "create initial commit &
     /// add" requests for the same repo can't both run and append two commits.
+    /// The adopt-a-folder flow (`git init` + seed + commit) shares this key:
+    /// same hazard class, and sharing makes init-and-commit and commit-only on
+    /// the same path mutually exclusive for free.
     InitialCommit(String),
 }
 

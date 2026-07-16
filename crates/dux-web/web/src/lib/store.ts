@@ -43,6 +43,7 @@ import type { EditorTabsState } from "./editorTabs"
 import { newClientId } from "./uid"
 import type {
   BranchWarningView,
+  InspectKind,
   ChangedFileView,
   ConnState,
   DirEntryView,
@@ -222,6 +223,11 @@ export interface DuxState {
   // reconnect abandons the provider's current conversation for a fresh one.
   forceReconnectTarget: string | null
   addProjectOpen: boolean
+  // Why the picker was opened: "add" (the default) or "init" (the split
+  // button's "Initialize a repository…" entry). The intent's ONLY effect is a
+  // header hint in the dialog; the primary-action ladder does the real work
+  // either way. Cleared on close.
+  addProjectIntent: "add" | "init"
   browsePath: string
   browseEntries: DirEntryView[]
   browseLoading: boolean
@@ -234,6 +240,15 @@ export interface DuxState {
   // is pending or resolved (nothing selected).
   projectPathInspection: {
     path: string
+    // Path classification from the server ("repo" | "bare" | "repo_subdir" |
+    // "plain"). Defaults to "repo" while loading / on error / under version
+    // skew, so no init or blocked panel appears before inspection confirms it.
+    kind: InspectKind
+    // The enclosing repository root when `kind` is "repo_subdir" and the
+    // server could name one; null inside git's internal directory.
+    repoRoot: string | null
+    // Starter-.gitignore candidates found in a "plain" folder.
+    gitignoreCandidates: string[]
     currentBranch: string | null
     warning: BranchWarningView | null
     // `false` when the repo is a fresh `git init` with no commits (unborn HEAD).
@@ -472,6 +487,7 @@ let state: DuxState = {
   agentInfoTarget: null,
   forceReconnectTarget: null,
   addProjectOpen: false,
+  addProjectIntent: "add",
   browsePath: "",
   browseEntries: [],
   browseLoading: false,
@@ -2305,14 +2321,36 @@ function runBrowse(path: string | null): void {
 }
 
 export function openAddProject(): void {
-  setState({ addProjectOpen: true, browseLoading: true, browseEntries: [] })
+  setState({
+    addProjectOpen: true,
+    addProjectIntent: "add",
+    browseLoading: true,
+    browseEntries: [],
+  })
   // A null path tells the server to open at the configured default
   // (`defaults.start_directory`, resolved from the live config), not $HOME.
   runBrowse(null)
 }
 
+// Open the same picker with the "init" intent (the split button's
+// "Initialize a repository…" entry). The intent only changes a header hint;
+// the primary-action ladder decides the real action from the inspection.
+export function openAddProjectForInit(): void {
+  setState({
+    addProjectOpen: true,
+    addProjectIntent: "init",
+    browseLoading: true,
+    browseEntries: [],
+  })
+  runBrowse(null)
+}
+
 export function closeAddProject(): void {
-  setState({ addProjectOpen: false, projectPathInspection: null })
+  setState({
+    addProjectOpen: false,
+    addProjectIntent: "add",
+    projectPathInspection: null,
+  })
 }
 
 export function browseDir(path: string | null): void {
@@ -2331,6 +2369,9 @@ export function inspectProjectPath(path: string): void {
   setState({
     projectPathInspection: {
       path,
+      kind: "repo",
+      repoRoot: null,
+      gitignoreCandidates: [],
       currentBranch: null,
       warning: null,
       hasCommits: true,
@@ -2349,6 +2390,12 @@ export function inspectProjectPath(path: string): void {
       setState({
         projectPathInspection: {
           path,
+          // Treat a missing kind as "repo" (the same version-skew stance as
+          // `has_commits !== false` below): an older backend never blocks or
+          // offers init, it just behaves as before.
+          kind: res.kind ?? "repo",
+          repoRoot: res.repo_root ?? null,
+          gitignoreCandidates: res.gitignore_candidates ?? [],
           currentBranch: res.current_branch,
           warning: res.warning,
           // Treat a missing/non-false value as "has commits" so an older
@@ -2365,6 +2412,9 @@ export function inspectProjectPath(path: string): void {
       setState({
         projectPathInspection: {
           path,
+          kind: "repo",
+          repoRoot: null,
+          gitignoreCandidates: [],
           currentBranch: null,
           warning: null,
           hasCommits: true,
@@ -2406,6 +2456,18 @@ export function addProjectCheckoutDefault(path: string, name: string): void {
 export function addProjectCreateInitialCommit(path: string, name: string): void {
   projectsApi
     .create({ path, name, create_initial_commit: true })
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not add the project."),
+    )
+}
+
+// Adopt a plain (non-repo) folder: the server runs `git init`, seeds a starter
+// .gitignore, creates an empty initial commit, then registers the project.
+// Offered when inspect reports `kind: "plain"`. Fire-and-forget like the other
+// add variants; the keyed status stream reports the outcome.
+export function initProject(path: string, name: string): void {
+  projectsApi
+    .create({ path, name, init_repo: true })
     .catch((e) =>
       toast.error(e instanceof Error ? e.message : "Could not add the project."),
     )

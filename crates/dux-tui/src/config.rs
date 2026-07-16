@@ -446,7 +446,11 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "start_directory",
             comment: Some(CommentSource::Static(
-                "# Starting directory for the project browser.",
+                "# Starting directory for the project browser.\n\
+                 # The project browser can also initialize a plain folder as a new git repository.\n\
+                 # When it does, dux seeds a commented starter .gitignore for common dependency and\n\
+                 # build directories it finds (node_modules, target, ...). The candidate list is\n\
+                 # built into dux and extended via pull request; it is deliberately not a setting.",
             )),
             value_fn: |c| FieldValue::OptStr(c.defaults.start_directory.clone()),
         },

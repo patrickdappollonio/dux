@@ -96,6 +96,8 @@ pub(crate) enum ButtonPressedTarget {
     ConfirmDiscardConfirm,
     ConfirmCreateInitialCommitCancel,
     ConfirmCreateInitialCommitConfirm,
+    ConfirmInitRepoCancel,
+    ConfirmInitRepoConfirm,
     ConfirmNonDefaultBranchCancel,
     ConfirmNonDefaultBranchAdd,
     ConfirmUseExistingBranchCancel,

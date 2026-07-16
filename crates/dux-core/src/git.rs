@@ -182,6 +182,143 @@ pub fn is_git_repo(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Where a path sits relative to git repositories, for the add-project and
+/// init-repository gates. Unlike [`is_git_repo`] (which answers "is git happy
+/// anywhere at or above this path?" and must stay loose because
+/// `load_projects` uses it for the `path_missing` flag), this classifies the
+/// path precisely so gates can distinguish a repository root from a folder
+/// buried inside one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoPathKind {
+    /// The root of a normal (non-bare) work tree.
+    WorkTreeRoot,
+    /// The root of a bare repository.
+    BareRoot,
+    /// A directory inside a work tree but not its root.
+    InsideWorkTree { root: PathBuf },
+    /// A directory inside git's internal directory (`.git/` of a normal repo,
+    /// or the internals of a bare repo such as `objects/`).
+    InsideGitDir { git_dir: PathBuf },
+    /// Not inside any git repository.
+    NotARepo,
+    /// Git could not be consulted (spawn failure, unparseable output). Gates
+    /// fail open on this; mutations fail closed (the [`CommitState`] doctrine).
+    Indeterminate,
+}
+
+/// Classify `path` per [`RepoPathKind`] using plumbing only.
+///
+/// The `--is-inside-git-dir` rung exists because inside a normal repo's
+/// `.git` directory `--git-dir` succeeds, `--is-bare-repository` prints
+/// `false`, and `--show-toplevel` exits 128 (measured); without the rung that
+/// combination would fall through to `Indeterminate` and the fail-open add
+/// gate would accept `~/repo/.git` as a project.
+pub fn repo_path_kind(path: &Path) -> RepoPathKind {
+    let run = |args: &[&str]| -> Option<std::process::Output> {
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+    };
+    // Rung 1: is git willing to talk about this path at all?
+    match run(&["rev-parse", "--git-dir"]) {
+        Some(out) if out.status.success() => {}
+        Some(_) => return RepoPathKind::NotARepo,
+        None => return RepoPathKind::Indeterminate,
+    }
+    let capture = |args: &[&str]| -> Option<String> {
+        run(args).filter(|out| out.status.success()).map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches(['\n', '\r'])
+                .to_string()
+        })
+    };
+    // Path outputs must be decoded from the RAW bytes, never via
+    // `from_utf8_lossy`: git prints path bytes verbatim, and a repo under a
+    // non-UTF8 path (legal on Linux) would have its bytes rewritten to U+FFFD,
+    // fail canonicalization, and fall to Indeterminate, which the fail-open
+    // add gate accepts, i.e. exactly the paths this ladder exists to stop
+    // would slip through.
+    let capture_path = |args: &[&str]| -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        run(args).filter(|out| out.status.success()).map(|out| {
+            let mut bytes = out.stdout.as_slice();
+            while let [rest @ .., b'\n' | b'\r'] = bytes {
+                bytes = rest;
+            }
+            PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+        })
+    };
+    // Rung 2: bare repositories. The bare root is addable; a folder inside a
+    // bare repo (objects/, refs/, ...) is git internals and must not be.
+    match capture(&["rev-parse", "--is-bare-repository"]).as_deref() {
+        Some("true") => {
+            let Some(git_dir) = capture_path(&["rev-parse", "--absolute-git-dir"]) else {
+                return RepoPathKind::Indeterminate;
+            };
+            let (Ok(canon_git_dir), Ok(canon_path)) = (git_dir.canonicalize(), path.canonicalize())
+            else {
+                return RepoPathKind::Indeterminate;
+            };
+            if canon_git_dir == canon_path {
+                return RepoPathKind::BareRoot;
+            }
+            return RepoPathKind::InsideGitDir { git_dir };
+        }
+        Some(_) => {}
+        None => return RepoPathKind::Indeterminate,
+    }
+    // Rung 3: inside a normal repo's .git directory (see the doc above).
+    match capture(&["rev-parse", "--is-inside-git-dir"]).as_deref() {
+        Some("true") => {
+            let Some(git_dir) = capture_path(&["rev-parse", "--absolute-git-dir"]) else {
+                return RepoPathKind::Indeterminate;
+            };
+            return RepoPathKind::InsideGitDir { git_dir };
+        }
+        Some(_) => {}
+        None => return RepoPathKind::Indeterminate,
+    }
+    // Rung 4: work tree root vs a folder inside the work tree.
+    let Some(toplevel) = capture_path(&["rev-parse", "--show-toplevel"]) else {
+        return RepoPathKind::Indeterminate;
+    };
+    let (Ok(canon_top), Ok(canon_path)) = (toplevel.canonicalize(), path.canonicalize()) else {
+        return RepoPathKind::Indeterminate;
+    };
+    if canon_top == canon_path {
+        RepoPathKind::WorkTreeRoot
+    } else {
+        RepoPathKind::InsideWorkTree { root: toplevel }
+    }
+}
+
+/// Initialize a new git repository in `path` (`git init`). Imperative: exit
+/// status only, stdout unparsed, stderr surfaced in the error. Deliberately
+/// honors the user's `init.defaultBranch` (no `-b` override). `git init` runs
+/// no hooks; the initial-commit step already pins `core.hooksPath=/dev/null`,
+/// which also neutralizes hook scripts an `init.templateDir` might copy in.
+pub fn init_repo(path: &Path) -> Result<()> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .arg("init")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run git init in {}", path.display()))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git init failed in {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether a repository's HEAD resolves to a commit, distinguishing a real
 /// git failure from a genuinely unborn HEAD.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3973,6 +4110,135 @@ mod tests {
         // A non-repo path can't be classified — Indeterminate, never Unborn.
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(repo_commit_state(tmp.path()), CommitState::Indeterminate);
+    }
+
+    #[test]
+    fn repo_path_kind_classifies_root_subdir_plain_and_bare() {
+        // Catches the crux misclassifications, including offering `git init`
+        // on a bare repository.
+        let repo = init_test_repo();
+        assert_eq!(repo_path_kind(repo.path()), RepoPathKind::WorkTreeRoot);
+
+        let sub = repo.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+        match repo_path_kind(&sub) {
+            RepoPathKind::InsideWorkTree { root } => {
+                assert_eq!(
+                    root.canonicalize().unwrap(),
+                    repo.path().canonicalize().unwrap()
+                );
+            }
+            other => panic!("subdir must classify as InsideWorkTree, got {other:?}"),
+        }
+
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(repo_path_kind(plain.path()), RepoPathKind::NotARepo);
+
+        let bare = tempfile::tempdir().unwrap();
+        let out = Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(repo_path_kind(bare.path()), RepoPathKind::BareRoot);
+    }
+
+    #[test]
+    fn repo_path_kind_flags_git_internal_directories() {
+        // Catches the measured ladder hole: inside `<repo>/.git`, `--git-dir`
+        // succeeds, `--is-bare-repository` is false, and `--show-toplevel`
+        // exits 128; without the `--is-inside-git-dir` rung this fell to
+        // Indeterminate and the fail-open add gate accepted `~/repo/.git`.
+        let repo = init_test_repo();
+        let git_dir = repo.path().join(".git");
+        assert!(
+            matches!(repo_path_kind(&git_dir), RepoPathKind::InsideGitDir { .. }),
+            "<repo>/.git must classify as InsideGitDir"
+        );
+        assert!(
+            matches!(
+                repo_path_kind(&git_dir.join("objects")),
+                RepoPathKind::InsideGitDir { .. }
+            ),
+            "<repo>/.git/objects must classify as InsideGitDir"
+        );
+    }
+
+    #[test]
+    fn repo_path_kind_flags_bare_repo_internals() {
+        // Catches registering a bare repository's internals as a project.
+        let bare = tempfile::tempdir().unwrap();
+        let out = Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(
+            matches!(
+                repo_path_kind(&bare.path().join("objects")),
+                RepoPathKind::InsideGitDir { .. }
+            ),
+            "a bare repo's objects/ must classify as InsideGitDir"
+        );
+    }
+
+    #[test]
+    fn repo_path_kind_classifies_repos_under_non_utf8_paths() {
+        // Catches the fail-open gate bypass: `--show-toplevel` output for a
+        // repo under a non-UTF8 path (legal on Linux) must be decoded from the
+        // raw bytes; a lossy decode rewrites the byte to U+FFFD, fails
+        // canonicalization, and falls to Indeterminate, which the add gate
+        // accepts.
+        use std::os::unix::ffi::OsStrExt;
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join(std::ffi::OsStr::from_bytes(b"rep\xFFo"));
+        std::fs::create_dir(&repo).unwrap();
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init under a non-UTF8 path failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(repo_path_kind(&repo), RepoPathKind::WorkTreeRoot);
+
+        let sub = repo.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        match repo_path_kind(&sub) {
+            RepoPathKind::InsideWorkTree { root } => {
+                assert_eq!(root.canonicalize().unwrap(), repo.canonicalize().unwrap());
+            }
+            other => panic!(
+                "a subdir of a non-UTF8-path repo must classify as InsideWorkTree, got {other:?}"
+            ),
+        }
+        assert!(
+            matches!(
+                repo_path_kind(&repo.join(".git")),
+                RepoPathKind::InsideGitDir { .. }
+            ),
+            "a non-UTF8-path repo's .git must classify as InsideGitDir"
+        );
+    }
+
+    #[test]
+    fn init_repo_creates_a_repository_and_errors_on_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        init_repo(dir.path()).expect("git init in an empty folder must succeed");
+        assert!(is_git_repo(dir.path()));
+        assert_eq!(repo_commit_state(dir.path()), CommitState::Unborn);
+
+        let missing = dir.path().join("does-not-exist");
+        assert!(
+            init_repo(&missing).is_err(),
+            "git init in a missing folder must surface an error"
+        );
     }
 
     // ── remote_default_branch tests ──────────────────────────────

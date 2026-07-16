@@ -106,6 +106,14 @@ pub struct InitialCommitAdd {
     pub branch: String,
     /// The resolved leading branch to persist for the project.
     pub leading_branch: String,
+    /// Set by dispatch: this add runs `git init` first (the adopt-a-folder
+    /// flow), so the completion messages can say so.
+    pub initialized_repo: bool,
+    /// Set by the worker after a successful starter-.gitignore seed.
+    pub seeded_gitignore: bool,
+    /// Set by the worker when seeding failed non-fatally; surfaced as a
+    /// persistent warning alongside the success final.
+    pub seed_warning: Option<String>,
 }
 
 #[derive(Clone, Debug)]

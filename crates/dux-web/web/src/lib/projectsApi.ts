@@ -15,6 +15,7 @@
 import { getConnectionId } from "./connection"
 import type {
   BranchWarningView,
+  InspectKind,
   ProjectView,
   ProjectWorktreeEntryView,
 } from "./types"
@@ -91,6 +92,10 @@ export const projectsApi = {
     // no commits) repo so it can back worktrees. Backend no-ops if the repo
     // already has commits.
     create_initial_commit?: boolean
+    // Adopt a plain (non-repo) folder: run `git init`, seed a starter
+    // .gitignore, create an empty initial commit, then register. Outranks
+    // `create_initial_commit` server-side (init subsumes the commit).
+    init_repo?: boolean
   }) => request<ProjectView>("POST", "/api/v1/projects", body),
   remove: (id: string) =>
     request<void>("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`),
@@ -114,6 +119,16 @@ export const projectsApi = {
   // `/ws` `inspect_project_path` request → `project_path_inspection` reply.
   inspectPath: (path: string) =>
     request<{
+      // Path classification. Optional: an older backend omits it (version
+      // skew), and the store treats a missing kind as "repo" (mirroring the
+      // `has_commits !== false` skew handling below).
+      kind?: InspectKind
+      // The enclosing repository root for `kind: "repo_subdir"`; null/absent
+      // when inside git's internal directory (no user-facing root to name).
+      repo_root?: string | null
+      // For `kind: "plain"`: starter-.gitignore candidate directory names
+      // found in the folder. Absent when empty.
+      gitignore_candidates?: string[]
       current_branch: string | null
       warning: BranchWarningView | null
       // `false` for a freshly `git init`'d repo with no commits (unborn HEAD).
