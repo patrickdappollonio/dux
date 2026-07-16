@@ -2,6 +2,7 @@ import { useState } from "react"
 import {
   AlertTriangle,
   Ban,
+  CornerLeftUp,
   Folder,
   FolderGit2,
   FolderOpen,
@@ -269,23 +270,60 @@ function AddProjectBrowser() {
             {/* Pinned, client-synthesized "Use this folder" row: the ONLY way
                 the current directory becomes a target. The footer stays
                 strictly selection-driven; the primary button never acts on
-                wherever the user happens to be standing. */}
+                wherever the user happens to be standing. The pinned band (a
+                faint elevated tint plus a neutral left accent rule) and the
+                monospace target pill read this as a commit action, distinct
+                from the ordinary folder rows below. */}
             <button
               type="button"
               onClick={() => selectTarget(browsePath)}
-              className={`flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
-                usingThisFolder ? "bg-accent" : ""
+              className={`flex min-h-11 items-center gap-2 border-l-2 border-primary/60 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
+                usingThisFolder ? "bg-accent" : "bg-muted/40"
               }`}
             >
               <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-              <span className="flex-1 truncate">
-                Use this folder
-                <span className="ml-2 text-muted-foreground">
-                  {baseName(browsePath)}
-                </span>
+              <span className="shrink-0">Use this folder</span>
+              <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">
+                <Folder className="size-3 shrink-0 text-muted-foreground" />
+                <span className="truncate">{baseName(browsePath)}</span>
               </span>
             </button>
+            {/* Non-interactive divider separating the commit action from the
+                navigation list below. */}
+            <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+              Browse
+            </div>
             {browseEntries.map((entry) => {
+              // The synthetic parent ("../") row reads as an "up" action, not a
+              // folder: a distinct glyph, the parent's basename, and its full
+              // path as a muted suffix. No git badge.
+              if (entry.is_parent) {
+                const parentBase = baseName(entry.path)
+                return (
+                  <button
+                    key={entry.path}
+                    type="button"
+                    onClick={() => handleEntryClick(entry)}
+                    // min-h-11 on phones gives each row a ≥44px touch target;
+                    // desktop keeps the compact py-2 density via md:.
+                    className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
+                  >
+                    <CornerLeftUp className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="flex-1 truncate">
+                      Up to{" "}
+                      <span className="font-medium">{parentBase}</span>
+                      {/* At the filesystem root the parent path IS the basename
+                          ("/"), so the muted suffix would just repeat it. Show it
+                          only when it adds the fuller path. */}
+                      {parentBase !== entry.path ? (
+                        <span className="ml-2 text-muted-foreground">
+                          {entry.path}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                )
+              }
               const isSelected = entry.is_git_repo && selected === entry.path
               const Icon = entry.is_git_repo ? FolderGit2 : Folder
               return (

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -36,7 +42,12 @@ function seed(overrides: Partial<DuxState> = {}) {
     addProjectIntent: "add",
     browsePath: "/home/u/notes",
     browseEntries: [
-      { path: "/home/u/notes/sub", label: "sub/", is_git_repo: false },
+      {
+        path: "/home/u/notes/sub",
+        label: "sub/",
+        is_git_repo: false,
+        is_parent: false,
+      },
     ],
     browseLoading: false,
     projectPathInspection: null,
@@ -79,6 +90,77 @@ describe("AddProjectDialog picker", () => {
     expect(inspectProjectPath).toHaveBeenCalledWith("/home/u/notes")
     // The selection footer shows the pinned target's path.
     expect(screen.getAllByText("/home/u/notes").length).toBeGreaterThan(0)
+  })
+
+  it("renders the target folder name pill on the pinned row", () => {
+    // The commit action rides the current folder's basename in a monospace
+    // pill, not the full path.
+    seed()
+    render(<AddProjectDialog />)
+    const pinned = screen.getByText("Use this folder").closest("button")!
+    // The pill node renders ONLY the basename ("notes"), and the pinned row
+    // never shows the full path. Scoping to the basename text node (not a
+    // substring of the whole row) is what proves baseName ran: were it to
+    // return the full path, this exact-text lookup would miss and the
+    // full-path guard below would trip.
+    expect(within(pinned).getByText("notes")).toBeTruthy()
+    expect(pinned.textContent).not.toContain("/home/u")
+  })
+
+  it("renders a parent entry as an 'Up to' action with the up glyph, not a folder row", () => {
+    // The parent's basename ("alice") is deliberately NOT a substring of the
+    // parent path elsewhere in the row, so matching the basename text node
+    // proves baseName produced it rather than the full path leaking through.
+    seed({
+      browseEntries: [
+        {
+          path: "/home/alice",
+          label: "../",
+          is_git_repo: false,
+          is_parent: true,
+        },
+        {
+          path: "/home/alice/notes/repo",
+          label: "repo",
+          is_git_repo: true,
+          is_parent: false,
+        },
+      ] as unknown as DuxState["browseEntries"],
+    })
+    render(<AddProjectDialog />)
+
+    // The parent row reads "Up to <basename>" with the parent's full path as a
+    // separate muted suffix, and renders the CornerLeftUp glyph rather than the
+    // plain "../" label. Asserting the basename and the path as distinct text
+    // nodes keeps this from passing on an accidental substring.
+    const upRow = screen.getByText("Up to").closest("button")!
+    expect(within(upRow).getByText("alice")).toBeTruthy()
+    expect(within(upRow).getByText("/home/alice")).toBeTruthy()
+    expect(upRow.querySelector("svg.lucide-corner-left-up")).toBeTruthy()
+    expect(screen.queryByText("../")).toBeNull()
+
+    // A normal git entry still renders its label and the git badge.
+    const repoRow = screen.getByText("repo").closest("button")!
+    expect(repoRow.textContent).toContain("git")
+  })
+
+  it("does not repeat the path on a parent row that points at the filesystem root", () => {
+    // baseName("/") === "/", so the muted full-path suffix would just echo the
+    // basename. The row must read "Up to /" once, never "Up to / /".
+    seed({
+      browseEntries: [
+        {
+          path: "/",
+          label: "../",
+          is_git_repo: false,
+          is_parent: true,
+        },
+      ] as unknown as DuxState["browseEntries"],
+    })
+    render(<AddProjectDialog />)
+    const upRow = screen.getByText("Up to").closest("button")!
+    // Exactly one "/" text node (the basename); the suffix is suppressed.
+    expect(within(upRow).getAllByText("/")).toHaveLength(1)
   })
 
   it("renders the pinned row FIRST, above the server-supplied entries", () => {

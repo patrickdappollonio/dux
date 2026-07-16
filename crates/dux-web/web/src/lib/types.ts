@@ -162,6 +162,7 @@ export interface DirEntryView {
   path: string
   label: string
   is_git_repo: boolean
+  is_parent: boolean
 }
 
 // A managed-worktree candidate for the "Attach worktree" flow. Only worktrees
