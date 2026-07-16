@@ -342,6 +342,112 @@ pub fn run_create_initial_commit_job(
     });
 }
 
+/// Background job for the adopt-a-folder flow: `git init`, seed a starter
+/// `.gitignore`, create the empty initial commit, and report the outcome via
+/// `WorkerEvent::InitialCommitCreated` (the same event as the commit-only
+/// bootstrap, so the completion plumbing is shared). Shared by the TUI and
+/// the web so the git work runs off the UI/reactor thread.
+pub fn run_init_repo_job(
+    add: crate::worker::InitialCommitAdd,
+    worker_tx: Sender<WorkerEvent>,
+    status_op_id: Option<String>,
+) {
+    let (add, result) = init_repo_and_commit(add, |path| git::create_initial_commit(path));
+    let _ = worker_tx.send(WorkerEvent::InitialCommitCreated {
+        add,
+        result,
+        status_op_id,
+    });
+}
+
+/// Seam-friendly body of [`run_init_repo_job`]: `commit` is injected so tests
+/// can set a local git identity in the just-initialized repo before
+/// delegating to `git::create_initial_commit` (clean CI has no global
+/// identity), without mutating global or process-wide git config.
+pub(crate) fn init_repo_and_commit(
+    mut add: crate::worker::InitialCommitAdd,
+    commit: impl Fn(&Path) -> anyhow::Result<String>,
+) -> (crate::worker::InitialCommitAdd, Result<(), String>) {
+    let path = PathBuf::from(&add.path);
+    // Re-classify at execution time (validation-to-worker races). Gates fail
+    // open on Indeterminate; this front-runs a mutation, so it fails closed.
+    match git::repo_path_kind(&path) {
+        git::RepoPathKind::NotARepo => {
+            if let Err(e) = git::init_repo(&path) {
+                return (add, Err(format!("{e:#}")));
+            }
+            add.initialized_repo = true;
+        }
+        // Already a repo (an init raced in, or a re-dispatch): idempotent,
+        // skip the init and proceed to seed + commit.
+        git::RepoPathKind::WorkTreeRoot | git::RepoPathKind::BareRoot => {}
+        git::RepoPathKind::InsideWorkTree { root } => {
+            return (
+                add,
+                Err(format!(
+                    "\"{}\" is inside the git repository at \"{}\"; refusing to initialize a repository there.",
+                    path.display(),
+                    root.display()
+                )),
+            );
+        }
+        git::RepoPathKind::InsideGitDir { .. } => {
+            return (
+                add,
+                Err(format!(
+                    "\"{}\" is inside git's internal directory; refusing to initialize a repository there.",
+                    path.display()
+                )),
+            );
+        }
+        git::RepoPathKind::Indeterminate => {
+            return (
+                add,
+                Err(format!(
+                    "couldn't determine whether \"{}\" is already a git repository; refusing to initialize one there.",
+                    path.display()
+                )),
+            );
+        }
+    }
+    // Seed failure is a persistent warning, not fatal: aborting here would
+    // leave an unborn repo whose natural retry (the commit-only rung) never
+    // seeds, funneling the user into exactly the silent seedless outcome the
+    // abort would exist to prevent.
+    match crate::gitignore_seed::seed_gitignore(&path) {
+        Ok(true) => add.seeded_gitignore = true,
+        Ok(false) => {}
+        Err(e) => {
+            let dirs = crate::gitignore_seed::matched_candidates(&path)
+                .iter()
+                .map(|c| c.dir)
+                .collect::<Vec<_>>()
+                .join(", ");
+            add.seed_warning = Some(format!(
+                "Initialized the repository at {} but couldn't write its starter .gitignore: {e:#}. Add a .gitignore covering {dirs} before creating an agent, or the agent's worktree will copy those directories.",
+                path.display()
+            ));
+        }
+    }
+    match commit(&path) {
+        Ok(committed_branch) => {
+            // Same branch/leading-branch rewrite as `run_create_initial_commit_job`:
+            // persist the branch the commit actually landed on.
+            let branch_opt = (!committed_branch.is_empty()).then_some(committed_branch.as_str());
+            add.leading_branch = leading_branch_for_project(&path, branch_opt);
+            add.branch = committed_branch;
+            (add, Ok(()))
+        }
+        Err(e) => {
+            let message = format!(
+                "Initialized the repository at {}, but couldn't create the initial commit: {e:#}. The folder is now a git repository; re-add it and dux will offer to create the initial commit.",
+                path.display()
+            );
+            (add, Err(message))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -625,6 +731,9 @@ mod tests {
                 name: "x".to_string(),
                 branch: "stale".to_string(),
                 leading_branch: "stale".to_string(),
+                initialized_repo: false,
+                seeded_gitignore: false,
+                seed_warning: None,
             },
             tx,
             None,
@@ -643,5 +752,114 @@ mod tests {
             }
             _ => panic!("expected InitialCommitCreated event"),
         }
+    }
+
+    /// The test-side commit seam: set a LOCAL git identity in the
+    /// just-initialized repo (clean CI has no global identity), then delegate
+    /// to the production commit. No global or env git config is touched.
+    fn commit_with_local_identity(path: &Path) -> anyhow::Result<String> {
+        run_git(path, &["config", "user.name", "test"]);
+        run_git(path, &["config", "user.email", "t@t"]);
+        git::create_initial_commit(path)
+    }
+
+    fn init_add(path: &Path) -> crate::worker::InitialCommitAdd {
+        crate::worker::InitialCommitAdd {
+            path: path.to_string_lossy().into_owned(),
+            name: "adopted".to_string(),
+            branch: String::new(),
+            leading_branch: String::new(),
+            initialized_repo: false,
+            seeded_gitignore: false,
+            seed_warning: None,
+        }
+    }
+
+    #[test]
+    fn init_repo_and_commit_bootstraps_a_plain_folder() {
+        // Happy path: plain folder becomes a repo with exactly one empty-tree
+        // commit, the starter .gitignore is seeded, and the flags are set.
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("node_modules")).unwrap();
+
+        let (add, result) = init_repo_and_commit(init_add(dir.path()), commit_with_local_identity);
+        result.expect("bootstrap must succeed");
+        assert!(add.initialized_repo, "initialized_repo must be set");
+        assert!(add.seeded_gitignore, "seeded_gitignore must be set");
+        assert!(add.seed_warning.is_none());
+        assert!(!add.branch.is_empty(), "the committed branch is persisted");
+        assert!(!add.leading_branch.is_empty());
+        assert!(dir.path().join(".gitignore").exists());
+        let out = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1");
+    }
+
+    #[test]
+    fn init_repo_and_commit_tolerates_a_raced_in_init() {
+        // A folder that became an unborn repo between validation and the
+        // worker (an init raced in) must not hard-fail: skip the init, still
+        // seed and commit.
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        fs::create_dir(dir.path().join("node_modules")).unwrap();
+
+        let (add, result) = init_repo_and_commit(init_add(dir.path()), commit_with_local_identity);
+        result.expect("a raced-in init is benign");
+        assert!(
+            !add.initialized_repo,
+            "the init was skipped, so the flag stays false"
+        );
+        assert!(add.seeded_gitignore, "the seed must still run");
+        assert!(git::repo_has_commits(dir.path()), "the commit must land");
+    }
+
+    #[test]
+    fn init_repo_and_commit_names_the_recovery_on_commit_failure() {
+        // Catches the silent unborn-repo strand: a failed commit must tell the
+        // user the folder is now a repository and how to recover.
+        let dir = tempdir().unwrap();
+        let (add, result) = init_repo_and_commit(init_add(dir.path()), |_| {
+            anyhow::bail!("injected commit failure")
+        });
+        let err = result.expect_err("the injected failure must surface");
+        assert!(
+            err.contains("Initialized the repository at"),
+            "error must name the initialized-repo state, got: {err}"
+        );
+        assert!(
+            err.contains("re-add it and dux will offer to create the initial commit"),
+            "error must name the recovery, got: {err}"
+        );
+        assert!(add.initialized_repo, "the init did land");
+        assert!(git::is_git_repo(dir.path()), "no .git rollback on failure");
+    }
+
+    #[test]
+    fn init_repo_and_commit_downgrades_a_seed_failure_to_a_warning() {
+        // Catches both the old self-defeating abort and a regression to
+        // silent seed loss: a .gitignore DIRECTORY makes the seed fail, but
+        // the job continues, the commit lands, and seed_warning is populated.
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("node_modules")).unwrap();
+        fs::create_dir(dir.path().join(".gitignore")).unwrap();
+
+        let (add, result) = init_repo_and_commit(init_add(dir.path()), commit_with_local_identity);
+        result.expect("a seed failure must not abort the bootstrap");
+        assert!(add.initialized_repo);
+        assert!(!add.seeded_gitignore);
+        let warning = add.seed_warning.expect("seed_warning must be populated");
+        assert!(
+            warning.contains("couldn't write its starter .gitignore"),
+            "got: {warning}"
+        );
+        assert!(
+            warning.contains("node_modules"),
+            "the warning must name the unfiltered directories, got: {warning}"
+        );
+        assert!(git::repo_has_commits(dir.path()), "the commit must land");
     }
 }

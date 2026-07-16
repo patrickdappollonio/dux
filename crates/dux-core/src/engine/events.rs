@@ -238,6 +238,12 @@ pub enum EventReaction {
         /// The branch the commit landed on (the repo's real current branch).
         branch: String,
         leading_branch: String,
+        /// This add ran `git init` first (the adopt-a-folder flow).
+        initialized_repo: bool,
+        /// The worker seeded a starter `.gitignore`.
+        seeded_gitignore: bool,
+        /// Non-fatal seed failure to surface as a persistent warning.
+        seed_warning: Option<String>,
         /// Correlation id for a web add-project `HandlerStatusOp`. `Some` on the
         /// web path, resolved in `drive_add_project_followup`; `None` for the TUI.
         status_op_id: Option<String>,
@@ -2244,6 +2250,9 @@ impl Engine {
                         name: add.name,
                         branch: add.branch,
                         leading_branch: add.leading_branch,
+                        initialized_repo: add.initialized_repo,
+                        seeded_gitignore: add.seeded_gitignore,
+                        seed_warning: add.seed_warning,
                         // SUCCESS message is built in `drive_add_project_followup`
                         // after the inline add (web); the TUI builds it in its
                         // `AddProjectAfterInitialCommit` view handler.

@@ -306,6 +306,17 @@ pub enum WireCommand {
         path: String,
         name: String,
     },
+    /// Initialize a brand-new git repository in a plain folder, seed a starter
+    /// `.gitignore`, create an empty initial commit, THEN register it as a
+    /// project (the adopt-a-folder flow). Mirrors the worker chain of
+    /// `AddProjectCreateInitialCommit`: validates via
+    /// `validate_project_init_path`, serializes per path via the shared
+    /// `InFlightKey::InitialCommit`, spawns `run_init_repo_job`, and returns a
+    /// busy status resolved by `drive_add_project_followup`.
+    AddProjectInitRepo {
+        path: String,
+        name: String,
+    },
     /// Remove a project from the workspace by id (does not touch its checkout).
     RemoveProject {
         project_id: String,
@@ -1035,6 +1046,13 @@ impl Engine {
                 let status = self.add_project_create_initial_commit(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status,
+                    created_op_id: None,
+                });
+            }
+            WireCommand::AddProjectInitRepo { path, name } => {
+                let status = self.add_project_init_repo(&path, name)?;
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
                     created_op_id: None,
                 });
             }
@@ -2290,6 +2308,9 @@ impl Engine {
             name,
             branch,
             leading_branch,
+            initialized_repo: false,
+            seeded_gitignore: false,
+            seed_warning: None,
         };
         let busy = format!("Creating an initial commit in {path_str} before adding the project...");
         // Mint a HandlerStatusOp: SUCCESS resolved in `drive_add_project_followup`
@@ -2337,6 +2358,83 @@ impl Engine {
             }
         });
         Ok(Some(pending))
+    }
+
+    /// Initialize a plain folder as a brand-new git repository, seed a starter
+    /// `.gitignore`, create the empty initial commit, then register it. A
+    /// near-copy of [`Self::add_project_create_initial_commit`] with these
+    /// deltas: validation goes through `validate_project_init_path` (fail-closed,
+    /// it front-runs `git init`), there is no Born fast-path (the worker's
+    /// re-classification owns all races), and the worker is `run_init_repo_job`.
+    /// It reuses `InFlightKey::InitialCommit` so init-and-commit and commit-only
+    /// on the same path are mutually exclusive for free.
+    fn add_project_init_repo(&mut self, path: &str, name: String) -> anyhow::Result<WireStatus> {
+        let validated = self
+            .validate_project_init_path(path)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let path_str = validated.to_string_lossy().to_string();
+        // Serialize per path: reject a second concurrent bootstrap (init or
+        // commit-only) rather than let two workers race. Cleared on completion
+        // in `process_worker_event` (and on a worker panic, below).
+        if !self.mark_in_flight(crate::engine::InFlightKey::InitialCommit(path_str.clone())) {
+            anyhow::bail!(
+                "A repository is already being initialized in \"{path_str}\". Please wait for it to finish."
+            );
+        }
+        let add = crate::worker::InitialCommitAdd {
+            path: path_str.clone(),
+            name,
+            // The worker resolves the real branch after the commit lands; these
+            // placeholders are rewritten by `init_repo_and_commit`.
+            branch: String::new(),
+            leading_branch: String::new(),
+            initialized_repo: false,
+            seeded_gitignore: false,
+            seed_warning: None,
+        };
+        let busy =
+            format!("Initializing a git repository in {path_str} before adding the project...");
+        let op = crate::engine::status_op(busy).resolve_in_handler(
+            move |o: &crate::engine::WebAddProjectOutcome| {
+                use crate::engine::{Final, WebAddProjectOutcome};
+                match o {
+                    WebAddProjectOutcome::Added { status_message } => {
+                        Final::info(status_message.clone())
+                    }
+                    WebAddProjectOutcome::AddFailed { message } => Final::error(message.clone()),
+                    // This flow never switches branches; the op type is shared
+                    // with the checkout-add flow, so the match must stay total.
+                    WebAddProjectOutcome::SwitchFailed { repo_path, .. } => Final::error(format!(
+                        "Couldn't add the project at {repo_path} after initializing the repository."
+                    )),
+                }
+            },
+        );
+        let op = op.with_scope(self.current_origin.clone());
+        let op_id = op.id().to_string();
+        let pending = WireStatus::from_update(&op.pending_status());
+        self.pending_web_add_project_ops.insert(op_id.clone(), op);
+        let worker_tx = self.worker_tx.clone();
+        std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
+            // Guarantee the in-flight gate clears and the op resolves even if
+            // the job panics.
+            let tx_panic = worker_tx.clone();
+            let add_panic = add.clone();
+            let op_id_panic = op_id.clone();
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                crate::project_browser::run_init_repo_job(add, worker_tx, Some(op_id));
+            }))
+            .is_err()
+            {
+                let _ = tx_panic.send(crate::worker::WorkerEvent::InitialCommitCreated {
+                    add: add_panic,
+                    result: Err("the repository-initialization worker panicked".to_string()),
+                    status_op_id: Some(op_id_panic),
+                });
+            }
+        });
+        Ok(pending)
     }
 
     /// Resolve a GitHub PR and create an agent on its head branch, mirroring the
@@ -2584,21 +2682,45 @@ impl Engine {
                 name,
                 branch,
                 leading_branch,
+                initialized_repo,
+                seeded_gitignore,
+                seed_warning,
                 status_op_id,
             } => {
                 let display_name = display_project_name(name, path);
-                let status_message = format!(
-                    "Created an initial commit and added project \"{display_name}\" to the workspace."
-                );
-                self.finish_web_project_add(WebProjectAdd {
+                let status_message = if *initialized_repo && *seeded_gitignore {
+                    format!(
+                        "Initialized a git repository, seeded a starter .gitignore, created an initial commit, and added project \"{display_name}\" to the workspace."
+                    )
+                } else if *initialized_repo {
+                    format!(
+                        "Initialized a git repository, created an initial commit, and added project \"{display_name}\" to the workspace."
+                    )
+                } else {
+                    format!(
+                        "Created an initial commit and added project \"{display_name}\" to the workspace."
+                    )
+                };
+                let add_failed_prefix = if *initialized_repo {
+                    "Initialized the repository but couldn't add the project"
+                } else {
+                    "Created the initial commit but couldn't add the project"
+                };
+                let mut statuses = self.finish_web_project_add(WebProjectAdd {
                     path,
                     display_name,
                     current_branch: branch,
                     leading_branch,
                     status_message,
-                    add_failed_prefix: "Created the initial commit but couldn't add the project",
+                    add_failed_prefix,
                     status_op_id,
-                })
+                });
+                // A non-fatal seed failure rides alongside the final as its own
+                // persistent warning toast so the user can still act on it.
+                if let Some(warning) = seed_warning {
+                    statuses.push(WireStatus::new("warning", warning.clone()));
+                }
+                statuses
             }
             _ => vec![],
         }
@@ -3484,6 +3606,7 @@ impl Engine {
             | WireCommand::CheckoutProjectDefaultBranch { .. }
             | WireCommand::AddProjectCheckoutDefault { .. }
             | WireCommand::AddProjectCreateInitialCommit { .. }
+            | WireCommand::AddProjectInitRepo { .. }
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::SetChangesPaneVisible { .. }
@@ -5300,6 +5423,144 @@ mod tests {
         assert!(
             !crate::git::repo_has_commits(repo.path()),
             "the rejected request must not have committed"
+        );
+    }
+
+    #[test]
+    fn apply_wire_init_repo_shares_the_initial_commit_gate() {
+        // Catches double-bootstrap races: a second concurrent AddProjectInitRepo
+        // for the same path is rejected, and an AddProjectCreateInitialCommit
+        // for a path an init flow holds is likewise excluded (shared key).
+        let plain = tempfile::tempdir().expect("tempdir");
+        let path = plain.path().to_string_lossy().into_owned();
+        let (mut engine, _tmp) = test_engine();
+
+        engine
+            .apply_wire(WireCommand::AddProjectInitRepo {
+                path: path.clone(),
+                name: "Adopted".to_string(),
+            })
+            .expect("first init-repo dispatch");
+        let res = engine.apply_wire(WireCommand::AddProjectInitRepo {
+            path: path.clone(),
+            name: "Adopted".to_string(),
+        });
+        assert!(
+            res.is_err(),
+            "a second concurrent init-repo request for the same path must be rejected"
+        );
+
+        // Cross-exclusion with the commit-only flow: an unborn repo whose path
+        // is held by the shared key can't start a commit-only bootstrap.
+        let unborn = init_unborn_repo_dir();
+        let canonical = std::fs::canonicalize(unborn.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(engine.mark_in_flight(crate::engine::InFlightKey::InitialCommit(canonical)));
+        let res = engine.apply_wire(WireCommand::AddProjectCreateInitialCommit {
+            path: unborn.path().to_string_lossy().into_owned(),
+            name: "Demo".to_string(),
+        });
+        assert!(
+            res.is_err(),
+            "the commit-only flow must be excluded by the shared in-flight key"
+        );
+        // Drain the first dispatch's worker event so its thread doesn't leak
+        // an un-received send into other tests' channels.
+        let _ = drive_add_project_chain(&mut engine);
+    }
+
+    #[test]
+    fn apply_wire_init_repo_clears_the_gate_and_resolves_the_op() {
+        // Catches a stranded busy toast plus a permanently locked path.
+        // Asserts only outcome-independent invariants (the commit outcome
+        // depends on whether this machine has an ambient git identity).
+        let plain = tempfile::tempdir().expect("tempdir");
+        let path = plain.path().to_string_lossy().into_owned();
+        let (mut engine, _tmp) = test_engine();
+
+        let outcome = engine
+            .apply_wire(WireCommand::AddProjectInitRepo {
+                path: path.clone(),
+                name: "Adopted".to_string(),
+            })
+            .expect("dispatch init-repo add");
+        let busy = outcome.status.expect("a keyed busy status");
+        assert_eq!(busy.tone, "busy");
+
+        let statuses = drive_add_project_chain(&mut engine);
+        assert!(
+            !statuses.is_empty(),
+            "the busy must resolve to a final status either way"
+        );
+        assert!(
+            engine.pending_web_add_project_ops.is_empty(),
+            "the keyed op must be consumed, not stranded"
+        );
+        // The gate must be free again whatever the outcome was.
+        let canonical = std::fs::canonicalize(plain.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            engine.mark_in_flight(crate::engine::InFlightKey::InitialCommit(canonical)),
+            "the in-flight gate must be cleared after the worker completes"
+        );
+    }
+
+    #[test]
+    fn drive_add_project_followup_narrates_init_and_seed_and_surfaces_the_warning() {
+        // Catches a misleading toast and a swallowed warning: the success
+        // message must claim the init and seed only when flagged, and a
+        // seed_warning must ride alongside as its own warning status.
+        let (mut engine, _tmp) = test_engine();
+        let reaction = |initialized: bool, seeded: bool, warning: Option<String>| {
+            EventReaction::AddProjectAfterInitialCommit {
+                path: "/adopted".to_string(),
+                name: "Adopted".to_string(),
+                branch: "main".to_string(),
+                leading_branch: "main".to_string(),
+                initialized_repo: initialized,
+                seeded_gitignore: seeded,
+                seed_warning: warning,
+                status_op_id: None,
+            }
+        };
+
+        let statuses = engine.drive_add_project_followup(&reaction(true, true, None));
+        let info = statuses.iter().find(|s| s.tone == "info").expect("info");
+        assert!(info.message.contains("Initialized a git repository"));
+        assert!(info.message.contains("seeded a starter .gitignore"));
+
+        // Same path is now registered; use fresh paths for the other rungs.
+        engine.projects.clear();
+        let statuses = engine.drive_add_project_followup(&reaction(true, false, None));
+        let info = statuses.iter().find(|s| s.tone == "info").expect("info");
+        assert!(info.message.contains("Initialized a git repository"));
+        assert!(
+            !info.message.contains("seeded"),
+            "no seed clause when nothing was seeded, got: {}",
+            info.message
+        );
+
+        engine.projects.clear();
+        let statuses = engine.drive_add_project_followup(&reaction(false, false, None));
+        let info = statuses.iter().find(|s| s.tone == "info").expect("info");
+        assert!(
+            !info.message.contains("Initialized"),
+            "the commit-only flow keeps its existing message, got: {}",
+            info.message
+        );
+
+        engine.projects.clear();
+        let statuses =
+            engine.drive_add_project_followup(&reaction(true, false, Some("seed failed".into())));
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.tone == "warning" && s.message == "seed failed"),
+            "the seed warning must be emitted as its own warning status, got: {statuses:?}"
         );
     }
 

@@ -543,6 +543,9 @@ impl App {
             name,
             branch,
             leading_branch,
+            initialized_repo: false,
+            seeded_gitignore: false,
+            seed_warning: None,
         };
         // Keyed busy dismissed by the op's `Final::Clear` when the worker reports
         // back (see `drain_events`); the visible final is the add-project view
