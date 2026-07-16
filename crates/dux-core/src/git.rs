@@ -732,9 +732,11 @@ pub fn head_commit(repo_path: &Path) -> Result<String> {
 pub struct UncommittedCopySummary {
     pub copied: usize,
     pub deleted: usize,
-    /// Directory records skipped (dirty submodules " M dir", untracked
-    /// embedded repos "?? dir/"). Relative paths, for the user-facing note.
-    pub skipped_dirs: Vec<String>,
+    /// Records skipped because the source is not a regular file or symlink:
+    /// dirty submodules (" M dir"), untracked embedded repos ("?? dir/"), and
+    /// non-regular files such as FIFOs, sockets, and devices (which would
+    /// block or fail a byte copy). Relative paths, for the user-facing note.
+    pub skipped_paths: Vec<String>,
 }
 
 /// Copies exactly what `git status --porcelain=v1 -z --untracked-files=all`
@@ -785,7 +787,7 @@ pub fn copy_uncommitted_changes(
     // by a directory).
     let mut deletions: Vec<PathBuf> = Vec::new();
     let mut copies: Vec<PathBuf> = Vec::new();
-    let mut skipped_dirs: Vec<String> = Vec::new();
+    let mut skipped_paths: Vec<String> = Vec::new();
 
     for record in output.stdout.split(|byte| *byte == 0) {
         if record.len() < 4 {
@@ -818,7 +820,7 @@ pub fn copy_uncommitted_changes(
         if path_bytes.ends_with(b"/") {
             // An untracked directory git will not descend into (an embedded
             // repo): never a recursive copy, skip with a note.
-            skipped_dirs.push(rel.to_string_lossy().trim_end_matches('/').to_string());
+            skipped_paths.push(rel.to_string_lossy().trim_end_matches('/').to_string());
             continue;
         }
         let unmerged = index_status == 'U'
@@ -841,7 +843,7 @@ pub fn copy_uncommitted_changes(
     }
 
     let mut summary = UncommittedCopySummary {
-        skipped_dirs,
+        skipped_paths,
         ..Default::default()
     };
 
@@ -869,10 +871,15 @@ pub fn copy_uncommitted_changes(
             }
             Err(err) => return Err(err.into()),
         };
-        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-            // A dirty submodule (` M smdir`), or an unmerged record that
-            // turned out to be a directory: skip with a note, touch nothing.
-            summary.skipped_dirs.push(rel.to_string_lossy().to_string());
+        if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            // A dirty submodule (` M smdir`), an unmerged record that turned
+            // out to be a directory, or a non-regular file (FIFO, socket,
+            // device): skip with a note, touch nothing. `sync_entry` must
+            // only ever see regular files and symlinks, because opening a
+            // FIFO with no writer blocks forever.
+            summary
+                .skipped_paths
+                .push(rel.to_string_lossy().to_string());
             continue;
         }
         ensure_destination_parents(&source, &destination, rel)?;
@@ -1996,7 +2003,7 @@ fn sync_symlink(source: &Path, destination: &Path) -> Result<()> {
 
 fn remove_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)?;
     } else {
         fs::remove_file(path)?;
@@ -2542,7 +2549,7 @@ mod tests {
         );
         assert!(!destination.join("junk.log").exists());
         assert_eq!(summary.copied, 2);
-        assert!(summary.skipped_dirs.is_empty());
+        assert!(summary.skipped_paths.is_empty());
     }
 
     /// Catches routing `?? dir/` through a bulk directory copy (which would
@@ -2840,7 +2847,7 @@ mod tests {
         let destination = tempfile::tempdir().unwrap();
         let summary = copy_uncommitted_changes(repo.path(), destination.path()).unwrap();
 
-        assert!(summary.skipped_dirs.iter().any(|p| p.contains("smdir")));
+        assert!(summary.skipped_paths.iter().any(|p| p.contains("smdir")));
         assert!(!destination.path().join("smdir").exists());
     }
 
@@ -2860,8 +2867,85 @@ mod tests {
 
         let summary = copy_uncommitted_changes(&source, &destination).unwrap();
 
-        assert!(summary.skipped_dirs.iter().any(|p| p.contains("embedded")));
+        assert!(summary.skipped_paths.iter().any(|p| p.contains("embedded")));
         assert!(!destination.join("embedded").exists());
+    }
+
+    /// A tracked file replaced by a FIFO is reported as an ordinary ` M`
+    /// copy record, but opening a FIFO with no writer blocks forever. The
+    /// copy must skip it with a note and still complete.
+    #[test]
+    fn copy_skips_tracked_file_replaced_by_fifo_without_hanging() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("f"), "regular\n").unwrap();
+        commit_all(repo.path(), "base");
+        let (source, destination) = copy_test_worktrees(repo.path());
+
+        fs::remove_file(source.join("f")).unwrap();
+        let out = Command::new("mkfifo")
+            .arg(source.join("f"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mkfifo failed");
+
+        let summary = copy_uncommitted_changes(&source, &destination).unwrap();
+
+        assert!(summary.skipped_paths.iter().any(|p| p == "f"));
+        // The destination is untouched: it keeps the tracked contents.
+        assert_eq!(
+            fs::read_to_string(destination.join("f")).unwrap(),
+            "regular\n"
+        );
+    }
+
+    /// Recursively snapshot every path under `root` (skipping `.git`) to its
+    /// on-disk representation: file bytes, symlink target, or directory marker.
+    fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut snapshot = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                if meta.file_type().is_symlink() {
+                    snapshot.insert(
+                        rel,
+                        fs::read_link(&path)
+                            .unwrap()
+                            .into_os_string()
+                            .into_encoded_bytes(),
+                    );
+                } else if meta.is_dir() {
+                    snapshot.insert(rel, b"<dir>".to_vec());
+                    stack.push(path);
+                } else {
+                    snapshot.insert(rel, fs::read(&path).unwrap());
+                }
+            }
+        }
+        snapshot
+    }
+
+    /// Data-loss tripwire: the copy must NEVER mutate the source checkout,
+    /// which holds the user's uncommitted work. Uses the richest fixture (a
+    /// mid-merge tree with UD/DU/UU/DD records) and asserts the source is
+    /// byte-identical afterwards.
+    #[test]
+    fn copy_never_mutates_the_source_checkout() {
+        let (repo, _, _, _) = conflicted_repo();
+        let before = snapshot_tree(repo.path());
+        assert!(!before.is_empty());
+
+        let destination = tempfile::tempdir().unwrap();
+        copy_uncommitted_changes(repo.path(), destination.path()).unwrap();
+
+        let after = snapshot_tree(repo.path());
+        assert_eq!(before, after, "the source checkout must be untouched");
     }
 
     /// Kills line-based or quote-unaware status parsing.

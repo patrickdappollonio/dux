@@ -655,10 +655,10 @@ pub fn run_create_agent_job(
             (Ok(source_head), Ok(worktree_head)) if source_head == worktree_head => {
                 match git::copy_uncommitted_changes(&copy.source, worktree) {
                     Ok(summary) => {
-                        if !summary.skipped_dirs.is_empty() {
+                        if !summary.skipped_paths.is_empty() {
                             creation_notes.push(format!(
-                                "Submodule or embedded repository contents were not copied: {}.",
-                                summary.skipped_dirs.join(", ")
+                                "Some paths were not copied (submodules, embedded repositories, or special files): {}.",
+                                summary.skipped_paths.join(", ")
                             ));
                         }
                     }
