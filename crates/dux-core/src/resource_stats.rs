@@ -646,6 +646,400 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // Ground-truth tests: these compare dux's numbers against what the OS
+    // itself reports, not against our own reasoning about what sysinfo should
+    // be doing. Every bug this file has shipped (CPU pinned at exactly 0.0;
+    // threads counted as processes, inflating RSS ~3.5x) read as correct code
+    // and was only ever caught by measuring. These tests are that measurement,
+    // made permanent.
+    // ---------------------------------------------------------------------
+
+    /// Read a process's resident set size straight from the kernel, in bytes.
+    /// `VmRSS` in `/proc/<pid>/status` is reported in kB and is precisely the
+    /// field `top` shows as RES and `htop` shows as M_RESIDENT, so it is the
+    /// ground truth a user comparing dux against their system monitor is
+    /// looking at.
+    #[cfg(target_os = "linux")]
+    fn proc_vm_rss_bytes(pid: u32) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status.lines().find_map(|line| {
+            let rest = line.strip_prefix("VmRSS:")?;
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            Some(kb * 1024)
+        })
+    }
+
+    /// Read a process's parent pid from `/proc/<pid>/status`. Returns `None`
+    /// for a pid that has exited, or for a thread entry we can't read.
+    #[cfg(target_os = "linux")]
+    fn proc_ppid(pid: u32) -> Option<u32> {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        status.lines().find_map(|line| {
+            let rest = line.strip_prefix("PPid:")?;
+            rest.trim().parse().ok()
+        })
+    }
+
+    /// Count the real PROCESSES in `root`'s tree (root included) straight from
+    /// `/proc`, with no help from sysinfo. Only numeric top-level `/proc`
+    /// entries are processes: a process's threads live under
+    /// `/proc/<pid>/task/` and are deliberately not walked, which is exactly
+    /// the distinction the thread-counting bug got wrong.
+    #[cfg(target_os = "linux")]
+    fn proc_tree_process_count(root: u32) -> usize {
+        use std::collections::HashMap;
+
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            if let Some(ppid) = proc_ppid(pid) {
+                parents.insert(pid, ppid);
+            }
+        }
+
+        let descends_from_root = |mut pid: u32| -> bool {
+            for _ in 0..64 {
+                match parents.get(&pid) {
+                    Some(&ppid) if ppid == root => return true,
+                    Some(&ppid) if ppid <= 1 => return false,
+                    Some(&ppid) => pid = ppid,
+                    None => return false,
+                }
+            }
+            false
+        };
+
+        let root_present = usize::from(parents.contains_key(&root));
+        root_present
+            + parents
+                .keys()
+                .filter(|pid| **pid != root && descends_from_root(**pid))
+                .count()
+    }
+
+    /// dux's per-process RSS must EQUAL what the kernel reports, byte for
+    /// byte, for BOTH a single-threaded process and a multi-threaded one.
+    ///
+    /// Scope, stated precisely because it was measured rather than assumed:
+    /// this test pins the PER-PROCESS reading only, and it keeps passing with
+    /// the thread-counting bug reintroduced (verified by mutating the filter
+    /// out). That is correct and intended: `Process::memory()` on a real
+    /// process entry was never the broken part, the AGGREGATION over the tree
+    /// was. The tree-level ground-truth guard is
+    /// [`tree_rss_matches_the_kernel_sum_over_real_processes`]; this one
+    /// establishes the thing that guard's arithmetic rests on, namely that a
+    /// single process's number is exactly what a user's `top`/`htop` shows.
+    /// The multi-threaded arm is here to prove the per-process figure does not
+    /// drift with thread count, not to catch the aggregation bug.
+    ///
+    /// Linux-gated because it reads `/proc`, which does not exist on macOS
+    /// (dux targets macOS and Linux). The equality it pins is not
+    /// Linux-specific, but the ground truth it compares against is: there is
+    /// no equivalent plain-text kernel interface on macOS to check against
+    /// without shelling out to `ps`, which reports rounded kB.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn per_process_rss_matches_proc_vmrss_exactly() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Guarantee the multi-threaded arm has threads to trip over instead of
+        // depending on however many the test harness happens to be running.
+        let (stop, handles) = spin_threads(4);
+
+        // `sleep` is the ideal single-threaded subject: it allocates nothing
+        // after start, so its RSS is stable and the exact comparison cannot
+        // race the sample.
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("failed to spawn sleep child");
+        let child_pid = child.id();
+
+        std::thread::sleep(Duration::from_millis(200));
+        let sys = fresh_system();
+
+        let (_cpu, child_rss, child_count, _) =
+            aggregate_tree(&sys, sysinfo::Pid::from_u32(child_pid));
+        let kernel_child_rss = proc_vm_rss_bytes(child_pid);
+
+        // The multi-threaded arm: the running test process, with its own
+        // spawned child excluded by rooting the walk at the child above and
+        // reading self separately. Self's tree here is self plus the sleep
+        // child, so compare self's OWN entry, not the tree total.
+        let self_pid = std::process::id();
+        let self_rss = sys
+            .process(sysinfo::Pid::from_u32(self_pid))
+            .expect("the current process must be visible")
+            .memory();
+        let kernel_self_rss = proc_vm_rss_bytes(self_pid);
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let kernel_child_rss =
+            kernel_child_rss.expect("the sleep child must still be readable in /proc");
+        assert_eq!(
+            child_count, 1,
+            "a lone sleep process is one process, not one per thread"
+        );
+        assert_eq!(
+            child_rss, kernel_child_rss,
+            "dux's RSS ({child_rss}) must equal /proc/{child_pid}/status VmRSS \
+             ({kernel_child_rss}), the same field top reads as RES and htop as M_RESIDENT"
+        );
+
+        let kernel_self_rss =
+            kernel_self_rss.expect("the current process must be readable in /proc");
+        assert_eq!(
+            self_rss, kernel_self_rss,
+            "the multi-threaded current process's RSS ({self_rss}) must also equal \
+             /proc/{self_pid}/status VmRSS ({kernel_self_rss}); a per-thread reading \
+             would report the same whole-process figure once per thread"
+        );
+    }
+
+    /// The tree total for a MULTI-THREADED root must equal the kernel's sum
+    /// over the real processes in that tree, with no thread inflation. This is
+    /// the direct ground-truth guard on the ~3.5x RSS bug: it roots the walk
+    /// at the heavily-threaded test process and checks the aggregate against
+    /// `/proc`, so a returning thread-counting regression is caught by the OS,
+    /// not by our own bookkeeping agreeing with itself.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tree_rss_matches_the_kernel_sum_over_real_processes() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (stop, handles) = spin_threads(4);
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("failed to spawn sleep child");
+        let child_pid = child.id();
+        let self_pid = std::process::id();
+
+        std::thread::sleep(Duration::from_millis(200));
+        let sys = fresh_system();
+
+        let (_cpu, rss, _count, _children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(self_pid));
+        // Ground truth: the kernel's VmRSS for each real process in the tree,
+        // summed independently of sysinfo.
+        let kernel_sum =
+            proc_vm_rss_bytes(self_pid).unwrap_or(0) + proc_vm_rss_bytes(child_pid).unwrap_or(0);
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            rss, kernel_sum,
+            "the tree total ({rss}) must equal the kernel's sum over its real \
+             processes ({kernel_sum}); if this is a multiple of the truth, thread \
+             entries are being summed as processes again"
+        );
+    }
+
+    /// `process_count` must equal the number of real processes in the tree, as
+    /// counted independently from `/proc`. Ground truth comes from the kernel
+    /// rather than from our own struct, so a future change that reintroduces
+    /// thread entries fails here even if it stays self-consistent everywhere
+    /// else in this file.
+    /// The root is the MULTI-THREADED test process on purpose. Rooting this at
+    /// a bare `sh` tree would pass with the thread bug fully reintroduced,
+    /// because nothing in that fixture has threads to miscount; the real
+    /// targets dux samples (node, claude, codex) are all heavily threaded.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_count_matches_real_process_count() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (stop, handles) = spin_threads(4);
+
+        // A known shape under the threaded root: `sh` plus a forked `sleep`
+        // grandchild. `sleep 5 &` forks rather than exec-replaces, and `wait`
+        // keeps `sh` alive, so the tree is genuinely two processes deep.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 5 & wait")
+            .spawn()
+            .expect("failed to spawn sh child");
+        let root_pid = std::process::id();
+
+        std::thread::sleep(Duration::from_millis(300));
+        let sys = fresh_system();
+
+        let (_cpu, _rss, count, _children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(root_pid));
+        let kernel_count = proc_tree_process_count(root_pid);
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            kernel_count, 3,
+            "the tree is this process, its sh child, and sh's forked sleep; if this \
+             is not 3 the test's own premise broke, not the code under test"
+        );
+        assert_eq!(
+            count, kernel_count,
+            "process_count ({count}) must equal the real process count from /proc \
+             ({kernel_count}); a mismatch means threads are being counted as processes"
+        );
+    }
+
+    /// The `children` breakdown INCLUDES the root process, so it is the full
+    /// accounting of the parent row's total and must add up exactly. This is
+    /// deliberate, and this test is here to stop a well-meaning future edit
+    /// that "cleans up" the seemingly-redundant root entry out of `children`:
+    /// doing so would silently make the expanded breakdown fail to sum to the
+    /// number printed on the row above it.
+    ///
+    /// Note the invariant only holds while the tree fits in the top-10 cap
+    /// `aggregate_tree` applies, so the fixture keeps the tree small.
+    #[test]
+    fn children_breakdown_sums_to_the_parent_total() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Threads under the root, so the sum is checked against a tree that
+        // has thread entries available to wrongly inflate it.
+        let (stop, handles) = spin_threads(4);
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 5 & wait")
+            .spawn()
+            .expect("failed to spawn sh child");
+        let root_pid = std::process::id();
+
+        std::thread::sleep(Duration::from_millis(300));
+        let sys = fresh_system();
+
+        let (_cpu, rss, count, children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(root_pid));
+
+        stop.store(true, Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            count <= 10,
+            "fixture must stay under aggregate_tree's top-10 children cap, got {count}"
+        );
+        let children_sum: u64 = children.iter().map(|c| c.rss_bytes).sum();
+        assert_eq!(
+            rss, children_sum,
+            "the parent total ({rss}) must equal the sum of its children breakdown \
+             ({children_sum}); the root is part of the breakdown on purpose"
+        );
+        assert!(
+            children.iter().any(|c| c.pid == root_pid),
+            "the root process must appear in its own breakdown: {children:?}"
+        );
+    }
+
+    /// CPU can only be checked DIRECTIONALLY. It is a sampled delta over a
+    /// window, so there is no external number to match: `top`'s own reading
+    /// changes with its refresh interval, and any two tools sampling different
+    /// windows disagree by design. What IS checkable, and what the
+    /// always-zero-CPU bug would have failed instantly, is the direction: a
+    /// process burning a core reads high, an idle one reads about nothing, and
+    /// a multi-threaded burn is never clamped at 100.
+    #[test]
+    fn cpu_reads_high_for_a_burning_tree_and_near_zero_for_an_idle_one() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        use std::os::unix::process::CommandExt;
+
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        // Four spinning subshells under one `sh`: a real multi-process tree
+        // whose aggregate must exceed 100% on a box with cores to spare.
+        //
+        // `process_group(0)` makes `sh` its own group leader (pgid == its pid)
+        // so the whole burn can be killed as a group. Killing `sh` alone does
+        // NOT stop the subshells: they are reparented to init and keep
+        // spinning for the rest of the suite.
+        let mut burner = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("for i in 1 2 3 4; do (while :; do :; done) & done; wait")
+            .process_group(0)
+            .spawn()
+            .expect("failed to spawn burner tree");
+        let mut idler = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("failed to spawn sleep child");
+        let burner_pid = burner.id();
+        let idler_pid = idler.id();
+
+        std::thread::sleep(Duration::from_millis(400));
+        let sys = fresh_system();
+
+        let (burner_cpu, _, burner_count, _) =
+            aggregate_tree(&sys, sysinfo::Pid::from_u32(burner_pid));
+        let (idle_cpu, _, _, _) = aggregate_tree(&sys, sysinfo::Pid::from_u32(idler_pid));
+
+        // Kill the burners before asserting: a panic must not leave four
+        // spinning shells behind for the rest of the suite. The negative pid
+        // targets the whole process group, subshells included.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", "--", &format!("-{burner_pid}")])
+            .status();
+        let _ = burner.kill();
+        let _ = burner.wait();
+        let _ = idler.kill();
+        let _ = idler.wait();
+
+        assert!(
+            burner_count >= 2,
+            "the burner fixture must be a real tree (sh plus its subshells), got {burner_count} \
+             processes; if this fails the shell did not fork as expected"
+        );
+        assert!(
+            burner_cpu > 50.0,
+            "a tree burning whole cores must read high, got {burner_cpu}%"
+        );
+        assert!(
+            idle_cpu < 5.0,
+            "a sleeping process must read about nothing, got {idle_cpu}%"
+        );
+        if cores >= 6 {
+            assert!(
+                burner_cpu > 100.0,
+                "four busy processes on a {cores}-core box must exceed 100% aggregate; \
+                 got {burner_cpu}% (a clamp would pin this at exactly 100)"
+            );
+        }
+    }
+
     #[test]
     fn is_descendant_of_returns_false_for_unrelated_pid() {
         use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
