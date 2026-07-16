@@ -262,7 +262,7 @@ function AddProjectBrowser() {
           <div className="flex flex-col">
             {/* Pinned, client-synthesized "Use this folder" row: the ONLY way
                 the current directory becomes a target. The footer stays
-                strictly selection-driven — the primary button never acts on
+                strictly selection-driven; the primary button never acts on
                 wherever the user happens to be standing. */}
             <button
               type="button"
@@ -325,7 +325,7 @@ function AddProjectBrowser() {
           ) : null}
           {initCopy ? (
             /* Init panel: this panel plus the explicit "Initialize Repository
-               & Add" label IS the confirmation — no extra dialog, because the
+               & Add" label IS the confirmation; no extra dialog, because the
                action is non-destructive (append-only no-follow seed, empty
                commit, git init in a folder the server confirmed is not a
                repo), consistent with the initial-commit rung's shipped

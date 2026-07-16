@@ -3574,7 +3574,7 @@ mod tests {
     fn repo_path_kind_flags_git_internal_directories() {
         // Catches the measured ladder hole: inside `<repo>/.git`, `--git-dir`
         // succeeds, `--is-bare-repository` is false, and `--show-toplevel`
-        // exits 128 — without the `--is-inside-git-dir` rung this fell to
+        // exits 128; without the `--is-inside-git-dir` rung this fell to
         // Indeterminate and the fail-open add gate accepted `~/repo/.git`.
         let repo = init_test_repo();
         let git_dir = repo.path().join(".git");

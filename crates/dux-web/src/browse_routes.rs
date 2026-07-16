@@ -116,12 +116,12 @@ struct MkdirReply {
     path: String,
 }
 
-/// `POST /api/v1/browse/mkdir` — create ONE new directory inside an existing
+/// `POST /api/v1/browse/mkdir`: create ONE new directory inside an existing
 /// parent, for the add-project picker's "New folder" affordance (built for the
 /// terminal-less phone-over-Tailscale case).
 ///
 /// Safety argument, from the threat model rather than borrowed helpers: the
-/// server is single-tenant/trusted by design — every client can already browse
+/// server is single-tenant/trusted by design, and every client can already browse
 /// the entire filesystem via this module's GET (no containment, by design), so
 /// this endpoint's job is shape discipline and non-destructiveness, not
 /// containment. `name` is validated to a single path component (no `/`, no

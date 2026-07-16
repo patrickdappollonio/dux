@@ -1,5 +1,5 @@
 // Vendored from shadcn/ui (button-group). The group's child selectors below
-// are kept byte-identical to upstream — they are what squares the inner
+// are kept byte-identical to upstream: they are what squares the inner
 // corners and collapses the shared border of adjacent buttons; `button.tsx`'s
 // `in-data-[slot=button-group]` size classes only normalize radius and rely on
 // these selectors for the actual seam. Two deviations from upstream, both

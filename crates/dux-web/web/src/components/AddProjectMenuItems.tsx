@@ -10,9 +10,9 @@ import { openAddProject, openAddProjectForInit } from "@/lib/store"
  * own <DropdownMenuContent> wrapper. Menu tenets: every item keeps a leading
  * lucide icon, neutral color, and a trailing "…" because both open a dialog.
  *
- * Both items open the SAME picker — the intent only changes a header hint, and
+ * Both items open the SAME picker; the intent only changes a header hint, and
  * the primary-action ladder decides the real action from the server's
- * inspection — so "Initialize a repository…" stays discoverable in the menu
+ * inspection, so "Initialize a repository…" stays discoverable in the menu
  * while remaining reachable through the plain picker too.
  */
 export function AddProjectMenuItems() {

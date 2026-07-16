@@ -72,7 +72,7 @@ export function noCommitsCopy(): NoCommitsCopy {
   return {
     message:
       "This repository has no commits yet, so agents can't branch worktrees from it.",
-    note: "Dux will make an empty initial commit — your existing files are left untouched (untracked).",
+    note: "Dux will make an empty initial commit; your existing files are left untouched (untracked).",
   }
 }
 
@@ -96,7 +96,7 @@ export function initRepoCopy(candidates: string[]): InitRepoCopy {
       : ""
   return {
     message: "This folder is not a git repository.",
-    note: `Dux will run git init${seedClause} and make an empty initial commit — your existing files are left untouched (untracked).`,
+    note: `Dux will run git init${seedClause} and make an empty initial commit; your existing files are left untouched (untracked).`,
   }
 }
 

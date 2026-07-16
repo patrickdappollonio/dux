@@ -225,7 +225,7 @@ export interface DuxState {
   addProjectOpen: boolean
   // Why the picker was opened: "add" (the default) or "init" (the split
   // button's "Initialize a repository…" entry). The intent's ONLY effect is a
-  // header hint in the dialog — the primary-action ladder does the real work
+  // header hint in the dialog; the primary-action ladder does the real work
   // either way. Cleared on close.
   addProjectIntent: "add" | "init"
   browsePath: string

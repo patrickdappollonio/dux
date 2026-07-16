@@ -10854,7 +10854,7 @@ cyan = "#00ffff"
         // A folder INSIDE an existing repository must open the failure modal
         // (with the root-naming message from the shared engine gate), never
         // the adopt-a-folder prompt; dismissing it restores the typed path.
-        // (A plain non-repo folder now opens ConfirmInitRepo instead — see
+        // (A plain non-repo folder now opens ConfirmInitRepo instead; see
         // project_browser_plain_folder_opens_init_repo_prompt.)
         let mut app = test_app(default_bindings());
         let root = PathBuf::from(&app.engine.projects[0].path);
