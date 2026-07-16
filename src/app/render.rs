@@ -5395,7 +5395,7 @@ impl App {
                     ])
                 } else {
                     Line::from(vec![
-                        Span::raw(format!(" {}", &input.text)),
+                        Span::raw(format!(" {}", input.text)),
                         Span::styled(
                             " ",
                             Style::default()
@@ -5657,7 +5657,7 @@ impl App {
                     ])
                 } else {
                     Line::from(vec![
-                        Span::raw(format!(" {}", &input.text)),
+                        Span::raw(format!(" {}", input.text)),
                         Span::styled(
                             " ",
                             Style::default()
@@ -5771,7 +5771,7 @@ impl App {
                     ])
                 } else {
                     Line::from(vec![
-                        Span::raw(format!(" {}", &input.text)),
+                        Span::raw(format!(" {}", input.text)),
                         Span::styled(
                             " ",
                             Style::default()
@@ -6120,7 +6120,7 @@ impl App {
     /// Render a single-line TextInput with cursor in a bordered box.
     /// Uses the terminal's hardware cursor for a blinking caret.
     fn render_single_line_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
-        let display = Line::from(Span::raw(format!(" {}", &input.text)));
+        let display = Line::from(Span::raw(format!(" {}", input.text)));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
