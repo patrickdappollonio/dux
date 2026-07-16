@@ -503,26 +503,6 @@ pub fn switch_branch_if_needed(repo_path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn has_tracked_changes(repo_path: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_string_lossy().as_ref(),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=no",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(!output.stdout.is_empty())
-}
-
 /// True when the repo has an `origin` remote. Exit-status only, per the
 /// git-safety rules for imperative commands.
 pub fn has_origin_remote(repo_path: &Path) -> Result<bool> {
@@ -4089,21 +4069,6 @@ mod tests {
         pull_branch(clone, "main").unwrap();
 
         assert_eq!(current_branch(clone).unwrap(), "main");
-    }
-
-    #[test]
-    fn has_tracked_changes_ignores_untracked_files() {
-        let repo = init_test_repo();
-
-        fs::write(repo.path().join("scratch.txt"), "untracked\n").unwrap();
-        assert!(!has_tracked_changes(repo.path()).unwrap());
-
-        fs::write(repo.path().join("tracked.txt"), "clean\n").unwrap();
-        commit_all(repo.path(), "add tracked file");
-        assert!(!has_tracked_changes(repo.path()).unwrap());
-
-        fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
-        assert!(has_tracked_changes(repo.path()).unwrap());
     }
 
     #[test]

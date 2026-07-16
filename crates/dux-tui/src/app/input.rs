@@ -7286,7 +7286,9 @@ not_a_real_action = ["x"]
                     project_name: app.engine.projects[0].name.clone(),
                     leading_branch: app.engine.projects[0].leading_branch.clone(),
                 },
-                result: Ok(Some("feature/demo".to_string())),
+                result: Ok(dux_core::worker::PullOutcome::Pulled {
+                    current_branch: Some("feature/demo".to_string()),
+                }),
                 status: dux_core::engine::ResolvedFinal::new(
                     format!("pull-project:{}", app.engine.projects[0].id),
                     dux_core::engine::Final::info(format!(

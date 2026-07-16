@@ -1825,7 +1825,8 @@ impl Engine {
                 // The user-facing message was resolved at dispatch by the
                 // StatusOp and rides in `status`.
                 if let PullTarget::Project { project_id, .. } = &target
-                    && let Ok(Some(branch_name)) = &result
+                    && let Ok(outcome) = &result
+                    && let Some(branch_name) = outcome.current_branch()
                     && let Some(existing) = self.projects.iter_mut().find(|c| c.id == *project_id)
                 {
                     existing.current_branch = branch_name.clone();
@@ -2733,7 +2734,9 @@ mod tests {
                 project_name: "p1-name".to_string(),
                 leading_branch: Some("main".to_string()),
             },
-            result: Ok(Some("feature-x".to_string())),
+            result: Ok(crate::worker::PullOutcome::Pulled {
+                current_branch: Some("feature-x".to_string()),
+            }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-project:p1",
                 crate::engine::Final::info(
@@ -2757,6 +2760,43 @@ mod tests {
             status.message,
             "Refreshed project \"p1-name\". Local branch is up to date with remote."
         );
+    }
+
+    /// A no-origin refresh still updates the project's current branch and
+    /// resolves the keyed info final (nothing to pull is not a failure).
+    #[test]
+    fn pull_completed_project_no_origin_updates_branch_and_resolves_info() {
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project);
+        let repo_path = "/tmp/p1".to_string();
+        engine.mark_in_flight(InFlightKey::Pull(repo_path.clone()));
+
+        let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
+            repo_path: repo_path.clone(),
+            target: PullTarget::Project {
+                project_id: "p1".to_string(),
+                project_name: "p1-name".to_string(),
+                leading_branch: Some("main".to_string()),
+            },
+            result: Ok(crate::worker::PullOutcome::NoOrigin {
+                current_branch: Some("feature-x".to_string()),
+            }),
+            status: crate::engine::ResolvedFinal::new(
+                "pull-project:p1",
+                crate::engine::Final::info(
+                    "Project \"p1-name\" has no origin remote; nothing to pull. Local branch state refreshed.",
+                ),
+            ),
+        });
+
+        assert!(!engine.is_in_flight(&InFlightKey::Pull(repo_path.clone())));
+        let p = &engine.projects[0];
+        assert_eq!(p.current_branch, "feature-x");
+
+        let status = unwrap_status(reaction);
+        assert_eq!(status.tone, StatusTone::Info);
+        assert_eq!(status.key.as_deref(), Some("pull-project:p1"));
     }
 
     #[test]
@@ -5037,7 +5077,9 @@ mod tests {
                 project_name: "p1-name".to_string(),
                 leading_branch: None,
             },
-            result: Ok(None),
+            result: Ok(crate::worker::PullOutcome::Pulled {
+                current_branch: None,
+            }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-project:p1",
                 crate::engine::Final::info(
@@ -5095,7 +5137,9 @@ mod tests {
         let reaction = engine.process_worker_event(WorkerEvent::PullCompleted {
             repo_path: repo_path.clone(),
             target: PullTarget::Session,
-            result: Ok(None),
+            result: Ok(crate::worker::PullOutcome::Pulled {
+                current_branch: None,
+            }),
             status: crate::engine::ResolvedFinal::new(
                 "pull-session:/tmp/wt-session",
                 crate::engine::Final::info(

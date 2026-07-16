@@ -9006,15 +9006,19 @@ mod tests {
                     Some(busy_id.as_str()),
                     "the final must carry the same opaque id as the busy"
                 );
-                assert_eq!(s.tone, StatusTone::Error);
+                // The refresh is best-effort: a failure is a WARNING that says
+                // the project continues from the local branch state.
+                assert_eq!(s.tone, StatusTone::Warning);
                 assert!(
                     s.message
-                        .starts_with("Project refresh failed for \"Demo\":"),
+                        .starts_with("Could not refresh \"Demo\" from origin:")
+                        && s.message
+                            .contains("Continuing from the local branch state."),
                     "unexpected message: {}",
                     s.message
                 );
             }
-            _ => panic!("expected a correlated error final"),
+            _ => panic!("expected a correlated warning final"),
         }
     }
 
