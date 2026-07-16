@@ -1,7 +1,17 @@
-import { ChevronDown, ChevronRight, TriangleAlert } from "lucide-react"
+import {
+  Activity,
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  CircleStop,
+  SquareTerminal,
+  TriangleAlert,
+} from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -16,10 +26,17 @@ import { formatBytes, formatCpu } from "@/lib/formatStats"
 import {
   RESOURCE_POLL_INTERVAL_MS,
   nextPollDelay,
+  pollIntervalLabel,
   shouldPoll,
   statsAreStale,
 } from "@/lib/resourcePoll"
-import { nothingRunning, taskManagerRows, type TaskRow } from "@/lib/resourceRows"
+import {
+  nothingRunning,
+  taskManagerRows,
+  taskManagerSummary,
+  type TaskRow,
+  type TaskRowKind,
+} from "@/lib/resourceRows"
 import { resourcesApi, type ResourceStatsView } from "@/lib/resourcesApi"
 import {
   closeStopAll,
@@ -103,6 +120,7 @@ function TaskManagerBody() {
   const rows = useMemo(() => taskManagerRows(sessions, stats), [sessions, stats])
   const empty = nothingRunning(rows)
   const stale = now !== null && statsAreStale(now, lastSuccessAt)
+  const summary = useMemo(() => taskManagerSummary(rows), [rows])
 
   // Poll while visible. Wall-clock: each tick schedules the next from how long
   // the fetch actually took, so a slow round-trip does not stretch the cadence.
@@ -197,7 +215,13 @@ function TaskManagerBody() {
   return (
     <>
           <DialogHeader>
-            <DialogTitle>Task Manager</DialogTitle>
+            <div className="flex items-center justify-between gap-2">
+              <DialogTitle>Task Manager</DialogTitle>
+              {/* Coexists with the stalled indicator below, never both at once:
+                  this pill claims the numbers are live, the stalled message
+                  says they are not, and showing both would contradict itself. */}
+              {stale ? null : <LivePollPill intervalMs={RESOURCE_POLL_INTERVAL_MS} />}
+            </div>
             <DialogDescription>
               What&apos;s running, what it costs, and how to stop it. Agents
               detach and can be reconnected; terminals are destroyed.
@@ -226,11 +250,12 @@ function TaskManagerBody() {
               {isMobile ? null : (
               <table className="w-full border-collapse text-sm">
                 <thead>
-                  <tr className="text-xs text-muted-foreground">
+                  <tr className="text-[10px] tracking-wide text-muted-foreground uppercase">
                     <th className="py-1 pr-2 text-left font-medium">Name</th>
+                    <th className="py-1 pr-2 text-right font-medium">PID</th>
+                    <th className="py-1 pr-2 text-right font-medium">Procs</th>
                     <th className="py-1 pr-2 text-right font-medium">CPU</th>
                     <th className="py-1 pr-2 text-right font-medium">Memory</th>
-                    <th className="py-1 pr-2 text-right font-medium">Procs</th>
                     <th className="py-1" />
                   </tr>
                 </thead>
@@ -274,8 +299,17 @@ function TaskManagerBody() {
           {/* Misclick-safe spacing between the list and the footer buttons. */}
           <div className="h-2" />
           <DialogFooter>
+            {summary ? (
+              <p className="self-center text-xs text-muted-foreground tabular-nums sm:mr-auto">
+                {summary}
+              </p>
+            ) : null}
             {empty ? null : (
-              <Button variant="outline" onClick={openStopAll}>
+              // Destructive here, unlike a `⋯` menu's neutral destructive items
+              // (CLAUDE.md scopes that tenet to DropdownMenuItems): this is a
+              // dialog footer button, the exact surface the tenet reserves
+              // `variant="destructive"` for.
+              <Button variant="destructive" onClick={openStopAll}>
                 Stop all…
               </Button>
             )}
@@ -284,6 +318,60 @@ function TaskManagerBody() {
             </Button>
           </DialogFooter>
     </>
+  )
+}
+
+// The header's "still live" cue: a small muted pill with a blinking dot,
+// reading "updating every Ns" with the interval read straight from the real
+// poll constant so the copy cannot drift from the actual cadence. Reuses the
+// existing `.agent-status-dot`/`--on` pulse (StatusBadge's streaming dot):
+// same blink, same `prefers-reduced-motion` handling, one definition.
+function LivePollPill({ intervalMs }: { intervalMs: number }) {
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+      <Circle
+        aria-hidden
+        className="size-2 shrink-0 fill-current agent-status-dot agent-status-dot--on"
+      />
+      Updating {pollIntervalLabel(intervalMs)}
+    </span>
+  )
+}
+
+// The leading row icon: reuses the SAME icons the rest of the app already
+// uses for these kinds, rather than inventing new ones (Sidebar.tsx /
+// MobileShell.tsx / AgentTabsStrip.tsx all use `Bot` for an agent and
+// `SquareTerminal` for a companion terminal). `dux` gets `Activity`, matching
+// the app menu's own Task Manager entry (`lib/appMenu.ts`), so the app's own
+// process reads as "the activity monitor icon", not another agent. TOTAL gets
+// none: it is a summary row, not a process.
+const ROW_ICONS: Partial<Record<TaskRowKind, typeof Bot>> = {
+  dux: Activity,
+  agent: Bot,
+  terminal: SquareTerminal,
+}
+
+function RowIcon({ kind }: { kind: TaskRowKind }) {
+  const Icon = ROW_ICONS[kind]
+  if (!Icon) return null
+  return <Icon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+}
+
+// Marks the dux row as "this process", not another agent. Reuses the shared
+// `Badge` primitive (see StatusBadge.tsx) rather than a hand-rolled span.
+// Cyan-tinted per the approved mock, but deliberately STATIC (no
+// `animate-attention-pulse`): that blink is reserved for "needs attention"
+// elsewhere (AttentionDot, Sidebar, MobileShell all pair cyan with the pulse
+// and a tooltip), and dux never needs the user's attention, so this pill
+// borrows the color, not the motion.
+function DuxBadge() {
+  return (
+    <Badge
+      variant="outline"
+      className="border-cyan-100/30 bg-cyan-100/10 text-cyan-100"
+    >
+      this process
+    </Badge>
   )
 }
 
@@ -335,6 +423,10 @@ function ExpandToggle({
 
 // Stat cells read as dashes when this row had no sample: a dormant tab, or a
 // process born since the last poll. The row still renders and stays stoppable.
+//
+// `pid` is handled by the CALLER, not here: TOTAL has no pid at all (blank,
+// not a dash: it is not a single process), which is a different "nothing to
+// show" than "no sample yet".
 function statCells(stats: ResourceStatsView | null) {
   return {
     cpu: stats ? formatCpu(stats.cpu_percent) : "—",
@@ -356,6 +448,9 @@ function DesktopRow({
 }) {
   const isTotal = row.kind === "total"
   const { cpu, mem, procs } = statCells(row.stats)
+  // TOTAL has no pid at all (blank: it is a summary, not a process); every
+  // other row shows the real pid, or a dash before the first sample lands.
+  const pid = isTotal ? "" : row.stats?.pid != null ? String(row.stats.pid) : "—"
   const children = row.stats?.children ?? []
 
   return (
@@ -376,8 +471,10 @@ function DesktopRow({
             ) : (
               <ExpandToggle row={row} expanded={expanded} onToggle={onToggle} />
             )}
+            <RowIcon kind={row.kind} />
             {/* `whitespace-nowrap`, never truncate: the container scrolls. */}
             <span className="whitespace-nowrap">{row.name}</span>
+            {row.kind === "dux" ? <DuxBadge /> : null}
             {row.detail ? (
               <span className="whitespace-nowrap font-mono text-xs text-muted-foreground">
                 {row.detail}
@@ -386,9 +483,10 @@ function DesktopRow({
           </div>
         </td>
         {/* `tabular-nums` so digits do not jitter as the numbers change. */}
+        <td className="py-1.5 pr-2 text-right tabular-nums">{pid}</td>
+        <td className="py-1.5 pr-2 text-right tabular-nums">{procs}</td>
         <td className="py-1.5 pr-2 text-right tabular-nums">{cpu}</td>
         <td className="py-1.5 pr-2 text-right tabular-nums">{mem}</td>
-        <td className="py-1.5 pr-2 text-right tabular-nums">{procs}</td>
         <td className="py-1.5 text-right">
           {row.stoppable ? (
             <Button
@@ -397,6 +495,7 @@ function DesktopRow({
               onClick={onStop}
               aria-label={row.stopLabel}
             >
+              <CircleStop aria-hidden />
               Stop
             </Button>
           ) : (
@@ -408,6 +507,7 @@ function DesktopRow({
         ? children.map((child) => (
             <tr
               key={`${row.key}-${child.pid}`}
+              data-testid={`child-row-${child.pid}`}
               className="text-xs text-muted-foreground"
             >
               <td className="py-0.5 pr-2">
@@ -418,13 +518,18 @@ function DesktopRow({
                 </div>
               </td>
               <td className="py-0.5 pr-2 text-right tabular-nums">
+                {child.pid}
+              </td>
+              {/* A child process has no process count of its own (it IS one
+                  process): render this cell empty rather than inventing a "1",
+                  and never put the pid here, which is the bug being fixed
+                  (a child's pid was previously rendered under Procs). */}
+              <td className="py-0.5 pr-2 text-right tabular-nums" />
+              <td className="py-0.5 pr-2 text-right tabular-nums">
                 {formatCpu(child.cpu_percent)}
               </td>
               <td className="py-0.5 pr-2 text-right tabular-nums">
                 {formatBytes(child.rss_bytes)}
-              </td>
-              <td className="py-0.5 pr-2 text-right tabular-nums">
-                {child.pid}
               </td>
               <td />
             </tr>
@@ -462,11 +567,15 @@ function MobileRow({
           {isTotal ? null : (
             <ExpandToggle row={row} expanded={expanded} onToggle={onToggle} />
           )}
+          <RowIcon kind={row.kind} />
           <div className="min-w-0">
             {/* Truncate here (a phone genuinely cannot fit a long branch name),
                 but the tooltip keeps the full name reachable. */}
             <SimpleTooltip content={row.name}>
-              <div className="truncate text-sm">{row.name}</div>
+              <div className="flex min-w-0 items-center gap-1.5 truncate text-sm">
+                <span className="truncate">{row.name}</span>
+                {row.kind === "dux" ? <DuxBadge /> : null}
+              </div>
             </SimpleTooltip>
             <div className="truncate text-xs text-muted-foreground tabular-nums">
               {cpu} · {mem} · {procs} procs
@@ -481,6 +590,7 @@ function MobileRow({
             aria-label={row.stopLabel}
             className="max-md:min-h-10 shrink-0"
           >
+            <CircleStop aria-hidden />
             Stop
           </Button>
         ) : null}
@@ -493,8 +603,13 @@ function MobileRow({
               className="flex items-center justify-between gap-2 text-xs text-muted-foreground"
             >
               <span className="truncate font-mono">{child.name}</span>
+              {/* The phone layout is cards, not a table: there is no PID
+                  column to put this in, so it is labelled inline rather than
+                  presented as a bare number that could be misread as a
+                  process count (the bug being fixed on desktop). */}
               <span className="shrink-0 tabular-nums">
-                {formatCpu(child.cpu_percent)} · {formatBytes(child.rss_bytes)}
+                pid {child.pid} · {formatCpu(child.cpu_percent)} ·{" "}
+                {formatBytes(child.rss_bytes)}
               </span>
             </li>
           ))}

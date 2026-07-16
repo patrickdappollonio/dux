@@ -4,6 +4,7 @@ import {
   RESOURCE_POLL_INTERVAL_MS,
   STALE_STATS_THRESHOLD_MS,
   nextPollDelay,
+  pollIntervalLabel,
   shouldPoll,
   statsAreStale,
 } from "./resourcePoll"
@@ -82,5 +83,18 @@ describe("statsAreStale", () => {
     expect(
       statsAreStale(lastSuccessAt + STALE_STATS_THRESHOLD_MS + 1, lastSuccessAt),
     ).toBe(true)
+  })
+})
+
+describe("pollIntervalLabel", () => {
+  it("derives_the_label_from_the_real_poll_constant", () => {
+    // Must be computed FROM the constant, not a hand-typed number: this is the
+    // whole point of the helper (the header pill cannot drift from the actual
+    // cadence).
+    expect(pollIntervalLabel(RESOURCE_POLL_INTERVAL_MS)).toBe("every 1s")
+  })
+
+  it("formats_a_sub_second_interval_with_one_decimal", () => {
+    expect(pollIntervalLabel(1500)).toBe("every 1.5s")
   })
 })

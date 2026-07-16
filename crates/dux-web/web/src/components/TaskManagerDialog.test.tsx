@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
-import { STALE_STATS_THRESHOLD_MS } from "@/lib/resourcePoll"
+import { RESOURCE_POLL_INTERVAL_MS, STALE_STATS_THRESHOLD_MS } from "@/lib/resourcePoll"
 import type { ResourceStatsView } from "@/lib/resourcesApi"
 import type { AgentTabView, SessionView, TerminalView } from "@/lib/types"
 
@@ -407,5 +407,123 @@ describe("TaskManagerDialog", () => {
     seed({ spine: { sessions: [session({ id: "s1", title: "hot" })] } } as Partial<DuxState>)
     render(<TaskManagerDialog />)
     await waitFor(() => expect(screen.getByText("129.5%")).toBeTruthy())
+  })
+
+  it("stop_all_trigger_is_destructive", async () => {
+    // The user's own words: "The 'Stop all' button should also be red." Unlike
+    // a `⋯` menu's neutral destructive items, a dialog footer button IS where
+    // CLAUDE.md's menu tenet reserves `variant="destructive"`.
+    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const trigger = await screen.findByText("Stop all…")
+    expect(trigger.className).toContain("destructive")
+  })
+
+  it("each_stoppable_rows_stop_button_renders_an_icon", async () => {
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const stop = await screen.findByLabelText("Stop fix-auth")
+    expect(stop.querySelector("svg")).toBeTruthy()
+  })
+
+  it("dux_row_renders_its_badge_and_still_has_no_stop_control", async () => {
+    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    await screen.findByText("dux")
+    expect(screen.getByText("this process")).toBeTruthy()
+    expect(screen.queryByLabelText("Stop dux")).toBeNull()
+  })
+
+  it("header_shows_the_live_interval_derived_from_the_poll_constant", async () => {
+    // Never a hand-typed number: the pill's text must trace back to the real
+    // poll cadence, so it cannot silently drift from `resourcePoll.ts`.
+    seed({ spine: { sessions: [] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    expect(
+      await screen.findByText(`Updating every ${RESOURCE_POLL_INTERVAL_MS / 1000}s`),
+    ).toBeTruthy()
+  })
+
+  it("the_live_pills_dot_reuses_the_already_reduced_motion_safe_status_dot", async () => {
+    // Rather than a fresh, unguarded animation, the blinking dot reuses
+    // StatusBadge's `.agent-status-dot`/`--on` mechanism, whose
+    // `prefers-reduced-motion` handling (index.css) already applies here for
+    // free.
+    seed({ spine: { sessions: [] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const pill = await screen.findByText(/Updating every/)
+    const dot = pill.querySelector("svg")
+    expect(dot?.getAttribute("class")).toContain("agent-status-dot")
+    expect(dot?.getAttribute("class")).toContain("agent-status-dot--on")
+  })
+
+  it("child_row_renders_its_pid_under_pid_and_an_empty_procs_cell", async () => {
+    // Regression: a child process has no process count of its own. Putting
+    // its pid under Procs read as "over 2 million subprocesses" in the wild.
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "term-1",
+          kind: "terminal",
+          label: "Terminal (npm): dev server",
+          process_count: 4,
+          children: [
+            { name: "node", pid: 4242, cpu_percent: 11.0, rss_bytes: 180_000_000 },
+          ],
+        }),
+        totalStat,
+      ],
+    })
+    seed({
+      spine: {
+        sessions: [
+          session({ id: "s1", terminals: [terminal({ id: "term-1", label: "Terminal 1" })] }),
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const toggle = await screen.findByLabelText("Show Terminal 1 child processes")
+    fireEvent.click(toggle)
+
+    const childRow = await screen.findByTestId("child-row-4242")
+    const cells = within(childRow).getAllByRole("cell")
+    // Name, PID, Procs, CPU, Memory, (action).
+    expect(cells[1].textContent).toBe("4242")
+    expect(cells[2].textContent).toBe("")
+  })
+
+  it("child_rows_procs_cell_never_contains_the_pid_value", async () => {
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "term-1",
+          kind: "terminal",
+          label: "Terminal (npm): dev server",
+          process_count: 4,
+          children: [
+            { name: "node", pid: 4242, cpu_percent: 11.0, rss_bytes: 180_000_000 },
+          ],
+        }),
+        totalStat,
+      ],
+    })
+    seed({
+      spine: {
+        sessions: [
+          session({ id: "s1", terminals: [terminal({ id: "term-1", label: "Terminal 1" })] }),
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const toggle = await screen.findByLabelText("Show Terminal 1 child processes")
+    fireEvent.click(toggle)
+
+    const childRow = await screen.findByTestId("child-row-4242")
+    const cells = within(childRow).getAllByRole("cell")
+    expect(cells[2].textContent).not.toContain("4242")
   })
 })

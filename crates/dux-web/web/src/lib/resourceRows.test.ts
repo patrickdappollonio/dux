@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { taskManagerRows } from "./resourceRows"
+import { taskManagerRows, taskManagerSummary } from "./resourceRows"
 import type { ResourceStatsView } from "./resourcesApi"
 import type { AgentTabView, SessionView, TerminalView } from "./types"
 
@@ -294,5 +294,46 @@ describe("taskManagerRows", () => {
     expect(t2?.stopLabel).not.toBe(t3?.stopLabel)
     expect(t2?.stopLabel).toContain("fix-auth")
     expect(t3?.stopLabel).toContain("fix-auth")
+  })
+})
+
+describe("taskManagerSummary", () => {
+  it("is_null_when_nothing_is_running", () => {
+    // Nothing to stop, so nothing to total: the footer's summary disappears
+    // along with "Stop all…" in this state.
+    const rows = taskManagerRows([], [duxStat, totalStat])
+    expect(taskManagerSummary(rows)).toBeNull()
+  })
+
+  it("counts_running_rows_and_reads_the_total_straight_off_the_total_row", () => {
+    const sessions = [
+      session({
+        id: "s1",
+        title: "fix-auth",
+        terminals: [terminal({ id: "term-1", label: "dev server" })],
+      }),
+    ]
+    const rows = taskManagerRows(sessions, [
+      duxStat,
+      stat({ id: "s1", cpu_percent: 3.4 }),
+      stat({ id: "term-1", cpu_percent: 1 }),
+      stat({
+        kind: "total",
+        label: "TOTAL",
+        process_count: 14,
+        cpu_percent: 65.6,
+        rss_bytes: 1_400_000_000,
+      }),
+    ])
+    // Two stoppable rows: the agent tab and its terminal.
+    expect(taskManagerSummary(rows)).toBe("2 running · 14 processes · 65.6% CPU · 1.3 GiB")
+  })
+
+  it("omits_the_total_figures_when_no_sample_has_landed_yet", () => {
+    // Before the first poll response, the TOTAL row has no stats: the summary
+    // still reports what is running from the spine, without inventing numbers.
+    const sessions = [session({ id: "s1" })]
+    const rows = taskManagerRows(sessions, [])
+    expect(taskManagerSummary(rows)).toBe("1 running")
   })
 })

@@ -17,6 +17,7 @@
 // agent's terminals, then TOTAL. Sorting by CPU would reorder rows under the
 // user's cursor on every poll.
 
+import { formatBytes, formatCpu } from "./formatStats"
 import type { ResourceStatsView } from "./resourcesApi"
 import { terminalTitle } from "./terminals"
 import type { SessionView } from "./types"
@@ -172,4 +173,28 @@ export function taskManagerRows(
 // render, so "nothing is running" means no agents and no terminals.
 export function nothingRunning(rows: readonly TaskRow[]): boolean {
   return !rows.some((r) => r.stoppable)
+}
+
+// The footer's muted totals line (e.g. "4 running · 14 processes · 65.6% CPU
+// · 1.4 GB"), read straight off the TOTAL row rather than summed here: core
+// already computes that aggregate once, and re-deriving it client-side would
+// risk drifting from the collector's own rounding.
+//
+// `null` when nothing is running: an all-dash summary next to an empty list
+// says nothing a reader needs, and the footer already omits "Stop all…" in
+// that state, so the summary disappears with it.
+export function taskManagerSummary(rows: readonly TaskRow[]): string | null {
+  const runningCount = rows.filter((r) => r.stoppable).length
+  if (runningCount === 0) return null
+
+  const parts = [`${runningCount} running`]
+
+  const total = rows.find((r) => r.kind === "total")?.stats ?? null
+  if (total) {
+    parts.push(`${total.process_count} process${total.process_count === 1 ? "" : "es"}`)
+    parts.push(`${formatCpu(total.cpu_percent)} CPU`)
+    parts.push(formatBytes(total.rss_bytes))
+  }
+
+  return parts.join(" · ")
 }

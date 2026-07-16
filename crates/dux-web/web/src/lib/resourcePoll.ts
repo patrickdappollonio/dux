@@ -65,3 +65,12 @@ export function statsAreStale(
   if (lastSuccessAt === null) return false
   return now - lastSuccessAt > thresholdMs
 }
+
+// The Task Manager header's "updating every Ns" pill. Derived from the real
+// poll constant (never a hand-typed number) so the copy cannot drift from the
+// actual cadence if `RESOURCE_POLL_INTERVAL_MS` ever changes.
+export function pollIntervalLabel(intervalMs: number): string {
+  const seconds = intervalMs / 1000
+  const formatted = Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
+  return `every ${formatted}s`
+}
