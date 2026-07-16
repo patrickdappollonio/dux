@@ -278,6 +278,11 @@ export interface DuxState {
   //     semantics); null once the user edits away from it or no name is pending.
   createAgentDraft: string
   createAgentRandomize: boolean
+  //   - `createAgentCopyChanges`: the "Copy uncommitted changes from the
+  //     project checkout" checkbox. Seeded from the bootstrap's config default
+  //     when the dialog opens; only "new" mode surfaces it (forks always copy,
+  //     the other flows never do).
+  createAgentCopyChanges: boolean
   createAgentGeneratedName: string | null
   //   - `createAgentPrInput`: the raw PR reference (URL, `#123`, or `123`) for
   //     the "From PR" mode. Free text (NOT agent-name-sanitized); the server
