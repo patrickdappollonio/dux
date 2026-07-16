@@ -206,6 +206,11 @@ impl App {
                 .config
                 .defaults
                 .pull_before_creating_agent_by_default,
+            copy_uncommitted_changes: self
+                .engine
+                .config
+                .defaults
+                .copy_uncommitted_changes_by_default,
         })
     }
 

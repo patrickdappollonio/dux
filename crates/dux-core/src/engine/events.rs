@@ -4291,6 +4291,7 @@ mod tests {
             custom_name: None,
             use_existing_branch: false,
             pull_before_create: false,
+            copy_uncommitted_changes: false,
         };
         let reaction = engine
             .apply(crate::engine::Command::DispatchCreateAgentRequest {

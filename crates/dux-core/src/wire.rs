@@ -315,6 +315,11 @@ pub enum WireCommand {
     CreateAgent {
         project_id: String,
         name: String,
+        /// Per-agent override for copying the project checkout's uncommitted
+        /// changes into the new worktree. `None` falls back to the config
+        /// default (`defaults.copy_uncommitted_changes_by_default`).
+        #[serde(default)]
+        copy_uncommitted_changes: Option<bool>,
     },
     /// Fork an existing agent session into a fresh worktree branched from the
     /// source session's branch. `name` follows the same rules as `CreateAgent`:
@@ -3303,7 +3308,11 @@ impl Engine {
                     project_name,
                 }
             }
-            WireCommand::CreateAgent { project_id, name } => {
+            WireCommand::CreateAgent {
+                project_id,
+                name,
+                copy_uncommitted_changes,
+            } => {
                 let project = self
                     .projects
                     .iter()
@@ -3333,6 +3342,8 @@ impl Engine {
                     custom_name,
                     use_existing_branch: false,
                     pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
+                    copy_uncommitted_changes: copy_uncommitted_changes
+                        .unwrap_or(self.config.defaults.copy_uncommitted_changes_by_default),
                 };
                 Command::DispatchCreateAgentRequest {
                     request: Box::new(request),
@@ -5059,6 +5070,7 @@ mod tests {
             .apply_wire(WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
                 name: "my-agent".to_string(),
+                copy_uncommitted_changes: None,
             })
             .expect("dispatch create");
 
@@ -6254,6 +6266,7 @@ mod tests {
             WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
                 name: "feature-x".to_string(),
+                copy_uncommitted_changes: None,
             }
         );
     }
@@ -6268,6 +6281,7 @@ mod tests {
             .wire_to_command(WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
                 name: "feature-x".to_string(),
+                copy_uncommitted_changes: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -6292,6 +6306,7 @@ mod tests {
             .wire_to_command(WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
                 name: String::new(),
+                copy_uncommitted_changes: None,
             })
             .expect("reconstruct");
         match cmd {
@@ -6305,12 +6320,62 @@ mod tests {
         }
     }
 
+    /// An old JSON body without the copy field still deserializes, and the
+    /// request falls back to the config default (true).
+    #[test]
+    fn create_agent_without_copy_field_uses_config_default() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        assert!(engine.config.defaults.copy_uncommitted_changes_by_default);
+
+        let json = r#"{"command":"create_agent","args":{"project_id":"p1","name":""}}"#;
+        let wire: WireCommand = serde_json::from_str(json).expect("deserialize");
+        let cmd = engine.wire_to_command(wire).expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                CreateAgentRequest::NewProject {
+                    copy_uncommitted_changes,
+                    ..
+                } => assert!(copy_uncommitted_changes),
+                other => panic!("expected NewProject, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+    }
+
+    /// An explicit per-agent false overrides the config default of true.
+    #[test]
+    fn create_agent_copy_flag_false_overrides_default_true() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        assert!(engine.config.defaults.copy_uncommitted_changes_by_default);
+
+        let cmd = engine
+            .wire_to_command(WireCommand::CreateAgent {
+                project_id: "p1".to_string(),
+                name: String::new(),
+                copy_uncommitted_changes: Some(false),
+            })
+            .expect("reconstruct");
+        match cmd {
+            Command::DispatchCreateAgentRequest { request, .. } => match *request {
+                CreateAgentRequest::NewProject {
+                    copy_uncommitted_changes,
+                    ..
+                } => assert!(!copy_uncommitted_changes),
+                other => panic!("expected NewProject, got {other:?}"),
+            },
+            _ => panic!("expected Command::DispatchCreateAgentRequest variant"),
+        }
+    }
+
     #[test]
     fn wire_to_command_create_agent_unknown_project_errors() {
         let (engine, _tmp) = test_engine();
         let result = engine.wire_to_command(WireCommand::CreateAgent {
             project_id: "ghost".to_string(),
             name: "feature-x".to_string(),
+            copy_uncommitted_changes: None,
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
@@ -6336,6 +6401,7 @@ mod tests {
             let result = engine.wire_to_command(WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
                 name: bad.to_string(),
+                copy_uncommitted_changes: None,
             });
             let err = result.map(|_| ()).unwrap_err();
             let msg = err.to_string();
@@ -6356,6 +6422,7 @@ mod tests {
                 .wire_to_command(WireCommand::CreateAgent {
                     project_id: "p1".to_string(),
                     name: good.to_string(),
+                    copy_uncommitted_changes: None,
                 })
                 .unwrap_or_else(|e| panic!("expected {good:?} to be accepted, got: {e}"));
             match cmd {
@@ -6381,6 +6448,7 @@ mod tests {
             .wire_to_command(WireCommand::CreateAgent {
                 project_id: "p1".to_string(),
                 name: "   ".to_string(),
+                copy_uncommitted_changes: None,
             })
             .expect("whitespace-only name should reconstruct");
         match cmd {

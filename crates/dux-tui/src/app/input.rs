@@ -8287,6 +8287,7 @@ not_a_real_action = ["x"]
                 custom_name: None,
                 use_existing_branch: false,
                 pull_before_create: false,
+                copy_uncommitted_changes: false,
             },
             input: TextInput::with_text("reuse-me".to_string()),
             randomize_name: false,

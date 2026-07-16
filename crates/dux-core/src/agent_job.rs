@@ -18,6 +18,29 @@ use crate::worker::{
 };
 use crate::{gh, git, logger};
 
+/// What to do when the copy's HEAD-equality guard fails (the source checkout
+/// and the new worktree are on different commits, so the status delta would
+/// not describe the same base tree).
+enum HeadMismatch {
+    /// Skip the copy and append a visible note to the create status (fresh
+    /// agents: the project checkout simply is not on that branch's commit).
+    SkipWithNote { branch: String },
+    /// Fail the creation (forks: equal HEADs hold by construction, so a
+    /// mismatch means the source moved mid-create).
+    Fail,
+}
+
+/// A copy of uncommitted changes planned by a per-request arm and executed in
+/// the common tail, after the provider availability check (so a missing
+/// provider does not throw away completed copy work with the worktree).
+struct PendingCopy {
+    /// The project checkout, or the fork's source worktree.
+    source: PathBuf,
+    /// Short human description of the source for progress/error messages.
+    source_desc: String,
+    on_head_mismatch: HeadMismatch,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_create_agent_job(
     request: CreateAgentRequest,
@@ -32,6 +55,10 @@ pub fn run_create_agent_job(
     // progress/failure event and is carried in `AgentLaunchKind::Create` so the
     // launch-ready/failed handler can resolve the op's final on the same id.
     let create_key = status_op_id;
+    // Non-fatal notes (best-effort pull problems, skipped copies) accumulated
+    // across the job and appended to the create status message, so they ride
+    // the keyed create-op final and stay visible.
+    let mut creation_notes: Vec<String> = Vec::new();
     let (
         project,
         provider,
@@ -42,14 +69,21 @@ pub fn run_create_agent_job(
         owns_worktree,
         title,
         launch_with_resume,
+        pending_copy,
     ) = match request {
         CreateAgentRequest::NewProject {
             project,
             custom_name,
             use_existing_branch,
             pull_before_create,
+            copy_uncommitted_changes,
         } => {
             let repo_path = PathBuf::from(&project.path);
+            let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
+                let cur =
+                    (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
+                crate::project_browser::leading_branch_for_project(&repo_path, cur)
+            });
 
             if pull_before_create {
                 let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
@@ -59,28 +93,48 @@ pub fn run_create_agent_job(
                         project.name
                     ),
                 });
-                let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
-                    let cur = (!project.current_branch.is_empty())
-                        .then_some(project.current_branch.as_str());
-                    crate::project_browser::leading_branch_for_project(&repo_path, cur)
-                });
-                if let Err(err) = git::switch_branch_if_needed(&repo_path, &leading_branch)
-                    .and_then(|_| {
-                        if git::has_tracked_changes(&repo_path)? {
-                            return Err(anyhow::anyhow!("source checkout has uncommitted changes"));
-                        }
-                        git::pull_branch(&repo_path, &leading_branch)
-                    })
-                {
+                // The pull is best-effort: creation never aborts on a failed
+                // switch or pull. The agent simply starts from the local
+                // branch state, and the create status says so.
+                if let Err(err) = git::switch_branch_if_needed(&repo_path, &leading_branch) {
                     logger::error(&format!(
-                        "pre-create pull failed for {}: {err}",
+                        "pre-create branch switch failed for {}: {err}",
                         project.path
                     ));
-                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                        "Failed to pull latest changes for project \"{}\" before creating the agent: {err}",
-                        project.name
-                    ) });
-                    return;
+                    creation_notes.push(format!(
+                        "Warning: could not switch the project checkout to \"{leading_branch}\": {err}. The agent starts from the local branch state."
+                    ));
+                } else {
+                    match git::has_origin_remote(&repo_path) {
+                        Ok(true) => {
+                            if let Err(err) = git::pull_branch(&repo_path, &leading_branch) {
+                                logger::error(&format!(
+                                    "pre-create pull failed for {}: {err}",
+                                    project.path
+                                ));
+                                creation_notes.push(format!(
+                                    "Warning: could not pull \"{leading_branch}\" from origin: {err}. The agent starts from the local branch state."
+                                ));
+                            }
+                        }
+                        Ok(false) => {
+                            // Steady state for local-only repos: the pull was
+                            // never promised, so this is a log-only skip.
+                            logger::info(&format!(
+                                "skipping pre-create pull for {}: no origin remote",
+                                project.path
+                            ));
+                        }
+                        Err(err) => {
+                            logger::error(&format!(
+                                "pre-create origin check failed for {}: {err}",
+                                project.path
+                            ));
+                            creation_notes.push(format!(
+                                "Warning: could not check for an origin remote: {err}. The agent starts from the local branch state."
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -100,11 +154,6 @@ pub fn run_create_agent_job(
             // coincidentally match an existing branch.
             let attach_existing =
                 use_existing_branch || git::branch_exists(&repo_path, &resolved_name).is_some();
-            let leading_branch = project.leading_branch.clone().unwrap_or_else(|| {
-                let cur =
-                    (!project.current_branch.is_empty()).then_some(project.current_branch.as_str());
-                crate::project_browser::leading_branch_for_project(&repo_path, cur)
-            });
             // Distinguish an unborn repo (no commits at all) from a genuinely
             // deleted branch. `local_branch_exists` is false for both, but the
             // remedies differ: an unborn repo needs an initial commit, not a
@@ -206,6 +255,20 @@ pub fn run_create_agent_job(
                     project.name
                 )
             };
+            // The copy runs in the common tail (after the provider check).
+            // No per-path exceptions: the HEAD-equality guard decides, for
+            // fresh worktrees and attached existing branches alike.
+            let pending_copy = copy_uncommitted_changes.then(|| PendingCopy {
+                source: repo_path.clone(),
+                source_desc: format!("project \"{}\"", project.name),
+                on_head_mismatch: HeadMismatch::SkipWithNote {
+                    branch: if attach_existing {
+                        resolved_name.clone()
+                    } else {
+                        leading_branch.clone()
+                    },
+                },
+            });
             (
                 project.clone(),
                 project.default_provider.clone(),
@@ -220,6 +283,7 @@ pub fn run_create_agent_job(
                 true,
                 title,
                 false,
+                pending_copy,
             )
         }
         CreateAgentRequest::PullRequest {
@@ -320,6 +384,7 @@ pub fn run_create_agent_job(
                 true,
                 agent_title,
                 false,
+                None,
             )
         }
         CreateAgentRequest::ForkSession {
@@ -373,31 +438,20 @@ pub fn run_create_agent_job(
                     return;
                 }
             };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
-                message: format!(
-                    "Copying the current filesystem contents from agent \"{source_label}\" into the new fork...",
-                ),
-            });
-            if let Err(err) = git::mirror_worktree_contents(&source_worktree, &worktree_path) {
-                logger::error(&format!(
-                    "failed to mirror worktree {} into {}: {err}",
-                    source_worktree.display(),
-                    worktree_path.display()
-                ));
-                let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed { status_op_id: create_key.clone(), message: format!(
-                    "Failed to copy the source worktree contents for agent \"{source_label}\": {err}",
-                ) });
-                return;
-            }
             let status_message = format!(
-                "Forked {} agent \"{}\" from \"{}\" in project \"{}\". The new worktree starts with copied files and a fresh session.",
+                "Forked {} agent \"{}\" from \"{}\" in project \"{}\". The new worktree starts with the copied uncommitted and untracked changes (gitignored files are not copied) and a fresh session.",
                 source_session.provider.as_str(),
                 branch_name,
                 source_label,
                 project.name
             );
+            // Equal HEADs hold by construction (the worktree was just created
+            // from `source_head`); the copy itself runs in the common tail.
+            let pending_copy = Some(PendingCopy {
+                source: source_worktree,
+                source_desc: format!("agent \"{source_label}\""),
+                on_head_mismatch: HeadMismatch::Fail,
+            });
             (
                 project,
                 source_session.provider,
@@ -410,6 +464,7 @@ pub fn run_create_agent_job(
                 // agent's durable title.
                 Some(custom_name),
                 false,
+                pending_copy,
             )
         }
         CreateAgentRequest::ExistingManagedWorktree {
@@ -443,6 +498,7 @@ pub fn run_create_agent_job(
                 false,
                 custom_name,
                 true,
+                None,
             )
         }
         CreateAgentRequest::ForkExternalWorktree {
@@ -494,34 +550,20 @@ pub fn run_create_agent_job(
                     return;
                 }
             };
-            let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
-                status_op_id: create_key.clone(),
-                message: format!(
-                    "Copying dirty and untracked files from external worktree \"{source_label}\"...",
-                ),
-            });
-            if let Err(err) = git::mirror_worktree_contents(&source_worktree_path, &worktree_path) {
-                logger::error(&format!(
-                    "failed to mirror external worktree {} into {}: {err}",
-                    source_worktree_path.display(),
-                    worktree_path.display()
-                ));
-                let _ = git::remove_worktree(&repo_path, &worktree_path, &branch_name);
-                let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
-                    status_op_id: create_key.clone(),
-                    message: format!(
-                        "Failed to copy external worktree contents from \"{source_label}\": {err}",
-                    ),
-                });
-                return;
-            }
             let status_message = format!(
-                "Created {} agent \"{}\" from external worktree \"{}\" in project \"{}\". Dirty and untracked files were copied into the managed worktree.",
+                "Created {} agent \"{}\" from external worktree \"{}\" in project \"{}\". Uncommitted and untracked changes were copied into the managed worktree (gitignored files are not copied).",
                 project.default_provider.as_str(),
                 branch_name,
                 source_label,
                 project.name
             );
+            // Equal HEADs hold by construction (the worktree was just created
+            // from the external worktree's head); the copy runs in the tail.
+            let pending_copy = Some(PendingCopy {
+                source: source_worktree_path,
+                source_desc: format!("external worktree \"{source_label}\""),
+                on_head_mismatch: HeadMismatch::Fail,
+            });
             (
                 project.clone(),
                 project.default_provider.clone(),
@@ -534,6 +576,7 @@ pub fn run_create_agent_job(
                 // display tracking the branch (an auto-derived worktree name).
                 custom_name,
                 false,
+                pending_copy,
             )
         }
     };
@@ -593,6 +636,94 @@ pub fn run_create_agent_job(
         });
         return;
     }
+    // The planned copy of uncommitted changes runs here, after the provider
+    // availability check (so a missing provider does not discard completed
+    // copy work) and before the startup command (which must see the files).
+    if let Some(copy) = pending_copy {
+        let _ = worker_tx.send(WorkerEvent::CreateAgentProgress {
+            status_op_id: create_key.clone(),
+            message: format!(
+                "Copying uncommitted and untracked changes from {} into the new worktree (gitignored files are not copied)...",
+                copy.source_desc
+            ),
+        });
+        let worktree = Path::new(&session.worktree_path);
+        // Porcelain status is relative to the HEAD commit's tree, so the copy
+        // is only faithful when both sides sit on the same commit.
+        let heads = (git::head_commit(&copy.source), git::head_commit(worktree));
+        match heads {
+            (Ok(source_head), Ok(worktree_head)) if source_head == worktree_head => {
+                match git::copy_uncommitted_changes(&copy.source, worktree) {
+                    Ok(summary) => {
+                        if !summary.skipped_dirs.is_empty() {
+                            creation_notes.push(format!(
+                                "Submodule or embedded repository contents were not copied: {}.",
+                                summary.skipped_dirs.join(", ")
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        logger::error(&format!(
+                            "failed to copy uncommitted changes from {} into {}: {err}",
+                            copy.source.display(),
+                            session.worktree_path
+                        ));
+                        if owns_worktree {
+                            let _ = git::remove_worktree(
+                                &repo_path,
+                                Path::new(&session.worktree_path),
+                                &session.branch_name,
+                            );
+                        }
+                        let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                            status_op_id: create_key.clone(),
+                            message: format!(
+                                "Failed to copy uncommitted changes from {}: {err}",
+                                copy.source_desc
+                            ),
+                        });
+                        return;
+                    }
+                }
+            }
+            _ => match copy.on_head_mismatch {
+                HeadMismatch::SkipWithNote { branch } => {
+                    creation_notes.push(format!(
+                        "Uncommitted changes were not copied: the project checkout is not on \"{branch}\"'s commit."
+                    ));
+                }
+                HeadMismatch::Fail => {
+                    logger::error(&format!(
+                        "uncommitted-changes copy aborted: {} is no longer on the commit {} was created from",
+                        copy.source.display(),
+                        session.worktree_path
+                    ));
+                    if owns_worktree {
+                        let _ = git::remove_worktree(
+                            &repo_path,
+                            Path::new(&session.worktree_path),
+                            &session.branch_name,
+                        );
+                    }
+                    let _ = worker_tx.send(WorkerEvent::CreateAgentFailed {
+                        status_op_id: create_key.clone(),
+                        message: format!(
+                            "Failed to copy uncommitted changes from {}: the source moved to a different commit during creation.",
+                            copy.source_desc
+                        ),
+                    });
+                    return;
+                }
+            },
+        }
+    }
+    // Notes ride the keyed create-op final so they surface as the visible
+    // status/toast, never log-only.
+    let status_message = if creation_notes.is_empty() {
+        status_message
+    } else {
+        format!("{status_message} {}", creation_notes.join(" "))
+    };
     let env = match crate::config::resolve_agent_env(&config.env, &project.env) {
         Ok(env) => env,
         Err(err) => {
@@ -819,11 +950,21 @@ mod tests {
         }
     }
 
-    /// Drive `run_create_agent_job` for an arbitrary request against `repo` and
-    /// return the `AgentSession` the job constructed (extracted from the terminal
-    /// `AgentLaunchReady` event). Panics with the failure message if the job
-    /// emits `CreateAgentFailed` instead.
-    fn drive_create_job(repo: &Path, request: CreateAgentRequest) -> AgentSession {
+    /// Everything a create job emitted, for asserting on success, failure,
+    /// the final status message, and the progress trail alike.
+    struct JobRun {
+        session: Option<AgentSession>,
+        status_message: Option<String>,
+        failure: Option<String>,
+        progress: Vec<String>,
+        /// Keeps the temporary worktrees root alive so tests can inspect the
+        /// created worktree's contents.
+        _paths_root: tempfile::TempDir,
+    }
+
+    /// Drive `run_create_agent_job` for an arbitrary request against `repo`
+    /// and collect every event the job emitted.
+    fn drive_create_job_run(repo: &Path, request: CreateAgentRequest) -> JobRun {
         let paths_root = tempfile::tempdir().unwrap();
         let paths = DuxPaths {
             root: paths_root.path().to_path_buf(),
@@ -845,15 +986,43 @@ mod tests {
             "op-1".to_string(),
             crate::term_identity::TerminalIdentity::default(),
         );
-        let mut session = None;
+        let mut run = JobRun {
+            session: None,
+            status_message: None,
+            failure: None,
+            progress: Vec::new(),
+            _paths_root: paths_root,
+        };
         while let Ok(event) = rx.try_recv() {
-            if let WorkerEvent::AgentLaunchReady(data) = event {
-                session = Some(data.request.session.clone());
-            } else if let WorkerEvent::CreateAgentFailed { message, .. } = event {
-                panic!("create job failed: {message}");
+            match event {
+                WorkerEvent::AgentLaunchReady(data) => {
+                    run.session = Some(data.request.session.clone());
+                    if let AgentLaunchKind::Create { status_message, .. } = &data.request.kind {
+                        run.status_message = Some(status_message.clone());
+                    }
+                }
+                WorkerEvent::CreateAgentFailed { message, .. } => {
+                    run.failure = Some(message);
+                }
+                WorkerEvent::CreateAgentProgress { message, .. } => {
+                    run.progress.push(message);
+                }
+                _ => {}
             }
         }
-        session.expect("the job should emit an AgentLaunchReady with the session")
+        run
+    }
+
+    /// Drive `run_create_agent_job` and return the `AgentSession` it
+    /// constructed. Panics with the failure message if the job emits
+    /// `CreateAgentFailed` instead.
+    fn drive_create_job(repo: &Path, request: CreateAgentRequest) -> AgentSession {
+        let run = drive_create_job_run(repo, request);
+        if let Some(message) = run.failure {
+            panic!("create job failed: {message}");
+        }
+        run.session
+            .expect("the job should emit an AgentLaunchReady with the session")
     }
 
     /// Drive `run_create_agent_job` for a `NewProject` request and return the
@@ -866,6 +1035,7 @@ mod tests {
             custom_name,
             use_existing_branch: false,
             pull_before_create: false,
+            copy_uncommitted_changes: false,
         };
         drive_create_job(repo.path(), request)
     }
@@ -882,7 +1052,7 @@ mod tests {
     }
 
     /// A minimal `AgentSession` rooted at `worktree` (a real git worktree so
-    /// `head_commit`/`mirror_worktree_contents` succeed), for the fork arms.
+    /// `head_commit`/`copy_uncommitted_changes` succeed), for the fork arms.
     fn fork_source_session(worktree: &Path) -> AgentSession {
         AgentSession {
             id: "src-1".to_string(),
@@ -997,5 +1167,352 @@ mod tests {
         assert_eq!(session.title, None);
         assert_eq!(session.initial_branch, session.branch_name);
         assert!(!session.branch_name.is_empty());
+    }
+
+    // ── uncommitted-changes copy and best-effort pull ────────────
+
+    fn git_in(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed in {}: {}",
+            args,
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn new_project_request(
+        repo: &Path,
+        pull_before_create: bool,
+        copy_uncommitted_changes: bool,
+    ) -> CreateAgentRequest {
+        CreateAgentRequest::NewProject {
+            project: test_project(repo),
+            custom_name: Some("copy-target".to_string()),
+            use_existing_branch: false,
+            pull_before_create,
+            copy_uncommitted_changes,
+        }
+    }
+
+    /// Happy path: the checkout's dirt travels; gitignored files do not.
+    #[test]
+    fn fresh_agent_copies_uncommitted_changes_from_checkout() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+        std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+        std::fs::write(repo.path().join("junk.log"), "ignored\n").unwrap();
+
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, true));
+        assert!(run.failure.is_none(), "creation must succeed");
+        let worktree = PathBuf::from(&run.session.as_ref().unwrap().worktree_path);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert!(!worktree.join("junk.log").exists());
+    }
+
+    /// PROVEN DEFECT: with the checkout on a different commit than the new
+    /// worktree, applying the status delta would delete files the worktree
+    /// legitimately has. The HEAD guard must skip the copy with a note.
+    #[test]
+    fn fresh_agent_skips_copy_when_checkout_head_differs() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("keep.txt"), "on main\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+        // Park the checkout on `feature` at a DIFFERENT commit, with an
+        // uncommitted `rm` of a file that exists on `main`.
+        git_in(repo.path(), &["switch", "-c", "feature"]);
+        std::fs::write(repo.path().join("feature-only.txt"), "feature\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "feature commit"]);
+        std::fs::remove_file(repo.path().join("keep.txt")).unwrap();
+
+        let mut project = test_project(repo.path());
+        project.current_branch = "feature".to_string();
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("copy-target".to_string()),
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: true,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(run.failure.is_none(), "creation must succeed");
+        let session = run.session.unwrap();
+        let worktree = PathBuf::from(&session.worktree_path);
+        assert!(
+            worktree.join("keep.txt").exists(),
+            "the uncommitted rm must NOT be applied across different commits"
+        );
+        let status = run.status_message.unwrap();
+        assert!(
+            status.contains("were not copied"),
+            "the skip must be visible in the status message, got: {status}"
+        );
+    }
+
+    /// Ticking "copy my uncommitted changes" must not move the user's branch:
+    /// with the pull off there is no switch at all.
+    #[test]
+    fn copy_only_creation_does_not_switch_the_shared_checkout() {
+        let repo = init_test_repo();
+        git_in(repo.path(), &["switch", "-c", "feature"]);
+        assert_eq!(
+            git_stdout(repo.path(), &["symbolic-ref", "--short", "HEAD"]),
+            "feature"
+        );
+
+        let mut project = test_project(repo.path());
+        project.current_branch = "feature".to_string();
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("copy-target".to_string()),
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: true,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(run.failure.is_none(), "creation must succeed");
+        assert_eq!(
+            git_stdout(repo.path(), &["symbolic-ref", "--short", "HEAD"]),
+            "feature",
+            "a copy-only creation must not switch the shared checkout"
+        );
+    }
+
+    #[test]
+    fn fresh_agent_with_copy_disabled_copies_nothing() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), false, false));
+        assert!(run.failure.is_none(), "creation must succeed");
+        let worktree = PathBuf::from(&run.session.as_ref().unwrap().worktree_path);
+        assert!(!worktree.join("note.txt").exists());
+    }
+
+    /// Kills the old hard abort: a failed pull is a warning note, not a
+    /// creation failure.
+    #[test]
+    fn fresh_agent_creation_survives_pull_failure() {
+        let repo = init_test_repo();
+        git_in(
+            repo.path(),
+            &["remote", "add", "origin", "/nonexistent/dux-test-origin"],
+        );
+
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, false));
+        assert!(run.failure.is_none(), "creation must survive a failed pull");
+        let status = run.status_message.unwrap();
+        assert!(
+            status.contains("could not pull"),
+            "the pull failure must be visible in the status message, got: {status}"
+        );
+    }
+
+    /// Kills the blanket dirty abort: a dirty checkout no longer blocks the
+    /// pull, and git itself fast-forwards when nothing conflicts.
+    #[test]
+    fn fresh_agent_creation_survives_dirty_checkout_and_still_pulls() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "base"]);
+
+        // A bare origin one commit ahead on an unrelated file.
+        let bare = tempfile::tempdir().unwrap();
+        git_in(bare.path(), &["init", "--bare", "-b", "main"]);
+        git_in(
+            repo.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        git_in(repo.path(), &["push", "origin", "main"]);
+        let staging = tempfile::tempdir().unwrap();
+        git_in(
+            staging.path(),
+            &["clone", bare.path().to_str().unwrap(), "."],
+        );
+        git_in(staging.path(), &["config", "user.name", "test"]);
+        git_in(staging.path(), &["config", "user.email", "t@t"]);
+        std::fs::write(staging.path().join("upstream.txt"), "ahead\n").unwrap();
+        git_in(staging.path(), &["add", "-A"]);
+        git_in(staging.path(), &["commit", "-m", "upstream"]);
+        git_in(staging.path(), &["push", "origin", "main"]);
+
+        // A tracked local edit that would have tripped the old dirty gate.
+        std::fs::write(repo.path().join("tracked.txt"), "dirty\n").unwrap();
+
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, true));
+        assert!(
+            run.failure.is_none(),
+            "a dirty checkout must not block creation: {:?}",
+            run.failure
+        );
+        let session = run.session.unwrap();
+        let worktree = PathBuf::from(&session.worktree_path);
+        assert!(
+            worktree.join("upstream.txt").exists(),
+            "the pull must have fast-forwarded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("tracked.txt")).unwrap(),
+            "dirty\n",
+            "the local edit still travels"
+        );
+    }
+
+    /// The local-only flagship case: no origin means a log-only pull skip
+    /// (no warning), and the copy still runs.
+    #[test]
+    fn fresh_agent_skips_pull_without_origin_and_still_copies() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+
+        let run = drive_create_job_run(repo.path(), new_project_request(repo.path(), true, true));
+        assert!(run.failure.is_none());
+        let session = run.session.unwrap();
+        let worktree = PathBuf::from(&session.worktree_path);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
+            "untracked\n"
+        );
+        let status = run.status_message.unwrap();
+        assert!(
+            !status.contains("Warning"),
+            "a missing origin is steady state, not a warning: {status}"
+        );
+    }
+
+    /// No per-path exceptions: attaching to an existing branch copies when
+    /// the checkout and the branch are on the same commit, and skips with a
+    /// note when they are not.
+    #[test]
+    fn attach_existing_branch_copies_when_heads_match_and_skips_when_not() {
+        // Same tip: the dirt travels.
+        let repo = init_test_repo();
+        create_branch(repo.path(), "same-tip");
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+        let request = CreateAgentRequest::NewProject {
+            project: test_project(repo.path()),
+            custom_name: Some("same-tip".to_string()),
+            use_existing_branch: true,
+            pull_before_create: false,
+            copy_uncommitted_changes: true,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(run.failure.is_none());
+        let worktree = PathBuf::from(&run.session.unwrap().worktree_path);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
+            "untracked\n"
+        );
+
+        // Different tip: skipped with a visible note.
+        let repo = init_test_repo();
+        create_branch(repo.path(), "other-tip");
+        git_in(repo.path(), &["commit", "--allow-empty", "-m", "advance"]);
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+        let request = CreateAgentRequest::NewProject {
+            project: test_project(repo.path()),
+            custom_name: Some("other-tip".to_string()),
+            use_existing_branch: true,
+            pull_before_create: false,
+            copy_uncommitted_changes: true,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(run.failure.is_none());
+        let worktree = PathBuf::from(&run.session.unwrap().worktree_path);
+        assert!(!worktree.join("note.txt").exists());
+        let status = run.status_message.unwrap();
+        assert!(
+            status.contains("were not copied"),
+            "the skip must be visible: {status}"
+        );
+    }
+
+    /// The fork rule change: gitignored files no longer travel on forks.
+    #[test]
+    fn fork_copy_excludes_gitignored_files() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join(".gitignore"), "*.log\n").unwrap();
+        git_in(repo.path(), &["add", "-A"]);
+        git_in(repo.path(), &["commit", "-m", "gitignore"]);
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+        std::fs::write(repo.path().join("junk.log"), "ignored\n").unwrap();
+
+        let source = fork_source_session(repo.path());
+        let request = CreateAgentRequest::ForkSession {
+            project: test_project(repo.path()),
+            source_session: Box::new(source),
+            source_label: "src agent".to_string(),
+            custom_name: Some("forked-agent".to_string()),
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(
+            run.failure.is_none(),
+            "the fork must succeed: {:?}",
+            run.failure
+        );
+        let worktree = PathBuf::from(&run.session.as_ref().unwrap().worktree_path);
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("note.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert!(!worktree.join("junk.log").exists());
+    }
+
+    /// Ordering: the copy runs AFTER the provider availability check, so an
+    /// unavailable provider fails before any copy progress is reported.
+    #[test]
+    fn provider_failure_after_worktree_creation_does_not_report_copied_then_discard() {
+        let repo = init_test_repo();
+        std::fs::write(repo.path().join("note.txt"), "untracked\n").unwrap();
+        let mut project = test_project(repo.path());
+        project.default_provider = ProviderKind::new("definitely-not-a-real-command-dux");
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("copy-target".to_string()),
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: true,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+        assert!(
+            run.failure.is_some(),
+            "the unavailable provider must fail the job"
+        );
+        assert!(
+            !run.progress
+                .iter()
+                .any(|message| message.contains("Copying uncommitted")),
+            "no copy progress may be reported before the provider check: {:?}",
+            run.progress
+        );
     }
 }

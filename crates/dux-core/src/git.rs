@@ -748,21 +748,6 @@ pub fn head_commit(repo_path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn mirror_worktree_contents(source: &Path, destination: &Path) -> Result<()> {
-    let source = source
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", source.display()))?;
-    let destination = destination
-        .canonicalize()
-        .with_context(|| format!("failed to resolve {}", destination.display()))?;
-    if source == destination {
-        return Err(anyhow!(
-            "source and destination worktrees must be different"
-        ));
-    }
-    sync_directory_contents(&source, &destination)
-}
-
 #[derive(Debug, Default)]
 pub struct UncommittedCopySummary {
     pub copied: usize,
@@ -1962,32 +1947,6 @@ fn is_github_host(host: &str) -> bool {
     host == "github.com" || host.starts_with("github.")
 }
 
-fn sync_directory_contents(source: &Path, destination: &Path) -> Result<()> {
-    let mut source_entries = Vec::new();
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if is_git_admin_entry(&name) {
-            continue;
-        }
-        source_entries.push(name);
-        sync_entry(&entry.path(), &destination.join(entry.file_name()))?;
-    }
-
-    for entry in fs::read_dir(destination)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if is_git_admin_entry(&name) {
-            continue;
-        }
-        if !source_entries.iter().any(|candidate| candidate == &name) {
-            remove_path(&entry.path())?;
-        }
-    }
-
-    Ok(())
-}
-
 fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     let file_type = metadata.file_type();
@@ -1999,31 +1958,12 @@ fn sync_entry(source: &Path, destination: &Path) -> Result<()> {
     let source_mode = metadata.permissions().mode();
 
     if file_type.is_dir() {
-        // If something already lives at the destination but isn't a directory
-        // (or is a symlink — which `Path::exists()` follows and would lie
-        // about), tear it down first so we don't sync into the wrong target.
-        if let Ok(destination_meta) = fs::symlink_metadata(destination) {
-            let dest_type = destination_meta.file_type();
-            if !dest_type.is_dir() || dest_type.is_symlink() {
-                remove_path(destination)?;
-            }
-        }
-
-        // Create with the source's mode in a single syscall instead of
-        // creating with the umask default and fixing it up afterwards. The
-        // post-creation `set_permissions` race is exactly the "delayed
-        // permission" pitfall: between `mkdir` and `chmod`, the directory
-        // briefly exists with whatever the user's umask permitted.
-        match fs::DirBuilder::new().mode(source_mode).create(destination) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                // Pre-existing directory — align mode with source explicitly.
-                fs::set_permissions(destination, metadata.permissions())?;
-            }
-            Err(err) => return Err(err.into()),
-        }
-        sync_directory_contents(source, destination)?;
-        return Ok(());
+        // The status-driven copy expands directories into per-file records
+        // before syncing, so a directory reaching this point is a caller bug.
+        return Err(anyhow!(
+            "sync_entry called on a directory: {}",
+            source.display()
+        ));
     }
 
     // Regular file: copy contents through an explicitly-moded handle so the
@@ -2082,10 +2022,6 @@ fn remove_path(path: &Path) -> Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
-}
-
-fn is_git_admin_entry(name: &std::ffi::OsStr) -> bool {
-    name == ".git"
 }
 
 #[cfg(test)]
@@ -2586,87 +2522,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(forked.join("fork.txt")).unwrap(),
             "from source branch\n"
-        );
-    }
-
-    #[test]
-    fn mirror_worktree_contents_copies_visible_tree_and_preserves_git_admin_state() {
-        let repo = init_test_repo();
-        fs::write(repo.path().join("tracked.txt"), "original tracked\n").unwrap();
-        fs::write(repo.path().join("delete-me.txt"), "delete me\n").unwrap();
-        commit_all(repo.path(), "tracked files");
-
-        let source = add_worktree(repo.path(), "mirror-source");
-        let destination = add_worktree(repo.path(), "mirror-destination");
-
-        fs::write(source.join("tracked.txt"), "modified tracked\n").unwrap();
-        fs::remove_file(source.join("delete-me.txt")).unwrap();
-        fs::write(source.join(".env"), "TOKEN=abc\n").unwrap();
-        fs::create_dir_all(source.join("scratch").join("nested")).unwrap();
-        fs::write(
-            source.join("scratch").join("nested").join("note.txt"),
-            "untracked\n",
-        )
-        .unwrap();
-
-        let destination_git_before = fs::read_to_string(destination.join(".git")).unwrap();
-        mirror_worktree_contents(&source, &destination).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
-            "modified tracked\n"
-        );
-        assert!(!destination.join("delete-me.txt").exists());
-        assert_eq!(
-            fs::read_to_string(destination.join(".env")).unwrap(),
-            "TOKEN=abc\n"
-        );
-        assert_eq!(
-            fs::read_to_string(destination.join("scratch").join("nested").join("note.txt"))
-                .unwrap(),
-            "untracked\n"
-        );
-        assert_eq!(
-            fs::read_to_string(destination.join(".git")).unwrap(),
-            destination_git_before
-        );
-    }
-
-    #[test]
-    fn mirror_worktree_contents_propagates_source_file_modes() {
-        // Assert that file/dir modes match the source after mirroring. The
-        // previous implementation created with umask defaults and fixed up
-        // permissions afterwards, leaving a brief window where the entry was
-        // visible with the wrong mode. The current implementation creates
-        // with the mode in a single syscall (DirBuilderExt / OpenOptionsExt).
-        let repo = init_test_repo();
-
-        let source = add_worktree(repo.path(), "mode-source");
-        let destination = add_worktree(repo.path(), "mode-destination");
-
-        let secret = source.join("secret.txt");
-        fs::write(&secret, "shh\n").unwrap();
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
-
-        let private_dir = source.join("private");
-        fs::create_dir(&private_dir).unwrap();
-        fs::set_permissions(&private_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(private_dir.join("inner.txt"), "inside\n").unwrap();
-
-        mirror_worktree_contents(&source, &destination).unwrap();
-
-        let dest_secret = fs::metadata(destination.join("secret.txt")).unwrap();
-        assert_eq!(
-            dest_secret.permissions().mode() & 0o777,
-            0o600,
-            "file mode should match source after sync_entry"
-        );
-
-        let dest_dir = fs::metadata(destination.join("private")).unwrap();
-        assert_eq!(
-            dest_dir.permissions().mode() & 0o777,
-            0o700,
-            "directory mode should match source after sync_entry"
         );
     }
 

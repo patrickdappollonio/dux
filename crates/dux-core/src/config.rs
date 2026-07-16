@@ -110,6 +110,8 @@ pub struct Defaults {
     pub enable_randomized_pet_name_by_default: bool,
     #[serde(default = "default_true")]
     pub pull_before_creating_agent_by_default: bool,
+    #[serde(default = "default_true")]
+    pub copy_uncommitted_changes_by_default: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -623,6 +625,7 @@ impl Default for Defaults {
             start_directory,
             enable_randomized_pet_name_by_default: false,
             pull_before_creating_agent_by_default: true,
+            copy_uncommitted_changes_by_default: true,
         }
     }
 }

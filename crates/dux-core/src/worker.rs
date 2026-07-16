@@ -276,6 +276,7 @@ pub enum CreateAgentRequest {
         custom_name: Option<String>,
         use_existing_branch: bool,
         pull_before_create: bool,
+        copy_uncommitted_changes: bool,
     },
     PullRequest {
         project: Project,

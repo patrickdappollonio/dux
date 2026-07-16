@@ -201,6 +201,12 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         "pull_before_creating_agent_by_default",
         config.defaults.pull_before_creating_agent_by_default,
     );
+    patch_table_bool(
+        doc,
+        "defaults",
+        "copy_uncommitted_changes_by_default",
+        config.defaults.copy_uncommitted_changes_by_default,
+    );
     remove_table_key(doc, "defaults", "prompt_for_name");
 
     // --- [env] ---
