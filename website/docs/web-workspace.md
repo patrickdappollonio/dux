@@ -46,6 +46,31 @@ link to a teammate on the same instance and they land exactly where you are:
 The links survive a reload and keep your browser back button working sensibly,
 which matters most on the phone.
 
+## Adding projects
+
+The sidebar's **Add project** button opens a folder picker that browses the
+server's filesystem. Pick a git repository and it joins the workspace. But here
+is the trick worth knowing when you are on your phone with no terminal in
+reach: the folder does **not** have to be a repository yet.
+
+- Point it at a plain folder (via the pinned **Use this folder** row at the top
+  of the list) and dux offers to **initialize a repository** right there: it
+  runs `git init`, seeds a commented starter `.gitignore` for dependency and
+  build folders it actually finds (`node_modules`, `target`, and friends),
+  makes an empty initial commit, and adds the project. Your existing files are
+  left exactly as they were, untracked and untouched.
+- Need a fresh place to start? The picker's **New folder** button creates a
+  directory right from the browser, so a brand-new project can go from nothing
+  to "agent working in it" without ever opening a shell.
+- Pick a folder that lives *inside* an existing repository and dux politely
+  refuses, pointing you at the repository root instead, so you never end up
+  with a project nested in another project's history.
+
+The `⋯` half of the Add-project button holds both flavors ("Add project…" and
+"Initialize a repository…"); either way the picker inspects your selection and
+offers the right action. The TUI's project browser makes the same offer when
+you point it at a plain folder.
+
 ## The browser terminals
 
 Each agent runs its real CLI in a real PTY on the server, and the browser streams
