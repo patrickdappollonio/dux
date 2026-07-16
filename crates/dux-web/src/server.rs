@@ -438,6 +438,10 @@ pub fn build_app(
             "/ws/sessions/{id}/terminals/{tid}/pty",
             get(ws_terminal_pty_upgrade),
         )
+        .route(
+            "/ws/projects/{id}/terminals/{tid}/pty",
+            get(ws_project_terminal_pty_upgrade),
+        )
         .route("/ws/sessions/{id}/tabs/{tab}/pty", get(ws_tab_pty_upgrade))
         .merge(crate::git_routes::routes())
         .merge(crate::file_routes::routes())
@@ -1011,16 +1015,89 @@ async fn ws_terminal_pty_upgrade(
     if state.engine.session_worktree(id.clone()).await.is_none() {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     }
-    // Enforce that the terminal belongs to THIS session: an unknown terminal, or
-    // one owned by a different session, is a 404 (never a cross-session attach).
-    match state.engine.terminal_session(tid.clone()).await {
-        Some(owner) if owner == id => {}
+    // Enforce that the terminal belongs to THIS session: an unknown terminal,
+    // one owned by a different session, or a project terminal is a 404 (never a
+    // cross-owner attach).
+    match state.engine.terminal_owner_of(tid.clone()).await {
+        Some(dux_core::model::TerminalOwner::Session(owner)) if owner == id => {}
         _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
     }
     let permit = match acquire_ws_permit(
         &state.ws_terminal_semaphore,
         peer.ip(),
         "/ws/sessions/:id/terminals/:tid/pty",
+        "max_websocket_terminal_connections",
+    ) {
+        Some(permit) => permit,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many WebSocket connections; try again shortly",
+            )
+                .into_response();
+        }
+    };
+    let engine = state.engine.clone();
+    let console = state.console.clone();
+    let pty_size_owners = Arc::clone(&state.pty_size_owners);
+    let bus = Arc::clone(&state.event_bus);
+    let connections = Arc::clone(&state.connections);
+    let peer_ip = peer.ip();
+    let user_agent = captured_user_agent(&headers);
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| {
+            handle_pty_socket(
+                socket,
+                engine,
+                PtyTarget::Terminal(tid),
+                console,
+                peer_ip,
+                permit,
+                pty_size_owners,
+                bus,
+                connections,
+                user_agent,
+            )
+        })
+        .into_response()
+}
+
+/// Upgrade handler for `GET /ws/projects/:id/terminals/:tid/pty`: stream a
+/// project terminal's PTY. Mirrors `ws_terminal_pty_upgrade` with the project
+/// (not a session) as the path owner: same-origin check, id bounds, a
+/// project-exists check, then per-variant ownership. The PTY plumbing downstream
+/// of `PtyTarget::Terminal` is owner-blind, so the attach itself is identical.
+async fn ws_project_terminal_pty_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path((id, tid)): Path<(String, String)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !same_origin_allowed(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin WebSocket upgrade rejected",
+        )
+            .into_response();
+    }
+    if !crate::rest_common::id_within_bound(&id) || !crate::rest_common::id_within_bound(&tid) {
+        return (StatusCode::NOT_FOUND, "unknown terminal").into_response();
+    }
+    if state.engine.project_path(id.clone()).await.is_none() {
+        return (StatusCode::NOT_FOUND, "unknown project").into_response();
+    }
+    // Enforce that the terminal belongs to THIS project: an unknown terminal, a
+    // session-owned terminal, or one owned by a different project is a 404
+    // (never a cross-owner attach).
+    match state.engine.terminal_owner_of(tid.clone()).await {
+        Some(dux_core::model::TerminalOwner::Project(owner)) if owner == id => {}
+        _ => return (StatusCode::NOT_FOUND, "unknown terminal").into_response(),
+    }
+    let permit = match acquire_ws_permit(
+        &state.ws_terminal_semaphore,
+        peer.ip(),
+        "/ws/projects/:id/terminals/:tid/pty",
         "max_websocket_terminal_connections",
     ) {
         Some(permit) => permit,

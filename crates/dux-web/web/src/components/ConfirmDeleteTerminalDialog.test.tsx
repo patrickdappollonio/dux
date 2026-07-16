@@ -48,6 +48,19 @@ function seed(terminal: TerminalView) {
     deleteTerminalTarget: terminal.id,
     spine: {
       sessions: [{ id: "s1", terminals: [terminal] }],
+      projects: [{ id: "p1", terminals: [] }],
+    },
+  } as unknown as DuxState
+}
+
+// Seed a PROJECT-owned terminal: it lives on a project's terminal list, and no
+// session carries it.
+function seedProjectTerminal(terminal: TerminalView) {
+  mockState = {
+    deleteTerminalTarget: terminal.id,
+    spine: {
+      sessions: [{ id: "s1", terminals: [] }],
+      projects: [{ id: "p1", terminals: [terminal] }],
     },
   } as unknown as DuxState
 }
@@ -69,6 +82,25 @@ describe("ConfirmDeleteTerminalDialog", () => {
       screen.getByText(/is running in this terminal and will be killed/),
     ).toBeTruthy()
     expect(screen.getByText("vim")).toBeTruthy()
+  })
+
+  it("opens and STAYS open for a project-owned terminal", () => {
+    // The trap this guards (T2): a session-only owner scan resolved a project
+    // terminal to `undefined`, so the vanished-target guard closed the dialog
+    // the instant it opened and the user never even reached the delete.
+    seedProjectTerminal(term({ id: "pt-1", label: "Terminal 3" }))
+    render(<ConfirmDeleteTerminalDialog />)
+    expect(screen.getByText("Close Terminal 3?")).toBeTruthy()
+    expect(screen.getByText("Close terminal")).toBeTruthy()
+  })
+
+  it("warns about a project terminal's running app too", () => {
+    seedProjectTerminal(term({ id: "pt-1", foreground_cmd: "htop" }))
+    render(<ConfirmDeleteTerminalDialog />)
+    expect(
+      screen.getByText(/is running in this terminal and will be killed/),
+    ).toBeTruthy()
+    expect(screen.getByText("htop")).toBeTruthy()
   })
 
   it("shows no kill warning when only the shell is running", () => {

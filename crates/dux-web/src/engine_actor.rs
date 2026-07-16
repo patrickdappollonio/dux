@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use dux_core::engine::{
     Command, Engine, EventReaction, InFlightKey, ProjectPersistenceView, PrunedPtyKind,
 };
+use dux_core::model::TerminalOwner;
 use dux_core::pty::{PtyClient, PtyViewerGuard};
 use dux_core::statusline::{
     Generation, KeyedStatusController, KeyedWireStatus, StatusScope, StatusTone,
@@ -73,12 +74,16 @@ pub enum EngineRequest {
     SubscribeTerminal(String, oneshot::Sender<Result<PtySubscription, String>>),
     /// Create a companion terminal for a session, replying `(terminal_id, label)`.
     CreateTerminal(String, oneshot::Sender<Result<(String, String), String>>),
-    /// Resolve the owning session id of a companion terminal (instant lookup), or
-    /// `None` when the terminal id is unknown. Lets the nested PTY socket and the
-    /// terminal REST routes enforce that a `:tid` belongs to its path `:id` before
-    /// subscribing to or deleting it (the legacy `SubscribeTerminal`/`DeleteTerminal`
-    /// path looks terminals up by id alone and does not check session ownership).
-    TerminalSession(String, oneshot::Sender<Option<String>>),
+    /// Create a project terminal for a project (a plain shell at the project's
+    /// repo root with no agent attached), replying `(terminal_id, label)`.
+    CreateProjectTerminal(String, oneshot::Sender<Result<(String, String), String>>),
+    /// Resolve the owner of a companion terminal (instant lookup), or `None`
+    /// when the terminal id is unknown. Lets the nested PTY sockets and the
+    /// terminal REST routes enforce that a `:tid` belongs to its path owner
+    /// (session or project) before subscribing to or deleting it (the legacy
+    /// `SubscribeTerminal`/`DeleteTerminal` path looks terminals up by id alone
+    /// and does not check ownership).
+    TerminalOwnerOf(String, oneshot::Sender<Option<TerminalOwner>>),
     /// Create an extra tab for a session running the given provider (or the
     /// session's project default when `None`), replying `(tab_id, provider)`. The
     /// launch is fire-and-forget (async worker); the id returns synchronously so
@@ -96,6 +101,10 @@ pub enum EngineRequest {
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
+    /// Resolve a project's repo-root path (instant lookup). Lets the project
+    /// terminal routes and the project-nested PTY socket 404 an unknown project
+    /// before acting, mirroring how `SessionWorktree` gates the session routes.
+    ProjectPath(String, oneshot::Sender<Option<String>>),
     /// Snapshot the live process trees the resource monitor should sample: every
     /// live agent tab and companion terminal, each with its spine id and root
     /// pid. Instant map iteration only: the blocking sysinfo walk runs off both
@@ -611,6 +620,21 @@ impl EngineHandle {
         rx.await.map_err(|_| "engine reply dropped".to_string())?
     }
 
+    /// Create a project terminal (a plain shell at the project's repo root with
+    /// no agent attached), replying `(terminal_id, label)`. Mirrors
+    /// `create_terminal`.
+    pub async fn create_project_terminal(
+        &self,
+        project_id: String,
+    ) -> Result<(String, String), String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::CreateProjectTerminal(project_id, tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
     /// Create an extra tab for `session_id` (provider `None` → project default),
     /// replying `(tab_id, provider)`. Direct-return, mirroring `create_terminal`.
     pub async fn create_agent_tab(
@@ -642,15 +666,16 @@ impl EngineHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// The session id that owns companion terminal `terminal_id`, or `None` when the
-    /// terminal is unknown or the engine thread is gone. The nested terminal PTY
-    /// socket and the `DELETE .../terminals/:tid` route use this to enforce that the
-    /// terminal belongs to the path's session before acting on it.
-    pub async fn terminal_session(&self, terminal_id: String) -> Option<String> {
+    /// The owner (session or project) of companion terminal `terminal_id`, or
+    /// `None` when the terminal is unknown or the engine thread is gone. The
+    /// nested terminal PTY sockets and the `DELETE .../terminals/:tid` routes use
+    /// this to enforce that the terminal belongs to the path's owner before
+    /// acting on it.
+    pub async fn terminal_owner_of(&self, terminal_id: String) -> Option<TerminalOwner> {
         let (tx, rx) = oneshot::channel();
         if self
             .req_tx
-            .send(EngineRequest::TerminalSession(terminal_id, tx))
+            .send(EngineRequest::TerminalOwnerOf(terminal_id, tx))
             .await
             .is_err()
         {
@@ -675,6 +700,21 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::SessionWorktree(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// The repo-root path of project `project_id`, or `None` when the project is
+    /// unknown or the engine thread is gone.
+    pub async fn project_path(&self, project_id: String) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::ProjectPath(project_id, tx))
             .await
             .is_err()
         {
@@ -1339,6 +1379,7 @@ pub(crate) fn run_engine_loop(
                         req,
                         EngineRequest::ApplyWire(..)
                             | EngineRequest::CreateTerminal(..)
+                            | EngineRequest::CreateProjectTerminal(..)
                             | EngineRequest::CreateAgentTab(..)
                     );
                     handle_request(
@@ -1739,11 +1780,17 @@ fn handle_request(
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
         }
-        EngineRequest::TerminalSession(terminal_id, reply) => {
+        EngineRequest::CreateProjectTerminal(project_id, reply) => {
+            let res = engine
+                .create_project_terminal(&project_id)
+                .map_err(|e| e.to_string());
+            let _ = reply.send(res);
+        }
+        EngineRequest::TerminalOwnerOf(terminal_id, reply) => {
             let owner = engine
                 .companion_terminals
                 .get(&terminal_id)
-                .map(|t| t.session_id.clone());
+                .map(|t| t.owner.clone());
             let _ = reply.send(owner);
         }
         EngineRequest::CreateAgentTab(session_id, provider, reply) => {
@@ -1763,6 +1810,14 @@ fn handle_request(
                 .find(|s| s.id == session_id)
                 .map(|s| s.worktree_path.clone());
             let _ = reply.send(worktree);
+        }
+        EngineRequest::ProjectPath(project_id, reply) => {
+            let path = engine
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| p.path.clone());
+            let _ = reply.send(path);
         }
         EngineRequest::ResourceTargets(reply) => {
             let _ = reply.send(engine.resource_monitor_targets());

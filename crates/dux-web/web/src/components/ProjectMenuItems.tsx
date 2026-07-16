@@ -3,6 +3,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
 import {
+  createProjectTerminal,
   openAttachWorktree,
   openCheckoutDefaultBranch,
   openCreateAgent,
@@ -21,6 +22,7 @@ import {
   GitPullRequest,
   Info,
   Settings,
+  SquareTerminal,
   Trash2,
 } from "lucide-react"
 
@@ -40,7 +42,8 @@ import {
 export function ProjectMenuItems({ id }: { id: string }) {
   const { spine, bootstrap } = useDux()
   const ghAvailable = bootstrap?.gh_available ?? false
-  const orphaned = !spine?.projects.some((p) => p.id === id)
+  const project = spine?.projects.find((p) => p.id === id)
+  const orphaned = project === undefined
 
   return (
     <>
@@ -59,6 +62,17 @@ export function ProjectMenuItems({ id }: { id: string }) {
           <DropdownMenuItem onClick={() => openAttachWorktree(id)}>
             <FolderGit2 />
             New agent from existing worktree…
+          </DropdownMenuItem>
+          {/* A project terminal: a plain shell at the project's repo root with
+              no agent attached. Immediate action (no trailing "…"), mirroring
+              the agent menu's "New terminal"; disabled when the project's path
+              is missing on disk (there is no root to open a shell at). */}
+          <DropdownMenuItem
+            disabled={project.path_missing}
+            onClick={() => createProjectTerminal(id)}
+          >
+            <SquareTerminal />
+            New project terminal
           </DropdownMenuItem>
           <DropdownMenuItem onClick={() => pullProject(id)}>
             <Download />

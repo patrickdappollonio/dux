@@ -911,6 +911,10 @@ impl Engine {
                 project_id,
                 project_name,
             } => {
+                // A removed project takes its project terminals with it (graceful
+                // SIGTERM via the terminating set); otherwise they would be
+                // orphaned with no sidebar row and no owner to route through.
+                self.begin_close_project_terminals(project_id);
                 self.projects.retain(|p| p.id != *project_id);
                 ProjectPersistenceView::Removed {
                     project_name: project_name.clone(),
@@ -920,6 +924,7 @@ impl Engine {
                 project_id,
                 project_name,
             } => {
+                self.begin_close_project_terminals(project_id);
                 self.projects.retain(|p| p.id != *project_id);
                 ProjectPersistenceView::Deleted {
                     project_name: project_name.clone(),
@@ -1105,8 +1110,9 @@ impl Engine {
         // those; this cleans up the remaining pin/activity/input/in-flight entries.
         self.clear_session_tab_runtime(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
-        self.companion_terminals
-            .retain(|_, t| t.session_id != session.id);
+        self.companion_terminals.retain(
+            |_, t| !matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == session.id),
+        );
         self.agent_tabs.retain(|_, t| t.session_id != session.id);
         self.update_branch_sync_sessions();
 
@@ -1209,8 +1215,9 @@ impl Engine {
             for tab_id in self.tab_ids_for_session(session_id) {
                 self.providers.remove(&tab_id);
             }
-            self.companion_terminals
-                .retain(|_, t| t.session_id != session_id);
+            self.companion_terminals.retain(
+                |_, t| !matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if sid == session_id),
+            );
             let project = project
                 .as_ref()
                 .expect("should_remove_worktree implies a project");
@@ -2660,7 +2667,7 @@ mod tests {
             engine
                 .companion_terminals
                 .values()
-                .any(|t| t.session_id == "s1")
+                .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string()))
         );
 
         engine
@@ -2672,8 +2679,48 @@ mod tests {
             !engine
                 .companion_terminals
                 .values()
-                .any(|t| t.session_id == "s1"),
+                .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string())),
             "deleted session's companion terminals should be removed"
+        );
+    }
+
+    #[test]
+    fn finish_delete_session_leaves_project_terminals() {
+        let (mut engine, _tmp) = test_engine();
+
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        engine
+            .create_companion_terminal("s1")
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1")
+            .expect("project terminal");
+
+        engine
+            .finish_delete_session("s1")
+            .unwrap()
+            .expect("outcome");
+
+        assert!(
+            engine.companion_terminals.contains_key(&project_tid),
+            "deleting an agent must not delete the project's own terminals"
+        );
+        assert!(
+            !engine
+                .companion_terminals
+                .values()
+                .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string())),
+            "the session's own terminals are removed"
         );
     }
 
@@ -3872,6 +3919,97 @@ mod tests {
             outcome.view,
             ProjectPersistenceView::Removed { ref project_name } if project_name == "Pee One"
         ));
+    }
+
+    #[test]
+    fn process_project_persistence_completed_remove_closes_project_terminals() {
+        // The TUI's remove-project path lands here (not in Command::RemoveProject),
+        // so the orphan cascade must live in this arm too: deleting it would keep
+        // the rest of the suite green while re-introducing the unkillable
+        // orphaned project terminal.
+        let (mut engine, _tmp) = test_engine();
+        let repo1 = tempfile::tempdir().expect("p1 dir");
+        let repo2 = tempfile::tempdir().expect("p2 dir");
+        engine.projects.push(sample_project(
+            "p1",
+            repo1.path().to_string_lossy().as_ref(),
+        ));
+        engine.projects.push(sample_project(
+            "p2",
+            repo2.path().to_string_lossy().as_ref(),
+        ));
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (t1, _) = engine
+            .create_project_terminal("p1")
+            .expect("terminal on p1");
+        let (t2, _) = engine
+            .create_project_terminal("p2")
+            .expect("terminal on p2");
+
+        let action = ProjectPersistenceAction::Remove {
+            project_id: "p1".to_string(),
+            project_name: "Pee One".to_string(),
+        };
+        engine.process_project_persistence_completed(action, Ok(()), None);
+
+        assert!(
+            !engine.companion_terminals.contains_key(&t1),
+            "removing a project must close its project terminals"
+        );
+        assert!(
+            engine.terminating_ptys.iter().any(|t| t.id == t1),
+            "the closed terminal is reaped gracefully via the terminating set"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&t2),
+            "another project's terminal must be untouched"
+        );
+    }
+
+    #[test]
+    fn process_project_persistence_completed_delete_closes_project_terminals() {
+        // The TUI's delete-project path drives the ::Delete arm; same cascade,
+        // same orphan risk.
+        let (mut engine, _tmp) = test_engine();
+        let repo1 = tempfile::tempdir().expect("p1 dir");
+        let repo2 = tempfile::tempdir().expect("p2 dir");
+        engine.projects.push(sample_project(
+            "p1",
+            repo1.path().to_string_lossy().as_ref(),
+        ));
+        engine.projects.push(sample_project(
+            "p2",
+            repo2.path().to_string_lossy().as_ref(),
+        ));
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (t1, _) = engine
+            .create_project_terminal("p1")
+            .expect("terminal on p1");
+        let (t2, _) = engine
+            .create_project_terminal("p2")
+            .expect("terminal on p2");
+
+        let action = ProjectPersistenceAction::Delete {
+            project_id: "p1".to_string(),
+            project_name: "Pee One".to_string(),
+        };
+        engine.process_project_persistence_completed(action, Ok(()), None);
+
+        assert!(engine.projects.iter().all(|p| p.id != "p1"));
+        assert!(
+            !engine.companion_terminals.contains_key(&t1),
+            "deleting a project must close its project terminals"
+        );
+        assert!(
+            engine.terminating_ptys.iter().any(|t| t.id == t1),
+            "the closed terminal is reaped gracefully via the terminating set"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&t2),
+            "another project's terminal must be untouched"
+        );
     }
 
     #[test]

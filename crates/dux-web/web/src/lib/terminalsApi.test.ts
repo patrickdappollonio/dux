@@ -58,6 +58,25 @@ describe("terminalsApi", () => {
     expect(c.headers["x-connection-id"]).toBe("conn-7")
   })
 
+  it("createForProject POSTs the project-nested terminals endpoint", async () => {
+    const fetchMock = stubOkFetch(201, { terminal_id: "t1", label: "Terminal 1" })
+    const created = await terminalsApi.createForProject("p1")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/projects/p1/terminals")
+    expect(c.method).toBe("POST")
+    expect(c.headers["x-connection-id"]).toBe("conn-7")
+    expect(created).toEqual({ terminal_id: "t1", label: "Terminal 1" })
+  })
+
+  it("removeForProject DELETEs the project-nested terminal endpoint (encoding ids)", async () => {
+    const fetchMock = stubOkFetch(204, null)
+    await terminalsApi.removeForProject("p 1", "t/2")
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe("/api/v1/projects/p%201/terminals/t%2F2")
+    expect(c.method).toBe("DELETE")
+    expect(c.headers["x-connection-id"]).toBe("conn-7")
+  })
+
   it("omits the connection-id header until it is known", async () => {
     setConnectionId(null)
     const fetchMock = stubOkFetch(201, { terminal_id: "t1", label: "Terminal 1" })

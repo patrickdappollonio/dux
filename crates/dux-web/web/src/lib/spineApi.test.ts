@@ -38,6 +38,8 @@ describe("fetchSpine", () => {
     // `last_focused_tab: null`.
     expect(result).toEqual({
       ...body,
+      // A project that omits `terminals` (an older server) is coerced to `[]`.
+      projects: [{ id: "p1", terminals: [] }],
       sessions: [
         {
           id: "s1",

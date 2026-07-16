@@ -215,8 +215,24 @@ pub struct ChangedFile {
     pub binary: bool,
 }
 
+/// Who a companion terminal belongs to. A terminal is owned by exactly one
+/// owner: an agent session (spawned in that agent's worktree) or a project
+/// (a "project terminal", spawned at the project's repo root with no agent
+/// attached). Ownership never changes after spawn.
+///
+/// Deliberately no bare-id accessor: every consumer must `match` so the
+/// `Project` variant can never be silently ignored by code written for the
+/// session-owned shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalOwner {
+    /// Owned by an agent session; the payload is the session id.
+    Session(String),
+    /// Owned by a project; the payload is the project id.
+    Project(String),
+}
+
 pub struct CompanionTerminal {
-    pub session_id: String,
+    pub owner: TerminalOwner,
     pub label: String,
     pub foreground_cmd: Option<String>,
     pub client: PtyClient,

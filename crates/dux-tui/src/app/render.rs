@@ -652,9 +652,30 @@ impl App {
 
         // Collect terminal display info for rendering.
         // Show the foreground command if one is running, otherwise the session label.
-        let terminal_render_data: Vec<(String, Option<String>)> = terminal_items
+        // Each row carries an owner-derived display name (the agent's branch or
+        // the project's name) so a generic engine label like "Terminal 3" is
+        // never ambiguous between an agent terminal and a project terminal.
+        let terminal_render_data: Vec<(String, Option<String>, String)> = terminal_items
             .iter()
-            .map(|(_, t)| (t.label.clone(), t.foreground_cmd.clone()))
+            .map(|(_, t)| {
+                let owner_name = match &t.owner {
+                    TerminalOwner::Session(sid) => self
+                        .engine
+                        .sessions
+                        .iter()
+                        .find(|s| &s.id == sid)
+                        .map(|s| s.title.clone().unwrap_or_else(|| s.branch_name.clone()))
+                        .unwrap_or_else(|| sid.clone()),
+                    TerminalOwner::Project(pid) => self
+                        .engine
+                        .projects
+                        .iter()
+                        .find(|p| &p.id == pid)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| pid.clone()),
+                };
+                (t.label.clone(), t.foreground_cmd.clone(), owner_name)
+            })
             .collect();
 
         let session_counts: HashMap<String, usize> = {
@@ -902,7 +923,7 @@ impl App {
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
                 .enumerate()
-                .map(|(i, (label, fg_cmd))| {
+                .map(|(i, (label, fg_cmd, owner_name))| {
                     let color = self.theme.session_active;
                     let mut spans = vec![Span::styled("● ", Style::default().fg(color))];
                     if let Some(cmd) = fg_cmd {
@@ -913,7 +934,7 @@ impl App {
                         let duplicate = terminal_render_data
                             .iter()
                             .enumerate()
-                            .any(|(j, (_, other))| j != i && other.as_deref() == Some(cmd));
+                            .any(|(j, (_, other, _))| j != i && other.as_deref() == Some(cmd));
                         spans.push(Span::styled(cmd.clone(), Style::default().fg(color)));
                         let suffix = terminal_dup_suffix(label, duplicate);
                         if !suffix.is_empty() {
@@ -924,6 +945,15 @@ impl App {
                         }
                     } else {
                         spans.push(Span::styled(label.clone(), Style::default().fg(color)));
+                    }
+                    // The owner name (agent branch/title or project name)
+                    // disambiguates generic labels; skip it when the label
+                    // already names the owner (the TUI's own spawn labels).
+                    if !label.starts_with(owner_name.as_str()) {
+                        spans.push(Span::styled(
+                            format!(" · {owner_name}"),
+                            Style::default().fg(self.theme.provider_label_fg),
+                        ));
                     }
                     ListItem::new(Line::from(spans))
                 })
@@ -8912,7 +8942,7 @@ mod tests {
         app.engine.companion_terminals.insert(
             terminal_id.clone(),
             CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client,

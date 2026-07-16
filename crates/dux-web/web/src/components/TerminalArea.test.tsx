@@ -14,6 +14,19 @@ vi.mock("@/lib/store", async (importOriginal) => {
   return { ...actual, useDux: () => mockState, startDormantTab: startDormantTabMock }
 })
 
+// Replace the lazy terminal pane with a prop-recording stub: the T15 test
+// below must prove WHAT the area hands the pane (the owner ref), and mounting
+// the real TerminalPane would pull in xterm's canvas renderer, which jsdom
+// cannot back. The dormant-gating tests never resolve the lazy chunk, so they
+// are unaffected.
+const paneProps: unknown[] = []
+vi.mock("@/components/LazyTerminalPane", () => ({
+  LazyTerminalPane: (props: unknown) => {
+    paneProps.push(props)
+    return <div data-testid="terminal-pane-stub" />
+  },
+}))
+
 // A tracking WebSocket double: G-T4 exists to prove that a DORMANT tab never
 // opens a PTY socket (which would force-launch the provider) merely by being
 // focused/rendered — only the explicit "Start session" action may. Every
@@ -135,6 +148,7 @@ function dormantSpine(): DuxState["spine"] {
 beforeEach(() => {
   installBootStubs()
   startDormantTabMock.mockClear()
+  paneProps.length = 0
 })
 
 afterEach(() => {
@@ -180,5 +194,51 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
     })
     render(<TerminalArea />)
     expect(screen.queryByText("Start session")).toBeNull()
+  })
+})
+
+describe("TerminalArea project terminals (T15)", () => {
+  it("mounts the pane with the PROJECT owner and never the dormant agent card", async () => {
+    // The trap this guards (T15): with a required string `sessionId` on the
+    // terminal target, this area compiled unchanged and handed a bogus session
+    // id down, so the pane built the session-nested PTY URL and 404'd forever,
+    // silently. The pane must receive the owner ref itself.
+    mockState = makeState({
+      spine: {
+        projects: [
+          {
+            id: "p1",
+            name: "Repo",
+            terminals: [
+              {
+                id: "pt-1",
+                label: "Terminal 2",
+                has_output: true,
+                foreground_cmd: null,
+              },
+            ],
+          },
+        ],
+        sessions: [],
+        sidebar: { groups: [], agentless_start: null },
+      } as unknown as DuxState["spine"],
+      selectedSessionId: null,
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+    })
+    render(<TerminalArea />)
+
+    expect(await screen.findByTestId("terminal-pane-stub")).toBeTruthy()
+    // A project terminal is never an agent's dormant tab.
+    expect(screen.queryByText("Start session")).toBeNull()
+    expect(paneProps).toHaveLength(1)
+    expect(paneProps[0]).toMatchObject({
+      kind: "terminal",
+      id: "pt-1",
+      owner: { kind: "project", projectId: "p1" },
+    })
   })
 })

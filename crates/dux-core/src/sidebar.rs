@@ -41,12 +41,16 @@ pub fn short_project_id(id: &str) -> String {
 /// Build the sidebar grouping. Mirrors the historical TUI ordering: projects in
 /// their stored order, and — only when `empty_separator_min_projects > 0` and
 /// the project count meets it — the projects with no agents are sunk below a
-/// separator. Sessions whose project no longer exists are surfaced as `orphaned`
-/// groups appended after the agent-bearing projects, so neither surface silently
-/// drops them.
+/// separator. A project with a live project terminal counts as non-empty even
+/// with zero agents (`projects_with_terminals` carries the project ids that own
+/// at least one live project terminal), so a project the user is actively
+/// working in never sinks below the "no agents" separator. Sessions whose
+/// project no longer exists are surfaced as `orphaned` groups appended after
+/// the agent-bearing projects, so neither surface silently drops them.
 pub fn build_sidebar(
     projects: &[Project],
     sessions: &[AgentSession],
+    projects_with_terminals: &std::collections::HashSet<String>,
     empty_separator_min_projects: u16,
 ) -> SidebarModel {
     use std::collections::{HashMap, HashSet};
@@ -80,7 +84,10 @@ pub fn build_sidebar(
             path_missing: project.path_missing,
             session_ids,
         };
-        if split && group.session_ids.is_empty() {
+        if split
+            && group.session_ids.is_empty()
+            && !projects_with_terminals.contains(project.id.as_str())
+        {
             agentless.push(group);
         } else {
             groups.push(group);
@@ -130,7 +137,7 @@ mod tests {
         let projects = vec![sample_project("p1", "/a"), sample_project("p2", "/b")];
         let sessions = vec![sample_session("s1", "p1", "feat")];
         // Threshold disabled (0): no split, projects stay in stored order.
-        let model = build_sidebar(&projects, &sessions, 0);
+        let model = build_sidebar(&projects, &sessions, &Default::default(), 0);
         assert_eq!(model.agentless_start, None);
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
@@ -144,7 +151,7 @@ mod tests {
         let projects = vec![sample_project("p1", "/a"), sample_project("p2", "/b")];
         let sessions = vec![sample_session("s1", "p1", "feat")];
         // Threshold 2, two projects, one agent-less -> split.
-        let model = build_sidebar(&projects, &sessions, 2);
+        let model = build_sidebar(&projects, &sessions, &Default::default(), 2);
         assert_eq!(model.agentless_start, Some(1));
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
@@ -157,7 +164,7 @@ mod tests {
             sample_session("s1", "p1", "feat"),
             sample_session("s2", "p2", "feat"),
         ];
-        let model = build_sidebar(&projects, &sessions, 2);
+        let model = build_sidebar(&projects, &sessions, &Default::default(), 2);
         assert_eq!(model.agentless_start, None);
     }
 
@@ -169,7 +176,7 @@ mod tests {
             sample_session("s2", "3fc34174-4561-4ac6-98fb-5f1434c101c2", "feat"),
             sample_session("s3", "3fc34174-4561-4ac6-98fb-5f1434c101c2", "feat"),
         ];
-        let model = build_sidebar(&projects, &sessions, 0);
+        let model = build_sidebar(&projects, &sessions, &Default::default(), 0);
         assert_eq!(model.groups.len(), 2);
         let orphan = &model.groups[1];
         assert!(orphan.orphaned);
@@ -185,10 +192,27 @@ mod tests {
             sample_session("s2", "ghost-id", "feat"),
         ];
         // Split (threshold 2): p1 has agents, p2 has none, plus an orphan group.
-        let model = build_sidebar(&projects, &sessions, 2);
+        let model = build_sidebar(&projects, &sessions, &Default::default(), 2);
         let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
         // Agent-bearing project, then orphan, then the separator, then p2.
         assert_eq!(ids, vec!["p1", "ghost-id", "p2"]);
         assert_eq!(model.agentless_start, Some(2));
+    }
+
+    #[test]
+    fn sidebar_project_with_terminal_and_no_agents_stays_above_separator() {
+        let projects = vec![sample_project("p1", "/a"), sample_project("p2", "/b")];
+        let sessions = vec![sample_session("s1", "p1", "feat")];
+        // p2 has no agents but owns a live project terminal: it must NOT sink
+        // below the "no agents" separator.
+        let with_terminals: std::collections::HashSet<String> =
+            std::iter::once("p2".to_string()).collect();
+        let model = build_sidebar(&projects, &sessions, &with_terminals, 2);
+        assert_eq!(
+            model.agentless_start, None,
+            "a project with a live project terminal is not agent-less"
+        );
+        let ids: Vec<&str> = model.groups.iter().map(|g| g.project_id.as_str()).collect();
+        assert_eq!(ids, vec!["p1", "p2"]);
     }
 }

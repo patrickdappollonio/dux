@@ -54,15 +54,26 @@ import type {
   StartupLogEntry,
 } from "./types"
 
-// The currently-streamed target: either an agent session or one of its
-// companion terminals. Both carry a `sessionId` so session-scoped UI (the
-// breadcrumb, changed files) keeps working regardless of which is focused.
+// Who a companion terminal belongs to: an agent session (spawned in that
+// agent's worktree) or a project (a "project terminal", spawned at the
+// project's repo root with no agent attached). Mirrors the Rust
+// `TerminalOwner`. Every consumer must branch on `kind`; there is
+// deliberately no bare-id accessor, so the project variant can never be
+// silently ignored by session-shaped code.
+export type TerminalOwnerRef =
+  | { kind: "session"; sessionId: string }
+  | { kind: "project"; projectId: string }
+
+// The currently-streamed target: either an agent session or a companion
+// terminal. An agent target carries a `sessionId` for session-scoped UI (the
+// breadcrumb, changed files); a terminal target carries its OWNER, which is a
+// session or a project, and a project terminal has no session context at all.
 export type SelectedTarget =
   // An agent tab. `tabId === sessionId` for the session-slot tab; an extra tab carries
   // its own id. The streamed PTY and all per-tab UI resolve from `tabId`, while
   // session-scoped UI keeps using `sessionId`.
   | { kind: "agent"; sessionId: string; tabId: string }
-  | { kind: "terminal"; terminalId: string; sessionId: string }
+  | { kind: "terminal"; terminalId: string; owner: TerminalOwnerRef }
 
 // The mobile hub-&-spoke shell shows one screen at a time: the project/session
 // hub ("home"), the focused terminal, or the changed-files view. Desktop never
@@ -984,8 +995,8 @@ function reconcilePendingProjectOrder(
 function pruneSelectionIfGone(spine: Spine): void {
   const target = state.selectedTarget
   if (!target) return
-  const session = spine.sessions.find((s) => s.id === target.sessionId)
   if (target.kind === "agent") {
+    const session = spine.sessions.find((s) => s.id === target.sessionId)
     // The session must still exist; if an extra tab is focused, it must still be
     // in that session's tab list (an extra tab can be closed by ANOTHER client,
     // whose local retarget-to-session-slot never ran here — this is the shared-workspace
@@ -1001,10 +1012,19 @@ function pruneSelectionIfGone(spine: Spine): void {
     }
     return
   }
-  // A terminal: it must still exist UNDER its owning session (scope by
-  // `sessionId`, not a cross-session `.some`).
+  // A terminal: it must still exist UNDER its owner. Branch on the owner kind:
+  // a project terminal is scoped to `spine.projects`, never to a session (the
+  // old `?? false` here made every project terminal look vanished and ejected
+  // the user to home on every spine apply).
+  const owner = target.owner
   const stillExists =
-    session?.terminals.some((t) => t.id === target.terminalId) ?? false
+    owner.kind === "session"
+      ? (spine.sessions
+          .find((s) => s.id === owner.sessionId)
+          ?.terminals.some((t) => t.id === target.terminalId) ?? false)
+      : (spine.projects
+          .find((p) => p.id === owner.projectId)
+          ?.terminals.some((t) => t.id === target.terminalId) ?? false)
   if (!stillExists) {
     // `selectSession(null)` clears the target and, on mobile, unwinds the spoke
     // so the back stack matches the screen (see `unwindMobileSpoke`). This is
@@ -1245,6 +1265,24 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
   // extra tab (`#/agent/<sid>/tab/<tabId>`), or a companion terminal
   // (`#/agent/<sid>/terminal/<tid>`). The literal `tab`/`terminal` keyword
   // disambiguates, so a tab/terminal literally named "tab" can't be confused.
+  // A project terminal deep-links as `#/project/<pid>/terminal/<tid>`, its own
+  // grammar, because the agent shapes embed a session id and a project terminal
+  // has none.
+  const pm = hash.match(/^#\/project\/([^/]+)\/terminal\/([^/]+)$/)
+  if (pm) {
+    try {
+      const projectId = decodeURIComponent(pm[1])
+      const terminalId = decodeURIComponent(pm[2])
+      if (!projectId || !terminalId) return null
+      return {
+        kind: "terminal",
+        terminalId,
+        owner: { kind: "project", projectId },
+      }
+    } catch {
+      return null
+    }
+  }
   const m = hash.match(/^#\/agent\/([^/]+)(?:\/(tab|terminal)\/([^/]+))?$/)
   if (!m) return null
   // `decodeURIComponent` throws a URIError on malformed percent-encoding (e.g.
@@ -1256,7 +1294,11 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
     if (m[2] === "terminal") {
       const terminalId = decodeURIComponent(m[3])
       if (!terminalId) return null
-      return { kind: "terminal", terminalId, sessionId }
+      return {
+        kind: "terminal",
+        terminalId,
+        owner: { kind: "session", sessionId },
+      }
     }
     if (m[2] === "tab") {
       const tabId = decodeURIComponent(m[3])
@@ -1278,10 +1320,14 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
 // stays the bare `#/agent/<sid>` so existing bookmarks remain valid.
 function selectionHash(target: SelectedTarget | null): string {
   if (!target) return ""
-  const base = `#/agent/${encodeURIComponent(target.sessionId)}`
   if (target.kind === "terminal") {
-    return `${base}/terminal/${encodeURIComponent(target.terminalId)}`
+    const owner = target.owner
+    if (owner.kind === "project") {
+      return `#/project/${encodeURIComponent(owner.projectId)}/terminal/${encodeURIComponent(target.terminalId)}`
+    }
+    return `#/agent/${encodeURIComponent(owner.sessionId)}/terminal/${encodeURIComponent(target.terminalId)}`
   }
+  const base = `#/agent/${encodeURIComponent(target.sessionId)}`
   return target.tabId === target.sessionId
     ? base
     : `${base}/tab/${encodeURIComponent(target.tabId)}`
@@ -1324,12 +1370,16 @@ function applyDeepLinkSelection(
   target: SelectedTarget,
 ): void {
   if (target.kind === "terminal") {
+    // Only session-owned terminals resolve through a session; project-terminal
+    // links restore via `applyProjectTerminalDeepLink` and never reach here.
+    if (target.owner.kind !== "session") return
+    const owner = target.owner
     if (session.terminals.some((t) => t.id === target.terminalId)) {
-      selectTerminal(target.terminalId, target.sessionId)
+      selectTerminal(target.terminalId, owner)
       return
     }
     // Terminal id gone — fall back to the owning agent.
-    selectSession(target.sessionId)
+    selectSession(owner.sessionId)
     return
   }
   if (
@@ -1353,9 +1403,36 @@ function restoreDeepLink(spine: Spine): void {
   const link = pendingDeepLink
   if (!link) return
   pendingDeepLink = null // one-shot, whatever the outcome
+  if (link.kind === "terminal") {
+    const owner = link.owner
+    if (owner.kind === "project") {
+      // A project-terminal link: restore it when it still exists; a vanished
+      // terminal falls back to nothing selected (there is no agent to land on).
+      applyProjectTerminalDeepLink(spine, link.terminalId, owner.projectId)
+      return
+    }
+    const session = spine.sessions.find((s) => s.id === owner.sessionId)
+    if (!session) return // session id gone, ignore the link
+    applyDeepLinkSelection(session, link)
+    return
+  }
   const session = spine.sessions.find((s) => s.id === link.sessionId)
   if (!session) return // session id gone — ignore the link
   applyDeepLinkSelection(session, link)
+}
+
+// Restore a project-terminal deep link against a spine: select the terminal
+// when its project still carries it, otherwise leave nothing selected.
+function applyProjectTerminalDeepLink(
+  spine: Spine,
+  terminalId: string,
+  projectId: string,
+): void {
+  const project = spine.projects.find((p) => p.id === projectId)
+  if (!project) return
+  if (project.terminals.some((t) => t.id === terminalId)) {
+    selectTerminal(terminalId, { kind: "project", projectId })
+  }
 }
 
 // Deep-link intent re-armed on an events-socket RECONNECT — distinct from the
@@ -1429,9 +1506,62 @@ function restoreReconnectDeepLink(spine: Spine): void {
   const armed = reconnectDeepLink
   if (!armed) return
   const sel = state.selectedSessionId
+  const armedTarget = armed.target
+  if (armedTarget.kind === "terminal" && armedTarget.owner.kind === "project") {
+    // A project terminal has no resume phase and its pane never issues the
+    // reconnect eject (that path is gated on the agent session-slot tab), so
+    // its selection normally survives a reconnect on its own, so this branch's
+    // usual job is to disarm as a no-op. The one restorable gap is a
+    // selection cleared by OUR OWN eject while the intent was armed; any
+    // deliberate navigation (a non-null selection that is not the armed
+    // terminal, or a home nav without the eject flag) disarms instead.
+    const target = armedTarget
+    const owner = armedTarget.owner
+    const cur = state.selectedTarget
+    if (
+      cur?.kind === "terminal" &&
+      cur.terminalId === target.terminalId
+    ) {
+      // Still on the armed terminal: the route survived, nothing to undo.
+      reconnectDeepLink = null
+      return
+    }
+    if (sel !== null || cur !== null) {
+      // The user moved somewhere else on their own; respect it.
+      reconnectDeepLink = null
+      return
+    }
+    if (!lastClearWasReconnectEject) {
+      // A deliberate home navigation, not our eject.
+      reconnectDeepLink = null
+      return
+    }
+    if (Date.now() - armed.armedAt > RECONNECT_DEEPLINK_TTL_MS) {
+      reconnectDeepLink = null
+      return
+    }
+    const exists =
+      spine.projects
+        .find((p) => p.id === owner.projectId)
+        ?.terminals.some((t) => t.id === target.terminalId) ?? false
+    if (!exists) return // keep waiting within the TTL (the spine may lag)
+    selectTerminal(target.terminalId, owner)
+    reconnectDeepLink = null
+    return
+  }
+  const armedSessionId =
+    armedTarget.kind === "agent"
+      ? armedTarget.sessionId
+      : armedTarget.owner.kind === "session"
+        ? armedTarget.owner.sessionId
+        : null
+  if (armedSessionId === null) {
+    reconnectDeepLink = null
+    return
+  }
   // The user actively moved to a DIFFERENT agent since we armed — respect it and
   // drop the intent so we never yank them back.
-  if (sel !== null && sel !== armed.target.sessionId) {
+  if (sel !== null && sel !== armedSessionId) {
     reconnectDeepLink = null
     return
   }
@@ -1448,7 +1578,7 @@ function restoreReconnectDeepLink(spine: Spine): void {
     reconnectDeepLink = null
     return
   }
-  const session = spine.sessions.find((s) => s.id === armed.target.sessionId)
+  const session = spine.sessions.find((s) => s.id === armedSessionId)
   if (!session) {
     // Genuinely gone (deleted here or by another client): a deletion legitimately
     // ejects to home, so drop the intent rather than resurrect a phantom.
@@ -1462,7 +1592,7 @@ function restoreReconnectDeepLink(spine: Spine): void {
   // The agent is present and running again. If the eject already cleared the
   // selection, re-restore the captured route; if it never cleared, this is a
   // no-op. Either way, disarm.
-  if (sel !== armed.target.sessionId) {
+  if (sel !== armedSessionId) {
     applyDeepLinkSelection(session, armed.target)
   }
   reconnectDeepLink = null
@@ -1599,22 +1729,33 @@ function fireFocusedTabPut(
   })
 }
 
-// Select one of a session's companion terminals as the streamed target. The
-// owning session id is retained so session-scoped UI keeps resolving.
-export function selectTerminal(terminalId: string, sessionId: string): void {
+// Select a companion terminal as the streamed target. A session-owned terminal
+// retains its owning session id so session-scoped UI keeps resolving; a project
+// terminal has NO session context (`selectedSessionId` stays null and the
+// changes pane shows its empty state, since changed files belong to a session's
+// worktree, and the project's source checkout has no diff pipeline).
+export function selectTerminal(terminalId: string, owner: TerminalOwnerRef): void {
   const prev = state.selectedSessionId
+  const sessionId = owner.kind === "session" ? owner.sessionId : null
   setState({
-    selectedTarget: { kind: "terminal", terminalId, sessionId },
+    selectedTarget: { kind: "terminal", terminalId, owner },
     selectedSessionId: sessionId,
     // Switching from the agent to one of its own terminals keeps the same
-    // session's loaded changes; only a different session enters loading.
-    changes: prev === sessionId ? state.changes : loadingChanges(sessionId),
+    // session's loaded changes; only a different session (or a project
+    // terminal, which has none) enters loading/empty.
+    changes:
+      sessionId === null
+        ? emptyChanges()
+        : prev === sessionId
+          ? state.changes
+          : loadingChanges(sessionId),
   })
   // The changed files belong to the SESSION, so subscribe/fetch the parent
-  // session even when a companion terminal is the streamed target.
+  // session even when a companion terminal is the streamed target; a project
+  // terminal drops the subscription entirely.
   switchChangesSubscription(prev, sessionId)
   writeSelectionHash()
-  if (prev !== sessionId) loadChanges(sessionId)
+  if (sessionId !== null && prev !== sessionId) loadChanges(sessionId)
 }
 
 // Spawn a new companion terminal for a session via REST (Phase 5). The 201 reply
@@ -1626,10 +1767,27 @@ export function selectTerminal(terminalId: string, sessionId: string): void {
 export function createTerminal(sessionId: string): void {
   terminalsApi
     .create(sessionId)
-    .then((created) => selectTerminal(created.terminal_id, sessionId))
+    .then((created) =>
+      selectTerminal(created.terminal_id, { kind: "session", sessionId }),
+    )
     .catch((e) =>
       toast.error(
         e instanceof Error ? e.message : "Could not create the terminal.",
+      ),
+    )
+}
+
+// Spawn a new project terminal (a plain shell at the project's repo root with
+// no agent attached) via REST, then focus it, mirroring `createTerminal`.
+export function createProjectTerminal(projectId: string): void {
+  terminalsApi
+    .createForProject(projectId)
+    .then((created) =>
+      selectTerminal(created.terminal_id, { kind: "project", projectId }),
+    )
+    .catch((e) =>
+      toast.error(
+        e instanceof Error ? e.message : "Could not create the project terminal.",
       ),
     )
 }
@@ -1645,24 +1803,42 @@ export function closeDeleteTerminal(): void {
   setState({ deleteTerminalTarget: null })
 }
 
-// Close (delete) a companion terminal via REST (Phase 5). The endpoint is nested
-// under the owning session, so resolve the parent session id from the spine; a
-// terminal that already vanished (no owner) is a no-op. The terminal is removed
-// from the workspace spine, and if it was the focused target the selection clears
-// via the spine prune in `applySpine` (driven by the `sessions.changed` refetch).
-// A failure surfaces as a toast.
-export function deleteTerminal(terminalId: string): void {
+// Resolve a terminal's owner from the spine: a session whose terminal list
+// carries it, else a project whose terminal list carries it, else undefined
+// (already vanished).
+export function findTerminalOwner(
+  terminalId: string,
+): TerminalOwnerRef | undefined {
   const sessionId = state.spine?.sessions.find((s) =>
     s.terminals.some((t) => t.id === terminalId),
   )?.id
-  if (sessionId === undefined) return
-  terminalsApi
-    .remove(sessionId, terminalId)
-    .catch((e) =>
-      toast.error(
-        e instanceof Error ? e.message : "Could not close the terminal.",
-      ),
-    )
+  if (sessionId !== undefined) return { kind: "session", sessionId }
+  const projectId = state.spine?.projects.find((p) =>
+    p.terminals.some((t) => t.id === terminalId),
+  )?.id
+  if (projectId !== undefined) return { kind: "project", projectId }
+  return undefined
+}
+
+// Close (delete) a companion terminal via REST (Phase 5). The endpoint is nested
+// under the owner, so resolve it from the spine across BOTH owner kinds,
+// sessions and projects (a session-only scan silently made project terminals
+// undeletable); a terminal that already vanished (no owner) is a no-op. The
+// terminal is removed from the workspace spine, and if it was the focused target
+// the selection clears via the spine prune in `applySpine` (driven by the
+// `sessions.changed` refetch). A failure surfaces as a toast.
+export function deleteTerminal(terminalId: string): void {
+  const owner = findTerminalOwner(terminalId)
+  if (owner === undefined) return
+  const request =
+    owner.kind === "session"
+      ? terminalsApi.remove(owner.sessionId, terminalId)
+      : terminalsApi.removeForProject(owner.projectId, terminalId)
+  request.catch((e) =>
+    toast.error(
+      e instanceof Error ? e.message : "Could not close the terminal.",
+    ),
+  )
 }
 
 // --- Agent tabs -------------------------------------------------------------
@@ -3063,6 +3239,11 @@ export function stopAllRunning(): void {
   for (const s of sessions) {
     if (s.status === "active") killSessionPty(s.id)
     for (const t of s.terminals) deleteTerminal(t.id)
+  }
+  // Project terminals live on projects, not sessions; the panic button must
+  // reach them too, or a hung project terminal survives "Stop all".
+  for (const p of state.spine?.projects ?? []) {
+    for (const t of p.terminals) deleteTerminal(t.id)
   }
 }
 

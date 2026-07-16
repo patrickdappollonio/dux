@@ -462,6 +462,12 @@ impl Engine {
                 for id in &removed {
                     self.finish_delete_session_memory(id);
                 }
+                // Close the project's own project terminals gracefully (SIGTERM,
+                // then the background reaper), exactly as deleting an agent closes
+                // that agent's terminals. Without this the terminals would be
+                // orphaned: no sidebar row, no owning project, and no route able
+                // to name them.
+                self.begin_close_project_terminals(&project_id);
                 // Remove the project from memory synchronously so a concurrent
                 // CreateAgent cannot attach a new session to a project mid-removal.
                 self.projects.retain(|p| p.id != project_id);
@@ -1262,6 +1268,50 @@ mod tests {
     }
 
     #[test]
+    fn remove_project_closes_project_terminals_but_not_other_projects() {
+        let (mut engine, _tmp) = test_engine();
+        let repo1 = tempfile::tempdir().expect("p1 dir");
+        let repo2 = tempfile::tempdir().expect("p2 dir");
+        engine.projects.push(sample_project(
+            "p1",
+            repo1.path().to_string_lossy().as_ref(),
+        ));
+        engine.projects.push(sample_project(
+            "p2",
+            repo2.path().to_string_lossy().as_ref(),
+        ));
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (t1, _) = engine
+            .create_project_terminal("p1")
+            .expect("terminal on p1");
+        let (t2, _) = engine
+            .create_project_terminal("p2")
+            .expect("terminal on p2");
+
+        engine
+            .apply(Command::RemoveProject {
+                project_id: "p1".to_string(),
+                project_name: "p1".to_string(),
+            })
+            .expect("remove project");
+
+        assert!(
+            !engine.companion_terminals.contains_key(&t1),
+            "removing a project must close its project terminals"
+        );
+        assert!(
+            engine.terminating_ptys.iter().any(|t| t.id == t1),
+            "the closed terminal is reaped gracefully via the terminating set"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&t2),
+            "another project's terminal must be untouched"
+        );
+        assert!(engine.projects.iter().all(|p| p.id != "p1"));
+    }
+
+    #[test]
     fn dispatch_agent_launch_refuses_a_closing_session() {
         // F2 regression: the shared launch chokepoint must refuse a launch into
         // a session that is mid-deletion (`closing_sessions`), covering every
@@ -1685,7 +1735,7 @@ mod tests {
         engine.companion_terminals.insert(
             "term-1".to_string(),
             CompanionTerminal {
-                session_id: "sess-1".to_string(),
+                owner: crate::model::TerminalOwner::Session("sess-1".to_string()),
                 label: "term".to_string(),
                 foreground_cmd: None,
                 client: spawn_cat_v_pty(),

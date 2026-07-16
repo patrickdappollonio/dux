@@ -20,9 +20,16 @@ type Sess = {
   tabs?: string[]
 }
 
-function makeSpine(sessions: Sess[]): Spine {
+function makeSpine(
+  sessions: Sess[],
+  projects: { id: string; terminals?: string[] }[] = [],
+): Spine {
   return {
-    projects: [],
+    projects: projects.map((p) => ({
+      id: p.id,
+      name: p.id,
+      terminals: (p.terminals ?? []).map((id) => ({ id })),
+    })) as unknown as Spine["projects"],
     sessions: sessions.map((s) => ({
       id: s.id,
       project_id: s.project_id,
@@ -106,7 +113,11 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-async function loadStore(hash: string, sessions: Sess[]) {
+async function loadStore(
+  hash: string,
+  sessions: Sess[],
+  projects: { id: string; terminals?: string[] }[] = [],
+) {
   hashRef.value = hash
   vi.stubGlobal("location", {
     protocol: "http:",
@@ -117,7 +128,7 @@ async function loadStore(hash: string, sessions: Sess[]) {
     pathname: "/",
     search: "",
   })
-  spineBody = makeSpine(sessions)
+  spineBody = makeSpine(sessions, projects)
   const mod = await import("./store")
   await vi.waitFor(() => {
     expect(mod.getSnapshot().spine).not.toBeNull()
@@ -312,6 +323,65 @@ describe("reconnect deep-link guard rails", () => {
     mod.eventsSocket.onEvent({ event: "sessions.changed" })
     await settle()
     expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+  })
+
+  it("a project-terminal deep link survives an events-socket reconnect", async () => {
+    // A project terminal has no resume phase and never receives the agent
+    // pane's transient eject, so the reconnect must leave its selection (and
+    // the armed intent must disarm as a no-op, never yank the user anywhere).
+    const mod = await loadStore(
+      "#/project/p1/terminal/pt1",
+      [],
+      [{ id: "p1", terminals: ["pt1"] }],
+    )
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "pt1",
+      owner: { kind: "project", projectId: "p1" },
+    })
+    await consumeBootOpen(mod)
+
+    // A drop-and-reopen arms the intent from the hash, then reloads the spine.
+    spineBody = makeSpine([], [{ id: "p1", terminals: ["pt1"] }])
+    mod.eventsSocket.onOpen()
+    await settle()
+
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "pt1",
+      owner: { kind: "project", projectId: "p1" },
+    })
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+  })
+
+  it("restores a project terminal cleared by our own eject while armed", async () => {
+    // The restorable gap: the selection was cleared by the store's OWN
+    // reconnect eject while the intent was armed; once the spine carries the
+    // terminal again the route comes back.
+    const mod = await loadStore(
+      "#/project/p1/terminal/pt1",
+      [],
+      [{ id: "p1", terminals: ["pt1"] }],
+    )
+    await consumeBootOpen(mod)
+
+    // Reopen arms from the hash synchronously; our own eject then clears the
+    // selection BEFORE the reconnect's spine apply lands (the race the armed
+    // intent exists to heal).
+    spineBody = makeSpine([], [{ id: "p1", terminals: ["pt1"] }])
+    mod.eventsSocket.onOpen()
+    mod.ejectSelectionForReconnect()
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    await settle()
+
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).not.toBeNull()
+    })
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "pt1",
+      owner: { kind: "project", projectId: "p1" },
+    })
   })
 
   it("restores an extra-tab deep link across a reconnect", async () => {

@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use crate::model::SessionStatus;
+use crate::model::{SessionStatus, TerminalOwner};
 use crate::pty::PtyClient;
 
 use super::Engine;
@@ -59,9 +59,10 @@ pub struct PrunedPty {
     /// The tab id (for an agent — `== session_id` for the session-slot tab) or terminal
     /// id (for a companion terminal).
     pub id: String,
-    /// The owning session id (agent). For a companion terminal this is the
-    /// terminal's owning session; empty only for an orphan with no session.
-    pub session_id: String,
+    /// Who owned the pruned PTY: `Session(sid)` for an agent tab or a
+    /// session-owned companion terminal, `Project(pid)` for a project terminal,
+    /// `None` only for an orphan whose owner could not be resolved.
+    pub owner: Option<TerminalOwner>,
     /// True when this exit detached the agent — i.e. it was the agent's LAST live
     /// tab, so the session is now Detached. Surfaces show the workspace-wide
     /// "Agent exited" notice for this; a tab exit that leaves siblings running
@@ -184,7 +185,7 @@ impl Engine {
             // silently no-op on the wrong key.
             let owning = self.owning_session_for_tab(&tab_id);
             let is_session_slot = owning.as_deref() == Some(tab_id.as_str());
-            let (session_id, label) = match &owning {
+            let (owner, label) = match &owning {
                 Some(sid) => {
                     let branch = self
                         .sessions
@@ -192,18 +193,19 @@ impl Engine {
                         .find(|s| &s.id == sid)
                         .map(|s| s.branch_name.clone())
                         .unwrap_or_else(|| sid.clone());
-                    if is_session_slot {
-                        (sid.clone(), branch)
+                    let label = if is_session_slot {
+                        branch
                     } else {
                         let provider = self
                             .agent_tabs
                             .get(&tab_id)
                             .map(|t| t.provider.as_str().to_string())
                             .unwrap_or_default();
-                        (sid.clone(), format!("{provider} on {branch}"))
-                    }
+                        format!("{provider} on {branch}")
+                    };
+                    (Some(TerminalOwner::Session(sid.clone())), label)
                 }
-                None => (String::new(), tab_id.clone()),
+                None => (None, tab_id.clone()),
             };
             // Clear EVERY runtime map keyed by this tab via the single-source
             // helper — not just providers/activity/input. In particular
@@ -216,20 +218,25 @@ impl Engine {
             // `providers`, so `any_tab_active` reflects the true post-exit state —
             // if a sibling tab is still live/launching the agent stays Active.
             // This exit detaches the agent only when it was the LAST live tab.
-            let agent_detached = !session_id.is_empty() && !self.any_tab_active(&session_id);
-            if agent_detached {
+            // An explicit match on the owner: only a session-owned prune can
+            // detach an agent (an orphan has no session to mark).
+            let agent_detached = match &owner {
+                Some(TerminalOwner::Session(sid)) => !self.any_tab_active(sid),
+                Some(TerminalOwner::Project(_)) | None => false,
+            };
+            if agent_detached && let Some(TerminalOwner::Session(sid)) = &owner {
                 // A clean exit of the session-slot tab is the "user quit the
-                // agent" signal that cancels auto-reopen; an extra tab exiting (or
-                // any crash) leaves the auto-reopen intent untouched.
+                // agent" signal that cancels auto-reopen; an extra tab exiting
+                // (or any crash) leaves the auto-reopen intent untouched.
                 if is_session_slot && exit_success == Some(true) {
-                    self.mark_session_desired_running(&session_id, false);
+                    self.mark_session_desired_running(sid, false);
                 }
-                self.mark_session_status(&session_id, SessionStatus::Detached);
+                self.mark_session_status(sid, SessionStatus::Detached);
             }
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Agent,
                 id: tab_id,
-                session_id,
+                owner,
                 agent_detached,
                 label,
             });
@@ -248,16 +255,15 @@ impl Engine {
             })
             .collect();
         for (terminal_id, label) in exited_terminals {
-            let session_id = self
+            let owner = self
                 .companion_terminals
                 .get(&terminal_id)
-                .map(|t| t.session_id.clone())
-                .unwrap_or_default();
+                .map(|t| t.owner.clone());
             self.companion_terminals.remove(&terminal_id);
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Terminal,
                 id: terminal_id,
-                session_id,
+                owner,
                 agent_detached: false,
                 label,
             });
@@ -333,7 +339,21 @@ impl Engine {
         let ids: Vec<String> = self
             .companion_terminals
             .iter()
-            .filter(|(_, t)| t.session_id == session_id)
+            .filter(|(_, t)| matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.begin_close_companion_terminal(&id);
+        }
+    }
+
+    /// SIGTERM every project terminal belonging to a project and move them all
+    /// into the terminating set (used when the project is removed).
+    pub fn begin_close_project_terminals(&mut self, project_id: &str) {
+        let ids: Vec<String> = self
+            .companion_terminals
+            .iter()
+            .filter(|(_, t)| matches!(&t.owner, TerminalOwner::Project(pid) if pid == project_id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
@@ -1206,6 +1226,132 @@ mod tests {
     }
 
     #[test]
+    fn begin_close_session_terminals_leaves_project_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (session_tid, _) = engine
+            .create_companion_terminal("s1")
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1")
+            .expect("project terminal");
+
+        engine.begin_close_session_terminals("s1");
+
+        assert!(
+            !engine.companion_terminals.contains_key(&session_tid),
+            "the session's terminal is closed"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&project_tid),
+            "an over-broad close must not take the project terminal with it"
+        );
+    }
+
+    #[test]
+    fn begin_close_project_terminals_leaves_session_terminals() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (session_tid, _) = engine
+            .create_companion_terminal("s1")
+            .expect("session terminal");
+        let (project_tid, _) = engine
+            .create_project_terminal("p1")
+            .expect("project terminal");
+
+        engine.begin_close_project_terminals("p1");
+
+        assert!(
+            !engine.companion_terminals.contains_key(&project_tid),
+            "the project's terminal is closed"
+        );
+        assert!(
+            engine.companion_terminals.contains_key(&session_tid),
+            "the session terminal must be untouched"
+        );
+    }
+
+    #[test]
+    fn pruned_project_terminal_carries_project_owner_and_never_detaches_agent() {
+        let (mut engine, _tmp) = test_engine();
+        let repo = tempfile::tempdir().expect("project dir");
+        engine
+            .projects
+            .push(sample_project("p1", repo.path().to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = repo.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.mark_session_status("s1", SessionStatus::Active);
+
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (terminal_id, _label) = engine
+            .create_project_terminal("p1")
+            .expect("create project terminal");
+
+        // Ctrl-d (EOF) makes cat exit.
+        engine
+            .companion_terminals
+            .get(&terminal_id)
+            .unwrap()
+            .client
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if !pruned.is_empty() {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "project terminal never exited");
+            sleep(Duration::from_millis(50));
+        };
+
+        let p = pruned
+            .iter()
+            .find(|p| p.id == terminal_id)
+            .expect("project terminal pruned");
+        assert_eq!(p.kind, PrunedPtyKind::Terminal);
+        assert_eq!(
+            p.owner,
+            Some(crate::model::TerminalOwner::Project("p1".to_string())),
+            "the prune must carry the project owner, not an empty-string orphan"
+        );
+        assert!(
+            !p.agent_detached,
+            "a project terminal exit never detaches an agent"
+        );
+        let status = engine
+            .sessions
+            .iter()
+            .find(|s| s.id == "s1")
+            .map(|s| s.status.clone());
+        assert_eq!(
+            status,
+            Some(SessionStatus::Active),
+            "the agent's session status is untouched by a project terminal exit"
+        );
+    }
+
+    #[test]
     fn reap_force_kills_a_straggler_past_its_deadline() {
         let (mut engine, _tmp) = test_engine();
         let worktree = tempfile::tempdir().expect("worktree dir");
@@ -1368,7 +1514,11 @@ mod tests {
             .find(|p| p.id == "tab-2")
             .expect("extra tab pruned");
         assert_eq!(p.kind, PrunedPtyKind::Agent);
-        assert_eq!(p.session_id, "s1", "resolves the owning session");
+        assert_eq!(
+            p.owner,
+            Some(crate::model::TerminalOwner::Session("s1".to_string())),
+            "resolves the owning session"
+        );
         assert!(
             p.label.contains("feat") && p.label.contains("codex"),
             "label names the agent + provider, not a raw UUID: {}",

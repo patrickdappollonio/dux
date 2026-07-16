@@ -109,9 +109,9 @@ import {
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
-import type { SelectedTarget } from "@/lib/store"
+import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
-import type { SessionView } from "@/lib/types"
+import type { SessionView, TerminalView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 // The set of actions the sidebar's ⋯ menu offers for a session, reused verbatim
@@ -235,8 +235,11 @@ function selectAndOpen(sessionId: string): void {
   mobileNavigate("terminal")
 }
 
-function selectTerminalAndOpen(terminalId: string, sessionId: string): void {
-  selectTerminal(terminalId, sessionId)
+function selectTerminalAndOpen(
+  terminalId: string,
+  owner: TerminalOwnerRef,
+): void {
+  selectTerminal(terminalId, owner)
   mobileNavigate("terminal")
 }
 
@@ -245,12 +248,12 @@ function selectTerminalAndOpen(terminalId: string, sessionId: string): void {
 function TerminalRow({
   terminal,
   siblings,
-  sessionId,
+  owner,
   active,
 }: {
   terminal: SessionView["terminals"][number]
   siblings: readonly SessionView["terminals"][number][]
-  sessionId: string
+  owner: TerminalOwnerRef
   active: boolean
 }) {
   // Title is the foreground command when one is running, otherwise the stable
@@ -262,7 +265,7 @@ function TerminalRow({
       <Button
         variant={active ? "secondary" : "ghost"}
         className="min-h-11 flex-1 justify-start gap-2 px-2"
-        onClick={() => selectTerminalAndOpen(terminal.id, sessionId)}
+        onClick={() => selectTerminalAndOpen(terminal.id, owner)}
       >
         <SquareTerminal />
         {/* When no foreground command is running, `title` already equals
@@ -428,7 +431,7 @@ function SessionRow({
           key={terminal.id}
           terminal={terminal}
           siblings={session.terminals}
-          sessionId={session.id}
+          owner={{ kind: "session", sessionId: session.id }}
           active={
             selectedTarget?.kind === "terminal" &&
             selectedTarget.terminalId === terminal.id
@@ -448,12 +451,14 @@ function ProjectBlock({
   name,
   branch,
   sessions,
+  terminals,
   selectedTarget,
 }: {
   id: string
   name: string
   branch: ProjectBranchDisplay | null
   sessions: SessionView[]
+  terminals: TerminalView[]
   selectedTarget: SelectedTarget | null
 }) {
   // The project HEADER is the drag handle (not the whole block, whose body
@@ -557,6 +562,22 @@ function ProjectBlock({
           </SortableContext>
         </DndContext>
       ) : null}
+
+      {/* Project terminals: shells at the project's repo root with no agent
+          attached, nested under the project header exactly like session
+          terminals nest under their agent. */}
+      {terminals.map((terminal) => (
+        <TerminalRow
+          key={terminal.id}
+          terminal={terminal}
+          siblings={terminals}
+          owner={{ kind: "project", projectId: id }}
+          active={
+            selectedTarget?.kind === "terminal" &&
+            selectedTarget.terminalId === terminal.id
+          }
+        />
+      ))}
     </div>
   )
 }
@@ -570,6 +591,7 @@ function ProjectGroupList({
   grouped,
   projectName,
   projectBranch,
+  projectTerminals,
   selectedTarget,
 }: {
   members: string[]
@@ -577,6 +599,7 @@ function ProjectGroupList({
   grouped: Map<string, SessionView[]>
   projectName: (id: string) => string
   projectBranch: (id: string) => ProjectBranchDisplay | null
+  projectTerminals: (id: string) => TerminalView[]
   selectedTarget: SelectedTarget | null
 }) {
   const sensors = useSensors(
@@ -612,6 +635,7 @@ function ProjectGroupList({
             name={projectName(projectId)}
             branch={projectBranch(projectId)}
             sessions={grouped.get(projectId) ?? []}
+            terminals={projectTerminals(projectId)}
             selectedTarget={selectedTarget}
           />
         ))}
@@ -651,6 +675,9 @@ function HomeScreen() {
     const project = projects.find((p) => p.id === id)
     return project ? projectBranchDisplay(project) : null
   }
+  // The project's own terminals (project terminals). Orphan ids resolve to [].
+  const projectTerminals = (id: string): TerminalView[] =>
+    projects.find((p) => p.id === id)?.terminals ?? []
   const hasProjects = projects.length > 0 || sessions.length > 0
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
@@ -699,6 +726,7 @@ function HomeScreen() {
                   grouped={grouped}
                   projectName={projectName}
                   projectBranch={projectBranch}
+                  projectTerminals={projectTerminals}
                   selectedTarget={selectedTarget}
                 />
               ) : null}
@@ -715,6 +743,7 @@ function HomeScreen() {
                   grouped={grouped}
                   projectName={projectName}
                   projectBranch={projectBranch}
+                  projectTerminals={projectTerminals}
                   selectedTarget={selectedTarget}
                 />
               </div>
@@ -760,6 +789,54 @@ function TerminalScreen() {
     changes.sessionId === selectedSessionId && changes.phase === "loaded"
       ? changes.staged.length + changes.unstaged.length
       : 0
+
+  // A focused PROJECT terminal has no session context at all: its own slim
+  // screen shows the project name over the full-screen pane (no PR chip, no
+  // changes count; those are session-scoped).
+  if (
+    selectedTarget?.kind === "terminal" &&
+    selectedTarget.owner.kind === "project"
+  ) {
+    const owner = selectedTarget.owner
+    const project = spine?.projects.find((p) => p.id === owner.projectId)
+    if (!project) return <HomeScreen />
+    const terminal = project.terminals.find(
+      (t) => t.id === selectedTarget.terminalId,
+    )
+    return (
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+        <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-10 shrink-0"
+            aria-label="Back"
+            onClick={() => history.back()}
+          >
+            <ChevronLeft />
+          </Button>
+          <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-sm">
+            <span className="truncate font-semibold">{project.name}</span>
+            <span className="truncate text-muted-foreground">
+              {terminal ? terminalTitle(terminal, project.terminals) : "Terminal"}
+            </span>
+          </div>
+        </header>
+        <div className="min-h-0 flex-1">
+          <ChunkBoundary>
+            <Suspense fallback={null}>
+              <LazyTerminalPane
+                key={selectedTarget.terminalId}
+                kind="terminal"
+                id={selectedTarget.terminalId}
+                owner={owner}
+              />
+            </Suspense>
+          </ChunkBoundary>
+        </div>
+      </div>
+    )
+  }
 
   // Defensive fallback: the agent exited (TerminalPane reset the selection) or
   // the target was pruned while we sat here. Show the hub content rather than a
@@ -872,7 +949,7 @@ function TerminalScreen() {
             shows its own readiness spinner once mounted. ChunkBoundary wraps
             Suspense so a stale-bundle import failure recovers instead of
             unmounting the tree. */}
-        {isExtraDormant && focusedTab ? (
+        {isExtraDormant && focusedTab && selectedTarget.kind === "agent" ? (
           <DormantTabCard
             sessionId={selectedTarget.sessionId}
             tabId={focusedTab.id}
@@ -881,12 +958,21 @@ function TerminalScreen() {
         ) : (
           <ChunkBoundary>
             <Suspense fallback={null}>
-              <LazyTerminalPane
-                key={paneKey}
-                kind={selectedTarget.kind}
-                id={targetId}
-                sessionId={selectedTarget.sessionId}
-              />
+              {selectedTarget.kind === "agent" ? (
+                <LazyTerminalPane
+                  key={paneKey}
+                  kind="agent"
+                  id={targetId}
+                  sessionId={selectedTarget.sessionId}
+                />
+              ) : (
+                <LazyTerminalPane
+                  key={paneKey}
+                  kind="terminal"
+                  id={targetId}
+                  owner={selectedTarget.owner}
+                />
+              )}
             </Suspense>
           </ChunkBoundary>
         )}

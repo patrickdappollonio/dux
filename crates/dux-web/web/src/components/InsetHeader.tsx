@@ -38,6 +38,21 @@ export function InsetHeader() {
       ? terminalTitle(terminal, session.terminals)
       : undefined
 
+  // A focused PROJECT terminal has no session: resolve its owning project and
+  // terminal directly so the bar shows `project › terminal` crumbs instead of
+  // rendering completely blank.
+  const projectTerminalOwner =
+    selectedTarget?.kind === "terminal" && selectedTarget.owner.kind === "project"
+      ? selectedTarget.owner
+      : undefined
+  const ownerProject = projectTerminalOwner
+    ? spine?.projects.find((p) => p.id === projectTerminalOwner.projectId)
+    : undefined
+  const projectTerminal =
+    ownerProject && selectedTarget?.kind === "terminal"
+      ? ownerProject.terminals.find((t) => t.id === selectedTarget.terminalId)
+      : undefined
+
   // The header details, mirroring the TUI: a flat `key: value` list joined by a
   // single separator. `terminal` only appears when a companion terminal is the
   // focused target; `terminals` (the count) only when there is at least one.
@@ -72,6 +87,20 @@ export function InsetHeader() {
     if (terminalLabel) details.push({ key: "terminal", value: terminalLabel })
     if (session.terminals.length > 0) {
       details.push({ key: "terminals", value: String(session.terminals.length) })
+    }
+  } else if (ownerProject) {
+    details.push({ key: "project", value: ownerProject.name })
+    if (projectTerminal) {
+      details.push({
+        key: "terminal",
+        value: terminalTitle(projectTerminal, ownerProject.terminals),
+      })
+    }
+    if (ownerProject.terminals.length > 0) {
+      details.push({
+        key: "terminals",
+        value: String(ownerProject.terminals.length),
+      })
     }
   }
 

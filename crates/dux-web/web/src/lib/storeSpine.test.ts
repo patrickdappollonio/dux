@@ -32,8 +32,15 @@ function session(id: string, projectId: string): Spine["sessions"][number] {
   } as unknown as Spine["sessions"][number]
 }
 
-function project(id: string): Spine["projects"][number] {
-  return { id } as unknown as Spine["projects"][number]
+function project(
+  id: string,
+  terminals: string[] = [],
+): Spine["projects"][number] {
+  return {
+    id,
+    name: id,
+    terminals: terminals.map((tid) => ({ id: tid })),
+  } as unknown as Spine["projects"][number]
 }
 
 let spineBody: Spine = makeSpine()
@@ -191,6 +198,51 @@ describe("spine slice", () => {
     // The session is gone in the next spine — the selection must clear.
     await pushSpine(mod, makeSpine({ sessions: [] }))
     expect(mod.getSnapshot().selectedSessionId).toBeNull()
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+  })
+
+  it("keeps a focused project terminal selected across a spine apply", async () => {
+    // The trap this guards (T10): the prune resolved the terminal through a
+    // (nonexistent) owning session, so a focused project terminal was ejected
+    // to home on EVERY spine refresh.
+    const mod = await loadStore()
+    await pushSpine(
+      mod,
+      makeSpine({ projects: [project("p1", ["pt1"])] }),
+      "projects.changed",
+    )
+    mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "pt1",
+      owner: { kind: "project", projectId: "p1" },
+    })
+    // A refresh that still carries the terminal must NOT eject the selection.
+    await pushSpine(
+      mod,
+      makeSpine({ projects: [project("p1", ["pt1"])] }),
+      "projects.changed",
+    )
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "pt1",
+      owner: { kind: "project", projectId: "p1" },
+    })
+  })
+
+  it("clears the selection when the focused project terminal vanishes", async () => {
+    const mod = await loadStore()
+    await pushSpine(
+      mod,
+      makeSpine({ projects: [project("p1", ["pt1"])] }),
+      "projects.changed",
+    )
+    mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
+    await pushSpine(
+      mod,
+      makeSpine({ projects: [project("p1")] }),
+      "projects.changed",
+    )
     expect(mod.getSnapshot().selectedTarget).toBeNull()
   })
 

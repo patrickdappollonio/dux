@@ -7921,7 +7921,7 @@ not_a_real_action = ["x"]
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.engine.sessions[0].id.clone(),
+                owner: dux_core::model::TerminalOwner::Session(app.engine.sessions[0].id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: Some("python".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -7969,7 +7969,7 @@ not_a_real_action = ["x"]
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.engine.sessions[0].id.clone(),
+                owner: dux_core::model::TerminalOwner::Session(app.engine.sessions[0].id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: Some("TERM sleep".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -8269,7 +8269,7 @@ not_a_real_action = ["x"]
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.engine.sessions[0].id.clone(),
+                owner: dux_core::model::TerminalOwner::Session(app.engine.sessions[0].id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -11677,7 +11677,7 @@ cyan = "#00ffff"
         app.engine.companion_terminals.insert(
             "term-test".to_string(),
             crate::app::CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "test".to_string(),
                 foreground_cmd: None,
                 client: term_client,
@@ -12408,7 +12408,7 @@ cyan = "#00ffff"
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "test".to_string(),
                 foreground_cmd: None,
                 client,
@@ -12529,11 +12529,11 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn new_companion_terminal_warns_without_selected_session() {
+    fn new_companion_terminal_warns_with_nothing_selected() {
         let mut app = test_app(default_bindings());
 
-        // Deselect everything by pointing at a project header.
-        app.selected_left = 0;
+        // Deselect everything: no left item at this index.
+        app.selected_left = usize::MAX;
 
         app.new_companion_terminal()
             .expect("should not error, just warn");
@@ -12543,11 +12543,57 @@ cyan = "#00ffff"
             crate::statusline::StatusTone::Warning,
             "should show yellow warning, not red error"
         );
-        assert!(app.status.text().contains("Select an agent session"));
+        assert!(app.status.text().contains("Select an agent or project"));
         assert!(
             app.engine.companion_terminals.is_empty(),
             "no terminal should be spawned"
         );
+    }
+
+    #[test]
+    fn new_companion_terminal_with_project_selected_spawns_project_terminal() {
+        let mut app = test_app(default_bindings());
+
+        // Point at the project header row.
+        app.selected_left = 0;
+        assert!(
+            app.selected_session().is_none(),
+            "a project row is selected"
+        );
+
+        app.new_companion_terminal()
+            .expect("should spawn a project terminal");
+
+        assert_eq!(app.engine.companion_terminals.len(), 1);
+        let terminal = app.engine.companion_terminals.values().next().unwrap();
+        assert_eq!(
+            terminal.owner,
+            dux_core::model::TerminalOwner::Project("project-1".to_string()),
+            "the terminal must be project-owned, not session-owned"
+        );
+        assert!(app.active_terminal_id.is_some());
+        assert_eq!(app.input_target, InputTarget::Terminal);
+        assert!(app.status.text().contains("project terminal"));
+    }
+
+    #[test]
+    fn show_or_open_first_terminal_on_project_row_reuses_existing_project_terminal() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+        app.new_companion_terminal()
+            .expect("spawn project terminal");
+        let first_id = app.active_terminal_id.clone().expect("active terminal");
+        app.active_terminal_id = None;
+
+        app.show_or_open_first_terminal()
+            .expect("open existing project terminal");
+
+        assert_eq!(
+            app.engine.companion_terminals.len(),
+            1,
+            "must reuse the existing project terminal, not spawn another"
+        );
+        assert_eq!(app.active_terminal_id, Some(first_id));
     }
 
     #[test]
@@ -13886,7 +13932,7 @@ cyan = "#00ffff"
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)

@@ -56,6 +56,17 @@ export function terminalPtyUrl(sessionId: string, terminalId: string): string {
   )}/terminals/${encodeURIComponent(terminalId)}/pty`
 }
 
+// A project terminal's PTY socket URL, nested under its owning project so the
+// server can enforce that the terminal belongs to that project.
+export function projectTerminalPtyUrl(
+  projectId: string,
+  terminalId: string,
+): string {
+  return `${wsScheme()}//${location.host}/ws/projects/${encodeURIComponent(
+    projectId,
+  )}/terminals/${encodeURIComponent(terminalId)}/pty`
+}
+
 // An extra tab's PTY socket URL, nested under its owning session so the server
 // can enforce that the tab belongs to that session. Used ONLY for extra tabs;
 // the session-slot tab keeps `agentPtyUrl` (its `tab_id === session_id`, served by

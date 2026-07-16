@@ -408,6 +408,21 @@ fn spine_has_terminal(spine: &serde_json::Value, terminal_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the spine carries a project whose `terminals` include `terminal_id`.
+fn spine_has_project_terminal(spine: &serde_json::Value, terminal_id: &str) -> bool {
+    spine["projects"]
+        .as_array()
+        .map(|projects| {
+            projects.iter().any(|p| {
+                p["terminals"]
+                    .as_array()
+                    .map(|ts| ts.iter().any(|t| t["id"].as_str() == Some(terminal_id)))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 // ── REST action endpoints + the events/PTY sockets ───────────────────────────
 
 /// Concrete type for a connected test WebSocket.
@@ -864,6 +879,237 @@ async fn terminal_rest_create_and_delete() {
         404,
         "create on unknown session → 404"
     );
+}
+
+/// Create a project terminal on `project_id` over REST and return its id.
+async fn create_project_terminal_via_rest(addr: SocketAddr, project_id: &str) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://{addr}/api/v1/projects/{project_id}/terminals"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "project terminal create should be 201"
+    );
+    assert!(
+        resp.headers().contains_key("location"),
+        "201 must carry a Location header"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["terminal_id"]
+        .as_str()
+        .expect("terminal_id in create response")
+        .to_string()
+}
+
+/// The project-terminal REST verbs create and delete a project terminal: `POST`
+/// returns 201 (+Location) with the new id (which then appears on the PROJECT in
+/// the spine, never on a session), `DELETE` returns 204, and unknown ids 404.
+#[tokio::test]
+async fn project_terminal_rest_create_and_delete() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    let terminal_id = create_project_terminal_via_rest(addr, "p1").await;
+    assert!(
+        wait_for_spine(addr, |spine| spine_has_project_terminal(
+            spine,
+            &terminal_id
+        ))
+        .await,
+        "spine's project never carried the REST-created project terminal {terminal_id}"
+    );
+    // The owner filter must not leak it onto a session.
+    let spine: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/spine"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !spine_has_terminal(&spine, &terminal_id),
+        "a project terminal must never appear in a session's terminals"
+    );
+
+    // Unknown terminal id on a valid project is a 404.
+    let missing = client
+        .delete(format!(
+            "http://{addr}/api/v1/projects/p1/terminals/does-not-exist"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status().as_u16(), 404, "unknown terminal → 404");
+
+    // Unknown project is a 404.
+    let missing_project = client
+        .delete(format!(
+            "http://{addr}/api/v1/projects/nope/terminals/{terminal_id}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_project.status().as_u16(),
+        404,
+        "unknown project → 404"
+    );
+
+    // The real delete returns 204 and the terminal disappears from the spine.
+    let deleted = client
+        .delete(format!(
+            "http://{addr}/api/v1/projects/p1/terminals/{terminal_id}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status().as_u16(), 204, "delete → 204");
+    assert!(
+        wait_for_spine(addr, |spine| !spine_has_project_terminal(
+            spine,
+            &terminal_id
+        ))
+        .await,
+        "spine still carried project terminal {terminal_id} after delete"
+    );
+
+    // Creating on an unknown project is a 404.
+    let bad_create = client
+        .post(format!("http://{addr}/api/v1/projects/nope/terminals"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        bad_create.status().as_u16(),
+        404,
+        "create on unknown project → 404"
+    );
+}
+
+/// Ownership is enforced per VARIANT, both directions: a project terminal is a
+/// 404 on the session-nested route, and a session terminal is a 404 on the
+/// project-nested route. A raw-id comparison across owner kinds would pass one
+/// of these.
+#[tokio::test]
+async fn terminal_delete_routes_404_across_owner_kinds() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+
+    let session_tid = create_terminal_via_rest(addr, "s1").await;
+    let project_tid = create_project_terminal_via_rest(addr, "p1").await;
+
+    // A project terminal through the session route: 404, and it survives.
+    let cross1 = client
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/s1/terminals/{project_tid}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        cross1.status().as_u16(),
+        404,
+        "a project terminal must 404 on the session route"
+    );
+
+    // A session terminal through the project route: 404, and it survives.
+    let cross2 = client
+        .delete(format!(
+            "http://{addr}/api/v1/projects/p1/terminals/{session_tid}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        cross2.status().as_u16(),
+        404,
+        "a session terminal must 404 on the project route"
+    );
+
+    // Both terminals still exist (the cross-owner 404s deleted nothing).
+    assert!(
+        wait_for_spine(addr, |spine| {
+            spine_has_terminal(spine, &session_tid)
+                && spine_has_project_terminal(spine, &project_tid)
+        })
+        .await,
+        "cross-owner 404s must not delete either terminal"
+    );
+}
+
+/// The project-nested terminal PTY socket streams the project terminal's bytes
+/// and enforces per-variant ownership: a session terminal is rejected on the
+/// project path, a project terminal is rejected on the session path, and an
+/// unknown project is rejected outright.
+#[tokio::test]
+async fn nested_project_terminal_pty_socket_enforces_project_ownership() {
+    let (addr, _tmp) = boot().await;
+    let project_tid = create_project_terminal_via_rest(addr, "p1").await;
+    let session_tid = create_terminal_via_rest(addr, "s1").await;
+
+    // The matching project path attaches and streams (the `cat` terminal echoes).
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/projects/p1/terminals/{project_tid}/pty"
+    ))
+    .await
+    .expect("connect project terminal pty on the owning project");
+    ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    ws.send(Message::Binary(b"dux-project-terminal-marker\n".to_vec()))
+        .await
+        .unwrap();
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(Ok(m))) = tokio::time::timeout(Duration::from_millis(300), ws.next()).await {
+            if let Message::Binary(b) = m {
+                acc.extend_from_slice(&b);
+            }
+            if String::from_utf8_lossy(&acc).contains("dux-project-terminal-marker") {
+                break;
+            }
+        }
+    }
+    assert!(
+        String::from_utf8_lossy(&acc).contains("dux-project-terminal-marker"),
+        "owning-project terminal socket did not stream; got {} bytes",
+        acc.len()
+    );
+
+    // A session-owned terminal through the project path is rejected pre-upgrade.
+    let cross = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/projects/p1/terminals/{session_tid}/pty"
+    ))
+    .await;
+    assert!(
+        cross.is_err(),
+        "a session terminal must not attach through a project path"
+    );
+
+    // A project terminal through the session path is rejected pre-upgrade.
+    let cross_back = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/sessions/s1/terminals/{project_tid}/pty"
+    ))
+    .await;
+    assert!(
+        cross_back.is_err(),
+        "a project terminal must not attach through a session path"
+    );
+
+    // An unknown project is rejected outright.
+    let unknown = tokio_tungstenite::connect_async(format!(
+        "ws://{addr}/ws/projects/nope/terminals/{project_tid}/pty"
+    ))
+    .await;
+    assert!(unknown.is_err(), "an unknown project must be rejected");
 }
 
 /// Tearing an agent's PTY down server-side (here via `POST .../kill`, which

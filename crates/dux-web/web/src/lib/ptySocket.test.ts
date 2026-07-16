@@ -6,6 +6,7 @@ import {
   agentPtyUrl,
   getActivePtySocket,
   setActivePtySocket,
+  projectTerminalPtyUrl,
   tabPtyUrl,
   terminalPtyUrl,
 } from "./ptySocket"
@@ -89,6 +90,14 @@ describe("ptySocket URL builders", () => {
     )
   })
 
+  it("builds the project-terminal PTY URL nested under its project", () => {
+    // A typo'd path here would 404 forever through the reconnecting socket
+    // with no visible error, so pin the exact string.
+    expect(projectTerminalPtyUrl("p1", "t9")).toBe(
+      "ws://localhost:7070/ws/projects/p1/terminals/t9/pty",
+    )
+  })
+
   it("builds the extra-tab PTY URL nested under its session", () => {
     expect(tabPtyUrl("s1", "tab9")).toBe(
       "ws://localhost:7070/ws/sessions/s1/tabs/tab9/pty",
@@ -103,6 +112,9 @@ describe("ptySocket URL builders", () => {
     )
     expect(tabPtyUrl("s/1", "b/2")).toBe(
       "wss://example.com/ws/sessions/s%2F1/tabs/b%2F2/pty",
+    )
+    expect(projectTerminalPtyUrl("p/1", "t/2")).toBe(
+      "wss://example.com/ws/projects/p%2F1/terminals/t%2F2/pty",
     )
   })
 })

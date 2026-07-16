@@ -154,7 +154,7 @@ describe("changes slice — subscription wiring", () => {
   it("selectTerminal subscribes the PARENT session topic", async () => {
     const mod = await loadStore()
     const sub = vi.spyOn(mod.eventsSocket, "subscribe")
-    mod.selectTerminal("term-1", "s3")
+    mod.selectTerminal("term-1", { kind: "session", sessionId: "s3" })
     expect(sub).toHaveBeenCalledWith(["session:s3:changes"])
     expect(mod.getSnapshot().changes.sessionId).toBe("s3")
   })

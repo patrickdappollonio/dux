@@ -20,7 +20,7 @@
 import { formatBytes, formatCpu } from "./formatStats"
 import type { ResourceStatsView } from "./resourcesApi"
 import { terminalTitle } from "./terminals"
-import type { SessionView } from "./types"
+import type { ProjectView, SessionView } from "./types"
 
 export type TaskRowKind = "dux" | "agent" | "terminal" | "total"
 
@@ -43,8 +43,11 @@ export interface TaskRow {
    * This field always includes the owning agent and the tab's position so it
    * stays unique and meaningful even when `name` alone would not. */
   stopLabel: string
-  /** The owning session, for the stop action. Null for dux/total. */
+  /** The owning session, for the stop action. Null for dux/total AND for a
+   * project terminal (whose owner is a project, not a session). */
   sessionId: string | null
+  /** The owning project, for a project-terminal row. Null everywhere else. */
+  projectId: string | null
   /** The tab id or terminal id to act on. Null for dux/total. */
   targetId: string | null
   /** The sampled numbers, or null when this row had no stats this poll (a
@@ -54,12 +57,14 @@ export interface TaskRow {
 
 // Build the Task Manager's rows from the spine and the latest sample.
 //
-// `sessions` is the spine's session list; `stats` the rows from
+// `sessions` is the spine's session list, `projects` its project list (whose
+// project terminals produce rows too); `stats` the rows from
 // `GET /api/v1/resources` (possibly empty before the first poll lands, in which
 // case every row renders with dashes).
 export function taskManagerRows(
   sessions: readonly SessionView[],
   stats: readonly ResourceStatsView[],
+  projects: readonly ProjectView[],
 ): TaskRow[] {
   // Index the sampled rows by the id core stamped on them.
   const byId = new Map<string, ResourceStatsView>()
@@ -81,6 +86,7 @@ export function taskManagerRows(
     stoppable: false,
     stopLabel: "dux",
     sessionId: null,
+    projectId: null,
     targetId: null,
     stats: dux,
   })
@@ -123,6 +129,7 @@ export function taskManagerRows(
             ? `Stop ${sessionLabel}`
             : `Stop ${tab.provider} tab ${nestedIndex} in ${sessionLabel}`,
           sessionId: session.id,
+          projectId: null,
           targetId: tab.id,
           stats: byId.get(tab.id) ?? null,
         })
@@ -146,6 +153,30 @@ export function taskManagerRows(
         stoppable: true,
         stopLabel: `Stop ${title}`,
         sessionId: session.id,
+        projectId: null,
+        targetId: terminal.id,
+        stats: byId.get(terminal.id) ?? null,
+      })
+    }
+  }
+
+  // Project terminals: live shells at a project's repo root with no agent
+  // attached. They are never gated on any session's status (they have no
+  // session), and their stats join by terminal id exactly like session
+  // terminals; the resource monitor samples the whole terminal map.
+  for (const project of projects) {
+    for (const terminal of project.terminals) {
+      const title = terminalTitle(terminal, project.terminals)
+      rows.push({
+        key: `term:${terminal.id}`,
+        kind: "terminal",
+        name: title,
+        detail: project.name,
+        nested: false,
+        stoppable: true,
+        stopLabel: `Stop ${title}`,
+        sessionId: null,
+        projectId: project.id,
         targetId: terminal.id,
         stats: byId.get(terminal.id) ?? null,
       })
@@ -162,6 +193,7 @@ export function taskManagerRows(
     stoppable: false,
     stopLabel: "TOTAL",
     sessionId: null,
+    projectId: null,
     targetId: null,
     stats: total,
   })

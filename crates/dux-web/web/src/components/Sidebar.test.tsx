@@ -16,6 +16,7 @@ import type { DuxState } from "@/lib/store"
 let mockState: DuxState
 const addTabMock = vi.fn()
 const selectSessionMock = vi.fn()
+const createProjectTerminalMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -23,6 +24,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     addTab: addTabMock,
     selectSession: selectSessionMock,
+    createProjectTerminal: createProjectTerminalMock,
   }
 })
 
@@ -136,6 +138,7 @@ beforeEach(() => {
   installBootStubs()
   addTabMock.mockClear()
   selectSessionMock.mockClear()
+  createProjectTerminalMock.mockClear()
 })
 
 afterEach(() => {
@@ -242,6 +245,144 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
     expect(screen.getByText("codex")).toBeTruthy()
     fireEvent.click(screen.getByText("codex"))
     expect(addTabMock).toHaveBeenCalledWith("s1", "codex")
+  })
+})
+
+describe("AppSidebar project terminals", () => {
+  // A spine whose project owns a live project terminal (and has no sessions):
+  // the row must render under the project header (T14; before this, a project
+  // terminal rendered NOWHERE in the sidebar).
+  function projectTerminalSpine(): DuxState["spine"] {
+    return {
+      projects: [
+        {
+          id: "p1",
+          name: "Repo",
+          path: "/tmp/p1",
+          path_missing: false,
+          default_provider: "claude",
+          current_branch: "main",
+          branch_status: "leading",
+          terminals: [
+            {
+              id: "pt-1",
+              label: "Terminal 2",
+              has_output: true,
+              foreground_cmd: null,
+            },
+          ],
+        },
+      ],
+      sessions: [],
+      sidebar: {
+        groups: [{ project_id: "p1", name: "Repo", orphaned: false, session_ids: [] }],
+        agentless_start: null,
+      },
+    } as unknown as DuxState["spine"]
+  }
+
+  it("renders the project terminal row under the project header", () => {
+    mockState = makeState({
+      spine: projectTerminalSpine(),
+      bootstrap: { title: "dux", dux_version: "v1" },
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    expect(screen.getByText("Terminal 2")).toBeTruthy()
+  })
+
+  it("offers 'New project terminal' in the project ⋯ menu and calls createProjectTerminal", () => {
+    mockState = makeState({
+      spine: projectTerminalSpine(),
+      bootstrap: { title: "dux", dux_version: "v1" },
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Project actions"))
+    const item = screen.getByText("New project terminal")
+    expect(
+      item.closest('[role="menuitem"]')?.getAttribute("aria-disabled"),
+    ).not.toBe("true")
+    fireEvent.click(item)
+    expect(createProjectTerminalMock).toHaveBeenCalledWith("p1")
+  })
+
+  it("disables 'New project terminal' when the project's path is missing", () => {
+    const spine = projectTerminalSpine() as unknown as {
+      projects: { path_missing: boolean }[]
+    }
+    spine.projects[0].path_missing = true
+    mockState = makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: { title: "dux", dux_version: "v1" },
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Project actions"))
+    const item = screen.getByText("New project terminal")
+    expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
+      "true",
+    )
+  })
+
+  it("hides 'New project terminal' for an orphaned group", () => {
+    // An orphaned group has no real project: the menu shows only "Remove
+    // project…", so there must be no terminal entry point.
+    mockState = makeState({
+      spine: {
+        projects: [],
+        sessions: [
+          {
+            id: "s1",
+            project_id: "ghost",
+            title: null,
+            provider: "claude",
+            branch_name: "main",
+            worktree_path: "/tmp/x",
+            status: "active",
+            auto_reopen_enabled: false,
+            terminals: [],
+            tabs: [
+              {
+                id: "s1",
+                provider: "claude",
+                order: 0,
+                working: false,
+                has_output: false,
+                has_live_process: true,
+              },
+            ],
+            has_output: false,
+            working: false,
+          },
+        ],
+        sidebar: {
+          groups: [
+            { project_id: "ghost", name: "ghost", orphaned: true, session_ids: ["s1"] },
+          ],
+          agentless_start: null,
+        },
+      } as unknown as DuxState["spine"],
+      bootstrap: { title: "dux", dux_version: "v1" },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByLabelText("Project actions"))
+    expect(screen.queryByText("New project terminal")).toBeNull()
+    expect(screen.getByText("Remove project…")).toBeTruthy()
   })
 })
 
