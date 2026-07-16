@@ -39,7 +39,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use dux_core::wire::{WireCommand, WireMacroEntry};
+use dux_core::wire::{SettingsPatch, WireCommand, WireMacroEntry};
 
 use crate::rest_common::scope_from_headers;
 use crate::server::AppState;
@@ -356,7 +356,10 @@ async fn set_settings(
     dispatch(
         &state,
         &headers,
-        WireCommand::SetSettings {
+        // The regrouping from the body's config-section groups onto the flat
+        // patch is real work, so it stays hand-written: this is the contract
+        // boundary between the public HTTP shape and the wire command.
+        WireCommand::SetSettings(SettingsPatch {
             copy_on_select: body.ui.copy_on_select,
             show_changes_pane: body.ui.show_changes_pane,
             web_notifications: body.capabilities.web_notifications,
@@ -371,7 +374,7 @@ async fn set_settings(
                 .defaults
                 .enable_randomized_pet_name_by_default,
             default_provider: body.defaults.provider,
-        },
+        }),
     )
     .await
 }

@@ -240,33 +240,13 @@ pub enum WireCommand {
     /// synchronous success/failure, and a non-empty patch mutates config-static
     /// state so the web fires `config.changed` and every tab refetches its
     /// settings.
-    SetSettings {
-        copy_on_select: Option<bool>,
-        show_changes_pane: Option<bool>,
-        web_notifications: Option<bool>,
-        always_show_tab_strip: Option<bool>,
-        status_clear_seconds: Option<u16>,
-        attention_grace_seconds: Option<u64>,
-        attention_indicator: Option<bool>,
-        attention_on_bell: Option<bool>,
-        pr_banner_position: Option<String>,
-        hyperlinks: Option<bool>,
-        /// `defaults.enable_randomized_pet_name_by_default`. It rides the
-        /// generic settings path (rather than its dedicated toggle endpoint)
-        /// because flipping it is a plain field write with no side effects,
-        /// unlike `ui.github_integration`, which arms/disarms PR sync and
-        /// therefore keeps its own endpoint.
-        enable_randomized_pet_name_by_default: Option<bool>,
-        /// `defaults.provider`: the GLOBAL default provider for new agents in
-        /// projects without a project-specific override, mirroring the TUI's
-        /// `change-default-provider` palette command. Distinct from the
-        /// per-project `ProjectConfig::default_provider` override, which has
-        /// its own dedicated wire path and is out of scope here. Validated
-        /// against the configured provider list (same source as
-        /// `BootstrapView::available_providers`); an unrecognized name
-        /// rejects the WHOLE patch, matching `pr_banner_position`.
-        default_provider: Option<String>,
-    },
+    /// The field list lives on [`SettingsPatch`], which carries the
+    /// field-by-field semantics. The wire format is unaffected by the newtype:
+    /// under this enum's adjacent tagging a newtype variant flattens its inner
+    /// struct straight into `args`, so `{"command":"set_settings","args":{...}}`
+    /// serializes and parses byte-identically to the inline-field form this
+    /// replaced (pinned by `set_settings_wire_json_round_trips_through_args`).
+    SetSettings(SettingsPatch),
     /// Force-kill a running agent's PTY WITHOUT deleting its session or
     /// worktree, the web counterpart to the TUI's kill-running modal (for one
     /// agent). Mirrors the force-reconnect teardown block but stops there (no
@@ -635,9 +615,26 @@ pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
     }
 }
 
-/// The present/absent fields for [`WireCommand::SetSettings`], grouped into a
-/// struct so [`Engine::set_settings`] doesn't take a many-argument positional
-/// list. See the variant's doc comment for the field-by-field semantics.
+/// The present/absent fields for [`WireCommand::SetSettings`] — the SINGLE
+/// field list for the settings path, and the payload the variant carries.
+///
+/// Set explicit values for the "Settings" modal's `[ui]`/`[capabilities]`/
+/// `[defaults]` knobs in one request, mirroring `SetInstanceIdentity`'s
+/// all-optional present-field pattern but for the generic settings surface (the
+/// Preferences dialog, opened from the app menu's cog; see
+/// `crates/dux-web/web/src/lib/settingsDescriptors.ts` for the exact field set
+/// and descriptions). Every field is optional; an absent field is left
+/// untouched, and a patch with every field absent is a no-op (no write, no
+/// `config.changed`). Numeric fields are clamped to a sane documented ceiling
+/// (0 stays 0 where the config documents a zero meaning); `pr_banner_position`
+/// and `default_provider` are validated against a fixed accepted set and the
+/// whole command is REJECTED (no partial apply) if a present value is
+/// unrecognized. `server.title` and `server.favicon` are deliberately NOT here,
+/// they stay on `SetInstanceIdentity`. The write is eager so the endpoint can
+/// report a synchronous success/failure, and a non-empty patch mutates
+/// config-static state so the web fires `config.changed` and every tab refetches
+/// its settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SettingsPatch {
     pub copy_on_select: Option<bool>,
     pub show_changes_pane: Option<bool>,
@@ -649,8 +646,34 @@ pub struct SettingsPatch {
     pub attention_on_bell: Option<bool>,
     pub pr_banner_position: Option<String>,
     pub hyperlinks: Option<bool>,
+    /// `defaults.enable_randomized_pet_name_by_default`. It rides the generic
+    /// settings path (rather than its dedicated toggle endpoint) because
+    /// flipping it is a plain field write with no side effects, unlike
+    /// `ui.github_integration`, which arms/disarms PR sync and therefore keeps
+    /// its own endpoint.
     pub enable_randomized_pet_name_by_default: Option<bool>,
+    /// `defaults.provider`: the GLOBAL default provider for new agents in
+    /// projects without a project-specific override, mirroring the TUI's
+    /// `change-default-provider` palette command. Distinct from the per-project
+    /// `ProjectConfig::default_provider` override, which has its own dedicated
+    /// wire path and is out of scope here. Validated against the configured
+    /// provider list (same source as `BootstrapView::available_providers`); an
+    /// unrecognized name rejects the WHOLE patch, matching
+    /// `pr_banner_position`.
     pub default_provider: Option<String>,
+}
+
+impl SettingsPatch {
+    /// True when the client sent at least one field.
+    ///
+    /// Every field is an `Option`, so "every field absent" is exactly
+    /// `Self::default()`. That makes this a whole-struct compare rather than a
+    /// per-field list, which means a field added to this struct CANNOT make it
+    /// stale. The field-by-field version of this check is how a patch carrying
+    /// only an unlisted field once read as empty and silently no-opped.
+    pub fn any_present(&self) -> bool {
+        *self != Self::default()
+    }
 }
 
 impl WireCommand {
@@ -676,33 +699,8 @@ impl WireCommand {
         }
         // An empty-patch `SetSettings` (every field absent) never touches
         // config, mirroring the `SetInstanceIdentity` empty-body no-op above.
-        if let WireCommand::SetSettings {
-            copy_on_select,
-            show_changes_pane,
-            web_notifications,
-            always_show_tab_strip,
-            status_clear_seconds,
-            attention_grace_seconds,
-            attention_indicator,
-            attention_on_bell,
-            pr_banner_position,
-            hyperlinks,
-            enable_randomized_pet_name_by_default,
-            default_provider,
-        } = self
-        {
-            return copy_on_select.is_some()
-                || show_changes_pane.is_some()
-                || web_notifications.is_some()
-                || always_show_tab_strip.is_some()
-                || status_clear_seconds.is_some()
-                || attention_grace_seconds.is_some()
-                || attention_indicator.is_some()
-                || attention_on_bell.is_some()
-                || pr_banner_position.is_some()
-                || hyperlinks.is_some()
-                || enable_randomized_pet_name_by_default.is_some()
-                || default_provider.is_some();
+        if let WireCommand::SetSettings(patch) = self {
+            return patch.any_present();
         }
         matches!(
             self,
@@ -1075,34 +1073,8 @@ impl Engine {
                     created_op_id: None,
                 });
             }
-            WireCommand::SetSettings {
-                copy_on_select,
-                show_changes_pane,
-                web_notifications,
-                always_show_tab_strip,
-                status_clear_seconds,
-                attention_grace_seconds,
-                attention_indicator,
-                attention_on_bell,
-                pr_banner_position,
-                hyperlinks,
-                enable_randomized_pet_name_by_default,
-                default_provider,
-            } => {
-                let status = self.set_settings(SettingsPatch {
-                    copy_on_select,
-                    show_changes_pane,
-                    web_notifications,
-                    always_show_tab_strip,
-                    status_clear_seconds,
-                    attention_grace_seconds,
-                    attention_indicator,
-                    attention_on_bell,
-                    pr_banner_position,
-                    hyperlinks,
-                    enable_randomized_pet_name_by_default,
-                    default_provider,
-                })?;
+            WireCommand::SetSettings(patch) => {
+                let status = self.set_settings(patch)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
                     created_op_id: None,
@@ -1316,6 +1288,18 @@ impl Engine {
     /// disk write), and a non-empty patch mutates config-static state so the web
     /// fires `config.changed` for connected clients to refetch their settings.
     fn set_settings(&mut self, patch: SettingsPatch) -> anyhow::Result<WireStatus> {
+        // Ask before the destructure moves the patch apart. This message is
+        // deliberately distinct from "Settings unchanged." below: "you sent me
+        // no fields" and "you sent values that already match" are different
+        // statements, and both are pinned by tests.
+        if !patch.any_present() {
+            return Ok(WireStatus::new("info", "Nothing to update."));
+        }
+
+        // LOAD-BEARING: this destructure is exhaustive with no `..` on purpose.
+        // It is what makes the compiler reject a field added to `SettingsPatch`
+        // but never mapped onto the candidate below, which is the only field
+        // list left on this path. Do not "tidy" it with `..`.
         let SettingsPatch {
             copy_on_select,
             show_changes_pane,
@@ -1330,22 +1314,6 @@ impl Engine {
             enable_randomized_pet_name_by_default,
             default_provider,
         } = patch;
-
-        if copy_on_select.is_none()
-            && show_changes_pane.is_none()
-            && web_notifications.is_none()
-            && always_show_tab_strip.is_none()
-            && status_clear_seconds.is_none()
-            && attention_grace_seconds.is_none()
-            && attention_indicator.is_none()
-            && attention_on_bell.is_none()
-            && pr_banner_position.is_none()
-            && hyperlinks.is_none()
-            && enable_randomized_pet_name_by_default.is_none()
-            && default_provider.is_none()
-        {
-            return Ok(WireStatus::new("info", "Nothing to update."));
-        }
 
         // Validate enums BEFORE mutating the candidate, so a rejected value
         // leaves nothing partially applied.
@@ -3520,7 +3488,7 @@ impl Engine {
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::SetChangesPaneVisible { .. }
             | WireCommand::SetInstanceIdentity { .. }
-            | WireCommand::SetSettings { .. }
+            | WireCommand::SetSettings(..)
             | WireCommand::ToggleRandomizedPetNameDefault {}
             | WireCommand::TogglePrBannerPosition {}
             | WireCommand::ToggleCopyOnSelect {}
@@ -7916,63 +7884,85 @@ mod tests {
         assert!(!WireCommand::WatchChangedFiles { session_id: None }.mutates_config_static());
     }
 
-    /// Build a `WireCommand::SetSettings` with every field `None` (a true no-op
-    /// patch) so tests only spell out the field(s) they care about.
+    /// A `SetSettings` with every field `None` (a true no-op patch).
     fn empty_settings_patch() -> WireCommand {
-        WireCommand::SetSettings {
-            copy_on_select: None,
-            show_changes_pane: None,
-            web_notifications: None,
-            always_show_tab_strip: None,
-            status_clear_seconds: None,
-            attention_grace_seconds: None,
-            attention_indicator: None,
-            attention_on_bell: None,
-            pr_banner_position: None,
-            hyperlinks: None,
-            enable_randomized_pet_name_by_default: None,
-            default_provider: None,
-        }
+        WireCommand::SetSettings(SettingsPatch::default())
     }
 
-    /// Build a `WireCommand::SetSettings` patch with only `pr_banner_position`
-    /// set (every other field `None`). `WireCommand`'s struct-variant fields
-    /// don't support functional-update syntax (`..base`, `E0436`), so each
-    /// single-field helper spells out the full field list explicitly.
+    /// A `SetSettings` carrying only `pr_banner_position`.
     fn pr_banner_position_only_patch(position: &str) -> WireCommand {
-        WireCommand::SetSettings {
-            copy_on_select: None,
-            show_changes_pane: None,
-            web_notifications: None,
-            always_show_tab_strip: None,
-            status_clear_seconds: None,
-            attention_grace_seconds: None,
-            attention_indicator: None,
-            attention_on_bell: None,
+        WireCommand::SetSettings(SettingsPatch {
             pr_banner_position: Some(position.to_string()),
-            hyperlinks: None,
-            enable_randomized_pet_name_by_default: None,
-            default_provider: None,
-        }
+            ..Default::default()
+        })
     }
 
-    /// Build a `WireCommand::SetSettings` patch with only `default_provider`
-    /// set (every other field `None`), mirroring `pr_banner_position_only_patch`.
+    /// A `SetSettings` carrying only `default_provider`.
     fn default_provider_only_patch(provider: &str) -> WireCommand {
-        WireCommand::SetSettings {
-            copy_on_select: None,
-            show_changes_pane: None,
-            web_notifications: None,
-            always_show_tab_strip: None,
-            status_clear_seconds: None,
-            attention_grace_seconds: None,
-            attention_indicator: None,
-            attention_on_bell: None,
-            pr_banner_position: None,
-            hyperlinks: None,
-            enable_randomized_pet_name_by_default: None,
+        WireCommand::SetSettings(SettingsPatch {
             default_provider: Some(provider.to_string()),
-        }
+            ..Default::default()
+        })
+    }
+
+    /// Pins the trick that replaced the presence check's field list: because
+    /// every field is an `Option`, "all absent" is exactly `Self::default()`.
+    #[test]
+    fn settings_patch_any_present_is_false_only_for_an_all_absent_patch() {
+        assert!(!SettingsPatch::default().any_present());
+        assert!(
+            SettingsPatch {
+                copy_on_select: Some(false),
+                ..Default::default()
+            }
+            .any_present(),
+            "a lone false must still read as present, not as absent"
+        );
+        assert!(
+            SettingsPatch {
+                status_clear_seconds: Some(0),
+                ..Default::default()
+            }
+            .any_present(),
+            "a lone zero must still read as present"
+        );
+        assert!(
+            SettingsPatch {
+                default_provider: Some(String::new()),
+                ..Default::default()
+            }
+            .any_present(),
+            "a lone empty string must still read as present"
+        );
+    }
+
+    /// WIRE PIN. `SetSettings` carries its fields in a newtype payload rather
+    /// than inline on the variant. Under this enum's adjacent tagging a newtype
+    /// variant flattens its inner struct into `args`, so the envelope is
+    /// byte-identical to the inline-field form and existing JSON still parses.
+    /// This freezes that property: a future change to the variant's shape that
+    /// altered the envelope fails here rather than at a client.
+    #[test]
+    fn set_settings_wire_json_round_trips_through_args() {
+        let json = serde_json::json!({
+            "command": "set_settings",
+            "args": { "copy_on_select": false },
+        });
+        let parsed: WireCommand = serde_json::from_value(json.clone()).expect("parse");
+        assert_eq!(
+            parsed,
+            WireCommand::SetSettings(SettingsPatch {
+                copy_on_select: Some(false),
+                ..Default::default()
+            })
+        );
+        // Absent fields must serialize back out as explicit nulls inside `args`,
+        // never leak out of `args`, and re-parse to the same command.
+        let reserialized = serde_json::to_value(&parsed).expect("serialize");
+        assert_eq!(reserialized["command"], "set_settings");
+        assert_eq!(reserialized["args"]["copy_on_select"], false);
+        let reparsed: WireCommand = serde_json::from_value(reserialized).expect("re-parse");
+        assert_eq!(reparsed, parsed);
     }
 
     #[test]
@@ -8027,20 +8017,12 @@ mod tests {
     fn set_settings_accepts_a_valid_ui_patch() {
         let (mut engine, _tmp) = test_engine();
         let outcome = engine
-            .apply_wire(WireCommand::SetSettings {
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
                 copy_on_select: Some(false),
-                show_changes_pane: None,
-                web_notifications: None,
                 always_show_tab_strip: Some(true),
-                status_clear_seconds: None,
-                attention_grace_seconds: None,
-                attention_indicator: None,
-                attention_on_bell: None,
                 pr_banner_position: Some("top".to_string()),
-                hyperlinks: None,
-                enable_randomized_pet_name_by_default: None,
-                default_provider: None,
-            })
+                ..Default::default()
+            }))
             .expect("dispatch ok");
         assert_eq!(outcome.status.expect("status").tone, "info");
         assert!(!engine.config.ui.copy_on_select);
@@ -8059,20 +8041,10 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         let before = engine.config.defaults.enable_randomized_pet_name_by_default;
         engine
-            .apply_wire(WireCommand::SetSettings {
-                copy_on_select: None,
-                show_changes_pane: None,
-                web_notifications: None,
-                always_show_tab_strip: None,
-                status_clear_seconds: None,
-                attention_grace_seconds: None,
-                attention_indicator: None,
-                attention_on_bell: None,
-                pr_banner_position: None,
-                hyperlinks: None,
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
                 enable_randomized_pet_name_by_default: Some(!before),
-                default_provider: None,
-            })
+                ..Default::default()
+            }))
             .expect("dispatch ok");
         assert_eq!(
             engine.config.defaults.enable_randomized_pet_name_by_default, !before,
@@ -8084,20 +8056,10 @@ mod tests {
     fn set_settings_clamps_out_of_range_status_clear_seconds() {
         let (mut engine, _tmp) = test_engine();
         engine
-            .apply_wire(WireCommand::SetSettings {
-                copy_on_select: None,
-                show_changes_pane: None,
-                web_notifications: None,
-                always_show_tab_strip: None,
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
                 status_clear_seconds: Some(u16::MAX),
-                attention_grace_seconds: None,
-                attention_indicator: None,
-                attention_on_bell: None,
-                pr_banner_position: None,
-                hyperlinks: None,
-                enable_randomized_pet_name_by_default: None,
-                default_provider: None,
-            })
+                ..Default::default()
+            }))
             .expect("dispatch ok");
         assert_eq!(
             engine.config.ui.status_clear_seconds,
@@ -8110,20 +8072,10 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.config.ui.attention_grace_seconds = 3;
         engine
-            .apply_wire(WireCommand::SetSettings {
-                copy_on_select: None,
-                show_changes_pane: None,
-                web_notifications: None,
-                always_show_tab_strip: None,
-                status_clear_seconds: None,
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
                 attention_grace_seconds: Some(0),
-                attention_indicator: None,
-                attention_on_bell: None,
-                pr_banner_position: None,
-                hyperlinks: None,
-                enable_randomized_pet_name_by_default: None,
-                default_provider: None,
-            })
+                ..Default::default()
+            }))
             .expect("dispatch ok");
         assert_eq!(engine.config.ui.attention_grace_seconds, 0);
     }
@@ -8159,20 +8111,10 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.config.ui.pr_banner_position = "top".to_string();
         engine
-            .apply_wire(WireCommand::SetSettings {
+            .apply_wire(WireCommand::SetSettings(SettingsPatch {
                 copy_on_select: Some(false),
-                show_changes_pane: None,
-                web_notifications: None,
-                always_show_tab_strip: None,
-                status_clear_seconds: None,
-                attention_grace_seconds: None,
-                attention_indicator: None,
-                attention_on_bell: None,
-                pr_banner_position: None,
-                hyperlinks: None,
-                enable_randomized_pet_name_by_default: None,
-                default_provider: None,
-            })
+                ..Default::default()
+            }))
             .expect("dispatch ok");
         // pr_banner_position was absent from the patch, so it must be untouched.
         assert_eq!(engine.config.ui.pr_banner_position, "top");
@@ -8425,7 +8367,7 @@ mod tests {
         let before = engine.config.clone();
         // Every value is derived from the current config, so no field can pass
         // by accidentally already holding the value we send.
-        let patch = WireCommand::SetSettings {
+        let patch = WireCommand::SetSettings(SettingsPatch {
             copy_on_select: Some(!before.ui.copy_on_select),
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),
@@ -8446,7 +8388,7 @@ mod tests {
             // `claude` is the default, `codex` is the other provider that ships
             // in `ProvidersConfig::default()`.
             default_provider: Some("codex".to_string()),
-        };
+        });
         engine.apply_wire(patch).expect("dispatch ok");
 
         let after = &engine.config;
