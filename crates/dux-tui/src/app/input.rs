@@ -4625,6 +4625,7 @@ impl App {
                     name: String::new(),
                     candidates,
                     confirm_selected: false,
+                    return_prompt: Box::new(return_prompt),
                 };
                 return;
             }
@@ -5048,15 +5049,24 @@ impl App {
     /// completion). On cancel: leave the folder untouched and restore the
     /// project browser. Always returns `false` (never quits).
     pub(crate) fn resolve_confirm_init_repo(&mut self, confirm: bool) -> bool {
-        let (path, name) = match &self.prompt {
-            PromptState::ConfirmInitRepo { path, name, .. } => (path.clone(), name.clone()),
-            _ => return false,
-        };
-        self.prompt = PromptState::None;
+        let (path, name, return_prompt) =
+            match std::mem::replace(&mut self.prompt, PromptState::None) {
+                PromptState::ConfirmInitRepo {
+                    path,
+                    name,
+                    return_prompt,
+                    ..
+                } => (path, name, return_prompt),
+                other => {
+                    self.prompt = other;
+                    return false;
+                }
+            };
         if !confirm {
-            if let Err(e) = self.open_project_browser() {
-                self.set_error(format!("{e:#}"));
-            }
+            // Restore the browser exactly as the user left it (location,
+            // typed path), the AddProjectFailed pattern; never rebuild it at
+            // the start directory.
+            self.prompt = *return_prompt;
             return false;
         }
         self.dispatch_init_repo(path, name);
@@ -10958,13 +10968,24 @@ cyan = "#00ffff"
             other => panic!("expected the init-repo prompt, got {other:?}"),
         }
 
-        // Cancel restores the project browser.
+        // Cancel restores the browser EXACTLY as the user left it: same
+        // location, typed path intact (never rebuilt at the start directory).
         app.resolve_confirm_init_repo(false);
-        assert!(
-            matches!(app.prompt, PromptState::BrowseProjects { .. }),
-            "cancel must restore the browser, got {:?}",
-            app.prompt
-        );
+        match &app.prompt {
+            PromptState::BrowseProjects {
+                editing_path,
+                path_input,
+                ..
+            } => {
+                assert!(*editing_path, "cancel must keep the path editor open");
+                assert_eq!(
+                    path_input.text,
+                    typed.to_string_lossy(),
+                    "cancel must keep the typed path"
+                );
+            }
+            other => panic!("cancel must restore the browser, got {other:?}"),
+        }
 
         // Re-open and confirm: the shared in-flight gate is marked.
         app.prompt = PromptState::ConfirmInitRepo {
@@ -10972,6 +10993,7 @@ cyan = "#00ffff"
             name: String::new(),
             candidates: vec!["node_modules".to_string()],
             confirm_selected: true,
+            return_prompt: Box::new(PromptState::None),
         };
         app.resolve_confirm_init_repo(true);
         assert!(

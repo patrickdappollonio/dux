@@ -1051,6 +1051,10 @@ pub(crate) enum PromptState {
         /// (display only; the worker re-derives the real list when seeding).
         candidates: Vec<String>,
         confirm_selected: bool, // false = Cancel (default), true = Initialize & Add
+        /// The prompt to restore on cancel (the project browser with the
+        /// user's location and typed path intact), the `AddProjectFailed`
+        /// pattern.
+        return_prompt: Box<PromptState>,
     },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     AgentInfo(AgentInfoPrompt),
