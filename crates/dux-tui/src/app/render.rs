@@ -7387,8 +7387,14 @@ impl App {
                         Style::default()
                     };
 
-                    // Expand indicator: ▶/▼ for expandable rows, space for others.
-                    let indicator = if !stat.children.is_empty() {
+                    // Expand indicator: ▶/▼ for expandable rows, space for
+                    // others. Gated on `has_breakdown()` (core's rule), NOT on
+                    // `children` being non-empty: `children` always contains
+                    // the root itself, so a leaf process has exactly one entry
+                    // and an is-empty test marks every row expandable. Expanding
+                    // one then reveals a single child that is a duplicate of the
+                    // row just expanded.
+                    let indicator = if stat.has_breakdown() {
                         if let Some(pid) = stat.pid {
                             if expanded.contains(&pid) {
                                 "▼ "
@@ -7418,8 +7424,16 @@ impl App {
                     let child = &rows[*parent_idx].children[*child_idx];
                     let is_last = *child_idx == rows[*parent_idx].children.len().saturating_sub(1);
                     let connector = if is_last { "└" } else { "├" };
-                    let label =
-                        truncate_status_text(&format!("    {connector} {}", child.name), name_w);
+                    // The root is part of its own breakdown on purpose (that is
+                    // what makes the rows sum to the parent's total), so say so
+                    // instead of letting it read as a phantom duplicate of the
+                    // row above.
+                    let name = if child.is_root {
+                        format!("{} (this process)", child.name)
+                    } else {
+                        child.name.clone()
+                    };
+                    let label = truncate_status_text(&format!("    {connector} {name}"), name_w);
                     let cpu_str = if short_window_sample {
                         format!("~{:.1}%", child.cpu_percent)
                     } else {
@@ -9453,6 +9467,7 @@ mod tests {
                 pid: 101,
                 cpu_percent: 3.0,
                 rss_bytes: 512 * 1024,
+                is_root: false,
             }],
         }];
         let mut expanded = HashSet::new();
@@ -9521,6 +9536,7 @@ mod tests {
                 pid: 101,
                 cpu_percent: 3.0,
                 rss_bytes: 512 * 1024,
+                is_root: false,
             }],
         }];
         let mut expanded = HashSet::new();
@@ -9615,6 +9631,7 @@ mod tests {
                 pid: 101,
                 cpu_percent: 3.0,
                 rss_bytes: 512 * 1024,
+                is_root: false,
             }],
         }];
         let mut expanded = HashSet::new();
@@ -9640,6 +9657,131 @@ mod tests {
         assert!(rendered.contains("PID"));
         assert!(rendered.contains("Procs"));
         assert!(rendered.contains("100"), "parent PID should render");
+    }
+
+    /// Render the monitor at a wide terminal and return the flattened buffer.
+    fn render_monitor_text(rows: &[ResourceStats], expanded: &HashSet<u32>) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_resource_monitor(frame, rows, 0, 0, expanded, false);
+            })
+            .expect("render frame");
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn leaf_row() -> ResourceStats {
+        // A leaf: the collector always puts the root in `children`, so a
+        // provider that spawned no subprocesses still has exactly one entry.
+        ResourceStats {
+            id: Some("s1".into()),
+            kind: ResourceKind::Agent,
+            label: "Agent (claude): leaf-branch".into(),
+            pid: Some(100),
+            cpu_percent: 5.0,
+            rss_bytes: 1024 * 1024,
+            process_count: 1,
+            children: vec![ProcessInfo {
+                name: "claude".into(),
+                pid: 100,
+                cpu_percent: 5.0,
+                rss_bytes: 1024 * 1024,
+                is_root: true,
+            }],
+        }
+    }
+
+    fn tree_row() -> ResourceStats {
+        ResourceStats {
+            id: Some("s2".into()),
+            kind: ResourceKind::Agent,
+            label: "Agent (claude): tree-branch".into(),
+            pid: Some(200),
+            cpu_percent: 8.0,
+            rss_bytes: 2048 * 1024,
+            process_count: 2,
+            children: vec![
+                ProcessInfo {
+                    name: "claude".into(),
+                    pid: 200,
+                    cpu_percent: 5.0,
+                    rss_bytes: 1024 * 1024,
+                    is_root: true,
+                },
+                ProcessInfo {
+                    name: "rust-analyzer".into(),
+                    pid: 201,
+                    cpu_percent: 3.0,
+                    rss_bytes: 1024 * 1024,
+                    is_root: false,
+                },
+            ],
+        }
+    }
+
+    /// The display defect: `children` always contains the root, so a leaf row
+    /// has `children.len() == 1` and the old `!children.is_empty()` gate marked
+    /// EVERY row expandable. Expanding a leaf then revealed one child that was
+    /// a duplicate of the row just expanded. A leaf must render no caret.
+    #[test]
+    fn resource_monitor_leaf_row_renders_no_expand_indicator() {
+        let rendered = render_monitor_text(&[leaf_row()], &HashSet::new());
+        assert!(
+            rendered.contains("Agent (claude): leaf-branch"),
+            "the leaf row itself must still render: {rendered}"
+        );
+        assert!(
+            !rendered.contains('\u{25b6}') && !rendered.contains('\u{25bc}'),
+            "a leaf row (its only child is itself) must render no expand caret: {rendered}"
+        );
+    }
+
+    /// The other half of the gate: a row with a real subprocess still offers
+    /// the caret, so suppressing the leaf case did not suppress everything.
+    #[test]
+    fn resource_monitor_row_with_real_breakdown_renders_expand_indicator() {
+        let rendered = render_monitor_text(&[tree_row()], &HashSet::new());
+        assert!(
+            rendered.contains('\u{25b6}'),
+            "a row with a real subprocess must render the collapsed caret: {rendered}"
+        );
+
+        let mut expanded = HashSet::new();
+        expanded.insert(200u32);
+        let rendered = render_monitor_text(&[tree_row()], &expanded);
+        assert!(
+            rendered.contains('\u{25bc}'),
+            "an expanded row must render the expanded caret: {rendered}"
+        );
+        assert!(
+            rendered.contains("rust-analyzer"),
+            "the real subprocess must render in the breakdown: {rendered}"
+        );
+    }
+
+    /// The root is in its own breakdown so the rows sum to the parent total.
+    /// Mark it, so the entry restating the row above reads as the parent's own
+    /// usage rather than a phantom duplicate process.
+    #[test]
+    fn resource_monitor_marks_the_root_entry_in_the_breakdown() {
+        let mut expanded = HashSet::new();
+        expanded.insert(200u32);
+        let rendered = render_monitor_text(&[tree_row()], &expanded);
+        assert!(
+            rendered.contains("claude (this process)"),
+            "the breakdown entry that IS the root must be labelled: {rendered}"
+        );
     }
 
     /// An agent (or terminal) literally titled "TOTAL" must not be

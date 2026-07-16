@@ -215,6 +215,7 @@ fn aggregate_tree(
                 pid: pid.as_u32(),
                 cpu_percent: proc_info.cpu_usage(),
                 rss_bytes: proc_info.memory(),
+                is_root: *pid == root,
             });
         }
     }
@@ -1038,6 +1039,120 @@ mod tests {
                  got {burner_cpu}% (a clamp would pin this at exactly 100)"
             );
         }
+    }
+
+    /// A leaf target's `children` holds exactly one entry: the root itself.
+    /// Offering an expand affordance there reveals a duplicate of the row the
+    /// user just expanded, which is the display defect this gate fixes.
+    #[test]
+    fn has_breakdown_is_false_for_a_leaf_whose_only_child_is_itself() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("failed to spawn sleep child");
+        let child_pid = child.id();
+
+        std::thread::sleep(Duration::from_millis(200));
+        let sys = fresh_system();
+        let (cpu, rss, count, children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(child_pid));
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let stats = ResourceStats {
+            id: Some("t1".into()),
+            kind: ResourceKind::Terminal,
+            label: "term".into(),
+            pid: Some(child_pid),
+            cpu_percent: cpu,
+            rss_bytes: rss,
+            process_count: count,
+            children,
+        };
+        assert_eq!(
+            stats.children.len(),
+            1,
+            "a real leaf process's breakdown is exactly its own entry"
+        );
+        assert!(
+            stats.children[0].is_root,
+            "the lone entry must be marked as the root, not read as a subprocess"
+        );
+        assert!(
+            !stats.has_breakdown(),
+            "a leaf carries no breakdown worth expanding"
+        );
+    }
+
+    /// A target with a real subprocess does have a breakdown, and exactly one
+    /// of its entries is flagged as the root.
+    #[test]
+    fn has_breakdown_is_true_and_root_is_marked_once_for_a_real_tree() {
+        let _guard = CHILD_PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 5 & wait")
+            .spawn()
+            .expect("failed to spawn sh child");
+        let root_pid = child.id();
+
+        std::thread::sleep(Duration::from_millis(300));
+        let sys = fresh_system();
+        let (cpu, rss, count, children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(root_pid));
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let stats = ResourceStats {
+            id: Some("s1".into()),
+            kind: ResourceKind::Agent,
+            label: "agent".into(),
+            pid: Some(root_pid),
+            cpu_percent: cpu,
+            rss_bytes: rss,
+            process_count: count,
+            children,
+        };
+        assert!(
+            stats.has_breakdown(),
+            "a tree with a real subprocess has a breakdown: {:?}",
+            stats.children
+        );
+        let roots: Vec<_> = stats.children.iter().filter(|c| c.is_root).collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "exactly one breakdown entry is the root: {:?}",
+            stats.children
+        );
+        assert_eq!(
+            roots[0].pid, root_pid,
+            "the entry flagged as root must be the tree's root pid"
+        );
+    }
+
+    /// The dux and TOTAL rows carry no children at all, and must not offer an
+    /// expand affordance either.
+    #[test]
+    fn has_breakdown_is_false_when_there_are_no_children() {
+        let stats = ResourceStats {
+            id: None,
+            kind: ResourceKind::Total,
+            label: "TOTAL".into(),
+            pid: None,
+            cpu_percent: 0.0,
+            rss_bytes: 0,
+            process_count: 0,
+            children: Vec::new(),
+        };
+        assert!(!stats.has_breakdown());
     }
 
     #[test]

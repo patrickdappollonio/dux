@@ -326,6 +326,10 @@ pub struct ProcessInfoView {
     pub pid: u32,
     pub cpu_percent: f32,
     pub rss_bytes: u64,
+    /// True for the entry that IS the row's root process. The breakdown
+    /// includes the root so it sums to the row total; this marks it so it does
+    /// not read as a phantom duplicate of the row above.
+    pub is_root: bool,
 }
 
 /// One resource-monitor row projected for web clients (`GET /api/v1/resources`).
@@ -350,6 +354,13 @@ pub struct ResourceStatsView {
     pub rss_bytes: u64,
     pub process_count: usize,
     pub children: Vec<ProcessInfoView>,
+    /// Whether the breakdown carries information beyond the row itself, i.e.
+    /// whether the client should offer an expand affordance. Computed by core
+    /// (`ResourceStats::has_breakdown`) rather than re-derived from
+    /// `children.length` in the browser, so the two surfaces cannot drift on
+    /// the rule: `children` always contains the root, so the threshold is
+    /// `> 1`, and a leaf's lone entry is not a breakdown.
+    pub has_breakdown: bool,
 }
 
 impl ResourceStatsView {
@@ -358,6 +369,7 @@ impl ResourceStatsView {
     pub fn from_stats(rows: Vec<ResourceStats>) -> Vec<Self> {
         rows.into_iter()
             .map(|r| Self {
+                has_breakdown: r.has_breakdown(),
                 id: r.id,
                 kind: match r.kind {
                     ResourceKind::Dux => "dux",
@@ -379,6 +391,7 @@ impl ResourceStatsView {
                         pid: c.pid,
                         cpu_percent: c.cpu_percent,
                         rss_bytes: c.rss_bytes,
+                        is_root: c.is_root,
                     })
                     .collect(),
             })

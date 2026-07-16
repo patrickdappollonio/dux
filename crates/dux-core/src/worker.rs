@@ -120,6 +120,13 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub cpu_percent: f32,
     pub rss_bytes: u64,
+    /// True for the one entry that IS the row's root process rather than a
+    /// subprocess under it. The breakdown deliberately includes the root so it
+    /// sums to the row's total (see `aggregate_tree`), which means one entry
+    /// always restates the row above it; without this flag it reads as a
+    /// phantom duplicate. Surfaces mark it rather than hide it: hiding it
+    /// would leave the breakdown silently failing to add up.
+    pub is_root: bool,
 }
 
 /// What a resource row describes. Lets a surface join a sampled row back to the
@@ -165,6 +172,25 @@ pub struct ResourceStats {
     pub rss_bytes: u64,
     pub process_count: usize,
     pub children: Vec<ProcessInfo>,
+}
+
+impl ResourceStats {
+    /// Whether this row's breakdown carries any information beyond the row
+    /// itself, i.e. whether an expand affordance should be offered at all.
+    ///
+    /// The threshold is `> 1`, not `> 0`, because `children` always contains
+    /// the root process itself. For a LEAF target (a provider that spawned no
+    /// subprocesses, which is the common case) that single entry is the root,
+    /// so expanding reveals nothing but a duplicate of the row just expanded.
+    ///
+    /// This lives in core, and is projected onto the wire as
+    /// `ResourceStatsView::has_breakdown`, so the TUI and the web cannot drift
+    /// on it. The rule is a policy call ("one entry is not a breakdown"), not
+    /// a self-evident fact, and it is exactly the kind of off-by-one that a
+    /// second implementation in a second language gets subtly wrong.
+    pub fn has_breakdown(&self) -> bool {
+        self.children.len() > 1
+    }
 }
 
 #[derive(Clone, Debug)]

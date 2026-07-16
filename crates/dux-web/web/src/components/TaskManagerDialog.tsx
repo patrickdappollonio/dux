@@ -385,8 +385,19 @@ function NoStop() {
   )
 }
 
-// The expand caret. Every kind expands, terminals included: the collector runs
-// the same tree walk over every target.
+// The expand caret. Every KIND expands, terminals included: the collector runs
+// the same tree walk over every target. What decides is whether this row's tree
+// actually has anything to break down.
+//
+// The gate is core's `has_breakdown`, never `children.length`: `children`
+// always includes the row's own root process, so a leaf (a provider that
+// spawned no subprocesses, the common case) has length 1 and a
+// `length === 0` test leaves every single row expandable. Expanding one then
+// reveals exactly one child: a duplicate of the row just expanded.
+function rowHasBreakdown(row: TaskRow): boolean {
+  return row.stats?.has_breakdown ?? false
+}
+
 function ExpandToggle({
   row,
   expanded,
@@ -396,8 +407,7 @@ function ExpandToggle({
   expanded: boolean
   onToggle: () => void
 }) {
-  const children = row.stats?.children ?? []
-  if (children.length === 0) return <span className="inline-block w-4" />
+  if (!rowHasBreakdown(row)) return <span className="inline-block w-4" />
   const Icon = expanded ? ChevronDown : ChevronRight
   return (
     <button
@@ -451,7 +461,12 @@ function DesktopRow({
   // TOTAL has no pid at all (blank: it is a summary, not a process); every
   // other row shows the real pid, or a dash before the first sample lands.
   const pid = isTotal ? "" : row.stats?.pid != null ? String(row.stats.pid) : "—"
-  const children = row.stats?.children ?? []
+  // Gate the BODY on the same rule as the toggle, not just the toggle: an
+  // expanded row whose subprocess exits between polls drops to a lone root
+  // entry, and the caret vanishing is not enough to stop the duplicate from
+  // rendering under it. The expansion set is keyed by row and outlives the
+  // shape of the tree it was opened on.
+  const children = rowHasBreakdown(row) ? (row.stats?.children ?? []) : []
 
   return (
     <>
@@ -515,6 +530,14 @@ function DesktopRow({
                   <span className="whitespace-nowrap font-mono">
                     {child.name}
                   </span>
+                  {/* The root is in its own breakdown so the entries sum to the
+                      row's total. Label it, or it reads as a phantom duplicate
+                      of the row above. */}
+                  {child.is_root ? (
+                    <span className="ml-1.5 whitespace-nowrap text-muted-foreground/70">
+                      (this process)
+                    </span>
+                  ) : null}
                 </div>
               </td>
               <td className="py-0.5 pr-2 text-right tabular-nums">
@@ -552,7 +575,8 @@ function MobileRow({
 }) {
   const isTotal = row.kind === "total"
   const { cpu, mem, procs } = statCells(row.stats)
-  const children = row.stats?.children ?? []
+  // Same body gate as the desktop row: see `DesktopRow`.
+  const children = rowHasBreakdown(row) ? (row.stats?.children ?? []) : []
 
   return (
     <div
@@ -602,7 +626,17 @@ function MobileRow({
               key={child.pid}
               className="flex items-center justify-between gap-2 text-xs text-muted-foreground"
             >
-              <span className="truncate font-mono">{child.name}</span>
+              <span className="truncate font-mono">
+                {child.name}
+                {/* Same root marker as desktop: the breakdown includes the row's
+                    own process so the numbers add up, and it must not read as a
+                    phantom duplicate. */}
+                {child.is_root ? (
+                  <span className="ml-1.5 text-muted-foreground/70">
+                    (this process)
+                  </span>
+                ) : null}
+              </span>
               {/* The phone layout is cards, not a table: there is no PID
                   column to put this in, so it is labelled inline rather than
                   presented as a bare number that could be misread as a

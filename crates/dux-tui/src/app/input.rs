@@ -1994,8 +1994,13 @@ impl App {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(VisualRow::Parent(idx)) = visual.get(*selected_row) {
                         let stat = &rows[*idx];
+                        // `has_breakdown()`, not `!children.is_empty()`: a leaf
+                        // row's only child is the root itself, so expanding it
+                        // would show a duplicate of this very row. Gate the
+                        // toggle as well as the indicator, or Enter still
+                        // expands a row that renders no caret.
                         if let Some(pid) = stat.pid
-                            && !stat.children.is_empty()
+                            && stat.has_breakdown()
                             && !expanded.remove(&pid)
                         {
                             expanded.insert(pid);
@@ -5224,8 +5229,10 @@ impl App {
                         *selected_row = index;
                         if let Some(VisualRow::Parent(row_idx)) = visual.get(index) {
                             let stat = &rows[*row_idx];
+                            // Same gate as the keyboard path: clicking a leaf
+                            // row must not expand a duplicate of itself.
                             if let Some(pid) = stat.pid
-                                && !stat.children.is_empty()
+                                && stat.has_breakdown()
                                 && !expanded.remove(&pid)
                             {
                                 expanded.insert(pid);
@@ -10572,12 +10579,14 @@ cyan = "#00ffff"
                             pid: 101,
                             cpu_percent: 3.0,
                             rss_bytes: 512,
+                            is_root: false,
                         },
                         ProcessInfo {
                             name: "claude".into(),
                             pid: 102,
                             cpu_percent: 2.0,
                             rss_bytes: 256,
+                            is_root: false,
                         },
                     ],
                 },
@@ -10610,6 +10619,81 @@ cyan = "#00ffff"
             } => {
                 assert_eq!(*selected_row, 1);
                 assert!(expanded.contains(&100), "agent row should expand on click");
+            }
+            other => panic!("expected resource monitor prompt, got {other:?}"),
+        }
+    }
+
+    /// Clicking a LEAF row must not expand it. Its `children` holds exactly one
+    /// entry, the root itself, so expanding shows a duplicate of the row just
+    /// clicked. The row renders no caret after this fix, and the toggle is
+    /// gated too so a click on the (caret-less) row is inert rather than
+    /// silently producing the duplicate anyway.
+    #[test]
+    fn mouse_click_resource_monitor_leaf_row_does_not_expand() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ResourceMonitor {
+            rows: vec![
+                ResourceStats {
+                    id: None,
+                    kind: ResourceKind::Dux,
+                    label: "dux".into(),
+                    pid: Some(1),
+                    cpu_percent: 0.0,
+                    rss_bytes: 0,
+                    process_count: 1,
+                    children: Vec::new(),
+                },
+                ResourceStats {
+                    id: Some("s1".into()),
+                    kind: ResourceKind::Agent,
+                    label: "Agent".into(),
+                    pid: Some(100),
+                    cpu_percent: 5.0,
+                    rss_bytes: 1024,
+                    process_count: 1,
+                    // The collector always includes the root, so this is what a
+                    // leaf target actually looks like on the wire.
+                    children: vec![ProcessInfo {
+                        name: "claude".into(),
+                        pid: 100,
+                        cpu_percent: 5.0,
+                        rss_bytes: 1024,
+                        is_root: true,
+                    }],
+                },
+                ResourceStats {
+                    id: None,
+                    kind: ResourceKind::Total,
+                    label: "TOTAL".into(),
+                    pid: None,
+                    cpu_percent: 5.0,
+                    rss_bytes: 1024,
+                    process_count: 2,
+                    children: Vec::new(),
+                },
+            ],
+            scroll_offset: 0,
+            selected_row: 0,
+            expanded: std::collections::HashSet::new(),
+            last_refresh: std::time::Instant::now(),
+            short_window_sample: false,
+        };
+        install_resource_monitor_overlay(&mut app, 3);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 15, 7));
+
+        match &app.prompt {
+            PromptState::ResourceMonitor {
+                selected_row,
+                expanded,
+                ..
+            } => {
+                assert_eq!(*selected_row, 1, "the click still selects the row");
+                assert!(
+                    !expanded.contains(&100),
+                    "a leaf row must not expand: its only child is itself"
+                );
             }
             other => panic!("expected resource monitor prompt, got {other:?}"),
         }

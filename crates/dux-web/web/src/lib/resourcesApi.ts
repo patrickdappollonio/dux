@@ -14,6 +14,11 @@ export interface ProcessInfoView {
   pid: number
   cpu_percent: number
   rss_bytes: number
+  /** True for the entry that IS the row's own root process. `children` includes
+   * the root on purpose, so that the breakdown sums to the row's total; this
+   * marks the entry that restates the row above rather than being an extra
+   * process under it. */
+  is_root: boolean
 }
 
 // One sampled row. Mirrors `dux_core::viewmodel::ResourceStatsView`.
@@ -32,6 +37,16 @@ export interface ResourceStatsView {
   rss_bytes: number
   process_count: number
   children: ProcessInfoView[]
+  /** Whether the breakdown says anything the row does not already say, i.e.
+   * whether to offer an expand affordance at all.
+   *
+   * Read this; do NOT re-derive it from `children.length`. `children` always
+   * contains the row's own root process, so a leaf's length is 1, not 0: the
+   * obvious `children.length > 0` test marks every row expandable and expanding
+   * a leaf reveals a duplicate of the row just expanded. Core owns the rule
+   * (`ResourceStats::has_breakdown`) so this surface and the TUI cannot drift
+   * on the off-by-one. */
+  has_breakdown: boolean
 }
 
 export interface ResourcesResponse {

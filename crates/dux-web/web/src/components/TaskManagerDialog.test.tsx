@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 
 import type { DuxState } from "@/lib/store"
 import { RESOURCE_POLL_INTERVAL_MS, STALE_STATS_THRESHOLD_MS } from "@/lib/resourcePoll"
-import type { ResourceStatsView } from "@/lib/resourcesApi"
+import type { ProcessInfoView, ResourceStatsView } from "@/lib/resourcesApi"
 import type { AgentTabView, SessionView, TerminalView } from "@/lib/types"
 
 // Spy on the store actions the dialog routes stops through, while `useDux` reads
@@ -108,17 +108,37 @@ function terminal(over: Partial<TerminalView> & { id: string }): TerminalView {
 }
 
 function stat(over: Partial<ResourceStatsView>): ResourceStatsView {
-  return {
+  const base = {
     id: null,
-    kind: "agent",
+    kind: "agent" as const,
     label: "row",
     pid: 1,
     cpu_percent: 0,
     rss_bytes: 0,
     process_count: 1,
-    children: [],
+    children: [] as ResourceStatsView["children"],
     ...over,
   }
+  // Mirror core's rule (`ResourceStats::has_breakdown`) rather than hardcoding
+  // a boolean per fixture, so a fixture cannot claim a breakdown its children
+  // do not support. Explicit overrides still win.
+  return { has_breakdown: base.children.length > 1, ...base, ...over }
+}
+
+// A subprocess entry in a breakdown.
+function proc(
+  name: string,
+  pid: number,
+  over: Partial<ProcessInfoView> = {},
+): ProcessInfoView {
+  return { name, pid, cpu_percent: 1, rss_bytes: 1024, is_root: false, ...over }
+}
+
+// The root entry every real breakdown carries: `aggregate_tree` always includes
+// the root process, which is what makes the breakdown sum to the row's total.
+// Fixtures must include it or they describe a tree the collector never emits.
+function rootProc(name: string, pid: number, over: Partial<ProcessInfoView> = {}) {
+  return proc(name, pid, { is_root: true, ...over })
 }
 
 const duxStat = stat({
@@ -300,7 +320,8 @@ describe("TaskManagerDialog", () => {
           rss_bytes: 201_700_000,
           process_count: 4,
           children: [
-            { name: "node", pid: 4242, cpu_percent: 11.0, rss_bytes: 180_000_000 },
+            rootProc("npm", 1, { cpu_percent: 1.1, rss_bytes: 21_700_000 }),
+            proc("node", 4242, { cpu_percent: 11.0, rss_bytes: 180_000_000 }),
           ],
         }),
         totalStat,
@@ -319,6 +340,117 @@ describe("TaskManagerDialog", () => {
     expect(screen.queryByText("node")).toBeNull()
     fireEvent.click(toggle)
     expect(screen.getAllByText("node").length).toBeGreaterThan(0)
+  })
+
+  it("offers_no_expand_toggle_for_a_leaf_row", async () => {
+    // The display defect: `children` ALWAYS contains the row's own root
+    // process, so a leaf (a provider that spawned nothing, the common case)
+    // arrives with exactly one entry. Gating on `children.length === 0` left
+    // every row expandable, and expanding a leaf revealed a single child that
+    // was a duplicate of the row just expanded.
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "s1",
+          kind: "agent",
+          label: "Agent (claude): fix-auth",
+          pid: 500,
+          process_count: 1,
+          children: [rootProc("claude", 500)],
+        }),
+        totalStat,
+      ],
+    })
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    // The row itself renders; only the affordance is suppressed.
+    await screen.findByTestId("task-row-tab:s1")
+    expect(screen.queryByLabelText("Show fix-auth child processes")).toBeNull()
+  })
+
+  it("offers_an_expand_toggle_for_a_row_with_a_real_breakdown", async () => {
+    // The other half of the gate: suppressing the leaf case must not suppress
+    // rows that do have something to show.
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "s1",
+          kind: "agent",
+          label: "Agent (claude): fix-auth",
+          pid: 500,
+          process_count: 2,
+          children: [rootProc("claude", 500), proc("node", 4242)],
+        }),
+        totalStat,
+      ],
+    })
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const toggle = await screen.findByLabelText("Show fix-auth child processes")
+    expect(screen.queryByText("node")).toBeNull()
+    fireEvent.click(toggle)
+    expect(screen.getAllByText("node").length).toBeGreaterThan(0)
+  })
+
+  it("reads_has_breakdown_from_the_server_rather_than_counting_children", async () => {
+    // Core owns the rule and ships the verdict on the wire. Honouring
+    // `has_breakdown` (rather than re-deriving `children.length > 1` here) is
+    // what keeps this surface and the TUI from drifting on the off-by-one, so
+    // a row whose flag says "no breakdown" offers no toggle even though it
+    // carries several entries.
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "s1",
+          kind: "agent",
+          label: "Agent (claude): fix-auth",
+          pid: 500,
+          children: [rootProc("claude", 500), proc("node", 4242)],
+          has_breakdown: false,
+        }),
+        totalStat,
+      ],
+    })
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    await screen.findByTestId("task-row-tab:s1")
+    expect(screen.queryByLabelText("Show fix-auth child processes")).toBeNull()
+  })
+
+  it("labels_the_root_entry_in_the_breakdown", async () => {
+    // The root is part of its own breakdown on purpose: that is what makes the
+    // child rows sum to the parent's total. Marking it is what stops it from
+    // reading as a phantom duplicate of the row above.
+    getResources.mockResolvedValue({
+      rows: [
+        duxStat,
+        stat({
+          id: "s1",
+          kind: "agent",
+          label: "Agent (claude): fix-auth",
+          pid: 500,
+          process_count: 2,
+          children: [rootProc("claude", 500), proc("node", 4242)],
+        }),
+        totalStat,
+      ],
+    })
+    seed({ spine: { sessions: [session({ id: "s1", title: "fix-auth" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    fireEvent.click(await screen.findByLabelText("Show fix-auth child processes"))
+
+    const rootRow = await screen.findByTestId("child-row-500")
+    expect(rootRow.textContent).toContain("(this process)")
+    // The real subprocess is NOT marked.
+    const childRow = await screen.findByTestId("child-row-4242")
+    expect(childRow.textContent).not.toContain("(this process)")
   })
 
   it("does_not_poll_while_closed", async () => {
@@ -354,9 +486,7 @@ describe("TaskManagerDialog", () => {
           id: "s1",
           kind: "agent",
           label: "Agent (claude): fix-auth",
-          children: [
-            { name: "node", pid: 4242, cpu_percent: 1, rss_bytes: 1024 },
-          ],
+          children: [rootProc("claude", 1), proc("node", 4242)],
         }),
         totalStat,
       ],
@@ -469,7 +599,8 @@ describe("TaskManagerDialog", () => {
           label: "Terminal (npm): dev server",
           process_count: 4,
           children: [
-            { name: "node", pid: 4242, cpu_percent: 11.0, rss_bytes: 180_000_000 },
+            rootProc("npm", 1, { cpu_percent: 1.1, rss_bytes: 21_700_000 }),
+            proc("node", 4242, { cpu_percent: 11.0, rss_bytes: 180_000_000 }),
           ],
         }),
         totalStat,
@@ -504,7 +635,8 @@ describe("TaskManagerDialog", () => {
           label: "Terminal (npm): dev server",
           process_count: 4,
           children: [
-            { name: "node", pid: 4242, cpu_percent: 11.0, rss_bytes: 180_000_000 },
+            rootProc("npm", 1, { cpu_percent: 1.1, rss_bytes: 21_700_000 }),
+            proc("node", 4242, { cpu_percent: 11.0, rss_bytes: 180_000_000 }),
           ],
         }),
         totalStat,
