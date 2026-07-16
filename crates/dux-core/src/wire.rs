@@ -8185,6 +8185,255 @@ mod tests {
         assert_eq!(engine.config.ui.pr_banner_position, "top");
     }
 
+    /// One accepted `SetSettings` field, described end to end: how to seed the
+    /// running config with a value that DIFFERS from what the patch sends (so
+    /// the row can never pass vacuously), the JSON the patch carries, and how
+    /// to read back the config field the value must land in.
+    struct SettingsFieldRow {
+        /// The key as it appears inside the wire envelope's `args` object.
+        key: &'static str,
+        seed: fn(&mut crate::config::Config),
+        sent: serde_json::Value,
+        read: fn(&crate::config::Config) -> String,
+        expect: &'static str,
+    }
+
+    /// Every field `set_settings` accepts, one row each. Built by hand on
+    /// purpose: this table is the loud counterpart to the compiler-enforced
+    /// destructure in `set_settings`, and the length assertion below is what
+    /// tells a contributor adding a field that a row is owed here too.
+    fn settings_field_rows() -> Vec<SettingsFieldRow> {
+        vec![
+            SettingsFieldRow {
+                key: "copy_on_select",
+                seed: |c| c.ui.copy_on_select = true,
+                sent: serde_json::json!(false),
+                read: |c| c.ui.copy_on_select.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
+                key: "show_changes_pane",
+                seed: |c| c.ui.show_changes_pane = true,
+                sent: serde_json::json!(false),
+                read: |c| c.ui.show_changes_pane.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
+                key: "web_notifications",
+                seed: |c| c.capabilities.web_notifications = true,
+                sent: serde_json::json!(false),
+                read: |c| c.capabilities.web_notifications.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
+                key: "always_show_tab_strip",
+                seed: |c| c.ui.always_show_tab_strip = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.always_show_tab_strip.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
+                key: "status_clear_seconds",
+                seed: |c| c.ui.status_clear_seconds = 6,
+                sent: serde_json::json!(11),
+                read: |c| c.ui.status_clear_seconds.to_string(),
+                expect: "11",
+            },
+            SettingsFieldRow {
+                key: "attention_grace_seconds",
+                seed: |c| c.ui.attention_grace_seconds = 3,
+                sent: serde_json::json!(9),
+                read: |c| c.ui.attention_grace_seconds.to_string(),
+                expect: "9",
+            },
+            SettingsFieldRow {
+                key: "attention_indicator",
+                seed: |c| c.ui.attention_indicator = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.attention_indicator.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
+                key: "attention_on_bell",
+                seed: |c| c.ui.attention_on_bell = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.attention_on_bell.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
+                key: "pr_banner_position",
+                seed: |c| c.ui.pr_banner_position = "bottom".to_string(),
+                sent: serde_json::json!("top"),
+                read: |c| c.ui.pr_banner_position.clone(),
+                expect: "top",
+            },
+            SettingsFieldRow {
+                key: "hyperlinks",
+                seed: |c| c.capabilities.hyperlinks = false,
+                sent: serde_json::json!(true),
+                read: |c| c.capabilities.hyperlinks.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
+                key: "enable_randomized_pet_name_by_default",
+                seed: |c| c.defaults.enable_randomized_pet_name_by_default = false,
+                sent: serde_json::json!(true),
+                read: |c| c.defaults.enable_randomized_pet_name_by_default.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
+                key: "default_provider",
+                // `codex` ships in `ProvidersConfig::default()`, so it passes the
+                // configured-provider validation while differing from the
+                // `claude` default.
+                seed: |c| c.defaults.provider = "claude".to_string(),
+                sent: serde_json::json!("codex"),
+                read: |c| c.defaults.provider.clone(),
+                expect: "codex",
+            },
+        ]
+    }
+
+    /// ENFORCEMENT TEST. Each field must land in the RUNNING config when it is
+    /// the ONLY field in the patch. This is the shape that catches a field
+    /// missing from the presence check: with a lone field absent from that
+    /// check the patch reads as empty and silently no-ops, while an all-fields
+    /// patch would still be non-empty and paper over it. That bug shipped once.
+    /// The patch is built from the wire JSON rather than a Rust literal so the
+    /// row exercises the same envelope a client sends.
+    #[test]
+    fn set_settings_applies_every_field_when_sent_alone() {
+        let rows = settings_field_rows();
+        assert_eq!(
+            rows.len(),
+            12,
+            "add a row when you add a field to SettingsPatch"
+        );
+        for row in rows {
+            let (mut engine, _tmp) = test_engine();
+            (row.seed)(&mut engine.config);
+            assert_ne!(
+                (row.read)(&engine.config),
+                row.expect,
+                "{}: the seed must differ from the value being sent, or the row proves nothing",
+                row.key
+            );
+            let command: WireCommand = serde_json::from_value(serde_json::json!({
+                "command": "set_settings",
+                "args": { row.key: row.sent },
+            }))
+            .unwrap_or_else(|err| panic!("{}: build wire command: {err}", row.key));
+            engine
+                .apply_wire(command)
+                .unwrap_or_else(|err| panic!("{}: dispatch: {err}", row.key));
+            assert_eq!(
+                (row.read)(&engine.config),
+                row.expect,
+                "{}: sent alone, it must land in the running config",
+                row.key
+            );
+        }
+    }
+
+    /// ENFORCEMENT TEST. Every field, in one patch, must land in the RUNNING
+    /// config AND on disk, and the two must agree. The existing suite asserted
+    /// disk content only, which is how a field missing from the copy-back
+    /// shipped: the file updated while the engine kept serving the stale value
+    /// until the next reload. The patch is an exhaustive literal with no `..`,
+    /// so adding a field fails to COMPILE here rather than silently skipping it.
+    #[test]
+    fn set_settings_round_trips_every_field_into_the_running_config() {
+        let (mut engine, _tmp) = test_engine();
+        let before = engine.config.clone();
+        // Every value is derived from the current config, so no field can pass
+        // by accidentally already holding the value we send.
+        let patch = WireCommand::SetSettings {
+            copy_on_select: Some(!before.ui.copy_on_select),
+            show_changes_pane: Some(!before.ui.show_changes_pane),
+            web_notifications: Some(!before.capabilities.web_notifications),
+            always_show_tab_strip: Some(!before.ui.always_show_tab_strip),
+            status_clear_seconds: Some(before.ui.status_clear_seconds + 1),
+            attention_grace_seconds: Some(before.ui.attention_grace_seconds + 1),
+            attention_indicator: Some(!before.ui.attention_indicator),
+            attention_on_bell: Some(!before.ui.attention_on_bell),
+            pr_banner_position: Some(if before.ui.pr_banner_position == "top" {
+                "bottom".to_string()
+            } else {
+                "top".to_string()
+            }),
+            hyperlinks: Some(!before.capabilities.hyperlinks),
+            enable_randomized_pet_name_by_default: Some(
+                !before.defaults.enable_randomized_pet_name_by_default,
+            ),
+            // `claude` is the default, `codex` is the other provider that ships
+            // in `ProvidersConfig::default()`.
+            default_provider: Some("codex".to_string()),
+        };
+        engine.apply_wire(patch).expect("dispatch ok");
+
+        let after = &engine.config;
+        assert_eq!(after.ui.copy_on_select, !before.ui.copy_on_select);
+        assert_eq!(after.ui.show_changes_pane, !before.ui.show_changes_pane);
+        assert_eq!(
+            after.capabilities.web_notifications,
+            !before.capabilities.web_notifications
+        );
+        assert_eq!(
+            after.ui.always_show_tab_strip,
+            !before.ui.always_show_tab_strip
+        );
+        assert_eq!(
+            after.ui.status_clear_seconds,
+            before.ui.status_clear_seconds + 1
+        );
+        assert_eq!(
+            after.ui.attention_grace_seconds,
+            before.ui.attention_grace_seconds + 1
+        );
+        assert_eq!(after.ui.attention_indicator, !before.ui.attention_indicator);
+        assert_eq!(after.ui.attention_on_bell, !before.ui.attention_on_bell);
+        assert_ne!(after.ui.pr_banner_position, before.ui.pr_banner_position);
+        assert_eq!(
+            after.capabilities.hyperlinks,
+            !before.capabilities.hyperlinks
+        );
+        assert_eq!(
+            after.defaults.enable_randomized_pet_name_by_default,
+            !before.defaults.enable_randomized_pet_name_by_default
+        );
+        assert_eq!(after.defaults.provider, "codex");
+
+        // Disk must agree with memory. Asserting only one of the two is what
+        // let the copy-back drift out of step with the eager write.
+        engine.config_writer.flush();
+        let raw = std::fs::read_to_string(&engine.paths.config_path).expect("read config");
+        let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
+        assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
+        assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
+        assert_eq!(
+            disk.capabilities.web_notifications,
+            after.capabilities.web_notifications
+        );
+        assert_eq!(
+            disk.ui.always_show_tab_strip,
+            after.ui.always_show_tab_strip
+        );
+        assert_eq!(disk.ui.status_clear_seconds, after.ui.status_clear_seconds);
+        assert_eq!(
+            disk.ui.attention_grace_seconds,
+            after.ui.attention_grace_seconds
+        );
+        assert_eq!(disk.ui.attention_indicator, after.ui.attention_indicator);
+        assert_eq!(disk.ui.attention_on_bell, after.ui.attention_on_bell);
+        assert_eq!(disk.ui.pr_banner_position, after.ui.pr_banner_position);
+        assert_eq!(disk.capabilities.hyperlinks, after.capabilities.hyperlinks);
+        assert_eq!(
+            disk.defaults.enable_randomized_pet_name_by_default,
+            after.defaults.enable_randomized_pet_name_by_default
+        );
+        assert_eq!(disk.defaults.provider, after.defaults.provider);
+    }
+
     /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in
     /// `CURATED_FAVICON_COLORS` and in the TS `FAVICON_COLORS` map that drives the
     /// customize-webapp dialog and the tinted-duck SVG. A recolor/rename dialog that
