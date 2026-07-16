@@ -1486,16 +1486,31 @@ function restoreReconnectDeepLink(spine: Spine): void {
   const sel = state.selectedSessionId
   const armedTarget = armed.target
   if (armedTarget.kind === "terminal" && armedTarget.owner.kind === "project") {
-    // A project terminal has no owning agent to wait on (there is no resume
-    // phase): restore it as soon as the spine carries it again, and disarm on
-    // any deliberate navigation, on TTL expiry, or when it is genuinely gone.
+    // A project terminal has no resume phase and its pane never issues the
+    // reconnect eject (that path is gated on the agent session-slot tab), so
+    // its selection normally survives a reconnect on its own — this branch's
+    // usual job is to disarm as a no-op. The one restorable gap is a
+    // selection cleared by OUR OWN eject while the intent was armed; any
+    // deliberate navigation (a non-null selection that is not the armed
+    // terminal, or a home nav without the eject flag) disarms instead.
     const target = armedTarget
     const owner = armedTarget.owner
-    if (sel !== null) {
+    const cur = state.selectedTarget
+    if (
+      cur?.kind === "terminal" &&
+      cur.terminalId === target.terminalId
+    ) {
+      // Still on the armed terminal: the route survived, nothing to undo.
       reconnectDeepLink = null
       return
     }
-    if (state.selectedTarget !== null && !lastClearWasReconnectEject) {
+    if (sel !== null || cur !== null) {
+      // The user moved somewhere else on their own — respect it.
+      reconnectDeepLink = null
+      return
+    }
+    if (!lastClearWasReconnectEject) {
+      // A deliberate home navigation, not our eject.
       reconnectDeepLink = null
       return
     }
@@ -1508,12 +1523,7 @@ function restoreReconnectDeepLink(spine: Spine): void {
         .find((p) => p.id === owner.projectId)
         ?.terminals.some((t) => t.id === target.terminalId) ?? false
     if (!exists) return // keep waiting within the TTL (the spine may lag)
-    if (
-      state.selectedTarget?.kind !== "terminal" ||
-      state.selectedTarget.terminalId !== target.terminalId
-    ) {
-      selectTerminal(target.terminalId, owner)
-    }
+    selectTerminal(target.terminalId, owner)
     reconnectDeepLink = null
     return
   }

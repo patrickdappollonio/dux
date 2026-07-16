@@ -189,4 +189,73 @@ describe("store companion-terminal lifecycle", () => {
     const del = find((u, init) => init?.method === "DELETE")
     expect(del).toBeUndefined()
   })
+
+  it("createProjectTerminal POSTs the project endpoint and focuses with a project owner", async () => {
+    const mod = await loadStore()
+    mod.createProjectTerminal("p1")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "terminal",
+        terminalId: "t9",
+        owner: { kind: "project", projectId: "p1" },
+      })
+    })
+    const post = find(
+      (u, init) => u === "/api/v1/projects/p1/terminals" && init?.method === "POST",
+    )
+    expect(post).toBeDefined()
+    // A project terminal has no session context.
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+  })
+
+  it("deleteTerminal routes a PROJECT-owned terminal to the project endpoint", async () => {
+    // The trap this guards (T1): a session-only owner scan resolved nothing for
+    // a project terminal and silently returned — Close did nothing, no toast.
+    spineBody = {
+      projects: [
+        { id: "p1", name: "Repo", terminals: [{ id: "pt1", label: "Terminal 1" }] },
+      ],
+      sessions: [],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.deleteTerminal("pt1")
+    await tick()
+    const del = find(
+      (u, init) =>
+        u === "/api/v1/projects/p1/terminals/pt1" && init?.method === "DELETE",
+    )
+    expect(del).toBeDefined()
+  })
+
+  it("stopAllRunning deletes project terminals too", async () => {
+    // The trap this guards (T4): the panic button iterated only sessions'
+    // terminals, so a hung project terminal survived "Stop all".
+    spineBody = {
+      projects: [
+        { id: "p1", name: "Repo", terminals: [{ id: "pt1", label: "Terminal 1" }] },
+      ],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          terminals: [{ id: "t1", label: "Terminal 1" }],
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    mod.stopAllRunning()
+    await tick()
+    const sessionDel = find(
+      (u, init) =>
+        u === "/api/v1/sessions/s1/terminals/t1" && init?.method === "DELETE",
+    )
+    const projectDel = find(
+      (u, init) =>
+        u === "/api/v1/projects/p1/terminals/pt1" && init?.method === "DELETE",
+    )
+    expect(sessionDel).toBeDefined()
+    expect(projectDel).toBeDefined()
+  })
 })

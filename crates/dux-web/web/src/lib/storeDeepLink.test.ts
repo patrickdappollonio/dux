@@ -16,9 +16,14 @@ function makeSpine(
     terminals?: string[]
     tabs?: string[]
   }[],
+  projects: { id: string; terminals?: string[] }[] = [],
 ): Spine {
   return {
-    projects: [],
+    projects: projects.map((p) => ({
+      id: p.id,
+      name: p.id,
+      terminals: (p.terminals ?? []).map((id) => ({ id })),
+    })) as unknown as Spine["projects"],
     sessions: sessions.map((s) => ({
       id: s.id,
       project_id: s.project_id,
@@ -104,6 +109,7 @@ afterEach(() => {
 async function loadStore(
   hash: string,
   sessions: { id: string; project_id: string; terminals?: string[] }[],
+  projects: { id: string; terminals?: string[] }[] = [],
 ) {
   vi.stubGlobal("location", {
     protocol: "http:",
@@ -112,7 +118,7 @@ async function loadStore(
     pathname: "/",
     search: "",
   })
-  spineBody = makeSpine(sessions)
+  spineBody = makeSpine(sessions, projects)
   const mod = await import("./store")
   await vi.waitFor(() => {
     expect(mod.getSnapshot().spine).not.toBeNull()
@@ -172,6 +178,41 @@ describe("deep-link restore on load", () => {
       terminalId: "t1",
       owner: { kind: "session", sessionId: "s1" },
     })
+  })
+
+  it("restores a project terminal from #/project/<pid>/terminal/<tid> on boot", async () => {
+    // The trap this guards (T11): the old grammar embedded a session id, so a
+    // project-terminal bookmark was silently dropped on an ordinary page load.
+    const mod = await loadStore(
+      "#/project/p1/terminal/pt1",
+      [],
+      [{ id: "p1", terminals: ["pt1"] }],
+    )
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "pt1",
+      owner: { kind: "project", projectId: "p1" },
+    })
+    expect(mod.getSnapshot().selectedSessionId).toBeNull()
+  })
+
+  it("leaves nothing selected when the project-terminal link's terminal is gone", async () => {
+    // A vanished project terminal has no agent to fall back to.
+    const mod = await loadStore(
+      "#/project/p1/terminal/gone",
+      [],
+      [{ id: "p1", terminals: ["pt-other"] }],
+    )
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+  })
+
+  it("ignores a malformed project hash", async () => {
+    const mod = await loadStore(
+      "#/project/p1/terminal/",
+      [],
+      [{ id: "p1", terminals: ["pt1"] }],
+    )
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
   })
 
   it("falls back to the agent when the terminal id is gone", async () => {
@@ -246,6 +287,17 @@ describe("selection writes the hash", () => {
       null,
       "",
       "#/agent/s1/terminal/t1",
+    )
+  })
+
+  it("selecting a project terminal writes the project hash form", async () => {
+    const mod = await loadStore("", [], [{ id: "p1", terminals: ["pt1"] }])
+    replaceStateMock.mockClear()
+    mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
+    expect(replaceStateMock).toHaveBeenCalledWith(
+      null,
+      "",
+      "#/project/p1/terminal/pt1",
     )
   })
 
