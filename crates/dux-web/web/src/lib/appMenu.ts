@@ -24,13 +24,13 @@
 // belong in that row's own `⋯` menu.
 
 import {
+  Activity,
   ArrowDownAZ,
   ArrowUpDown,
   CalendarPlus,
   Clock,
   FileCode,
   Globe,
-  OctagonX,
   RefreshCw,
   SlidersHorizontal,
   SquarePen,
@@ -44,7 +44,7 @@ import {
   openConfigEditor,
   openCustomizeWebapp,
   openGlobalEnv,
-  openKillRunning,
+  openTaskManager,
   openMacrosDialog,
   sortAgents,
 } from "@/lib/store"
@@ -180,12 +180,16 @@ export function appMenuModel(): AppMenuEntry[] {
     { kind: "separator", id: "sep-agents" },
     {
       kind: "item",
-      id: "stop-running-agents",
+      id: "task-manager",
       // Neutral, not destructive-tinted: the trailing "…" plus the dialog's own
-      // confirmation are the danger signal (CLAUDE.md menu tenet).
-      title: "Stop running agents…",
-      icon: OctagonX,
-      run: () => openKillRunning(),
+      // confirmations are the danger signal (CLAUDE.md menu tenet).
+      //
+      // `Activity`, not `OctagonX`: stopping is now one action among several on
+      // a surface you mostly READ (what is running, and what it costs). The
+      // pulse line is the near-universal OS activity-monitor idiom.
+      title: "Task Manager…",
+      icon: Activity,
+      run: () => openTaskManager(),
     },
   ]
 }

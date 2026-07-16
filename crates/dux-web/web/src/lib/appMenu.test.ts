@@ -4,7 +4,7 @@ const openCustomizeWebapp = vi.fn()
 const openConfigEditor = vi.fn()
 const openMacrosDialog = vi.fn()
 const openGlobalEnv = vi.fn()
-const openKillRunning = vi.fn()
+const openTaskManager = vi.fn()
 const sortAgents = vi.fn()
 const reload = vi.fn(() => Promise.resolve())
 
@@ -13,7 +13,7 @@ vi.mock("@/lib/store", () => ({
   openConfigEditor: () => openConfigEditor(),
   openMacrosDialog: () => openMacrosDialog(),
   openGlobalEnv: () => openGlobalEnv(),
-  openKillRunning: () => openKillRunning(),
+  openTaskManager: () => openTaskManager(),
   sortAgents: (by: string) => sortAgents(by),
 }))
 vi.mock("@/lib/configApi", () => ({ configApi: { reload: () => reload() } }))
@@ -43,7 +43,7 @@ describe("appMenuModel", () => {
       ["submenu", "sort-agents"],
       ["submenu", "configuration"],
       ["separator", "sep-agents"],
-      ["item", "stop-running-agents"],
+      ["item", "task-manager"],
     ])
   })
 
@@ -58,7 +58,7 @@ describe("appMenuModel", () => {
       "edit-config",
       "edit-macros",
       "global-env",
-      "stop-running-agents",
+      "task-manager",
     ]) {
       expect(titleOf(id)?.title.endsWith("…"), `${id} should end with …`).toBe(
         true,
@@ -142,8 +142,8 @@ describe("appMenuModel", () => {
     expect(openMacrosDialog).toHaveBeenCalledOnce()
     run("global-env")
     expect(openGlobalEnv).toHaveBeenCalledOnce()
-    run("stop-running-agents")
-    expect(openKillRunning).toHaveBeenCalledOnce()
+    run("task-manager")
+    expect(openTaskManager).toHaveBeenCalledOnce()
     run("reload-config")
     expect(reload).toHaveBeenCalledOnce()
 

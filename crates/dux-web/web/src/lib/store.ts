@@ -289,11 +289,16 @@ export interface DuxState {
   //     inferred from an empty draft, so manually clearing the input doesn't
   //     fake a phantom "generating" state.
   createAgentNamePending: boolean
-  // The kill-running modal (the app menu's "Stop running agents…"). Lists every
-  // active agent and live companion terminal and force-kills each on demand
-  // (agents detach and can be reconnected; terminals are destroyed). The list is
-  // derived live from the spine, so it needs no state beyond this open flag.
-  killRunningOpen: boolean
+  // The Task Manager (the app menu's "Task Manager…"). Lists every running agent
+  // tab and companion terminal with its CPU/memory/process count, and stops each
+  // on demand (agents detach and can be reconnected; terminals are destroyed).
+  // The rows are derived live from the spine joined to the polled stats, so the
+  // dialog needs no state beyond this open flag.
+  taskManagerOpen: boolean
+  // Whether the "Stop all…" confirmation (nested inside the Task Manager) is up.
+  // Every stop confirms, the bulk one most of all: it ends every agent and
+  // terminal at once.
+  stopAllOpen: boolean
   // The Monaco config.toml editor (the app menu's "Edit config file…"). `configEditorOpen`
   // gates the modal; the raw text is fetched into `configEditorContent` on open
   // so the editor seeds from a settled value (no set-state-in-effect).
@@ -480,7 +485,8 @@ let state: DuxState = {
   createAgentGeneratedName: null,
   createAgentNamePending: false,
   createAgentPrInput: "",
-  killRunningOpen: false,
+  taskManagerOpen: false,
+  stopAllOpen: false,
   configEditorOpen: false,
   configEditorContent: "",
   configEditorLoading: false,
@@ -2940,15 +2946,38 @@ export function toggleChangesPane(): void {
 
 
 
-// The kill-running modal (the app menu's "Stop running agents…"). Open/close
-// just flip the gate;
-// the dialog derives its rows from the spine.
-export function openKillRunning(): void {
-  setState({ killRunningOpen: true })
+// The Task Manager (the app menu's "Task Manager…"). Open/close just flip the
+// gate; the dialog derives its rows from the spine and polls the stats itself
+// while open.
+export function openTaskManager(): void {
+  setState({ taskManagerOpen: true })
 }
 
-export function closeKillRunning(): void {
-  setState({ killRunningOpen: false })
+export function closeTaskManager(): void {
+  setState({ taskManagerOpen: false, stopAllOpen: false })
+}
+
+// The "Stop all…" confirmation nested inside the Task Manager.
+export function openStopAll(): void {
+  setState({ stopAllOpen: true })
+}
+
+export function closeStopAll(): void {
+  setState({ stopAllOpen: false })
+}
+
+// Stop every running agent and companion terminal. Agents are DETACHED (the
+// worktree and session survive and can be reconnected), which is why this stops
+// each agent as a whole rather than closing its tabs one by one: closing tabs
+// would also destroy the extra tabs' pills, and the panic button should leave as
+// much recoverable as possible. Terminals have no detached state (existence ==
+// running), so they are destroyed. Gated by its own confirmation.
+export function stopAllRunning(): void {
+  const sessions = state.spine?.sessions ?? []
+  for (const s of sessions) {
+    if (s.status === "active") killSessionPty(s.id)
+    for (const t of s.terminals) deleteTerminal(t.id)
+  }
 }
 
 // The Preferences dialog (the app menu's "Preferences…"). Open/close just flip the
