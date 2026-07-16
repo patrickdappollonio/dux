@@ -1,6 +1,6 @@
 //! Companion-terminal lifecycle on the headless `Engine`. Companion terminals are
 //! plain PTYs distinct from agent providers: they have no launch/resume flow and
-//! no provider semantics — they simply run the configured terminal command. A
+//! no provider semantics; they simply run the configured terminal command. A
 //! terminal is owned by either an agent session (spawned in that agent's
 //! worktree) or a project (a "project terminal", spawned at the project's repo
 //! root with no agent attached). The TUI spawns session-owned terminals via

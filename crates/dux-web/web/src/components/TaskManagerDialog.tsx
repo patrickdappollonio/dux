@@ -209,8 +209,8 @@ function TaskManagerBody() {
   function handleStop(row: TaskRow) {
     if (row.targetId === null) return
     // Both paths open an EXISTING confirmation dialog rather than acting now.
-    // Guard per KIND: a terminal (of either owner) needs only its target id —
-    // a project terminal's `sessionId` is null, and a session-null early
+    // Guard per KIND: a terminal (of either owner) needs only its target id.
+    // A project terminal's `sessionId` is null, and a session-null early
     // return here would leave its Stop button dead.
     if (row.kind === "terminal") {
       openDeleteTerminal(row.targetId)

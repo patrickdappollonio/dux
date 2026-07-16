@@ -210,7 +210,7 @@ describe("store companion-terminal lifecycle", () => {
 
   it("deleteTerminal routes a PROJECT-owned terminal to the project endpoint", async () => {
     // The trap this guards (T1): a session-only owner scan resolved nothing for
-    // a project terminal and silently returned — Close did nothing, no toast.
+    // a project terminal and silently returned: Close did nothing, no toast.
     spineBody = {
       projects: [
         { id: "p1", name: "Repo", terminals: [{ id: "pt1", label: "Terminal 1" }] },

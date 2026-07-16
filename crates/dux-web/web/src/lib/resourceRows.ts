@@ -163,7 +163,7 @@ export function taskManagerRows(
   // Project terminals: live shells at a project's repo root with no agent
   // attached. They are never gated on any session's status (they have no
   // session), and their stats join by terminal id exactly like session
-  // terminals — the resource monitor samples the whole terminal map.
+  // terminals; the resource monitor samples the whole terminal map.
   for (const project of projects) {
     for (const terminal of project.terminals) {
       const title = terminalTitle(terminal, project.terminals)

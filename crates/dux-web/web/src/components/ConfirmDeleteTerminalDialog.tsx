@@ -25,7 +25,7 @@ export function ConfirmDeleteTerminalDialog() {
   // Derive the terminal from the ViewModel so a process that exits while the
   // dialog is open (the terminal vanishes from the model) closes it gracefully
   // via the effect below, mirroring the TUI's exit handling. Scan BOTH owner
-  // kinds — a session-only scan resolved a project terminal to `undefined`, so
+  // kinds: a session-only scan resolved a project terminal to `undefined`, so
   // its dialog auto-closed the instant it opened.
   let terminal: TerminalView | undefined
   if (deleteTerminalTarget && spine) {

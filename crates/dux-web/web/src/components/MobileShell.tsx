@@ -806,7 +806,7 @@ function TerminalScreen() {
 
   // A focused PROJECT terminal has no session context at all: its own slim
   // screen shows the project name over the full-screen pane (no PR chip, no
-  // changes count — those are session-scoped).
+  // changes count; those are session-scoped).
   if (
     selectedTarget?.kind === "terminal" &&
     selectedTarget.owner.kind === "project"

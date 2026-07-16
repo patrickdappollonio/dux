@@ -250,7 +250,7 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
 
 describe("AppSidebar project terminals", () => {
   // A spine whose project owns a live project terminal (and has no sessions):
-  // the row must render under the project header (T14 — before this, a project
+  // the row must render under the project header (T14; before this, a project
   // terminal rendered NOWHERE in the sidebar).
   function projectTerminalSpine(): DuxState["spine"] {
     return {

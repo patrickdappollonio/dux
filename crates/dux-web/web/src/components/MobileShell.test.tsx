@@ -204,7 +204,7 @@ describe("MobileShell project terminals", () => {
 
   it("renders the project terminal row under the project block on the hub", () => {
     // T14's mobile half: before this, a project terminal rendered nowhere in
-    // the hub — invisible and unreachable on a phone.
+    // the hub, invisible and unreachable on a phone.
     mockState = makeState({
       spine: projectTerminalSpine(),
       bootstrap: { title: "dux", dux_version: "v1" },

@@ -56,7 +56,7 @@ import type {
 // Who a companion terminal belongs to: an agent session (spawned in that
 // agent's worktree) or a project (a "project terminal", spawned at the
 // project's repo root with no agent attached). Mirrors the Rust
-// `TerminalOwner`. Every consumer must branch on `kind` — there is
+// `TerminalOwner`. Every consumer must branch on `kind`; there is
 // deliberately no bare-id accessor, so the project variant can never be
 // silently ignored by session-shaped code.
 export type TerminalOwnerRef =
@@ -66,7 +66,7 @@ export type TerminalOwnerRef =
 // The currently-streamed target: either an agent session or a companion
 // terminal. An agent target carries a `sessionId` for session-scoped UI (the
 // breadcrumb, changed files); a terminal target carries its OWNER, which is a
-// session or a project — a project terminal has no session context at all.
+// session or a project, and a project terminal has no session context at all.
 export type SelectedTarget =
   // An agent tab. `tabId === sessionId` for the session-slot tab; an extra tab carries
   // its own id. The streamed PTY and all per-tab UI resolve from `tabId`, while
@@ -990,7 +990,7 @@ function pruneSelectionIfGone(spine: Spine): void {
     }
     return
   }
-  // A terminal: it must still exist UNDER its owner. Branch on the owner kind —
+  // A terminal: it must still exist UNDER its owner. Branch on the owner kind:
   // a project terminal is scoped to `spine.projects`, never to a session (the
   // old `?? false` here made every project terminal look vanished and ejected
   // the user to home on every spine apply).
@@ -1243,7 +1243,7 @@ function parseSelectionHash(hash: string): SelectedTarget | null {
   // extra tab (`#/agent/<sid>/tab/<tabId>`), or a companion terminal
   // (`#/agent/<sid>/terminal/<tid>`). The literal `tab`/`terminal` keyword
   // disambiguates, so a tab/terminal literally named "tab" can't be confused.
-  // A project terminal deep-links as `#/project/<pid>/terminal/<tid>` — its own
+  // A project terminal deep-links as `#/project/<pid>/terminal/<tid>`, its own
   // grammar, because the agent shapes embed a session id and a project terminal
   // has none.
   const pm = hash.match(/^#\/project\/([^/]+)\/terminal\/([^/]+)$/)
@@ -1390,7 +1390,7 @@ function restoreDeepLink(spine: Spine): void {
       return
     }
     const session = spine.sessions.find((s) => s.id === owner.sessionId)
-    if (!session) return // session id gone — ignore the link
+    if (!session) return // session id gone, ignore the link
     applyDeepLinkSelection(session, link)
     return
   }
@@ -1488,7 +1488,7 @@ function restoreReconnectDeepLink(spine: Spine): void {
   if (armedTarget.kind === "terminal" && armedTarget.owner.kind === "project") {
     // A project terminal has no resume phase and its pane never issues the
     // reconnect eject (that path is gated on the agent session-slot tab), so
-    // its selection normally survives a reconnect on its own — this branch's
+    // its selection normally survives a reconnect on its own, so this branch's
     // usual job is to disarm as a no-op. The one restorable gap is a
     // selection cleared by OUR OWN eject while the intent was armed; any
     // deliberate navigation (a non-null selection that is not the armed
@@ -1505,7 +1505,7 @@ function restoreReconnectDeepLink(spine: Spine): void {
       return
     }
     if (sel !== null || cur !== null) {
-      // The user moved somewhere else on their own — respect it.
+      // The user moved somewhere else on their own; respect it.
       reconnectDeepLink = null
       return
     }
@@ -1710,7 +1710,7 @@ function fireFocusedTabPut(
 // Select a companion terminal as the streamed target. A session-owned terminal
 // retains its owning session id so session-scoped UI keeps resolving; a project
 // terminal has NO session context (`selectedSessionId` stays null and the
-// changes pane shows its empty state — changed files belong to a session's
+// changes pane shows its empty state, since changed files belong to a session's
 // worktree, and the project's source checkout has no diff pipeline).
 export function selectTerminal(terminalId: string, owner: TerminalOwnerRef): void {
   const prev = state.selectedSessionId
@@ -1799,7 +1799,7 @@ export function findTerminalOwner(
 }
 
 // Close (delete) a companion terminal via REST (Phase 5). The endpoint is nested
-// under the owner, so resolve it from the spine across BOTH owner kinds —
+// under the owner, so resolve it from the spine across BOTH owner kinds,
 // sessions and projects (a session-only scan silently made project terminals
 // undeletable); a terminal that already vanished (no owner) is a no-op. The
 // terminal is removed from the workspace spine, and if it was the focused target
@@ -3154,7 +3154,7 @@ export function stopAllRunning(): void {
     if (s.status === "active") killSessionPty(s.id)
     for (const t of s.terminals) deleteTerminal(t.id)
   }
-  // Project terminals live on projects, not sessions — the panic button must
+  // Project terminals live on projects, not sessions; the panic button must
   // reach them too, or a hung project terminal survives "Stop all".
   for (const p of state.spine?.projects ?? []) {
     for (const t of p.terminals) deleteTerminal(t.id)

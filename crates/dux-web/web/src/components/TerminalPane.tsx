@@ -69,7 +69,7 @@ type TerminalPaneProps =
   // `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
   // `sessionId`; an extra tab's does not) and the terminal id for a terminal.
   // The owner (session id for an agent, `TerminalOwnerRef` for a terminal) is
-  // passed explicitly — it builds the nested PTY socket URL and the macro
+  // passed explicitly: it builds the nested PTY socket URL and the macro
   // target, and the spine may not yet list a just-created terminal when this
   // pane first mounts.
   | { kind: "agent"; id: string; sessionId: string }
@@ -143,7 +143,7 @@ function pasteIntoTerm(term: Terminal): void {
 export function TerminalPane(props: TerminalPaneProps) {
   const { kind, id } = props
   // The owning session id, when there is one: the agent's own session, or a
-  // session-owned terminal's parent. A PROJECT terminal has none (null) — every
+  // session-owned terminal's parent. A PROJECT terminal has none (null); every
   // session-scoped branch below must tolerate that.
   const sessionId =
     props.kind === "agent"

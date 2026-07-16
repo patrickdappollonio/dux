@@ -995,7 +995,7 @@ async fn project_terminal_rest_create_and_delete() {
 
 /// Ownership is enforced per VARIANT, both directions: a project terminal is a
 /// 404 on the session-nested route, and a session terminal is a 404 on the
-/// project-nested route — a raw-id comparison across owner kinds would pass one
+/// project-nested route. A raw-id comparison across owner kinds would pass one
 /// of these.
 #[tokio::test]
 async fn terminal_delete_routes_404_across_owner_kinds() {

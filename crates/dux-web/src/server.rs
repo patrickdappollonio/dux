@@ -1062,7 +1062,7 @@ async fn ws_terminal_pty_upgrade(
         .into_response()
 }
 
-/// Upgrade handler for `GET /ws/projects/:id/terminals/:tid/pty` — stream a
+/// Upgrade handler for `GET /ws/projects/:id/terminals/:tid/pty`: stream a
 /// project terminal's PTY. Mirrors `ws_terminal_pty_upgrade` with the project
 /// (not a session) as the path owner: same-origin check, id bounds, a
 /// project-exists check, then per-variant ownership. The PTY plumbing downstream

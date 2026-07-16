@@ -12,10 +12,10 @@
 //!   The `:tid` ownership against `:id` is enforced before the delete (the legacy
 //!   `DeleteTerminal` looks a terminal up by id alone and does not check
 //!   ownership), so a `:tid` that does not belong to `:id` is a 404.
-//! - `POST   /api/v1/projects/:id/terminals`       — create a project terminal (a
+//! - `POST   /api/v1/projects/:id/terminals`       creates a project terminal (a
 //!   plain shell at the project's repo root with no agent attached). 404 when
 //!   `:id` is not a known project.
-//! - `DELETE /api/v1/projects/:id/terminals/:tid`  — delete a project terminal,
+//! - `DELETE /api/v1/projects/:id/terminals/:tid`  deletes a project terminal,
 //!   with the same ownership enforcement: a terminal owned by a session (or by a
 //!   different project) is a 404 on this route, and a project terminal is a 404
 //!   on the session-nested route.
@@ -89,7 +89,7 @@ async fn create_terminal(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
-/// `POST /api/v1/projects/:id/terminals` — create a project terminal: a plain
+/// `POST /api/v1/projects/:id/terminals` creates a project terminal: a plain
 /// shell at the project's repo root with no agent attached. Mirrors
 /// `create_terminal`, with the project (not a session) resolved from the path.
 async fn create_project_terminal(
@@ -131,7 +131,7 @@ async fn delete_terminal(
     }
     // Enforce ownership per variant: an unknown terminal, one owned by a
     // different session, or a PROJECT terminal (whose id could otherwise collide
-    // with a session id) is a 404 — never a cross-owner delete.
+    // with a session id) is a 404, never a cross-owner delete.
     match state.engine.terminal_owner_of(tid.clone()).await {
         Some(TerminalOwner::Session(owner)) if owner == id => {}
         _ => return unknown_terminal(),
@@ -139,7 +139,7 @@ async fn delete_terminal(
     dispatch_delete(&state, tid, &headers).await
 }
 
-/// `DELETE /api/v1/projects/:id/terminals/:tid` — delete a project terminal,
+/// `DELETE /api/v1/projects/:id/terminals/:tid` deletes a project terminal,
 /// enforcing that `:tid` is project-owned by `:id` before dispatching the delete.
 async fn delete_project_terminal(
     State(state): State<AppState>,
@@ -162,7 +162,7 @@ async fn delete_project_terminal(
 }
 
 /// The shared delete dispatch: `WireCommand::DeleteTerminal` is id-keyed and
-/// owner-blind by design — ownership was already enforced by the route above.
+/// owner-blind by design; ownership was already enforced by the route above.
 async fn dispatch_delete(state: &AppState, tid: String, headers: &HeaderMap) -> Response {
     match state
         .engine
