@@ -156,7 +156,35 @@ describe("AddProjectDialog picker", () => {
 
   it("shows the init hint only for the init intent", () => {
     seed({ addProjectIntent: "init" })
+    const { unmount } = render(<AddProjectDialog />)
+    expect(
+      screen.getByText(/dux will\s+initialize a git repository/i),
+    ).toBeTruthy()
+    unmount()
+
+    // The "only" half: the plain add intent must NOT render the hint, or the
+    // intent conditional could be dropped (hint rendered unconditionally)
+    // without any test noticing.
+    seed({ addProjectIntent: "add" })
     render(<AddProjectDialog />)
-    expect(screen.getByText(/dux will\s+initialize a git repository/i)).toBeTruthy()
+    expect(
+      screen.queryByText(/dux will\s+initialize a git repository/i),
+    ).toBeNull()
+  })
+
+  it("Escape in the New-folder editor cancels the editor without closing the dialog", () => {
+    // base-ui's dialog dismiss listens for Escape at the document level and
+    // ignores defaultPrevented; without stopPropagation the Escape meant for
+    // the inline editor dismisses the whole picker.
+    seed()
+    render(<AddProjectDialog />)
+    fireEvent.click(screen.getByRole("button", { name: /new folder/i }))
+    const input = screen.getByPlaceholderText("Folder name")
+    fireEvent.change(input, { target: { value: "drafts" } })
+    fireEvent.keyDown(input, { key: "Escape" })
+
+    expect(closeAddProject).not.toHaveBeenCalled()
+    expect(screen.queryByPlaceholderText("Folder name")).toBeNull()
+    expect(screen.getByRole("button", { name: /new folder/i })).toBeTruthy()
   })
 })

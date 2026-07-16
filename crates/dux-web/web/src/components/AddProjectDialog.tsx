@@ -107,6 +107,12 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
             create()
           } else if (e.key === "Escape") {
             e.preventDefault()
+            // stopPropagation is load-bearing: base-ui's dialog dismiss
+            // listens for Escape at the document level and does NOT check
+            // defaultPrevented, so without it the Escape meant to cancel
+            // this inline editor also closes the whole picker (losing the
+            // browse location, selection, and inspection).
+            e.stopPropagation()
             reset()
           }
         }}
