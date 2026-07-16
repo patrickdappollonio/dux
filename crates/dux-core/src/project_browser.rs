@@ -352,7 +352,7 @@ pub fn run_init_repo_job(
     worker_tx: Sender<WorkerEvent>,
     status_op_id: Option<String>,
 ) {
-    let (add, result) = init_repo_and_commit(add, |path| git::create_initial_commit(path));
+    let (add, result) = init_repo_and_commit(add, git::create_initial_commit);
     let _ = worker_tx.send(WorkerEvent::InitialCommitCreated {
         add,
         result,
