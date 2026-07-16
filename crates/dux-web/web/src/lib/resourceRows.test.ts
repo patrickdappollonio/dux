@@ -113,7 +113,7 @@ describe("taskManagerRows", () => {
 
   it("renders_row_without_stats_as_dashes", () => {
     // A dormant tab (or one born since the last poll) has no stats. It must
-    // still render, and must still be stoppable — never drop a killable row for
+    // still render, and must still be stoppable. Never drop a killable row for
     // lack of numbers.
     const sessions = [
       session({

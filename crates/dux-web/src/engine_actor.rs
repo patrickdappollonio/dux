@@ -98,7 +98,7 @@ pub enum EngineRequest {
     SessionWorktree(String, oneshot::Sender<Option<String>>),
     /// Snapshot the live process trees the resource monitor should sample: every
     /// live agent tab and companion terminal, each with its spine id and root
-    /// pid. Instant map iteration only — the blocking sysinfo walk runs off both
+    /// pid. Instant map iteration only: the blocking sysinfo walk runs off both
     /// the engine thread and the reactor, in [`crate::resource_routes::ResourceService`].
     ResourceTargets(oneshot::Sender<Vec<dux_core::worker::ResourceTarget>>),
     /// Snapshot the build-/config-static bootstrap projection (providers, macros,

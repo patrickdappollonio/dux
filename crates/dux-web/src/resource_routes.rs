@@ -1,4 +1,4 @@
-//! `GET /api/v1/resources` — the REST read behind the web Task Manager, plus the
+//! `GET /api/v1/resources`: the REST read behind the web Task Manager, plus the
 //! [`ResourceService`] that samples CPU/RSS off both the engine thread and the
 //! reactor.
 //!
@@ -270,7 +270,7 @@ mod tests {
         let json = body_json(resp).await;
         let rows = json["rows"].as_array().expect("rows array");
         // No agents or terminals are running, so the sample is exactly the two
-        // synthetic rows — an empty Task Manager still reports dux itself.
+        // synthetic rows. An empty Task Manager still reports dux itself.
         let kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, vec!["dux", "total"]);
 

@@ -84,7 +84,7 @@ pub struct Engine {
     /// derives per-process CPU from the delta between two refreshes, so a
     /// collector rebuilt per sample reports 0% forever (see
     /// [`crate::resource_stats`]). `spawn_resource_stats_worker` spawns a thread
-    /// per sample, hence the `Arc<Mutex<_>>` — the worker locks it for the walk,
+    /// per sample, hence the `Arc<Mutex<_>>`. The worker locks it for the walk,
     /// and the in-flight guard already serialises those samples.
     pub resource_collector: Arc<Mutex<crate::resource_stats::ResourceCollector>>,
 

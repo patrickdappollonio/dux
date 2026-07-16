@@ -28,7 +28,7 @@ import {
 import { cn } from "@/lib/utils"
 
 // The Task Manager (the app menu's "Task Manager…"): what is running, what it
-// costs, and how to stop it. It merges two things that used to be separate — the
+// costs, and how to stop it. It merges two things that used to be separate: the
 // web's kill-running modal and the resource monitor the web never had.
 //
 // Rows are PER TAB, not per agent: stats are sampled per provider process, and
@@ -79,7 +79,7 @@ function TaskManagerBody() {
   const { spine } = useDux()
   // ONE layout renders at a time (not two hidden behind CSS): the 4-column table
   // cannot fit a phone, so mobile gets stacked cards instead. Rendering both and
-  // hiding one would duplicate every row — and every Stop control — in the DOM.
+  // hiding one would duplicate every row, and every Stop control, in the DOM.
   const isMobile = useIsMobile()
   const [stats, setStats] = useState<ResourceStatsView[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -142,7 +142,7 @@ function TaskManagerBody() {
   }, [])
 
   // Auto-close ONLY when the list goes from populated to empty while open (the
-  // user stopped the last runtime), never on an open that starts empty — that
+  // user stopped the last runtime), never on an open that starts empty, which
   // would flash the dialog shut before the "Nothing is running." state is read.
   const wasPopulated = useRef(false)
   useEffect(() => {
@@ -466,7 +466,7 @@ function MobileRow({
 
 // The bulk stop's confirmation. Nested inside the Task Manager, and destructive-
 // styled (unlike the Task Manager itself): this one really is only a dangerous
-// action. Follows the established pattern — Cancel `autoFocus`, the confirm
+// action. Follows the established pattern: Cancel `autoFocus`, the confirm
 // `variant="destructive"`, misclick-safe spacing.
 function ConfirmStopAllDialog({ open }: { open: boolean }) {
   const { spine } = useDux()
