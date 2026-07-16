@@ -117,7 +117,11 @@ function TaskManagerBody() {
   const [now, setNow] = useState<number | null>(null)
 
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
-  const rows = useMemo(() => taskManagerRows(sessions, stats), [sessions, stats])
+  const projects = useMemo(() => spine?.projects ?? [], [spine])
+  const rows = useMemo(
+    () => taskManagerRows(sessions, stats, projects),
+    [sessions, stats, projects],
+  )
   const empty = nothingRunning(rows)
   const stale = now !== null && statsAreStale(now, lastSuccessAt)
   const summary = useMemo(() => taskManagerSummary(rows), [rows])
@@ -203,12 +207,16 @@ function TaskManagerBody() {
   }, [])
 
   function handleStop(row: TaskRow) {
-    if (row.sessionId === null || row.targetId === null) return
+    if (row.targetId === null) return
     // Both paths open an EXISTING confirmation dialog rather than acting now.
+    // Guard per KIND: a terminal (of either owner) needs only its target id —
+    // a project terminal's `sessionId` is null, and a session-null early
+    // return here would leave its Stop button dead.
     if (row.kind === "terminal") {
       openDeleteTerminal(row.targetId)
       return
     }
+    if (row.sessionId === null) return
     openCloseTab(row.sessionId, row.targetId)
   }
 
@@ -661,7 +669,11 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
   const { spine } = useDux()
   const sessions = spine?.sessions ?? []
   const agents = sessions.filter((s) => s.status === "active").length
-  const terminals = sessions.reduce((n, s) => n + s.terminals.length, 0)
+  // Count terminals across BOTH owners: session terminals plus project
+  // terminals, matching exactly what `stopAllRunning` will stop.
+  const terminals =
+    sessions.reduce((n, s) => n + s.terminals.length, 0) +
+    (spine?.projects ?? []).reduce((n, p) => n + p.terminals.length, 0)
 
   function handleConfirm() {
     stopAllRunning()

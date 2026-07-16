@@ -56,8 +56,16 @@ export function TerminalArea() {
     selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
 
   // Resolve the owning session + (for an agent) the focused tab so we can render
-  // the tab strip and gate the dormant card.
-  const session = spine?.sessions.find((s) => s.id === selectedTarget.sessionId)
+  // the tab strip and gate the dormant card. A project terminal has NO owning
+  // session — every session-scoped branch below is agent-only or tolerates
+  // `undefined`.
+  const ownerSessionId =
+    selectedTarget.kind === "agent"
+      ? selectedTarget.sessionId
+      : selectedTarget.owner.kind === "session"
+        ? selectedTarget.owner.sessionId
+        : null
+  const session = spine?.sessions.find((s) => s.id === ownerSessionId)
   const tabs = session?.tabs ?? []
   const focusedTab =
     selectedTarget.kind === "agent"
@@ -102,7 +110,7 @@ export function TerminalArea() {
         />
       ) : null}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {isExtraDormant && focusedTab ? (
+        {isExtraDormant && focusedTab && selectedTarget.kind === "agent" ? (
           <DormantTabCard
             sessionId={selectedTarget.sessionId}
             tabId={focusedTab.id}
@@ -111,12 +119,21 @@ export function TerminalArea() {
         ) : (
           <ChunkBoundary>
             <Suspense fallback={null}>
-              <LazyTerminalPane
-                key={paneKey}
-                kind={selectedTarget.kind}
-                id={targetId}
-                sessionId={selectedTarget.sessionId}
-              />
+              {selectedTarget.kind === "agent" ? (
+                <LazyTerminalPane
+                  key={paneKey}
+                  kind="agent"
+                  id={targetId}
+                  sessionId={selectedTarget.sessionId}
+                />
+              ) : (
+                <LazyTerminalPane
+                  key={paneKey}
+                  kind="terminal"
+                  id={targetId}
+                  owner={selectedTarget.owner}
+                />
+              )}
             </Suspense>
           </ChunkBoundary>
         )}

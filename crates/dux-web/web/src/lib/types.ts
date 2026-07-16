@@ -42,6 +42,11 @@ export interface ProjectView {
   /** RFC 3339 timestamp of when the project was added, or "" when no store row
    * exists yet. */
   created_at: string
+  /** Project terminals open at this project's repo root (owned by the project,
+   * with no agent attached), sorted by id. Session-owned companion terminals
+   * live on `SessionView.terminals` instead. An older server omits the field;
+   * `fetchSpine` normalizes a missing value to `[]` at ingestion. */
+  terminals: TerminalView[]
 }
 
 export interface PrView {

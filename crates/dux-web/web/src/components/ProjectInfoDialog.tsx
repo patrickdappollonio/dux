@@ -41,7 +41,11 @@ export function ProjectInfoDialog() {
   let body: React.ReactNode = null
   if (project && spine) {
     const branch = projectBranchDisplay(project)
-    const counts = projectLiveCounts(project.id, spine.sessions)
+    const counts = projectLiveCounts(
+      project.id,
+      spine.sessions,
+      project.terminals,
+    )
     const envCount = Object.keys(project.env).length
     const providerExplicit = project.explicit_default_provider !== null
     body = (

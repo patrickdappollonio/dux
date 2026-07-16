@@ -36,7 +36,7 @@ import {
   handleTabGone,
   useDux,
 } from "@/lib/store"
-import type { SelectedTarget } from "@/lib/store"
+import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { isTabGone } from "@/lib/agentTabs"
 import {
   PtySocket,
@@ -44,6 +44,7 @@ import {
   getActivePtySocket,
   setActivePtySocket,
   tabPtyUrl,
+  projectTerminalPtyUrl,
   terminalPtyUrl,
 } from "@/lib/ptySocket"
 import {
@@ -63,18 +64,16 @@ import { suppressViewerReports } from "@/lib/suppressViewerReports"
 import { registerAgentNotifications } from "@/lib/agentNotifications"
 import { BrailleSpinner } from "@/components/BrailleSpinner"
 
-interface TerminalPaneProps {
-  // The streamed target: an agent tab or one of its companion terminals.
+type TerminalPaneProps =
+  // The streamed target: an agent tab, or a companion terminal of either owner.
   // `id` is the FOCUSED TAB id for an agent (the session-slot tab's equals
   // `sessionId`; an extra tab's does not) and the terminal id for a terminal.
-  kind: "agent" | "terminal"
-  id: string
-  // The owning session id. Equal to `id` for an agent; the parent session for a
-  // companion terminal. Used to build the nested PTY socket URL and the macro
-  // target, so it is passed explicitly (the spine may not yet list a just-created
-  // terminal when this pane first mounts).
-  sessionId: string
-}
+  // The owner (session id for an agent, `TerminalOwnerRef` for a terminal) is
+  // passed explicitly — it builds the nested PTY socket URL and the macro
+  // target, and the spine may not yet list a just-created terminal when this
+  // pane first mounts.
+  | { kind: "agent"; id: string; sessionId: string }
+  | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
 
 // A soft newline (LF / Ctrl-j) written straight to the PTY, plus the view side
 // effects a typed key would get through xterm's data pipeline — which both the
@@ -141,7 +140,34 @@ function pasteIntoTerm(term: Terminal): void {
     .finally(() => term.focus())
 }
 
-export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
+export function TerminalPane(props: TerminalPaneProps) {
+  const { kind, id } = props
+  // The owning session id, when there is one: the agent's own session, or a
+  // session-owned terminal's parent. A PROJECT terminal has none (null) — every
+  // session-scoped branch below must tolerate that.
+  const sessionId =
+    props.kind === "agent"
+      ? props.sessionId
+      : props.owner.kind === "session"
+        ? props.owner.sessionId
+        : null
+  const projectId =
+    props.kind === "terminal" && props.owner.kind === "project"
+      ? props.owner.projectId
+      : null
+  // The PTY socket URL for THIS target. For an agent, the session-slot tab
+  // (`id === sessionId`) uses the session PTY route and an extra tab its own
+  // nested route; a terminal uses its owner's nested route (session- or
+  // project-scoped). Computed at render (it derives purely from the props) and
+  // consumed by the mount effect below.
+  const ptyUrl =
+    props.kind === "agent"
+      ? props.id === props.sessionId
+        ? agentPtyUrl(props.sessionId)
+        : tabPtyUrl(props.sessionId, props.id)
+      : props.owner.kind === "session"
+        ? terminalPtyUrl(props.owner.sessionId, props.id)
+        : projectTerminalPtyUrl(props.owner.projectId, props.id)
   // The padded, background-painted host. Padding must live HERE — one layer
   // OUTSIDE the element xterm opens into — because FitAddon measures the open
   // target's parent via getComputedStyle().height, which under Tailwind's
@@ -249,26 +275,33 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   }, [bootstrap?.clipboard_passthrough])
   // Always resolve the owning session by `sessionId` (for an agent, `id` is the
   // FOCUSED TAB id — the session-slot tab's equals the session id, but an extra
-  // tab's does not, so a lookup by `id` would miss). The focused tab, when this
+  // tab's does not, so a lookup by `id` would miss). A project terminal has no
+  // session; it resolves its owning PROJECT instead. The focused tab, when this
   // is an agent, drives the provider label / readiness / exit gating.
   const session =
-    kind === "agent"
-      ? spine?.sessions.find((s) => s.id === sessionId)
-      : spine?.sessions.find((s) => s.terminals.some((t) => t.id === id))
+    sessionId !== null ? spine?.sessions.find((s) => s.id === sessionId) : undefined
+  const project =
+    projectId !== null ? spine?.projects.find((p) => p.id === projectId) : undefined
   const focusedTab =
     kind === "agent" ? session?.tabs.find((t) => t.id === id) : undefined
   // Title for a bridged desktop notification: the agent's name (or its branch),
-  // read lazily in the OSC handler so a rename never recreates the terminal.
-  const notifyTitle = session?.title || session?.branch_name || "Agent"
+  // or the owning project's name for a project terminal, read lazily in the OSC
+  // handler so a rename never recreates the terminal.
+  const notifyTitle =
+    projectId !== null
+      ? project?.name || "Terminal"
+      : session?.title || session?.branch_name || "Agent"
   const notifyTitleRef = useRef(notifyTitle)
   useEffect(() => {
     notifyTitleRef.current = notifyTitle
   }, [notifyTitle])
   const isSessionSlotTab = kind === "agent" && id === sessionId
+  const ownedTerminals =
+    kind === "terminal" ? (project?.terminals ?? session?.terminals) : undefined
   const hasOutput =
     kind === "agent"
       ? (focusedTab?.has_output ?? session?.has_output ?? false)
-      : (session?.terminals.find((t) => t.id === id)?.has_output ?? false)
+      : (ownedTerminals?.find((t) => t.id === id)?.has_output ?? false)
   const providerName =
     kind === "agent" ? (focusedTab?.provider ?? session?.provider) : session?.provider
   // Kept current for the mount effect's PTY-gone check (an extra tab's socket
@@ -284,9 +317,9 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
   // `SelectedTarget` shape so the popover filters macros by the focused surface
   // and runs against the right PTY.
   const macroTarget: SelectedTarget =
-    kind === "agent"
-      ? { kind: "agent", sessionId, tabId: id }
-      : { kind: "terminal", terminalId: id, sessionId }
+    props.kind === "agent"
+      ? { kind: "agent", sessionId: props.sessionId, tabId: id }
+      : { kind: "terminal", terminalId: id, owner: props.owner }
   // Latch readiness: once the PTY has emitted output we keep the spinner hidden,
   // even if a later view model reports `has_output: false` (e.g. an exited
   // agent). Adjusting state during render is the React-sanctioned latch pattern
@@ -504,17 +537,10 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
     // exactly as the legacy `Subscribe` did. Registered as the active socket so the
     // macro picker can write to it; cleared on unmount. The byte feed and the
     // first-frame resize are wired further down (after the sizing state exists).
-    // For an agent, the session-slot tab (`id === sessionId`) uses the session PTY
-    // route; an extra tab uses its own nested route. Opening a tab's socket launches
-    // it if it isn't running (resume is decided server-side: it continues only when
-    // it's the sole tab coming up). A dormant tab is never auto-mounted (App renders
-    // its card instead), so reaching here for one is an intentional launch.
-    const ptyUrl =
-      kind === "agent"
-        ? id === sessionId
-          ? agentPtyUrl(sessionId)
-          : tabPtyUrl(sessionId, id)
-        : terminalPtyUrl(sessionId, id)
+    // Opening a tab's socket launches it if it isn't running (resume is decided
+    // server-side: it continues only when it's the sole tab coming up). A
+    // dormant tab is never auto-mounted (App renders its card instead), so
+    // reaching here for one is an intentional launch.
     const pty = new PtySocket(ptyUrl)
     ptyRef.current = pty
     setActivePtySocket(pty)
@@ -1102,7 +1128,7 @@ export function TerminalPane({ kind, id, sessionId }: TerminalPaneProps) {
       disposeOsc8Gate.dispose()
       term.dispose()
     }
-  }, [kind, id, sessionId])
+  }, [kind, id, sessionId, ptyUrl])
 
   // React to ownership handovers. The server broadcasts a `pty.owner` carrying the
   // claimer's connection id; the store fans it out by pty id plus that owner id. For

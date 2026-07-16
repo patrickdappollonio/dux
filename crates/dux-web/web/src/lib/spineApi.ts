@@ -17,6 +17,7 @@ import type {
   ProjectView,
   SessionView,
   SidebarModel,
+  TerminalView,
 } from "./types"
 
 // The spine document. Field names/types mirror the server's JSON and the values
@@ -66,7 +67,8 @@ export async function fetchSpine(): Promise<Spine> {
   // `source_branch`, but every downstream consumer treats them as required: `tabs`
   // becomes `[]` and the two branch fields become `""` (falsy, so the
   // "Unknown"/no-drift fallbacks in the info dialog and header still apply).
-  const raw = (await resp.json()) as Omit<Spine, "sessions"> & {
+  const raw = (await resp.json()) as Omit<Spine, "sessions" | "projects"> & {
+    projects: Array<Omit<ProjectView, "terminals"> & { terminals?: TerminalView[] }>
     sessions: Array<
       Omit<
         SessionView,
@@ -82,6 +84,12 @@ export async function fetchSpine(): Promise<Spine> {
   }
   return {
     ...raw,
+    // An older server that predates project terminals omits the field; every
+    // downstream consumer treats it as required, so normalize to `[]` here.
+    projects: raw.projects.map((p) => ({
+      ...p,
+      terminals: p.terminals ?? [],
+    })),
     sessions: raw.sessions.map((s) => ({
       ...s,
       tabs: s.tabs ?? [],

@@ -76,4 +76,16 @@ export const terminalsApi = {
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/terminals/${encodeURIComponent(terminalId)}`,
     ),
+  // Project terminals (a plain shell at the project's repo root with no agent
+  // attached) ride the project-nested twins of the session routes.
+  createForProject: (projectId: string) =>
+    request<CreatedTerminal>(
+      "POST",
+      `/api/v1/projects/${encodeURIComponent(projectId)}/terminals`,
+    ),
+  removeForProject: (projectId: string, terminalId: string) =>
+    request<void>(
+      "DELETE",
+      `/api/v1/projects/${encodeURIComponent(projectId)}/terminals/${encodeURIComponent(terminalId)}`,
+    ),
 }

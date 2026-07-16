@@ -209,12 +209,20 @@ afterEach(() => {
 // Run the same behavioral contract for both surfaces the pane serves. The
 // companion-terminal ("terminal") case is the load-bearing one: an epoch-only
 // reconnect is a NO-OP for it, so this parametrization is the regression guard.
+// Build the pane's (union-typed) props for either surface: an agent carries
+// its owning session id, a terminal its owner ref.
+function paneProps(kind: "agent" | "terminal", id: string) {
+  return kind === "agent"
+    ? ({ kind: "agent", id, sessionId: "s1" } as const)
+    : ({ kind: "terminal", id, owner: { kind: "session", sessionId: "s1" } } as const)
+}
+
 describe.each([
   { kind: "agent" as const, id: "s1" },
   { kind: "terminal" as const, id: "t1" },
 ])("TerminalPane connectionLost affordance ($kind)", ({ kind, id }) => {
   it("shows the Reconnect affordance on 'failed' without doubling the spinner", () => {
-    render(<TerminalPane kind={kind} id={id} sessionId="s1" />)
+    render(<TerminalPane {...paneProps(kind, id)} />)
     last().emit("failed")
     expect(screen.getByText("Connection lost.")).toBeTruthy()
     expect(screen.getByText("Reconnect")).toBeTruthy()
@@ -224,7 +232,7 @@ describe.each([
   })
 
   it("Reconnect calls the pane's OWN socket.connect() (not an epoch no-op)", () => {
-    render(<TerminalPane kind={kind} id={id} sessionId="s1" />)
+    render(<TerminalPane {...paneProps(kind, id)} />)
     const pty = last()
     pty.emit("failed")
     // Ignore the connect() the wiring effect already fired on mount; the button
@@ -236,7 +244,7 @@ describe.each([
   })
 
   it("clears the affordance once the socket reopens ('open')", () => {
-    render(<TerminalPane kind={kind} id={id} sessionId="s1" />)
+    render(<TerminalPane {...paneProps(kind, id)} />)
     const pty = last()
     pty.emit("failed")
     expect(screen.getByText("Connection lost.")).toBeTruthy()
@@ -246,7 +254,7 @@ describe.each([
 
   it("suppresses its own connectionLost overlay while globally offline", () => {
     mockState = makeState(true)
-    render(<TerminalPane kind={kind} id={id} sessionId="s1" />)
+    render(<TerminalPane {...paneProps(kind, id)} />)
     last().emit("failed")
     // The app-wide OfflineOverlay owns the offline case; the `&& !offline` gate
     // hides the per-pane affordance so the two never double up.

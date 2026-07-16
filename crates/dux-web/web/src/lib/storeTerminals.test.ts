@@ -161,7 +161,7 @@ describe("store companion-terminal lifecycle", () => {
       expect(mod.getSnapshot().selectedTarget).toEqual({
         kind: "terminal",
         terminalId: "t9",
-        sessionId: "s1",
+        owner: { kind: "session", sessionId: "s1" },
       })
     })
     const post = find(

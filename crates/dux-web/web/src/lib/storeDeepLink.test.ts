@@ -170,7 +170,7 @@ describe("deep-link restore on load", () => {
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "terminal",
       terminalId: "t1",
-      sessionId: "s1",
+      owner: { kind: "session", sessionId: "s1" },
     })
   })
 
@@ -241,7 +241,7 @@ describe("selection writes the hash", () => {
       { id: "s1", project_id: "p1", terminals: ["t1"] },
     ])
     replaceStateMock.mockClear()
-    mod.selectTerminal("t1", "s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
     expect(replaceStateMock).toHaveBeenCalledWith(
       null,
       "",

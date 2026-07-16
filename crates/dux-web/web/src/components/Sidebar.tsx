@@ -135,7 +135,7 @@ import {
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { terminalTitle } from "@/lib/terminals"
-import type { SelectedTarget } from "@/lib/store"
+import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import type { SessionView, TerminalView } from "@/lib/types"
 
@@ -145,12 +145,12 @@ import type { SessionView, TerminalView } from "@/lib/types"
 function TerminalSubItem({
   terminal,
   siblings,
-  sessionId,
+  owner,
   active,
 }: {
   terminal: TerminalView
   siblings: readonly TerminalView[]
-  sessionId: string
+  owner: TerminalOwnerRef
   active: boolean
 }) {
   // Title is the foreground command when one is running, otherwise the stable
@@ -177,7 +177,7 @@ function TerminalSubItem({
       <SidebarMenuSubButton
         isActive={active}
         className="flex-1 hover:bg-transparent active:bg-transparent data-active:bg-transparent"
-        onClick={() => selectTerminal(terminal.id, sessionId)}
+        onClick={() => selectTerminal(terminal.id, owner)}
       >
         <SquareTerminal />
         {/* When no foreground command is running, `title` already equals
@@ -205,7 +205,7 @@ function TerminalSubItem({
           </SidebarMenuAction>
         </div>
         <DropdownMenuContent side="right" align="start">
-          <DropdownMenuItem onClick={() => selectTerminal(terminal.id, sessionId)}>
+          <DropdownMenuItem onClick={() => selectTerminal(terminal.id, owner)}>
             <Terminal />
             Stream
           </DropdownMenuItem>
@@ -576,7 +576,7 @@ function SessionSubItem({
               key={terminal.id}
               terminal={terminal}
               siblings={session.terminals}
-              sessionId={session.id}
+              owner={{ kind: "session", sessionId: session.id }}
               active={
                 selectedTarget?.kind === "terminal" &&
                 selectedTarget.terminalId === terminal.id
@@ -652,12 +652,14 @@ function ProjectItem({
   name,
   branch,
   sessions,
+  terminals,
   selectedTarget,
 }: {
   id: string
   name: string
   branch: ProjectBranchDisplay | null
   sessions: SessionView[]
+  terminals: TerminalView[]
   selectedTarget: SelectedTarget | null
 }) {
   // Only the project HEADER row is the project drag handle (not the whole
@@ -675,7 +677,7 @@ function ProjectItem({
   // agent under a collapsed project can force it open. Absent from the store =>
   // default: open when the project has agents, collapsed when it's empty.
   const { projectOpen } = useDux()
-  const open = projectOpen?.[id] ?? sessions.length > 0
+  const open = projectOpen?.[id] ?? (sessions.length > 0 || terminals.length > 0)
 
   return (
     <Collapsible
@@ -784,6 +786,24 @@ function ProjectItem({
               selectedTarget={selectedTarget}
               projectName={name}
             />
+          ) : null}
+          {/* Project terminals: shells at the project's repo root with no agent
+              attached, rendered exactly like the session-terminal rows. */}
+          {terminals.length > 0 ? (
+            <SidebarMenuSub className="mr-0 border-l-0 pr-0 dux-tree">
+              {terminals.map((terminal) => (
+                <TerminalSubItem
+                  key={terminal.id}
+                  terminal={terminal}
+                  siblings={terminals}
+                  owner={{ kind: "project", projectId: id }}
+                  active={
+                    selectedTarget?.kind === "terminal" &&
+                    selectedTarget.terminalId === terminal.id
+                  }
+                />
+              ))}
+            </SidebarMenuSub>
           ) : null}
         </CollapsibleContent>
       </SidebarMenuItem>
@@ -1017,6 +1037,7 @@ function ProjectGroup({
   grouped,
   projectName,
   projectBranch,
+  projectTerminals,
   selectedTarget,
 }: {
   members: string[]
@@ -1024,6 +1045,7 @@ function ProjectGroup({
   grouped: Map<string, SessionView[]>
   projectName: (id: string) => string
   projectBranch: (id: string) => ProjectBranchDisplay | null
+  projectTerminals: (id: string) => TerminalView[]
   selectedTarget: SelectedTarget | null
 }) {
   const sensors = useSensors(
@@ -1050,6 +1072,7 @@ function ProjectGroup({
       name={projectName(projectId)}
       branch={projectBranch(projectId)}
       sessions={grouped.get(projectId) ?? []}
+      terminals={projectTerminals(projectId)}
       selectedTarget={selectedTarget}
     />
   ))
@@ -1097,6 +1120,9 @@ export function AppSidebar() {
     const project = projects.find((p) => p.id === id)
     return project ? projectBranchDisplay(project) : null
   }
+  // The project's own terminals (project terminals). Orphan ids resolve to [].
+  const projectTerminals = (id: string): TerminalView[] =>
+    projects.find((p) => p.id === id)?.terminals ?? []
 
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
@@ -1155,6 +1181,7 @@ export function AppSidebar() {
               grouped={grouped}
               projectName={projectName}
               projectBranch={projectBranch}
+              projectTerminals={projectTerminals}
               selectedTarget={selectedTarget}
             />
           )}
@@ -1171,6 +1198,7 @@ export function AppSidebar() {
               grouped={grouped}
               projectName={projectName}
               projectBranch={projectBranch}
+              projectTerminals={projectTerminals}
               selectedTarget={selectedTarget}
             />
           </SidebarGroup>
