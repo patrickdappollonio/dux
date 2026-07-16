@@ -236,14 +236,29 @@ pub fn repo_path_kind(path: &Path) -> RepoPathKind {
                 .to_string()
         })
     };
+    // Path outputs must be decoded from the RAW bytes, never via
+    // `from_utf8_lossy`: git prints path bytes verbatim, and a repo under a
+    // non-UTF8 path (legal on Linux) would have its bytes rewritten to U+FFFD,
+    // fail canonicalization, and fall to Indeterminate, which the fail-open
+    // add gate accepts, i.e. exactly the paths this ladder exists to stop
+    // would slip through.
+    let capture_path = |args: &[&str]| -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        run(args).filter(|out| out.status.success()).map(|out| {
+            let mut bytes = out.stdout.as_slice();
+            while let [rest @ .., b'\n' | b'\r'] = bytes {
+                bytes = rest;
+            }
+            PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+        })
+    };
     // Rung 2: bare repositories. The bare root is addable; a folder inside a
     // bare repo (objects/, refs/, ...) is git internals and must not be.
     match capture(&["rev-parse", "--is-bare-repository"]).as_deref() {
         Some("true") => {
-            let Some(git_dir) = capture(&["rev-parse", "--absolute-git-dir"]) else {
+            let Some(git_dir) = capture_path(&["rev-parse", "--absolute-git-dir"]) else {
                 return RepoPathKind::Indeterminate;
             };
-            let git_dir = PathBuf::from(git_dir);
             let (Ok(canon_git_dir), Ok(canon_path)) = (git_dir.canonicalize(), path.canonicalize())
             else {
                 return RepoPathKind::Indeterminate;
@@ -259,21 +274,18 @@ pub fn repo_path_kind(path: &Path) -> RepoPathKind {
     // Rung 3: inside a normal repo's .git directory (see the doc above).
     match capture(&["rev-parse", "--is-inside-git-dir"]).as_deref() {
         Some("true") => {
-            let Some(git_dir) = capture(&["rev-parse", "--absolute-git-dir"]) else {
+            let Some(git_dir) = capture_path(&["rev-parse", "--absolute-git-dir"]) else {
                 return RepoPathKind::Indeterminate;
             };
-            return RepoPathKind::InsideGitDir {
-                git_dir: PathBuf::from(git_dir),
-            };
+            return RepoPathKind::InsideGitDir { git_dir };
         }
         Some(_) => {}
         None => return RepoPathKind::Indeterminate,
     }
     // Rung 4: work tree root vs a folder inside the work tree.
-    let Some(toplevel) = capture(&["rev-parse", "--show-toplevel"]) else {
+    let Some(toplevel) = capture_path(&["rev-parse", "--show-toplevel"]) else {
         return RepoPathKind::Indeterminate;
     };
-    let toplevel = PathBuf::from(toplevel);
     let (Ok(canon_top), Ok(canon_path)) = (toplevel.canonicalize(), path.canonicalize()) else {
         return RepoPathKind::Indeterminate;
     };
@@ -3607,6 +3619,49 @@ mod tests {
                 RepoPathKind::InsideGitDir { .. }
             ),
             "a bare repo's objects/ must classify as InsideGitDir"
+        );
+    }
+
+    #[test]
+    fn repo_path_kind_classifies_repos_under_non_utf8_paths() {
+        // Catches the fail-open gate bypass: `--show-toplevel` output for a
+        // repo under a non-UTF8 path (legal on Linux) must be decoded from the
+        // raw bytes; a lossy decode rewrites the byte to U+FFFD, fails
+        // canonicalization, and falls to Indeterminate, which the add gate
+        // accepts.
+        use std::os::unix::ffi::OsStrExt;
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join(std::ffi::OsStr::from_bytes(b"rep\xFFo"));
+        std::fs::create_dir(&repo).unwrap();
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init under a non-UTF8 path failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(repo_path_kind(&repo), RepoPathKind::WorkTreeRoot);
+
+        let sub = repo.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        match repo_path_kind(&sub) {
+            RepoPathKind::InsideWorkTree { root } => {
+                assert_eq!(root.canonicalize().unwrap(), repo.canonicalize().unwrap());
+            }
+            other => panic!(
+                "a subdir of a non-UTF8-path repo must classify as InsideWorkTree, got {other:?}"
+            ),
+        }
+        assert!(
+            matches!(
+                repo_path_kind(&repo.join(".git")),
+                RepoPathKind::InsideGitDir { .. }
+            ),
+            "a non-UTF8-path repo's .git must classify as InsideGitDir"
         );
     }
 
