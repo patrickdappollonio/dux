@@ -15,6 +15,7 @@ import {
   setCreateAgentDraft,
   setCreateAgentPrInput,
   submitNameDialog,
+  toggleCreateAgentCopyChanges,
   toggleCreateAgentRandomize,
   useDux,
 } from "@/lib/store"
@@ -34,6 +35,7 @@ export function CreateAgentDialog() {
     createAgentTarget,
     createAgentDraft,
     createAgentRandomize,
+    createAgentCopyChanges,
     createAgentNamePending,
     createAgentPrInput,
     spine,
@@ -76,7 +78,7 @@ export function CreateAgentDialog() {
       ? `New agent from PR in ${projectName}`
       : `New agent in ${projectName}`
   const description = isFork
-    ? "Forks the agent into a new git worktree + branch (copying its current files) and launches a fresh session."
+    ? "Forks the agent into a new git worktree + branch (copying its uncommitted and untracked files) and launches a fresh session."
     : isPr
       ? "Fetches the PR's head branch into a new git worktree and launches the agent. Paste a PR URL or enter a PR number. Leave the name blank to use the PR's branch name."
       : "Creates a git worktree + branch and launches the agent. Tick “Use randomized pet name” to autofill a generated name."
@@ -163,6 +165,18 @@ export function CreateAgentDialog() {
             Use randomized pet name
           </label>
         </div>
+        {createAgentTarget?.kind === "new" && (
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="copy-uncommitted-changes"
+              checked={createAgentCopyChanges}
+              onCheckedChange={toggleCreateAgentCopyChanges}
+            />
+            <label htmlFor="copy-uncommitted-changes" className="text-sm">
+              Copy uncommitted changes from the project checkout
+            </label>
+          </div>
+        )}
         <div className="h-2" />
         <DialogFooter>
           <Button variant="outline" onClick={closeCreateAgent}>

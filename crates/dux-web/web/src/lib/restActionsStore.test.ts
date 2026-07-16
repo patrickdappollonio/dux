@@ -25,6 +25,8 @@ let actionFails = false
 let actionStatus = 400
 // Records the [url, init] of every action fetch the store fired.
 const actionCalls: Array<{ url: string; method?: string; body: unknown }> = []
+// Extra fields merged into the bootstrap document (per-test overrides).
+let bootstrapExtra: Record<string, unknown> = {}
 
 function isBootRead(u: string): boolean {
   return (
@@ -57,7 +59,10 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ available_providers: ["codex", "claude"] }),
+        json: async () => ({
+          available_providers: ["codex", "claude"],
+          ...bootstrapExtra,
+        }),
         text: async () => "",
         headers: { get: () => null },
       } as unknown as Response
@@ -109,6 +114,7 @@ beforeEach(() => {
   actionFails = false
   actionStatus = 400
   actionCalls.length = 0
+  bootstrapExtra = {}
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -183,6 +189,35 @@ describe("store write actions route to REST", () => {
     mod.pullProject("p1")
     await vi.waitFor(() => expect(actionCalls.length).toBe(1))
     expect(actionCalls[0].url).toBe("/api/v1/projects/p1/pull")
+  })
+
+  it("openCreateAgent seeds the copy checkbox true when the bootstrap omits the field", async () => {
+    const mod = await loadStore()
+    mod.openCreateAgent("p1")
+    expect(mod.getSnapshot().createAgentCopyChanges).toBe(true)
+  })
+
+  it("openCreateAgent seeds the copy checkbox from the bootstrap default", async () => {
+    bootstrapExtra = { copy_uncommitted_changes_by_default: false }
+    const mod = await loadStore()
+    mod.openCreateAgent("p1")
+    expect(mod.getSnapshot().createAgentCopyChanges).toBe(false)
+  })
+
+  it("submitNameDialog carries the copy checkbox in the create body", async () => {
+    const mod = await loadStore()
+    mod.openCreateAgent("p1")
+    mod.toggleCreateAgentCopyChanges()
+    expect(mod.getSnapshot().createAgentCopyChanges).toBe(false)
+    mod.submitNameDialog("feat")
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    expect(actionCalls[0].url).toBe("/api/v1/sessions")
+    expect(actionCalls[0].body).toEqual({
+      kind: "new",
+      project_id: "p1",
+      name: "feat",
+      copy_uncommitted_changes: false,
+    })
   })
 })
 

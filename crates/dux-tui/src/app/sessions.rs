@@ -407,6 +407,11 @@ impl App {
             input,
             randomize_name,
             randomized_name,
+            copy_changes: self
+                .engine
+                .config
+                .defaults
+                .copy_uncommitted_changes_by_default,
             focus: NameNewAgentFocus::Input,
         };
         Ok(())

@@ -1013,6 +1013,9 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
 pub(crate) enum NameNewAgentFocus {
     Input,
     RandomizedNameCheckbox,
+    /// Only reachable for `CreateAgentRequest::NewProject`: forks always
+    /// copy and the other flows never do, so only fresh agents show the box.
+    CopyChangesCheckbox,
 }
 
 #[derive(Clone, Debug)]
@@ -1131,6 +1134,10 @@ pub(crate) enum PromptState {
         input: TextInput,
         randomize_name: bool,
         randomized_name: Option<String>,
+        /// Whether the new worktree copies the project checkout's uncommitted
+        /// changes. Only surfaced (and only written into the request) for
+        /// `CreateAgentRequest::NewProject`.
+        copy_changes: bool,
         focus: NameNewAgentFocus,
     },
     PickEditor {
@@ -1420,6 +1427,7 @@ pub(crate) enum OverlayCheckboxId {
     RenameSessionBranch,
     NonDefaultBranchCheckoutDefault,
     NameNewAgentRandomizedPetName,
+    NameNewAgentCopyChanges,
     ConfigReloadRecoverOldConfig,
 }
 
@@ -1568,6 +1576,9 @@ pub(crate) enum OverlayMouseLayout {
     NameNewAgent {
         input: Rect,
         checkbox: Option<OverlayCheckbox>,
+        /// The "copy uncommitted changes" checkbox; present only for
+        /// `CreateAgentRequest::NewProject` prompts.
+        copy_checkbox: Option<OverlayCheckbox>,
     },
 }
 

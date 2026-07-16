@@ -6216,6 +6216,7 @@ impl App {
                 request,
                 input,
                 randomize_name,
+                copy_changes,
                 focus,
                 ..
             } => {
@@ -6237,7 +6238,25 @@ impl App {
                     )
                     .height
                     .saturating_add(1);
+                // Only fresh project agents expose the copy checkbox: forks
+                // always copy and the other flows never do.
+                let show_copy_checkbox = matches!(request, CreateAgentRequest::NewProject { .. });
+                let copy_checkbox_label = "Copy uncommitted changes from the project checkout";
+                let copy_checkbox_height = if show_copy_checkbox {
+                    let copy_checkbox = Checkbox::new(copy_checkbox_label);
+                    copy_checkbox
+                        .layout(
+                            inner_width,
+                            copy_checkbox.marker_style(Style::default()),
+                            copy_checkbox.label_style(Style::default()),
+                        )
+                        .height
+                        .saturating_add(1)
+                } else {
+                    0
+                };
                 let checkbox_spacing = 1;
+                let copy_checkbox_spacing = u16::from(show_copy_checkbox);
                 let footer_spacing = 1;
                 let context_line = match request {
                     CreateAgentRequest::ExistingManagedWorktree { worktree_path, .. } => {
@@ -6261,6 +6280,8 @@ impl App {
                     8 + context_height
                         + checkbox_spacing
                         + randomize_checkbox_height
+                        + copy_checkbox_spacing
+                        + copy_checkbox_height
                         + footer_spacing,
                     frame.area(),
                 );
@@ -6277,6 +6298,8 @@ impl App {
                     _,
                     randomize_checkbox_area,
                     _,
+                    copy_checkbox_area,
+                    _,
                     hint_area,
                 ] = Layout::default()
                     .direction(Direction::Vertical)
@@ -6286,6 +6309,8 @@ impl App {
                         Constraint::Length(3),
                         Constraint::Length(checkbox_spacing),
                         Constraint::Length(randomize_checkbox_height),
+                        Constraint::Length(copy_checkbox_spacing),
+                        Constraint::Length(copy_checkbox_height),
                         Constraint::Length(footer_spacing),
                         Constraint::Min(1),
                     ])
@@ -6363,6 +6388,30 @@ impl App {
                     ))),
                 );
 
+                let copy_checkbox_rect = if show_copy_checkbox {
+                    let (rect, _) = self.render_overlay_checkbox(
+                        frame,
+                        copy_checkbox_area,
+                        copy_checkbox_label,
+                        *copy_changes,
+                        if *focus == NameNewAgentFocus::CopyChangesCheckbox {
+                            CheckboxState::Focused
+                        } else {
+                            CheckboxState::Normal
+                        },
+                        Some(Line::from(Span::styled(
+                            format!(
+                                "{}Requires the checkout to be on the same commit",
+                                Checkbox::indent()
+                            ),
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ))),
+                    );
+                    Some(rect)
+                } else {
+                    None
+                };
+
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
                 let toggle_key = self.bindings.label_for(Action::ToggleSelection);
@@ -6392,6 +6441,10 @@ impl App {
                     checkbox: Some(OverlayCheckbox {
                         id: OverlayCheckboxId::NameNewAgentRandomizedPetName,
                         rect: randomized_name_checkbox_rect,
+                    }),
+                    copy_checkbox: copy_checkbox_rect.map(|rect| OverlayCheckbox {
+                        id: OverlayCheckboxId::NameNewAgentCopyChanges,
+                        rect,
                     }),
                 };
             }

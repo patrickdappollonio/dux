@@ -48,6 +48,10 @@ pub struct BootstrapView {
     /// web new-agent dialog pre-checks its "Use randomized pet name" box (and
     /// requests a generated name on open), matching the TUI's prompt default.
     pub randomize_agent_names_by_default: bool,
+    /// Mirrors `defaults.copy_uncommitted_changes_by_default`. Seeds the web
+    /// create dialog's "Copy uncommitted changes" checkbox; the per-agent
+    /// choice rides the create request, so this stays read-only exposure.
+    pub copy_uncommitted_changes_by_default: bool,
     /// Whether the new-agent-from-PR flow is available (GitHub integration on +
     /// `gh` installed and authenticated; see `Engine::pr_agent_command_available`).
     /// The web dialog hides/disables its "From PR" mode with a quiet explanation
@@ -655,6 +659,10 @@ impl Engine {
                 .config
                 .defaults
                 .enable_randomized_pet_name_by_default,
+            copy_uncommitted_changes_by_default: self
+                .config
+                .defaults
+                .copy_uncommitted_changes_by_default,
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
