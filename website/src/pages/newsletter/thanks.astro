@@ -1,0 +1,40 @@
+---
+// Landing page after someone submits the newsletter form. Buttondown's
+// "redirect after subscribing" setting should point here. Utility page:
+// kept out of search engines and the sitemap.
+import Layout from "../../layouts/Layout.astro";
+import Header from "../../components/Header.astro";
+import Footer from "../../components/Footer.astro";
+import NewsletterStatus from "../../components/NewsletterStatus.astro";
+
+const title = "Almost in the flock | getdux.app";
+const description =
+  "One confirmation click stands between you and the dux newsletter.";
+---
+
+<Layout title={title} description={description} noIndex emitStructuredData={false}>
+  <Header />
+  <main>
+    <NewsletterStatus pill="▸ one more thing">
+      <Fragment slot="title">
+        Go check your <span class="text-[color:var(--color-accent)]">inbox</span>
+      </Fragment>
+      <Fragment slot="body">
+        <p>
+          A confirmation email is waddling your way right now. Click the link
+          inside it and you're officially in. Skip that click and, well,
+          nothing happens. Ever. Double opt-in isn't bureaucracy, it's how we
+          keep the bots out of the flock.
+        </p>
+      </Fragment>
+      <Fragment slot="actions">
+        <a href="/" class="btn-ghost">Back to the homepage</a>
+      </Fragment>
+      <Fragment slot="footnote">
+        Nothing showing up? Give it a minute, then go rescue it from spam.
+        Email providers love flagging the good stuff.
+      </Fragment>
+    </NewsletterStatus>
+  </main>
+  <Footer />
+</Layout>

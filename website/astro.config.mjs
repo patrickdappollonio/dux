@@ -26,7 +26,12 @@ export default defineConfig({
   integrations: [
     mdx(),
     pagefind(),
-    sitemap({ filter: (page) => !page.endsWith("/rss.xml") }),
+    // Newsletter status pages are post-subscribe/post-confirm landing pages
+    // (noindex), so they stay out of the sitemap too.
+    sitemap({
+      filter: (page) =>
+        !page.endsWith("/rss.xml") && !page.includes("/newsletter/"),
+    }),
   ],
   build: {
     inlineStylesheets: "auto",
