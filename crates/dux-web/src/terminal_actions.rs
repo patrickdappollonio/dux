@@ -1,7 +1,8 @@
 //! REST verbs for companion terminals (Phase 5 of the REST-first migration):
-//! create and delete a session's companion terminal. Live terminal byte I/O rides
-//! the nested PTY socket `/ws/sessions/:id/terminals/:tid/pty` (see `server.rs`);
-//! these routes manage only the terminal's lifecycle.
+//! create and delete a terminal for either owner. Live terminal byte I/O rides
+//! the nested PTY sockets `/ws/sessions/:id/terminals/:tid/pty` and
+//! `/ws/projects/:id/terminals/:tid/pty` (see `server.rs`); these routes manage
+//! only the terminal's lifecycle.
 //!
 //! Routes (all gated; an unauthenticated request 401s before the handler):
 //! - `POST   /api/v1/sessions/:id/terminals`       — create a companion terminal,
@@ -11,6 +12,13 @@
 //!   The `:tid` ownership against `:id` is enforced before the delete (the legacy
 //!   `DeleteTerminal` looks a terminal up by id alone and does not check
 //!   ownership), so a `:tid` that does not belong to `:id` is a 404.
+//! - `POST   /api/v1/projects/:id/terminals`       — create a project terminal (a
+//!   plain shell at the project's repo root with no agent attached). 404 when
+//!   `:id` is not a known project.
+//! - `DELETE /api/v1/projects/:id/terminals/:tid`  — delete a project terminal,
+//!   with the same ownership enforcement: a terminal owned by a session (or by a
+//!   different project) is a 404 on this route, and a project terminal is a 404
+//!   on the session-nested route.
 
 use axum::{
     Json, Router,
@@ -21,21 +29,31 @@ use axum::{
 };
 use serde::Serialize;
 
+use dux_core::model::TerminalOwner;
 use dux_core::wire::WireCommand;
 
 use crate::git_routes::resolve_worktree;
 use crate::rest_common::{id_within_bound, scope_from_headers, unknown_session};
 use crate::server::AppState;
 
-/// The gated companion-terminal routes. Both are nested under `/sessions/:id` so
-/// the session is resolved/validated from the path, exactly like the other
-/// resource-nested REST routes.
+/// The gated companion-terminal routes. Session terminals nest under
+/// `/sessions/:id` and project terminals under `/projects/:id`, so the owner is
+/// resolved/validated from the path, exactly like the other resource-nested REST
+/// routes.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions/{id}/terminals", post(create_terminal))
         .route(
             "/api/v1/sessions/{id}/terminals/{tid}",
             delete(delete_terminal),
+        )
+        .route(
+            "/api/v1/projects/{id}/terminals",
+            post(create_project_terminal),
+        )
+        .route(
+            "/api/v1/projects/{id}/terminals/{tid}",
+            delete(delete_project_terminal),
         )
 }
 
@@ -71,8 +89,35 @@ async fn create_terminal(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+/// `POST /api/v1/projects/:id/terminals` — create a project terminal: a plain
+/// shell at the project's repo root with no agent attached. Mirrors
+/// `create_terminal`, with the project (not a session) resolved from the path.
+async fn create_project_terminal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_project();
+    }
+    if state.engine.project_path(id.clone()).await.is_none() {
+        return unknown_project();
+    }
+    match state.engine.create_project_terminal(id.clone()).await {
+        Ok((terminal_id, label)) => {
+            let location = format!("/api/v1/projects/{id}/terminals/{terminal_id}");
+            (
+                StatusCode::CREATED,
+                [(header::LOCATION, location)],
+                Json(CreatedTerminal { terminal_id, label }),
+            )
+                .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
 /// `DELETE /api/v1/sessions/:id/terminals/:tid` — delete a companion terminal,
-/// enforcing that `:tid` belongs to `:id` before dispatching the delete.
+/// enforcing that `:tid` is session-owned by `:id` before dispatching the delete.
 async fn delete_terminal(
     State(state): State<AppState>,
     Path((id, tid)): Path<(String, String)>,
@@ -84,17 +129,46 @@ async fn delete_terminal(
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp;
     }
-    // Enforce session ownership of the terminal: an unknown terminal, or one owned
-    // by a different session, is a 404 (never a cross-session delete).
-    match state.engine.terminal_session(tid.clone()).await {
-        Some(owner) if owner == id => {}
+    // Enforce ownership per variant: an unknown terminal, one owned by a
+    // different session, or a PROJECT terminal (whose id could otherwise collide
+    // with a session id) is a 404 — never a cross-owner delete.
+    match state.engine.terminal_owner_of(tid.clone()).await {
+        Some(TerminalOwner::Session(owner)) if owner == id => {}
         _ => return unknown_terminal(),
     }
+    dispatch_delete(&state, tid, &headers).await
+}
+
+/// `DELETE /api/v1/projects/:id/terminals/:tid` — delete a project terminal,
+/// enforcing that `:tid` is project-owned by `:id` before dispatching the delete.
+async fn delete_project_terminal(
+    State(state): State<AppState>,
+    Path((id, tid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if !id_within_bound(&id) || !id_within_bound(&tid) {
+        return unknown_terminal();
+    }
+    if state.engine.project_path(id.clone()).await.is_none() {
+        return unknown_project();
+    }
+    // Enforce ownership per variant: a session-owned terminal is a 404 on the
+    // project route, exactly as a project terminal is on the session route.
+    match state.engine.terminal_owner_of(tid.clone()).await {
+        Some(TerminalOwner::Project(owner)) if owner == id => {}
+        _ => return unknown_terminal(),
+    }
+    dispatch_delete(&state, tid, &headers).await
+}
+
+/// The shared delete dispatch: `WireCommand::DeleteTerminal` is id-keyed and
+/// owner-blind by design — ownership was already enforced by the route above.
+async fn dispatch_delete(state: &AppState, tid: String, headers: &HeaderMap) -> Response {
     match state
         .engine
         .apply_wire_scoped(
             WireCommand::DeleteTerminal { terminal_id: tid },
-            scope_from_headers(&headers, &state.connections),
+            scope_from_headers(headers, &state.connections),
         )
         .await
     {
@@ -105,4 +179,8 @@ async fn delete_terminal(
 
 fn unknown_terminal() -> Response {
     (StatusCode::NOT_FOUND, "unknown terminal").into_response()
+}
+
+fn unknown_project() -> Response {
+    (StatusCode::NOT_FOUND, "unknown project").into_response()
 }

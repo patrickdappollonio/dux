@@ -543,7 +543,9 @@ impl Engine {
         let mut terminals: Vec<TerminalView> = self
             .companion_terminals
             .iter()
-            .filter(|(_, t)| t.session_id == s.id)
+            .filter(
+                |(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == s.id),
+            )
             .map(|(id, t)| TerminalView {
                 id: id.clone(),
                 label: t.label.clone(),

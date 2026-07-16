@@ -4625,7 +4625,7 @@ mod resource_monitor_targets_tests {
         engine.companion_terminals.insert(
             "term-1".to_string(),
             CompanionTerminal {
-                session_id: "s1".to_string(),
+                owner: crate::model::TerminalOwner::Session("s1".to_string()),
                 label: "dev server".to_string(),
                 foreground_cmd: Some("npm".to_string()),
                 client: spawn_cat(worktree.path()),

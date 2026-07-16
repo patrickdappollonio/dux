@@ -8764,7 +8764,7 @@ mod tests {
         app.engine.companion_terminals.insert(
             terminal_id.clone(),
             CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client,

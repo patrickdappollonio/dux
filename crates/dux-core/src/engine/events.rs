@@ -1099,8 +1099,9 @@ impl Engine {
         // those; this cleans up the remaining pin/activity/input/in-flight entries.
         self.clear_session_tab_runtime(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
-        self.companion_terminals
-            .retain(|_, t| t.session_id != session.id);
+        self.companion_terminals.retain(
+            |_, t| !matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == session.id),
+        );
         self.agent_tabs.retain(|_, t| t.session_id != session.id);
         self.update_branch_sync_sessions();
 
@@ -1203,8 +1204,9 @@ impl Engine {
             for tab_id in self.tab_ids_for_session(session_id) {
                 self.providers.remove(&tab_id);
             }
-            self.companion_terminals
-                .retain(|_, t| t.session_id != session_id);
+            self.companion_terminals.retain(
+                |_, t| !matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if sid == session_id),
+            );
             let project = project
                 .as_ref()
                 .expect("should_remove_worktree implies a project");
@@ -2632,7 +2634,7 @@ mod tests {
             engine
                 .companion_terminals
                 .values()
-                .any(|t| t.session_id == "s1")
+                .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string()))
         );
 
         engine
@@ -2644,7 +2646,7 @@ mod tests {
             !engine
                 .companion_terminals
                 .values()
-                .any(|t| t.session_id == "s1"),
+                .any(|t| t.owner == crate::model::TerminalOwner::Session("s1".to_string())),
             "deleted session's companion terminals should be removed"
         );
     }

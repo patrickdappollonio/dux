@@ -7763,7 +7763,7 @@ not_a_real_action = ["x"]
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.engine.sessions[0].id.clone(),
+                owner: dux_core::model::TerminalOwner::Session(app.engine.sessions[0].id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: Some("python".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -7811,7 +7811,7 @@ not_a_real_action = ["x"]
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.engine.sessions[0].id.clone(),
+                owner: dux_core::model::TerminalOwner::Session(app.engine.sessions[0].id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: Some("TERM sleep".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -8111,7 +8111,7 @@ not_a_real_action = ["x"]
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id: app.engine.sessions[0].id.clone(),
+                owner: dux_core::model::TerminalOwner::Session(app.engine.sessions[0].id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
@@ -11341,7 +11341,7 @@ cyan = "#00ffff"
         app.engine.companion_terminals.insert(
             "term-test".to_string(),
             crate::app::CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "test".to_string(),
                 foreground_cmd: None,
                 client: term_client,
@@ -12072,7 +12072,7 @@ cyan = "#00ffff"
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "test".to_string(),
                 foreground_cmd: None,
                 client,
@@ -13550,7 +13550,7 @@ cyan = "#00ffff"
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                session_id,
+                owner: dux_core::model::TerminalOwner::Session(session_id),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)

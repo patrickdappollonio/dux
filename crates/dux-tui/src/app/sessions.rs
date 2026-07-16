@@ -1006,7 +1006,7 @@ impl App {
         self.engine.companion_terminals.insert(
             terminal_id.clone(),
             CompanionTerminal {
-                session_id: session.id.clone(),
+                owner: TerminalOwner::Session(session.id.clone()),
                 label,
                 foreground_cmd: None,
                 client,
@@ -1023,11 +1023,96 @@ impl App {
         Ok(())
     }
 
-    /// Opens the first existing companion terminal for the selected session,
-    /// or spawns a new one if none exists.
+    /// Spawns the PTY for a project terminal: the configured terminal command
+    /// at the project's repo root, with the resolved global-plus-project
+    /// environment. Mirrors `spawn_companion_terminal_for_session`, with the
+    /// project (not a session worktree) as the working directory.
+    pub(crate) fn spawn_project_terminal_for_project(
+        &self,
+        project: &Project,
+    ) -> Result<PtyClient> {
+        let (rows, cols) = if self.last_pty_size != (0, 0) {
+            self.last_pty_size
+        } else {
+            (24, 80)
+        };
+        logger::debug(&format!(
+            "spawning project terminal {:?} {:?} in {} ({}x{})",
+            self.engine.config.terminal.command,
+            self.engine.config.terminal.args,
+            project.path,
+            cols,
+            rows,
+        ));
+        let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
+            .unwrap_or_default();
+        PtyClient::spawn_with_env_opts(
+            &self.engine.config.terminal.command,
+            &self.engine.config.terminal.args,
+            Path::new(&project.path),
+            rows,
+            cols,
+            self.engine.config.ui.agent_scrollback_lines,
+            dux_core::pty::PtySpawnOptions {
+                env: &env,
+                // Same shell semantics as a session-owned companion: no agent
+                // signal scanning, but the full terminal identity.
+                track_agent_signals: false,
+                identity: &self.engine.resolved_identity(),
+            },
+        )
+    }
+
+    /// Always spawns a new project terminal at the given project's repo root.
+    /// A project terminal is a plain shell with no agent attached; it does NOT
+    /// run the project's `startup_command`.
+    pub(crate) fn show_project_terminal(&mut self, project: &Project) -> Result<()> {
+        if project.path_missing {
+            self.set_warning(format!(
+                "Cannot open a project terminal: path not found for \"{}\".",
+                project.name
+            ));
+            return Ok(());
+        }
+        let client = self.spawn_project_terminal_for_project(project)?;
+        let terminal_id = self.next_terminal_id();
+        let count = self.project_terminal_count(&project.id) + 1;
+        let label = if count == 1 {
+            project.name.clone()
+        } else {
+            format!("{} ({count})", project.name)
+        };
+        self.engine.companion_terminals.insert(
+            terminal_id.clone(),
+            CompanionTerminal {
+                owner: TerminalOwner::Project(project.id.clone()),
+                label,
+                foreground_cmd: None,
+                client,
+            },
+        );
+        self.active_terminal_id = Some(terminal_id);
+        self.terminal_return_to_list = true;
+        self.show_companion_terminal_surface();
+        self.input_target = InputTarget::Terminal;
+        self.set_info(format!(
+            "Launched project terminal at the repo root of \"{}\".",
+            project.name
+        ));
+        Ok(())
+    }
+
+    /// Opens the first existing companion terminal for the selected session
+    /// (or, on a project row, the first project terminal for that project), or
+    /// spawns a new one if none exists.
     pub(crate) fn show_or_open_first_terminal(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session().cloned() else {
-            self.set_error("Select an agent session first.");
+        // A session row wins; a project header row targets the project itself.
+        let owner = if let Some(session) = self.selected_session() {
+            TerminalOwner::Session(session.id.clone())
+        } else if let Some(project) = self.selected_project() {
+            TerminalOwner::Project(project.id.clone())
+        } else {
+            self.set_error("Select an agent or project first.");
             return Ok(());
         };
 
@@ -1035,7 +1120,7 @@ impl App {
             .engine
             .companion_terminals
             .iter()
-            .filter(|(_, t)| t.session_id == session.id)
+            .filter(|(_, t)| t.owner == owner)
             .min_by_key(|(id, _)| {
                 id.strip_prefix("term-")
                     .and_then(|n| n.parse::<u64>().ok())
@@ -1049,22 +1134,54 @@ impl App {
             self.show_companion_terminal_surface();
             self.input_target = InputTarget::Terminal;
             self.set_info(format!("Opened terminal \"{label}\"."));
-            Ok(())
-        } else {
-            self.show_companion_terminal()
+            return Ok(());
+        }
+        match owner {
+            TerminalOwner::Session(_) => self.show_companion_terminal(),
+            TerminalOwner::Project(project_id) => {
+                let Some(project) = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .cloned()
+                else {
+                    self.set_error("Select an agent or project first.");
+                    return Ok(());
+                };
+                self.show_project_terminal(&project)
+            }
         }
     }
 
-    /// Spawns a new companion terminal for the agent that owns the currently
-    /// selected terminal in the terminals list.
+    /// Spawns a new companion terminal for the owner (agent session or
+    /// project) of the currently selected terminal in the terminals list.
     pub(crate) fn spawn_terminal_for_selected_terminal(&mut self) -> Result<()> {
         let items = self.terminal_items();
         let Some(&(_, terminal)) = items.get(self.selected_terminal_index) else {
             self.set_warning("No terminal selected.");
             return Ok(());
         };
-        let session_id = terminal.session_id.clone();
+        let owner = terminal.owner.clone();
         drop(items);
+
+        let session_id = match owner {
+            TerminalOwner::Session(session_id) => session_id,
+            TerminalOwner::Project(project_id) => {
+                // A project terminal's sibling is another project terminal.
+                let Some(project) = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .cloned()
+                else {
+                    self.set_warning("The parent project no longer exists.");
+                    return Ok(());
+                };
+                return self.show_project_terminal(&project);
+            }
+        };
 
         let Some(session) = self
             .engine
@@ -1092,7 +1209,7 @@ impl App {
         self.engine.companion_terminals.insert(
             terminal_id.clone(),
             CompanionTerminal {
-                session_id: session.id.clone(),
+                owner: TerminalOwner::Session(session.id.clone()),
                 label,
                 foreground_cmd: None,
                 client,
@@ -1109,14 +1226,18 @@ impl App {
         Ok(())
     }
 
-    /// Palette command: always spawns a new companion terminal.
-    /// Uses a yellow warning if no agent session is selected.
+    /// Palette command: always spawns a new companion terminal for the
+    /// selected agent, or a project terminal for the selected project.
+    /// Uses a yellow warning when nothing is selected.
     pub(crate) fn new_companion_terminal(&mut self) -> Result<()> {
-        if self.selected_session().is_none() {
-            self.set_warning("Select an agent session first to launch a companion terminal.");
-            return Ok(());
+        if self.selected_session().is_some() {
+            return self.show_companion_terminal();
         }
-        self.show_companion_terminal()
+        if let Some(project) = self.selected_project().cloned() {
+            return self.show_project_terminal(&project);
+        }
+        self.set_warning("Select an agent or project first to launch a terminal.");
+        Ok(())
     }
 
     /// Opens the terminal overlay for the terminal selected in the terminals list.
@@ -1126,16 +1247,20 @@ impl App {
             return Ok(());
         };
         let terminal_id = terminal_id.clone();
-        let session_id = terminal.session_id.clone();
+        let owner = terminal.owner.clone();
         let label = terminal.label.clone();
         drop(items);
 
-        // Select this terminal's session in the left pane.
-        if let Some(pos) = self
-            .left_items()
-            .iter()
-            .position(|item| matches!(item, LeftItem::Session(idx) if self.engine.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())))
-        {
+        // Select this terminal's owner (session or project) in the left pane.
+        let pos = match &owner {
+            TerminalOwner::Session(session_id) => self.left_items().iter().position(
+                |item| matches!(item, LeftItem::Session(idx) if self.engine.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())),
+            ),
+            TerminalOwner::Project(project_id) => self.left_items().iter().position(
+                |item| matches!(item, LeftItem::Project(idx) if self.engine.projects.get(*idx).map(|p| p.id.as_str()) == Some(project_id.as_str())),
+            ),
+        };
+        if let Some(pos) = pos {
             self.selected_left = pos;
         }
         self.reload_changed_files();
@@ -3051,18 +3176,33 @@ impl App {
         }
 
         for (terminal_id, terminal) in self.terminal_items() {
-            let (project_name, session_label) = self
-                .engine
-                .sessions
-                .iter()
-                .find(|session| session.id == terminal.session_id)
-                .map(|session| {
-                    (
-                        self.engine.project_name_for_session(session),
-                        self.session_label(session),
-                    )
-                })
-                .unwrap_or_else(|| ("unknown".to_string(), terminal.session_id.clone()));
+            let context_owner = match &terminal.owner {
+                TerminalOwner::Session(session_id) => {
+                    let (project_name, session_label) = self
+                        .engine
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == *session_id)
+                        .map(|session| {
+                            (
+                                self.engine.project_name_for_session(session),
+                                self.session_label(session),
+                            )
+                        })
+                        .unwrap_or_else(|| ("unknown".to_string(), session_id.clone()));
+                    format!("on agent \"{session_label}\" under project \"{project_name}\"")
+                }
+                TerminalOwner::Project(project_id) => {
+                    let project_name = self
+                        .engine
+                        .projects
+                        .iter()
+                        .find(|project| project.id == *project_id)
+                        .map(|project| project.name.clone())
+                        .unwrap_or_else(|| project_id.clone());
+                    format!("at the repo root of project \"{project_name}\"")
+                }
+            };
             let foreground = terminal
                 .foreground_cmd
                 .clone()
@@ -3077,7 +3217,7 @@ impl App {
                 .filter(|cmd| !cmd.trim().is_empty())
                 .unwrap_or_else(|| "shell".to_string());
             let label = foreground;
-            let context = format!("on agent \"{session_label}\" under project \"{project_name}\"");
+            let context = context_owner;
             let search_text = format!(
                 "{} {} {} {}",
                 label,

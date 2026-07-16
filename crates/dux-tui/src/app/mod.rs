@@ -50,6 +50,7 @@ use crate::storage::SessionStore;
 use crate::theme::Theme;
 use dux_core::engine::{Command, Engine};
 pub(crate) use dux_core::model::CompanionTerminal;
+pub(crate) use dux_core::model::TerminalOwner;
 
 use text_input::TextInput;
 
@@ -3530,7 +3531,7 @@ impl App {
     pub(crate) fn clear_companion_terminals_for_session(&mut self, session_id: &str) {
         self.engine
             .companion_terminals
-            .retain(|_, t| t.session_id != session_id);
+            .retain(|_, t| !matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id));
         if let Some(ref id) = self.active_terminal_id
             && !self.engine.companion_terminals.contains_key(id)
         {
@@ -3580,7 +3581,16 @@ impl App {
         self.engine
             .companion_terminals
             .values()
-            .filter(|t| t.session_id == session_id)
+            .filter(|t| matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id))
+            .count()
+    }
+
+    /// Returns the number of running project terminals for a given project.
+    pub(crate) fn project_terminal_count(&self, project_id: &str) -> usize {
+        self.engine
+            .companion_terminals
+            .values()
+            .filter(|t| matches!(&t.owner, TerminalOwner::Project(pid) if pid == project_id))
             .count()
     }
 

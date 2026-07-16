@@ -1658,7 +1658,7 @@ mod tests {
         engine.companion_terminals.insert(
             "term-1".to_string(),
             CompanionTerminal {
-                session_id: "sess-1".to_string(),
+                owner: crate::model::TerminalOwner::Session("sess-1".to_string()),
                 label: "term".to_string(),
                 foreground_cmd: None,
                 client: spawn_cat_v_pty(),
