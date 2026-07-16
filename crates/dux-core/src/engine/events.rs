@@ -2260,18 +2260,36 @@ impl Engine {
                     },
                     Err(err) => {
                         logger::error(&format!("initial commit failed for {}: {err}", add.path));
+                        // A non-fatal seed failure must not be swallowed by a
+                        // commit failure: the error's own recovery advice sends
+                        // the user through the commit-only rung, which never
+                        // seeds, so the warning is the only thing standing
+                        // between them and an agent copying node_modules. Emit
+                        // it as its own persistent warning ALONGSIDE the error
+                        // final (the web shows both toasts; the TUI's single
+                        // status line is documented-lossy and shows the last
+                        // item, the error, whose advice is the primary next
+                        // step).
+                        let seed_warning = add
+                            .seed_warning
+                            .clone()
+                            .map(|w| EventReaction::Status(StatusUpdate::warning(w)));
                         // Web path: resolve the keyed add-project op into its error
                         // final. TUI path (op map empty here) keeps the unkeyed Status.
-                        if let Some(id) = status_op_id
+                        let error_final = if let Some(id) = status_op_id
                             && let Some(op) = self.pending_web_add_project_ops.remove(&id)
                         {
-                            return op
-                                .resolve(&crate::engine::WebAddProjectOutcome::AddFailed {
-                                    message: err,
-                                })
-                                .into_reaction();
+                            op.resolve(&crate::engine::WebAddProjectOutcome::AddFailed {
+                                message: err,
+                            })
+                            .into_reaction()
+                        } else {
+                            EventReaction::Status(StatusUpdate::error(err))
+                        };
+                        match seed_warning {
+                            Some(warning) => EventReaction::Multi(vec![warning, error_final]),
+                            None => error_final,
                         }
-                        EventReaction::Status(StatusUpdate::error(err))
                     }
                 }
             }

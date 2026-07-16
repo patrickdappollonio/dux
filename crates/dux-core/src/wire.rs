@@ -5510,6 +5510,44 @@ mod tests {
     }
 
     #[test]
+    fn seed_warning_survives_a_commit_failure() {
+        // Catches the double-failure swallow: when the seed failed AND the
+        // commit failed, the error's recovery advice routes the user through
+        // the commit-only rung (which never seeds), so the seed warning must
+        // still surface as its own persistent warning alongside the error
+        // final; dropping it recreates the silent-seedless outcome it exists
+        // to prevent.
+        let (mut engine, _tmp) = test_engine();
+        let reaction =
+            engine.process_worker_event(crate::worker::WorkerEvent::InitialCommitCreated {
+                add: crate::worker::InitialCommitAdd {
+                    path: "/adopted".to_string(),
+                    name: "Adopted".to_string(),
+                    branch: String::new(),
+                    leading_branch: String::new(),
+                    initialized_repo: true,
+                    seeded_gitignore: false,
+                    seed_warning: Some("seed failed".to_string()),
+                },
+                result: Err("no identity".to_string()),
+                status_op_id: None,
+            });
+        let statuses = wire_statuses_from_reaction(&reaction);
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.tone == "warning" && s.message == "seed failed"),
+            "the seed warning must survive the commit failure, got {statuses:?}"
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|s| s.tone == "error" && s.message.contains("no identity")),
+            "the error final must still be emitted, got {statuses:?}"
+        );
+    }
+
+    #[test]
     fn drive_add_project_followup_narrates_init_and_seed_and_surfaces_the_warning() {
         // Catches a misleading toast and a swallowed warning: the success
         // message must claim the init and seed only when flagged, and a
