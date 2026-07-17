@@ -175,6 +175,18 @@ function PathField({ value }: { value: string }) {
   )
 }
 
+// A monospace name chip with a leading folder glyph. Shared by the pinned
+// "Use this folder" row and the "Up to <folder>" parent row so the two folder
+// names render identically and cannot drift.
+function FolderPill({ name }: { name: string }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">
+      <Folder className="size-3 shrink-0 text-muted-foreground" />
+      <span className="truncate">{name}</span>
+    </span>
+  )
+}
+
 // The browser body is mounted only while the dialog is open so its local
 // `selected`/`name` state resets on each open — no set-state-in-effect needed.
 function AddProjectBrowser() {
@@ -315,10 +327,7 @@ function AddProjectBrowser() {
             >
               <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
               <span className="shrink-0">Use this folder</span>
-              <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">
-                <Folder className="size-3 shrink-0 text-muted-foreground" />
-                <span className="truncate">{baseName(browsePath)}</span>
-              </span>
+              <FolderPill name={baseName(browsePath)} />
             </button>
             {/* Non-interactive divider separating the commit action from the
                 navigation list below. */}
@@ -342,10 +351,8 @@ function AddProjectBrowser() {
                     className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
                   >
                     <CornerLeftUp className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="min-w-0 flex-1 truncate">
-                      Up to{" "}
-                      <span className="font-medium">{baseName(entry.path)}</span>
-                    </span>
+                    <span className="shrink-0">Up to</span>
+                    <FolderPill name={baseName(entry.path)} />
                   </button>
                 )
               }

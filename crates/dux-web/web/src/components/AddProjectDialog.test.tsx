@@ -146,14 +146,17 @@ describe("AddProjectDialog picker", () => {
     })
     render(<AddProjectDialog />)
 
-    // The parent row reads "Up to <basename>" and renders the CornerLeftUp
-    // glyph rather than the plain "../" label. It deliberately shows NO path
-    // (the header field is the authoritative path), so the full parent path
-    // must not appear anywhere in the row.
+    // The parent row reads "Up to <basename>" with the up glyph rather than the
+    // plain "../" label, and the basename rides the same shared FolderPill as
+    // the pinned row (a folder glyph inside the chip). It deliberately shows NO
+    // path (the header field is authoritative), so the full parent path must not
+    // appear anywhere in the row.
     const upRow = screen.getByText("Up to").closest("button")!
     expect(within(upRow).getByText("alice")).toBeTruthy()
     expect(upRow.textContent).not.toContain("/home/alice")
     expect(upRow.querySelector("svg.lucide-corner-left-up")).toBeTruthy()
+    // The shared folder pill contributes a folder glyph to the row.
+    expect(upRow.querySelector("svg.lucide-folder")).toBeTruthy()
     expect(screen.queryByText("../")).toBeNull()
 
     // A normal git entry still renders its label and the git badge.
