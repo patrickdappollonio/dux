@@ -465,6 +465,27 @@ mod tests {
         sys
     }
 
+    /// Re-sample every tracked process's memory figure, with no CPU work and
+    /// no baseline sleep, so retry loops that only care about RSS can
+    /// re-check the ground truth cheaply and quickly.
+    fn resample_memory(sys: &mut sysinfo::System) {
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+    }
+
+    /// How many times a ground-truth-vs-kernel comparison is retried before
+    /// the test gives up. Self is a live, currently-executing process for the
+    /// tests in this module that compare its own RSS: any allocation between
+    /// sysinfo's sample and the direct `/proc` read races the two numbers
+    /// against a moving target even though neither side is wrong. Retrying a
+    /// bounded number of times, resampling both sides together each time,
+    /// waits out that benign race instead of loosening the equality itself.
+    const RSS_RACE_RETRY_ATTEMPTS: usize = 25;
+    const RSS_RACE_RETRY_DELAY: Duration = Duration::from_millis(20);
+
     /// Threads share their process's address space, so on Linux `sysinfo`
     /// lists each userland thread in `sys.processes()` reporting the WHOLE
     /// process's RSS. Without filtering `thread_kind().is_some()` entries,
@@ -767,22 +788,45 @@ mod tests {
         let child_pid = child.id();
 
         std::thread::sleep(Duration::from_millis(200));
-        let sys = fresh_system();
-
-        let (_cpu, child_rss, child_count, _) =
-            aggregate_tree(&sys, sysinfo::Pid::from_u32(child_pid));
-        let kernel_child_rss = proc_vm_rss_bytes(child_pid);
+        let mut sys = fresh_system();
 
         // The multi-threaded arm: the running test process, with its own
         // spawned child excluded by rooting the walk at the child above and
         // reading self separately. Self's tree here is self plus the sleep
         // child, so compare self's OWN entry, not the tree total.
+        //
+        // Self is the one subject in this test that keeps allocating (test
+        // harness bookkeeping, `sysinfo`'s own system-wide walk), so a single
+        // pair of reads can legitimately land on either side of an allocation
+        // even though nothing is broken. Retry a bounded number of times,
+        // resampling sysinfo and the kernel together, until they land on the
+        // same instant.
         let self_pid = std::process::id();
-        let self_rss = sys
-            .process(sysinfo::Pid::from_u32(self_pid))
-            .expect("the current process must be visible")
-            .memory();
-        let kernel_self_rss = proc_vm_rss_bytes(self_pid);
+        let self_pid_h = sysinfo::Pid::from_u32(self_pid);
+        let mut self_rss = 0u64;
+        let mut kernel_self_rss = None;
+        for attempt in 0..RSS_RACE_RETRY_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(RSS_RACE_RETRY_DELAY);
+            }
+            sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[self_pid_h]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_memory(),
+            );
+            self_rss = sys
+                .process(self_pid_h)
+                .expect("the current process must be visible")
+                .memory();
+            kernel_self_rss = proc_vm_rss_bytes(self_pid);
+            if kernel_self_rss == Some(self_rss) {
+                break;
+            }
+        }
+
+        let (_cpu, child_rss, child_count, _) =
+            aggregate_tree(&sys, sysinfo::Pid::from_u32(child_pid));
+        let kernel_child_rss = proc_vm_rss_bytes(child_pid);
 
         stop.store(true, Ordering::Relaxed);
         for h in handles {
@@ -835,13 +879,32 @@ mod tests {
         let self_pid = std::process::id();
 
         std::thread::sleep(Duration::from_millis(200));
-        let sys = fresh_system();
+        let mut sys = fresh_system();
 
-        let (_cpu, rss, _count, _children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(self_pid));
-        // Ground truth: the kernel's VmRSS for each real process in the tree,
-        // summed independently of sysinfo.
-        let kernel_sum =
-            proc_vm_rss_bytes(self_pid).unwrap_or(0) + proc_vm_rss_bytes(child_pid).unwrap_or(0);
+        // Self is part of this tree and keeps allocating while the test
+        // runs, so a single pair of reads can legitimately race even though
+        // nothing is broken. Retry a bounded number of times, resampling
+        // sysinfo and the kernel together, until they land on the same
+        // instant.
+        let mut rss = 0u64;
+        let mut kernel_sum = 0u64;
+        for attempt in 0..RSS_RACE_RETRY_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(RSS_RACE_RETRY_DELAY);
+                resample_memory(&mut sys);
+            }
+            let (_cpu, r, _count, _children) =
+                aggregate_tree(&sys, sysinfo::Pid::from_u32(self_pid));
+            // Ground truth: the kernel's VmRSS for each real process in the
+            // tree, summed independently of sysinfo.
+            let ks = proc_vm_rss_bytes(self_pid).unwrap_or(0)
+                + proc_vm_rss_bytes(child_pid).unwrap_or(0);
+            rss = r;
+            kernel_sum = ks;
+            if rss == kernel_sum {
+                break;
+            }
+        }
 
         stop.store(true, Ordering::Relaxed);
         for h in handles {
@@ -886,10 +949,29 @@ mod tests {
         let root_pid = std::process::id();
 
         std::thread::sleep(Duration::from_millis(300));
-        let sys = fresh_system();
+        let mut sys = fresh_system();
 
-        let (_cpu, _rss, count, _children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(root_pid));
-        let kernel_count = proc_tree_process_count(root_pid);
+        // Under a loaded CI runner, `sh -c "sleep 5 & wait"` can take longer
+        // than the fixed wait above to fork its `sleep` grandchild, which
+        // would make the tree's own premise (3 real processes) false through
+        // no fault of the code under test. Retry a bounded number of times,
+        // resampling from both sysinfo and the kernel together, until the
+        // fork has actually landed.
+        let mut count = 0usize;
+        let mut kernel_count = 0usize;
+        for attempt in 0..RSS_RACE_RETRY_ATTEMPTS {
+            if attempt > 0 {
+                std::thread::sleep(RSS_RACE_RETRY_DELAY);
+                resample_memory(&mut sys);
+            }
+            let (_cpu, _rss, c, _children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(root_pid));
+            let kc = proc_tree_process_count(root_pid);
+            count = c;
+            kernel_count = kc;
+            if kernel_count == 3 {
+                break;
+            }
+        }
 
         stop.store(true, Ordering::Relaxed);
         for h in handles {
