@@ -259,13 +259,14 @@ function AddProjectBrowser() {
   }
 
   function handleEntryClick(entry: DirEntryView) {
-    if (entry.is_git_repo) {
-      selectTarget(entry.path)
-    } else {
-      // Navigating away clears any pending selection from the prior directory.
-      setSelected(null)
-      browseDir(entry.path)
-    }
+    // Every folder row opens on click, git repo or not, matching the TUI's
+    // navigate-anywhere model: a git repo is not a dead end, you can browse into
+    // it and its subfolders. Choosing a target is done exclusively through the
+    // pinned "Use this folder" row (which inspects and, for a repo subdirectory,
+    // surfaces the same "add the repository instead" block as the TUI). This
+    // also clears any pending selection from the directory we are leaving.
+    setSelected(null)
+    browseDir(entry.path)
   }
 
   function handleAdd() {
@@ -356,7 +357,8 @@ function AddProjectBrowser() {
                   </button>
                 )
               }
-              const isSelected = entry.is_git_repo && selected === entry.path
+              // No row-level selected state: every folder row navigates, and
+              // selection lives solely on the pinned "Use this folder" row.
               const Icon = entry.is_git_repo ? FolderGit2 : Folder
               return (
                 <button
@@ -365,9 +367,7 @@ function AddProjectBrowser() {
                   onClick={() => handleEntryClick(entry)}
                   // min-h-11 on phones gives each row a ≥44px touch target;
                   // desktop keeps the compact py-2 density via md:.
-                  className={`flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
-                    isSelected ? "bg-accent" : ""
-                  }`}
+                  className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
                 >
                   <Icon className="size-4 shrink-0 text-muted-foreground" />
                   <span className="flex-1 truncate">{entry.label}</span>

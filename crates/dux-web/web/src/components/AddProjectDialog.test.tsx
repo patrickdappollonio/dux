@@ -256,6 +256,26 @@ describe("AddProjectDialog picker", () => {
     expect(inspectProjectPath).not.toHaveBeenCalled()
   })
 
+  it("navigates INTO a git-repo row too, not selects it (TUI parity)", () => {
+    // Parity with the TUI: a git repo is not a dead end. Clicking it browses in
+    // (so you can reach its subfolders), and selection happens only via the
+    // pinned "Use this folder" row, never by clicking a git row.
+    seed({
+      browseEntries: [
+        {
+          path: "/home/u/notes/my-app",
+          label: "my-app",
+          is_git_repo: true,
+          is_parent: false,
+        },
+      ] as unknown as DuxState["browseEntries"],
+    })
+    render(<AddProjectDialog />)
+    fireEvent.click(screen.getByText("my-app").closest("button")!)
+    expect(browseDir).toHaveBeenCalledWith("/home/u/notes/my-app")
+    expect(inspectProjectPath).not.toHaveBeenCalled()
+  })
+
   it("shows the init hint only for the init intent", () => {
     seed({ addProjectIntent: "init" })
     const { unmount } = render(<AddProjectDialog />)
