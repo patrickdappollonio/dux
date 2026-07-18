@@ -710,9 +710,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Header: title + sort on one row, then search. The New-agent action now
-          lives in the bottom bar next to Add project (both surfaces). px-1 matches
-          the list below so the search box lines up edge-to-edge with the agent rows. */}
-      <div className="flex flex-col gap-2 px-1 pt-2 pb-1">
+          lives in the bottom bar next to Add project (both surfaces). px-2 matches
+          the sidebar header (the logo row's p-2) and the list below, so the search
+          box and the agent rows share one inset and none of it hugs the edge. */}
+      <div className="flex flex-col gap-2 px-2 pt-2 pb-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">Agents</span>
           <span className="text-xs text-muted-foreground">
@@ -736,7 +737,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2 no-scrollbar">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 no-scrollbar">
         {nothing ? (
           <Empty className="border-0 p-4">
             <EmptyHeader>
