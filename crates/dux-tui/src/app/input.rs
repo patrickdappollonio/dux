@@ -410,6 +410,19 @@ impl App {
         {
             return Ok(false);
         }
+        // While the agent-list filter is open and the Left pane holds focus, route
+        // keys to the filter first so query characters type into it and never fire
+        // a hotkey. Editing/navigation keys are consumed here; anything else (Tab,
+        // the palette chord, etc.) falls through to normal handling. Esc is already
+        // handled just above via `close_top_overlay`, keeping filter dismissal
+        // uniform with how prompts are dismissed.
+        if self.agent_filter.is_some()
+            && self.focus == FocusPane::Left
+            && self.left_section == LeftSection::Projects
+            && self.handle_agent_filter_key(key)?
+        {
+            return Ok(false);
+        }
         if key.code == KeyCode::Esc
             && self.focus == FocusPane::Files
             && (self.files_search_active || self.has_files_search())
@@ -671,6 +684,7 @@ impl App {
                 Action::OpenProjectBrowser => {
                     self.open_project_browser()?;
                 }
+                Action::FilterAgents => self.open_agent_filter(),
                 Action::NewAgent => self.create_agent_for_selected_project()?,
                 Action::NewAgentFromWorktree => self.create_agent_from_existing_worktree()?,
                 Action::ForkAgent => self.fork_selected_session()?,
@@ -714,6 +728,78 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Route a key while agent-list filter mode is active (Left pane focused).
+    /// Returns `true` when the key was consumed by the filter (typed into the
+    /// query or moved/activated a filtered row), `false` when it should fall
+    /// through to normal handling (e.g. Tab, the palette chord). Esc is not seen
+    /// here: it is dismissed one level up via `close_top_overlay`, matching prompts.
+    ///
+    /// Printable characters and Backspace edit the live query and re-filter the
+    /// list; Up/Down move the selection over the filtered rows; Enter activates the
+    /// selected row and exits filter mode, keeping that agent selected in the
+    /// restored full list.
+    fn handle_agent_filter_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.agent_filter.is_none() {
+            return Ok(false);
+        }
+        match key.code {
+            KeyCode::Enter => {
+                // Preserve the activated agent across the exit so the restored full
+                // list keeps it selected (Enter on the Inactive toggle has no agent).
+                let keep = self.selected_session().map(|s| s.id.clone());
+                self.activate_selected_left_item(true)?;
+                self.close_agent_filter();
+                if let Some(id) = keep {
+                    self.reselect_left_session(&id);
+                }
+                Ok(true)
+            }
+            KeyCode::Down => {
+                if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+                    self.selected_left = next;
+                    self.project_chooser_context = None;
+                    self.close_diff_view();
+                    self.reload_changed_files();
+                    self.update_missing_project_warning();
+                }
+                Ok(true)
+            }
+            KeyCode::Up => {
+                if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
+                    self.selected_left = prev;
+                    self.project_chooser_context = None;
+                    self.close_diff_view();
+                    self.reload_changed_files();
+                    self.update_missing_project_warning();
+                }
+                Ok(true)
+            }
+            _ => {
+                // Delegate editing keys (chars, Backspace, cursor moves) to the
+                // text input; a consumed key re-filters the list live. Everything
+                // it rejects (Tab, modifier chords, etc.) falls through unhandled.
+                if let Some(input) = self.agent_filter.as_mut()
+                    && input.handle_key(key)
+                {
+                    self.rebuild_left_items();
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    /// After leaving filter mode, move the Left selection back onto the row for
+    /// `session_id` in the restored full list, if it is still present.
+    fn reselect_left_session(&mut self, session_id: &str) {
+        if let Some(index) = self.left_items().iter().position(|item| {
+            matches!(item, LeftItem::Session(i)
+                if self.engine.sessions.get(*i).is_some_and(|s| s.id == session_id))
+        }) {
+            self.selected_left = index;
+        }
     }
 
     fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -8267,6 +8353,239 @@ not_a_real_action = ["x"]
             .map(|s| s.branch_name.clone())
             .collect();
         assert_eq!(in_memory, vec!["charlie", "alpha", "bravo"]);
+    }
+
+    /// Build an Active agent session in the given project with a non-existent
+    /// worktree (so a reconnect triggered by Enter fails safely without spawning a
+    /// PTY). Used by the agent-filter tests below.
+    fn filter_test_session(
+        id: &str,
+        branch: &str,
+        project_id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> AgentSession {
+        AgentSession {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            project_path: Some(format!("/tmp/does-not-exist/{project_id}")),
+            provider: ProviderKind::from_str("codex"),
+            source_branch: "main".to_string(),
+            branch_name: branch.to_string(),
+            initial_branch: branch.to_string(),
+            worktree_path: format!("/tmp/does-not-exist/{id}"),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+        }
+    }
+
+    fn filtered_branches(app: &App) -> Vec<String> {
+        app.left_items()
+            .iter()
+            .filter_map(|item| match item {
+                LeftItem::Session(i) => Some(app.engine.sessions[*i].branch_name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn slash_opens_filter_mode_and_typing_narrows_the_agent_list() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        app.engine.sessions.clear();
+        for branch in ["api", "web", "auth"] {
+            app.engine.sessions.push(filter_test_session(
+                &format!("session-{branch}"),
+                branch,
+                &project_id,
+                now,
+            ));
+        }
+        app.rebuild_left_items();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+
+        // `/` (the Left-scope FilterAgents binding) enters filter mode.
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.agent_filter.is_some(), "slash should open filter mode");
+
+        // Typing routes into the query (letters are input, not hotkeys) and
+        // live-filters: "au" matches only the "auth" branch.
+        for c in ['a', 'u'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(app.agent_filter.as_ref().unwrap().text, "au");
+        assert_eq!(filtered_branches(&app), vec!["auth".to_string()]);
+
+        // Backspacing to an empty query restores the full list.
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.agent_filter.as_ref().unwrap().text, "");
+        assert_eq!(filtered_branches(&app).len(), 3);
+    }
+
+    #[test]
+    fn filter_matches_project_name_across_projects() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let demo_id = app.engine.projects[0].id.clone();
+        // A second project whose name (not branch) is the discriminating field.
+        let mut website = app.engine.projects[0].clone();
+        website.id = "project-website".to_string();
+        website.name = "website".to_string();
+        app.engine.projects.push(website);
+
+        app.engine.sessions.clear();
+        // Identical branch/title, so only the project name differs.
+        app.engine
+            .sessions
+            .push(filter_test_session("s-demo", "feature", &demo_id, now));
+        app.engine.sessions.push(filter_test_session(
+            "s-web",
+            "feature",
+            "project-website",
+            now,
+        ));
+        app.rebuild_left_items();
+
+        app.open_agent_filter();
+        for c in "site".chars() {
+            app.agent_filter.as_mut().unwrap().insert_char(c);
+        }
+        app.rebuild_left_items();
+
+        let ids: Vec<String> = app
+            .left_items()
+            .iter()
+            .filter_map(|item| match item {
+                LeftItem::Session(i) => Some(app.engine.sessions[*i].id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["s-web".to_string()]);
+    }
+
+    #[test]
+    fn filter_matches_a_tab_provider() {
+        // An agent runs codex, but a tab runs claude; searching "claude" surfaces
+        // it, mirroring the web's any-tab provider match.
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        app.engine.sessions.clear();
+        app.engine.sessions.push(filter_test_session(
+            "s-codex",
+            "codex-agent",
+            &project_id,
+            now,
+        ));
+        app.engine.sessions.push(filter_test_session(
+            "s-plain",
+            "plain-agent",
+            &project_id,
+            now,
+        ));
+        // Attach a claude tab to the first agent.
+        app.engine.agent_tabs.insert(
+            "tab-claude".to_string(),
+            crate::model::AgentTab {
+                id: "tab-claude".to_string(),
+                session_id: "s-codex".to_string(),
+                provider: ProviderKind::from_str("claude"),
+                sort_order: 1,
+                created_at: now,
+            },
+        );
+        app.rebuild_left_items();
+
+        app.open_agent_filter();
+        for c in "claude".chars() {
+            app.agent_filter.as_mut().unwrap().insert_char(c);
+        }
+        app.rebuild_left_items();
+
+        assert_eq!(filtered_branches(&app), vec!["codex-agent".to_string()]);
+    }
+
+    #[test]
+    fn esc_exits_filter_mode_and_restores_full_list() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        app.engine.sessions.clear();
+        for branch in ["api", "web"] {
+            app.engine.sessions.push(filter_test_session(
+                &format!("session-{branch}"),
+                branch,
+                &project_id,
+                now,
+            ));
+        }
+        app.rebuild_left_items();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+
+        app.open_agent_filter();
+        for c in "api".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(filtered_branches(&app), vec!["api".to_string()]);
+
+        // Esc routes through the shared overlay-dismiss path (close_top_overlay).
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.agent_filter.is_none(), "Esc should exit filter mode");
+        assert_eq!(filtered_branches(&app).len(), 2);
+    }
+
+    #[test]
+    fn enter_activates_filtered_row_and_exits_filter_mode() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        app.engine.sessions.clear();
+        for branch in ["api", "web"] {
+            app.engine.sessions.push(filter_test_session(
+                &format!("session-{branch}"),
+                branch,
+                &project_id,
+                now,
+            ));
+        }
+        app.rebuild_left_items();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+
+        app.open_agent_filter();
+        for c in "web".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(filtered_branches(&app), vec!["web".to_string()]);
+
+        // Enter activates the single filtered row and exits filter mode, keeping
+        // that agent selected in the restored full list.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.agent_filter.is_none(), "Enter should exit filter mode");
+        assert_eq!(filtered_branches(&app).len(), 2);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()),
+            Some("session-web".to_string()),
+            "the activated agent stays selected after the filter closes"
+        );
     }
 
     #[test]

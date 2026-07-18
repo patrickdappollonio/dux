@@ -611,7 +611,18 @@ impl App {
 
         let left_items = self.left_items();
         let projects_focused = focused && self.left_section == LeftSection::Projects;
-        let title = format!("Agents ({})", self.engine.sessions.len());
+        // While filtering, show the visible-over-total count (e.g. "Agents (2/7)")
+        // so the pruned list is not mistaken for the whole roster.
+        let total_agents = self.engine.sessions.len();
+        let title = if self.agent_filter.is_some() {
+            let visible_agents = left_items
+                .iter()
+                .filter(|item| matches!(item, LeftItem::Session(_)))
+                .count();
+            format!("Agents ({visible_agents}/{total_agents})")
+        } else {
+            format!("Agents ({total_agents})")
+        };
         let items = left_items
             .iter()
             .map(|item| match item {
@@ -773,9 +784,42 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
-        self.mouse_layout.left_list = self
-            .themed_block(&title, projects_focused)
-            .inner(projects_area);
+        let block = self.themed_block(&title, projects_focused);
+        let inner = block.inner(projects_area);
+        // Reserve a one-line search input at the TOP of the pane while filtering.
+        // It carries a `/` affordance plus the live query and a block cursor, and is
+        // themed through the same input-cursor tokens as the other pane inputs.
+        let (search_area, list_inner) = if self.agent_filter.is_some() && inner.height >= 3 {
+            let [sa, la] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .areas(inner);
+            (Some(sa), la)
+        } else {
+            (None, inner)
+        };
+        self.mouse_layout.left_list = list_inner;
+        block.render(projects_area, frame.buffer_mut());
+        if let Some(search_area) = search_area {
+            let (text, cursor) = self
+                .agent_filter
+                .as_ref()
+                .map(|input| (input.text.clone(), input.cursor))
+                .unwrap_or_default();
+            Paragraph::new(render_single_line_cursor_input(
+                "/ ",
+                &text,
+                cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+            ))
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.border_normal)),
+            )
+            .render(search_area, frame.buffer_mut());
+        }
         let mut state =
             ListState::default().with_selected(if self.left_section == LeftSection::Projects {
                 Some(self.selected_left)
@@ -783,10 +827,8 @@ impl App {
                 None
             });
         StatefulWidget::render(
-            List::new(items)
-                .block(self.themed_block(&title, projects_focused))
-                .highlight_style(self.theme.selection_style()),
-            projects_area,
+            List::new(items).highlight_style(self.theme.selection_style()),
+            list_inner,
             frame.buffer_mut(),
             &mut state,
         );

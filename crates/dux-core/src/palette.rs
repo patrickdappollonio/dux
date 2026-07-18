@@ -82,6 +82,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // there is no equivalent app-menu entry.
     },
     PaletteCommand {
+        action: Action::FilterAgents,
+        name: "filter-agents",
+        description: "Filter the agent list by name, branch, project, or provider",
+        // GLOBAL (display-only): a live filter over the flat agent list, mirroring
+        // the web sidebar/hub search box. It never mutates or persists sessions.
+    },
+    PaletteCommand {
         action: Action::ForkAgent,
         name: "fork-agent",
         description: "Fork the selected agent into a fresh worktree and session",

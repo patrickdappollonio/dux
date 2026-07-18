@@ -3930,6 +3930,7 @@ mod tests {
             pending_server_flip_op: None,
             pending_config_reload_op: None,
             project_chooser_context: None,
+            agent_filter: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

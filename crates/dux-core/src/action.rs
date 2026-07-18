@@ -19,6 +19,7 @@ pub enum Action {
     NewAgentFromPr,
     NewAgentFromWorktree,
     ManageProjects,
+    FilterAgents,
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
@@ -154,6 +155,7 @@ impl Action {
             Action::NewAgentFromPr => "new_agent_from_pr",
             Action::NewAgentFromWorktree => "new_agent_from_worktree",
             Action::ManageProjects => "manage_projects",
+            Action::FilterAgents => "filter_agents",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
@@ -270,6 +272,7 @@ impl Action {
             Action::ManageProjects => {
                 "Choose a project to target for project-scoped palette actions."
             }
+            Action::FilterAgents => "Filter the agent list by name, branch, project, or provider.",
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::ChangeAgentProvider => {
                 "Swap the selected agent worktree to a different provider."
@@ -426,6 +429,7 @@ impl Action {
             | Action::ToggleProject
             | Action::NewAgent
             | Action::NewAgentFromWorktree
+            | Action::FilterAgents
             | Action::ForkAgent
             | Action::ChangeAgentProvider
             | Action::FocusAgent

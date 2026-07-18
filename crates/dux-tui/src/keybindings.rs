@@ -204,6 +204,26 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Enters filter mode over the flat agent list. `/` is free in the Left
+        // scope (it is only bound in Files/Browser today, and scopes are
+        // independent). In filter mode printable keys type the query, so
+        // navigation falls back to the arrow keys, mirroring the project browser.
+        action: Action::FilterAgents,
+        default_keys: &[KeyCombination::one_key(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )],
+        scopes: &[BindingScope::Left],
+        help: Some(HelpEntry {
+            section: "Projects pane",
+            description: "Filter agents by name, branch, project, or provider",
+        }),
+        hint_contexts: &[
+            (HintContext::LeftProject, "Filter"),
+            (HintContext::LeftSession, "Filter"),
+        ],
+    },
+    BindingDef {
         action: Action::ForkAgent,
         default_keys: &[key!(f)],
         scopes: &[BindingScope::Left],
@@ -2253,6 +2273,7 @@ mod tests {
             "delete-project",
             "delete-terminal",
             "edit-macros",
+            "filter-agents",
             "force-reconnect-agent",
             "force-redraw",
             "fork-agent",

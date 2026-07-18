@@ -338,6 +338,13 @@ pub struct App {
     /// the chosen project. Cleared when the user navigates to a different agent
     /// row, so it never silently hijacks selection.
     pub(crate) project_chooser_context: Option<String>,
+    /// The live agent-list filter, mirroring the web sidebar/hub search box.
+    /// `Some` means filter mode is active: a one-line search input renders at the
+    /// top of the left pane and printable keys type into this query, live-filtering
+    /// the flat list via `dux_core::agent_search::matches_session`. `None` means the
+    /// full, unfiltered list is shown. This is a DISPLAY filter only: it never
+    /// mutates `engine.sessions`, never persists, and composes with the sort mode.
+    pub(crate) agent_filter: Option<TextInput>,
 }
 
 /// Handler-resolved outcome for the server-flip op (see
@@ -1825,15 +1832,25 @@ impl AgentSortMode {
 ///
 /// `is_hot(index)` reports whether the session at that index is working or needs
 /// attention (used only by `Active`).
+///
+/// `is_visible(index)` is a symmetric DISPLAY filter: an index that fails it never
+/// enters either bucket, so a filtered row disappears from the list entirely and
+/// the `InactiveToggle` tail only appears when a visible inactive row remains. When
+/// there is no active filter, callers pass `&|_| true`. Filtering is a pure display
+/// concern here: `sessions` is never mutated.
 pub(crate) fn build_left_items(
     sessions: &[AgentSession],
     inactive_collapsed: bool,
     sort_mode: AgentSortMode,
     is_hot: &dyn Fn(usize) -> bool,
+    is_visible: &dyn Fn(usize) -> bool,
 ) -> Vec<LeftItem> {
     let mut active: Vec<usize> = Vec::new();
     let mut inactive: Vec<usize> = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
+        if !is_visible(index) {
+            continue;
+        }
         match session.status {
             crate::model::SessionStatus::Detached | crate::model::SessionStatus::Exited => {
                 inactive.push(index)
@@ -2182,6 +2199,7 @@ impl App {
             pending_server_flip_op: None,
             pending_config_reload_op: None,
             project_chooser_context: None,
+            agent_filter: None,
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and
@@ -2627,6 +2645,14 @@ impl App {
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
+        // The agent-list filter is the top-most dismissible layer on the Left pane.
+        // Esc clears the query and restores the full list without activating a row,
+        // routed here so filter dismissal stays uniform with prompt dismissal.
+        if self.agent_filter.is_some() {
+            self.close_agent_filter();
+            self.set_info("Cleared the agent filter. Showing every agent again.");
+            return true;
+        }
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
             let return_to_list = self.terminal_return_to_list;
             self.fullscreen_overlay = FullscreenOverlay::None;
@@ -3227,11 +3253,79 @@ impl App {
                     || self.engine.session_needs_attention(&s.id)
             })
             .collect();
-        self.left_items_cache =
-            build_left_items(&self.engine.sessions, self.inactive_collapsed, mode, &|i| {
-                hot[i]
-            });
+        // Precompute the display-filter visibility mask so its closure can borrow a
+        // plain `Vec<bool>` while `build_left_items` borrows `self.engine.sessions`
+        // (mirroring the hot mask above, and avoiding a second `self.engine` borrow).
+        // An absent or whitespace-only query makes everything visible.
+        let visible: Vec<bool> = self.agent_visibility_mask();
+        self.left_items_cache = build_left_items(
+            &self.engine.sessions,
+            self.inactive_collapsed,
+            mode,
+            &|i| hot[i],
+            &|i| visible[i],
+        );
         self.ensure_selectable_left_item();
+    }
+
+    /// Build the per-session visibility mask for the current agent-list filter.
+    /// Each entry is `true` when the session at that index passes the live query
+    /// (via the shared core matcher `dux_core::agent_search::matches_session`), so a
+    /// filtered row is excluded from both the active and inactive buckets. When
+    /// filter mode is off, or the query is empty/whitespace, every session is
+    /// visible. The provider haystack mirrors the web sidebar search exactly: the
+    /// session's own provider first, then each of its tabs' providers.
+    fn agent_visibility_mask(&self) -> Vec<bool> {
+        let query = match &self.agent_filter {
+            Some(input) => input.text.as_str(),
+            None => return vec![true; self.engine.sessions.len()],
+        };
+        if dux_core::agent_search::normalize_query(query).is_empty() {
+            return vec![true; self.engine.sessions.len()];
+        }
+        self.engine
+            .sessions
+            .iter()
+            .map(|session| {
+                let project_name = self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|p| p.id == session.project_id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("");
+                // Session provider first, then each tab's provider (any-tab match),
+                // exactly like the web's `[session.provider, ...tabs.provider]`.
+                let mut providers: Vec<&str> = vec![session.provider.as_str()];
+                for tab in self.engine.agent_tabs.values() {
+                    if tab.session_id == session.id {
+                        providers.push(tab.provider.as_str());
+                    }
+                }
+                dux_core::agent_search::matches_session(
+                    session.title.as_deref(),
+                    &session.branch_name,
+                    project_name,
+                    &providers,
+                    query,
+                )
+            })
+            .collect()
+    }
+
+    /// Enter agent-list filter mode: seed an empty query and rebuild the list.
+    /// While active, printable keys type into the query and the arrows navigate
+    /// the filtered rows (mirroring the project browser's type-to-filter).
+    pub(crate) fn open_agent_filter(&mut self) {
+        self.agent_filter = Some(TextInput::new());
+        self.rebuild_left_items();
+    }
+
+    /// Leave agent-list filter mode: clear the query and restore the full list,
+    /// keeping a sensible (selectable) selection via `rebuild_left_items`.
+    pub(crate) fn close_agent_filter(&mut self) {
+        self.agent_filter = None;
+        self.rebuild_left_items();
     }
 
     pub(crate) fn is_selectable_left_item(&self, index: usize) -> bool {
@@ -4582,13 +4676,17 @@ mod tests {
         // Collapsed (default): the active row, then a single Inactive toggle; the
         // inactive session is hidden.
         assert_eq!(
-            build_left_items(&sessions, true, AgentSortMode::Active, &|_| false),
+            build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &|_| {
+                true
+            }),
             vec![LeftItem::Session(0), LeftItem::InactiveToggle],
         );
 
         // Expanded: the inactive session follows the toggle.
         assert_eq!(
-            build_left_items(&sessions, false, AgentSortMode::Active, &|_| false),
+            build_left_items(&sessions, false, AgentSortMode::Active, &|_| false, &|_| {
+                true
+            }),
             vec![
                 LeftItem::Session(0),
                 LeftItem::InactiveToggle,
@@ -4603,7 +4701,7 @@ mod tests {
         a.status = SessionStatus::Active;
         let mut b = test_session("b", "other", 0);
         b.status = SessionStatus::Active;
-        let items = build_left_items(&[a, b], true, AgentSortMode::Active, &|_| false);
+        let items = build_left_items(&[a, b], true, AgentSortMode::Active, &|_| false, &|_| true);
         assert_eq!(items, vec![LeftItem::Session(0), LeftItem::Session(1)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
     }
@@ -4618,7 +4716,13 @@ mod tests {
         let mut ghost = test_session("ghost", "gone-project", 0);
         ghost.status = SessionStatus::Active;
         assert_eq!(
-            build_left_items(&[real, ghost], true, AgentSortMode::Active, &|_| false),
+            build_left_items(
+                &[real, ghost],
+                true,
+                AgentSortMode::Active,
+                &|_| false,
+                &|_| true
+            ),
             vec![LeftItem::Session(0), LeftItem::Session(1)],
         );
     }
@@ -4643,7 +4747,7 @@ mod tests {
             mk("i4", SessionStatus::Exited, 20),   // newer
         ];
         let hot = |i: usize| i == 2;
-        let items = build_left_items(&sessions, false, AgentSortMode::Active, &hot);
+        let items = build_left_items(&sessions, false, AgentSortMode::Active, &hot, &|_| true);
         assert_eq!(
             items,
             vec![
@@ -4668,7 +4772,9 @@ mod tests {
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
 
-        let asc = build_left_items(&sessions, true, AgentSortMode::NameAsc, &|_| false);
+        let asc = build_left_items(&sessions, true, AgentSortMode::NameAsc, &|_| false, &|_| {
+            true
+        });
         assert_eq!(
             asc,
             vec![
@@ -4678,7 +4784,13 @@ mod tests {
             ],
         );
 
-        let desc = build_left_items(&sessions, true, AgentSortMode::NameDesc, &|_| false);
+        let desc = build_left_items(
+            &sessions,
+            true,
+            AgentSortMode::NameDesc,
+            &|_| false,
+            &|_| true,
+        );
         assert_eq!(
             desc,
             vec![
@@ -4705,7 +4817,9 @@ mod tests {
             s
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
-        let items = build_left_items(&sessions, true, AgentSortMode::Manual, &|_| false);
+        let items = build_left_items(&sessions, true, AgentSortMode::Manual, &|_| false, &|_| {
+            true
+        });
         assert_eq!(
             items,
             vec![
@@ -4714,6 +4828,61 @@ mod tests {
                 LeftItem::Session(2),
             ],
         );
+    }
+
+    #[test]
+    fn build_left_items_visibility_predicate_prunes_both_buckets() {
+        // A visibility predicate hides one active and one inactive index; the
+        // hidden rows must appear in NEITHER bucket, and the Inactive toggle still
+        // appears because a visible inactive row remains.
+        let mk = |id: &str, status: SessionStatus| {
+            let mut s = test_session(id, "p", 0);
+            s.status = status;
+            s
+        };
+        let sessions = vec![
+            mk("a0", SessionStatus::Active),   // 0: visible active
+            mk("a1", SessionStatus::Active),   // 1: hidden active
+            mk("i2", SessionStatus::Detached), // 2: visible inactive
+            mk("i3", SessionStatus::Detached), // 3: hidden inactive
+        ];
+        let visible = |i: usize| i == 0 || i == 2;
+        let items = build_left_items(
+            &sessions,
+            false,
+            AgentSortMode::Active,
+            &|_| false,
+            &visible,
+        );
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Session(0),
+                LeftItem::InactiveToggle,
+                LeftItem::Session(2),
+            ],
+        );
+        assert!(!items.contains(&LeftItem::Session(1)));
+        assert!(!items.contains(&LeftItem::Session(3)));
+    }
+
+    #[test]
+    fn build_left_items_no_toggle_when_every_inactive_is_filtered_out() {
+        // The only inactive row is hidden by the predicate, so no Inactive toggle
+        // should render even though an inactive session exists in `sessions`.
+        let mk = |id: &str, status: SessionStatus| {
+            let mut s = test_session(id, "p", 0);
+            s.status = status;
+            s
+        };
+        let sessions = vec![
+            mk("a0", SessionStatus::Active),
+            mk("i1", SessionStatus::Detached),
+        ];
+        let visible = |i: usize| i == 0;
+        let items = build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &visible);
+        assert_eq!(items, vec![LeftItem::Session(0)]);
+        assert!(!items.contains(&LeftItem::InactiveToggle));
     }
 
     #[test]
