@@ -6,6 +6,7 @@
 pub mod action;
 pub mod activity;
 pub mod agent_job;
+pub mod agent_search;
 pub mod attention;
 pub mod browser;
 pub mod config;
