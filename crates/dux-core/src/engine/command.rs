@@ -213,6 +213,12 @@ pub enum Command {
         session_ids: Vec<String>,
     },
 
+    /// Persist a GLOBAL custom order for every agent (the flat model). `session_ids`
+    /// must be EXACTLY the full set of all session ids. On success it writes one
+    /// global `sort_order` permutation and re-sorts `self.sessions` to match.
+    /// Returns `EventReaction::Nothing` (silent; the refreshed view is the feedback).
+    ReorderAgents { session_ids: Vec<String> },
+
     /// Persist a custom display order for the workspace's projects.
     /// `project_ids` must be EXACTLY the full set of known project ids (same
     /// strict validation as [`Command::ReorderSessions`]). On success it writes
@@ -971,6 +977,11 @@ impl Engine {
                 Ok(EventReaction::Nothing)
             }
 
+            Command::ReorderAgents { session_ids } => {
+                self.reorder_agents(&session_ids)?;
+                Ok(EventReaction::Nothing)
+            }
+
             Command::ReorderProjects { project_ids } => {
                 self.reorder_projects(&project_ids)?;
                 Ok(EventReaction::Nothing)
@@ -1104,6 +1115,26 @@ impl Engine {
         Ok(())
     }
 
+    /// Validate and apply a new GLOBAL agent order (the flat model). Unlike
+    /// [`reorder_sessions`], which is project-scoped, `session_ids` must be the
+    /// complete set of ALL sessions and the whole Vec is re-sorted to match — a
+    /// dragged agent can land anywhere, independent of project. Store first
+    /// (DB-first), then the in-memory Vec.
+    fn reorder_agents(&mut self, session_ids: &[String]) -> anyhow::Result<()> {
+        let current: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+        validate_reorder(&current, session_ids, "agent")?;
+
+        self.session_store.set_global_session_order(session_ids)?;
+
+        let new_pos: std::collections::HashMap<&str, usize> = session_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        reorder_in_place(&mut self.sessions, |s| new_pos.get(s.id.as_str()).copied());
+        Ok(())
+    }
+
     /// Validate and apply a new project order. See [`Command::ReorderProjects`].
     fn reorder_projects(&mut self, project_ids: &[String]) -> anyhow::Result<()> {
         let current: Vec<String> = self.projects.iter().map(|p| p.id.clone()).collect();
@@ -1126,19 +1157,12 @@ impl Engine {
     /// Does NOT re-sort the Vec (it is already in the desired order); it only
     /// writes each project's ordered id list. Errors propagate to the caller.
     pub fn persist_session_order(&self) -> anyhow::Result<()> {
-        use std::collections::BTreeMap;
-        // Preserve the Vec's project encounter order so the writes are
-        // deterministic; the per-project id lists follow the Vec order exactly.
-        let mut per_project: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-        for session in &self.sessions {
-            per_project
-                .entry(session.project_id.as_str())
-                .or_default()
-                .push(session.id.clone());
-        }
-        for (project_id, ids) in per_project {
-            self.session_store.reorder_sessions(project_id, &ids)?;
-        }
+        // Flat model: agents are one global list, so persist the in-memory Vec order
+        // as a single global `sort_order` permutation (not per-project). A TUI sort
+        // command sorts `self.sessions` and calls this; the web's global drag reaches
+        // the same store method through `ReorderAgents`.
+        let ids: Vec<String> = self.sessions.iter().map(|s| s.id.clone()).collect();
+        self.session_store.set_global_session_order(&ids)?;
         Ok(())
     }
 }
@@ -1404,6 +1428,61 @@ mod tests {
         assert_eq!(session_ids_for(&engine, "p1"), vec!["b", "a"]);
         // p2's relative order (x before y) is untouched.
         assert_eq!(session_ids_for(&engine, "p2"), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn reorder_agents_moves_across_projects_globally_and_persists() {
+        let (mut engine, _tmp) = test_engine();
+        // Two projects interleaved: p1-a, p1-b, p2-x, p2-y (Vec order).
+        for (id, proj) in [("a", "p1"), ("b", "p1"), ("x", "p2"), ("y", "p2")] {
+            let session = sample_session(id, proj, id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+
+        // Global reorder: interleave across project boundaries — x (p2) between the
+        // two p1 agents. Impossible under the old project-grouped model; the whole
+        // point of the flat model.
+        engine
+            .apply(Command::ReorderAgents {
+                session_ids: vec!["a".into(), "x".into(), "b".into(), "y".into()],
+            })
+            .expect("apply");
+
+        let vec_order: Vec<String> = engine.sessions.iter().map(|s| s.id.clone()).collect();
+        assert_eq!(vec_order, vec!["a", "x", "b", "y"]);
+
+        // Persisted: reload reflects the same global order (load_sessions orders by
+        // the now-global sort_order).
+        let reloaded: Vec<String> = engine
+            .session_store
+            .load_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(reloaded, vec!["a", "x", "b", "y"]);
+    }
+
+    #[test]
+    fn reorder_agents_rejects_incomplete_set() {
+        let (mut engine, _tmp) = test_engine();
+        for (id, proj) in [("a", "p1"), ("b", "p2")] {
+            let session = sample_session(id, proj, id);
+            engine.session_store.upsert_session(&session).unwrap();
+            engine.sessions.push(session);
+        }
+        // Only one of the two sessions — not the complete set.
+        let err = engine
+            .apply(Command::ReorderAgents {
+                session_ids: vec!["a".into()],
+            })
+            .map(|_| ())
+            .expect_err("incomplete set must error");
+        assert!(
+            err.to_string().contains("exactly the current"),
+            "err: {err}"
+        );
     }
 
     #[test]

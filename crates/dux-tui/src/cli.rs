@@ -290,6 +290,12 @@ fn run_diff_summary(current: &Config) -> Result<()> {
     );
     diff_str(
         &mut changes,
+        "ui.agent_sort",
+        &defaults.ui.agent_sort,
+        &current.ui.agent_sort,
+    );
+    diff_str(
+        &mut changes,
         "ui.theme",
         &defaults.ui.theme,
         &current.ui.theme,

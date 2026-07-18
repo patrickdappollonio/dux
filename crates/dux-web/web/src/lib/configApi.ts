@@ -49,6 +49,10 @@ export const configApi = {
   // Persist the Changes-pane visibility flag (`config.ui.show_changes_pane`).
   setChangesPaneVisible: (visible: boolean) =>
     send("PUT", "/api/v1/ui/changes-pane", { visible }),
+  // Persist the flat agent-list sort mode (`config.ui.agent_sort`). The server
+  // validates the value and rejects unknown modes.
+  setAgentSort: (sort: string) =>
+    send("POST", "/api/v1/ui/agent-sort", { sort }),
   // Reload config from disk (the app menu's "Reload config").
   reload: () => send("POST", "/api/v1/config/reload", {}),
   // Flip GitHub PR integration AND its engine-side PR-sync side effects (arming

@@ -19,6 +19,7 @@ import { TaskManagerDialog } from "@/components/TaskManagerDialog"
 import { ConfirmDiscardFileDialog } from "@/components/ConfirmDiscardFileDialog"
 import { ConfirmCloseEditorTabDialog } from "@/components/ConfirmCloseEditorTabDialog"
 import { CreateAgentDialog } from "@/components/CreateAgentDialog"
+import { NewAgentPickerDialog } from "@/components/NewAgentPickerDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
 import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
@@ -58,6 +59,7 @@ function GlobalOverlays() {
       <CommitDialog />
       <EditorOverlay />
       <CreateAgentDialog />
+      <NewAgentPickerDialog />
       <RenameSessionDialog />
       <ChangeProviderDialog />
       <DeleteSessionDialog />

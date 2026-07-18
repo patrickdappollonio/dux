@@ -14,6 +14,7 @@
 //! - `POST /api/v1/defaults/toggle-randomized-pet-name` — flip the random
 //!   pet-name default.
 //! - `POST /api/v1/ui/toggle-pr-banner-position` — swap the PR banner top/bottom.
+//! - `POST /api/v1/ui/agent-sort` — set the web agent-list sort mode (validated).
 //! - `POST /api/v1/ui/toggle-github-integration` — flip GitHub PR integration.
 //! - `POST /api/v1/ui/toggle-copy-on-select` — flip web-terminal copy-on-select.
 //! - `POST /api/v1/ui/toggle-always-show-tab-strip` — flip whether the agent tab
@@ -59,6 +60,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/ui/toggle-pr-banner-position",
             post(toggle_pr_banner_position),
         )
+        .route("/api/v1/ui/agent-sort", post(set_agent_sort))
         .route(
             "/api/v1/ui/toggle-github-integration",
             post(toggle_github_integration),
@@ -188,6 +190,27 @@ async fn toggle_randomized_pet_name_default(
 /// top and bottom of the agent pane (`ui.pr_banner_position`).
 async fn toggle_pr_banner_position(State(state): State<AppState>, headers: HeaderMap) -> Response {
     dispatch(&state, &headers, WireCommand::TogglePrBannerPosition {}).await
+}
+
+#[derive(Deserialize)]
+struct AgentSortBody {
+    sort: String,
+}
+
+/// `POST /api/v1/ui/agent-sort`. Set the web agent-list sort mode
+/// (`ui.agent_sort`) to an explicit value. The engine validates it and rejects
+/// unknown modes. The sidebar's sort control and a drag-reorder both call this.
+async fn set_agent_sort(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentSortBody>,
+) -> Response {
+    dispatch(
+        &state,
+        &headers,
+        WireCommand::SetAgentSort { sort: body.sort },
+    )
+    .await
 }
 
 /// `POST /api/v1/ui/toggle-github-integration`. Flip GitHub PR integration

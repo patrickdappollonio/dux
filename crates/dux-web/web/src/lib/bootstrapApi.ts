@@ -10,6 +10,7 @@
 // into this single document. A non-2xx is thrown as a `BootstrapFetchError`
 // carrying the HTTP status so the caller can branch.
 
+import type { FlatSortKey } from "./flatList"
 import type { MacroView } from "./types"
 
 // The bootstrap document. Field names/types mirror the server's JSON (snake_case)
@@ -64,6 +65,10 @@ export interface Bootstrap {
    * the terminal, anything else above. (Server sends a free string; the two
    * known values are the only ones the UI branches on.) */
   pr_banner_position: "top" | "bottom"
+  /** Mirrors `config.ui.agent_sort`: the flat agent-list sort mode, persisted
+   * server-side so it survives restarts and every client agrees. Older servers
+   * omit it, so consumers fall back to "active". */
+  agent_sort?: FlatSortKey
   /** Mirrors `config.ui.agent_scrollback_lines`; sizes each xterm.js instance. */
   agent_scrollback_lines: number
   /** Mirrors `config.ui.show_changes_pane`; the desktop Changes-pane default. */

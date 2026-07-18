@@ -47,6 +47,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { MobileShell } = await import("./MobileShell")
+const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
   return {
@@ -214,11 +215,13 @@ describe("MobileShell project terminals", () => {
   })
 
   it("offers 'New project terminal' in the project ⋯ menu", () => {
+    // Agent-less project actions live in the New-agent picker's per-project ⋯.
     mockState = makeState({
       spine: projectTerminalSpine(),
       bootstrap: { title: "dux", dux_version: "v1" },
+      newAgentPickerOpen: true,
     })
-    render(<MobileShell />)
+    render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByLabelText("Project actions"))
     const item = screen.getByText("New project terminal")
     expect(

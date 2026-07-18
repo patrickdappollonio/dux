@@ -670,6 +670,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Str(c.ui.pr_banner_position.clone()),
         },
         ConfigEntry::Field {
+            key: "agent_sort",
+            comment: Some(CommentSource::Static(
+                "# Web agent-list sort mode, persisted across restarts and shared by all\n# web clients: \"active\" (default; working / attention agents float up),\n# \"updated\", \"created\", \"name\", or \"manual\" (the raw drag-reorder order).\n# Set it from the web sidebar's sort control; a drag-reorder switches it to\n# \"manual\" automatically. Web-only; the TUI keeps its one-shot sort commands.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.agent_sort.clone()),
+        },
+        ConfigEntry::Field {
             key: "theme",
             comment: Some(CommentSource::Static(
                 "# Visual theme for the dux interface.\n# Built-in options include \"dux_dark\" (the default), plus any theme\n# bundled with the opaline engine, for example: \"catppuccin_mocha\",\n# \"catppuccin_frappe\", \"nord\", \"dracula\", \"gruvbox_dark\",\n# \"tokyo_night\", \"solarized_dark\", \"one_dark\", \"rose_pine\", and others.\n# To use a custom theme, drop a TOML file into <config_dir>/themes/<name>.toml\n# (with the same token format as opaline themes) and reference it here\n# by file stem. Unknown names fall back to dux_dark with a warning.\n# Use the `change-theme` command in the palette (Ctrl-p) for an interactive picker.",

@@ -860,6 +860,25 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Assign a GLOBAL `sort_order` of `0..n` to `ordered_ids`, in that order,
+    /// across every session regardless of project. This is the flat-model ordering:
+    /// agents are one independent list, so a drag persists a single global
+    /// permutation (not a per-project one). Not project-scoped, so it can move an
+    /// agent anywhere in the list. Like [`reorder_sessions`] it is "dumb": strict
+    /// validation that `ordered_ids` is the complete session set lives in the
+    /// engine. `updated_at` is deliberately untouched (preserves recency sorting).
+    pub fn set_global_session_order(&self, ordered_ids: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
+            for (position, id) in ordered_ids.iter().enumerate() {
+                stmt.execute(params![position as i64, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Assign positions `0..n` to exactly `ordered_ids`, in that order, over the
     /// `projects.sort_order` column. Single transaction. Like
     /// [`reorder_sessions`], validation that `ordered_ids` is the complete set
@@ -890,16 +909,21 @@ impl SessionStore {
     /// only ever indicates a stranded half-migration. `count(nullif(sort_order,
     /// 0))` counts only rows whose value is neither 0 nor NULL.
     fn session_sort_order_needs_backfill(&self) -> Result<bool> {
-        let stranded: bool = self.conn.query_row(
+        // The flat model orders agents by a GLOBAL `sort_order`, so it must be a
+        // total order (globally distinct). Re-run the backfill whenever two or more
+        // sessions share a value: that means either a fresh (all-zero) table or a
+        // legacy PER-PROJECT numbering (each project restarted at 0) that must be
+        // globalized. Once globally distinct, this returns false and never re-runs.
+        let has_duplicates: bool = self.conn.query_row(
             "select exists( \
                  select 1 from agent_sessions \
-                 group by project_id \
-                 having count(*) > 1 and count(nullif(sort_order, 0)) = 0 \
+                 group by sort_order \
+                 having count(*) > 1 \
              )",
             [],
             |row| row.get(0),
         )?;
-        Ok(stranded)
+        Ok(has_duplicates)
     }
 
     /// One-time backfill run when the `sort_order` column is first added to an
@@ -907,28 +931,24 @@ impl SessionStore {
     /// `0,1,2,…` following the legacy `updated_at DESC` order so the visible
     /// order is preserved exactly after the upgrade.
     fn backfill_session_sort_order(&self) -> Result<()> {
-        let mut stmt = self.conn.prepare(
-            "select id, project_id from agent_sessions order by project_id, updated_at desc",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
+        // Assign a GLOBAL 0..n order (flat model: agents are one independent list).
+        // Order by the CURRENT effective order (`sort_order asc, updated_at desc` —
+        // the same order `load_sessions` uses) so this is non-destructive: a legacy
+        // per-project arrangement is frozen into a sensible global sequence rather
+        // than reshuffled, and a fresh (all-zero) table falls back to most-recent
+        // first. Runs once; afterwards the values are globally distinct.
+        let ids: Vec<String> = self
+            .conn
+            .prepare("select id from agent_sessions order by sort_order asc, updated_at desc")?
+            .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut update =
                 tx.prepare("update agent_sessions set sort_order = ?1 where id = ?2")?;
-            let mut position = 0i64;
-            let mut current_project: Option<String> = None;
-            for (id, project_id) in rows {
-                if current_project.as_deref() != Some(project_id.as_str()) {
-                    position = 0;
-                    current_project = Some(project_id);
-                }
-                update.execute(params![position, id])?;
-                position += 1;
+            for (position, id) in ids.iter().enumerate() {
+                update.execute(params![position as i64, id])?;
             }
         }
         tx.commit()?;
@@ -1803,10 +1823,11 @@ mod tests {
     }
 
     #[test]
-    fn single_session_per_project_at_zero_is_not_treated_as_stranded() {
-        // A project with exactly one session legitimately sits at sort_order 0.
-        // That must NOT read as a stranded backfill (which would re-run it on
-        // every open).
+    fn duplicate_sort_order_triggers_global_backfill_then_settles() {
+        // The flat model needs a GLOBAL total order. Two sessions in different
+        // projects both at sort_order 0 (legacy per-project numbering) is NOT a
+        // valid global order, so the backfill must run to give them distinct
+        // positions — then never re-run once globalized.
         let store = test_store();
         let now = Utc::now();
         store
@@ -1820,9 +1841,24 @@ mod tests {
             .execute("update agent_sessions set sort_order = 0", [])
             .unwrap();
         assert!(
-            !store.session_sort_order_needs_backfill().unwrap(),
-            "single-session-per-project zeros are legitimate, not stranded"
+            store.session_sort_order_needs_backfill().unwrap(),
+            "a shared sort_order is not a global total order"
         );
+
+        store.backfill_session_sort_order().unwrap();
+        assert!(
+            !store.session_sort_order_needs_backfill().unwrap(),
+            "a globalized order is distinct and never re-runs"
+        );
+        let distinct: i64 = store
+            .conn
+            .query_row(
+                "select count(distinct sort_order) from agent_sessions",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(distinct, 2, "every session gets a distinct global position");
     }
 
     #[test]

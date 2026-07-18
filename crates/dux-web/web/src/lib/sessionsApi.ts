@@ -115,6 +115,12 @@ export const sessionsApi = {
       project_id: projectId,
       session_ids: sessionIds,
     }),
+  // Flat model: reorder every agent as one global list. `sessionIds` must be the
+  // complete session set, in the desired order (the server validates strictly).
+  reorderGlobal: (sessionIds: string[]) =>
+    request<void>("POST", "/api/v1/sessions/reorder-global", {
+      session_ids: sessionIds,
+    }),
   // Re-run the agent's project startup command in its worktree. The server runs
   // it off-thread and routes the busy/success/error toasts back over `/ws`, so
   // this resolves as soon as the run is accepted (a non-2xx still throws).

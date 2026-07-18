@@ -44,6 +44,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions", post(create_session))
         .route("/api/v1/sessions/reorder", post(reorder_sessions))
+        .route("/api/v1/sessions/reorder-global", post(reorder_agents))
         .route(
             "/api/v1/sessions/{id}",
             patch(patch_session).delete(delete_session),
@@ -552,6 +553,33 @@ async fn reorder_sessions(
         .apply_wire_scoped(
             WireCommand::ReorderSessions {
                 project_id: body.project_id,
+                session_ids: body.session_ids,
+            },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReorderGlobalBody {
+    session_ids: Vec<String>,
+}
+
+/// `POST /api/v1/sessions/reorder-global`. The flat model's drag: reorder every
+/// agent as one global list. `session_ids` must be the complete session set.
+async fn reorder_agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReorderGlobalBody>,
+) -> Response {
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::ReorderAgents {
                 session_ids: body.session_ids,
             },
             scope_from_headers(&headers, &state.connections),

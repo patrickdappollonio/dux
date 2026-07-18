@@ -52,7 +52,9 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         }),
     },
     WelcomeTip {
-        web: Some("Every project's `⋯` menu can spawn a `New agent…`. The more, the merrier."),
+        web: Some(
+            "Hit `New agent`, search any project, pick a provider, and go. The more, the merrier.",
+        ),
         tui: Some(|resolve| {
             format!(
                 "`{}` spawns a new agent in the current worktree. The more, the merrier.",
@@ -124,7 +126,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
     },
     WelcomeTip {
         web: Some(
-            "A project's settings (the `⋯` menu) can pin its own default provider. One project, one brain.",
+            "In the `New agent` picker, each project's `⋯` menu can pin its own default provider. One project, one brain.",
         ),
         tui: Some(|_resolve| {
             "Need to change which CLI new agents use? `change-default-provider` updates the global fallback. `change-project-default-provider` overrides just one project.".into()

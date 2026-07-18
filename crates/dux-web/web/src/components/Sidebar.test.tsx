@@ -79,6 +79,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { AppSidebar } = await import("./Sidebar")
+const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
   return {
@@ -295,15 +296,14 @@ describe("AppSidebar project terminals", () => {
   })
 
   it("offers 'New project terminal' in the project ⋯ menu and calls createProjectTerminal", () => {
+    // An agent-less project (only a project terminal) has no agent row, so its
+    // project actions live in the New-agent picker's per-project ⋯ menu.
     mockState = makeState({
       spine: projectTerminalSpine(),
       bootstrap: { title: "dux", dux_version: "v1" },
+      newAgentPickerOpen: true,
     })
-    render(
-      <SidebarProvider>
-        <AppSidebar />
-      </SidebarProvider>,
-    )
+    render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByLabelText("Project actions"))
     const item = screen.getByText("New project terminal")
     expect(
@@ -321,12 +321,9 @@ describe("AppSidebar project terminals", () => {
     mockState = makeState({
       spine: spine as unknown as DuxState["spine"],
       bootstrap: { title: "dux", dux_version: "v1" },
+      newAgentPickerOpen: true,
     })
-    render(
-      <SidebarProvider>
-        <AppSidebar />
-      </SidebarProvider>,
-    )
+    render(<NewAgentPickerDialog />)
     fireEvent.click(screen.getByLabelText("Project actions"))
     const item = screen.getByText("New project terminal")
     expect(item.closest('[role="menuitem"]')?.getAttribute("aria-disabled")).toBe(
@@ -380,7 +377,10 @@ describe("AppSidebar project terminals", () => {
         <AppSidebar />
       </SidebarProvider>,
     )
-    fireEvent.click(screen.getByLabelText("Project actions"))
+    // The orphan has an agent row; its project actions live in the agent ⋯ menu
+    // under the "Project…" submenu.
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    fireEvent.click(screen.getByText("Project…"))
     expect(screen.queryByText("New project terminal")).toBeNull()
     expect(screen.getByText("Remove project…")).toBeTruthy()
   })
@@ -428,11 +428,12 @@ describe("AppSidebar attention dot", () => {
   })
 })
 
-describe("AppSidebar project folder icon", () => {
-  it("renders the open/closed crossfade pair as outlines, never filled", () => {
-    // The old filled variants (fill="currentColor") made the open and closed
-    // folder silhouettes nearly indistinguishable; the outline forms are the
-    // visual difference, so a fill regression is a real UX regression.
+describe("AppSidebar flat agent row", () => {
+  it("renders a display-only project label and a colored state word on line two", () => {
+    // The flat model drops project headers: each agent row carries its project as
+    // a display-only Folder label on line two, alongside a state word derived from
+    // the same flags that drive the working/attention cues. Project ACTIONS are in
+    // the agent ⋯ menu under a "Project…" submenu, not on the row itself.
     mockState = makeState({
       spine: makeSessionSpine(1),
       bootstrap: {
@@ -447,13 +448,39 @@ describe("AppSidebar project folder icon", () => {
         <AppSidebar />
       </SidebarProvider>,
     )
-    const closed = container.querySelectorAll("svg.lucide-folder")
-    const open = container.querySelectorAll("svg.lucide-folder-open")
-    expect(closed.length).toBeGreaterThan(0)
-    expect(open.length).toBeGreaterThan(0)
-    for (const icon of [...closed, ...open]) {
-      expect(icon.getAttribute("fill")).toBe("none")
-    }
+    // The Folder outline icon is present on the row's project label.
+    expect(container.querySelectorAll("svg.lucide-folder").length).toBeGreaterThan(0)
+    // The state word for an active, non-working agent is "Idle".
+    expect(screen.getByText("Idle")).toBeTruthy()
+    // The row itself exposes no "Project actions" trigger (display-only label).
+    expect(screen.queryByLabelText("Project actions")).toBeNull()
+    // Project actions live in the agent ⋯ menu, under a "Project…" submenu.
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    expect(screen.getByText("Project…")).toBeTruthy()
+  })
+
+  it("collapses detached/exited agents into a Quiet tail", () => {
+    // Two projects: s1 (Repo) active, s2 (Other) detached. The detached agent must
+    // land under the collapsible "Quiet" toggle (label + a count badge), not the
+    // main list.
+    mockState = makeState({
+      spine: makeTwoProjectSpine(),
+      bootstrap: {
+        title: "dux",
+        dux_version: "v1",
+        available_providers: ["claude"],
+      },
+      createTabInFlight: [],
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    const quietToggle = screen.getByRole("button", { name: /Quiet/ })
+    expect(quietToggle).toBeTruthy()
+    // The count rides in a badge next to the label, not inline as "Quiet · 1".
+    expect(quietToggle.textContent).toContain("1")
   })
 })
 

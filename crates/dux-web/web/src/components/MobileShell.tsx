@@ -1,41 +1,4 @@
-import {
-  DndContext,
-  PointerSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-} from "@dnd-kit/core"
-import type { DragEndEvent } from "@dnd-kit/core"
-import {
-  SortableContext,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable"
-import { CSS } from "@dnd-kit/utilities"
-import {
-  Bot,
-  Check,
-  ChevronLeft,
-  Cpu,
-  Ellipsis,
-  FolderOpen,
-  GitFork,
-  GitPullRequest,
-  Info,
-  Pencil,
-  Play,
-  Plus,
-  RefreshCw,
-  RotateCcw,
-  ScrollText,
-  Settings,
-  SquareChevronRight,
-  SquareTerminal,
-  Trash2,
-  Variable,
-  X,
-} from "lucide-react"
-import type { CSSProperties } from "react"
+import { ChevronLeft, Ellipsis, GitPullRequest, Plus, Settings } from "lucide-react"
 import { Suspense, useState } from "react"
 
 import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
@@ -46,190 +9,30 @@ import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { DormantTabCard } from "@/components/DormantTabCard"
-import { ProjectMenuItems } from "@/components/ProjectMenuItems"
+import { AgentActionsMenu, FlatAgentList } from "@/components/FlatAgentList"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { StatusBadge } from "@/components/StatusBadge"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { agentRowVisual } from "@/lib/agentRow"
-import {
-  defaultProviderForSession,
-  isExtraTabDormant,
-  shouldShowTabStrip,
-} from "@/lib/agentTabs"
-import { projectBranchDisplay } from "@/lib/projectBranch"
-import type { ProjectBranchDisplay } from "@/lib/projectBranch"
+import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
-import { partitionProjects } from "@/lib/projects"
 import {
-  applyPendingOrders,
-  moveItem,
-  reorderProjectsInGroup,
-} from "@/lib/reorder"
-import {
-  addTab,
-  createTerminal,
   mobileNavigate,
-  openAgentInfo,
-  openAgentEnv,
-  openForceReconnect,
-  openAgentStartupCommand,
-  openChangeProvider,
-  openDelete,
-  openDeleteTerminal,
-  openForkAgent,
-  openRename,
-  openStartupLogs,
-  reorderProjects,
-  reorderSessions,
-  rerunStartupCommand,
+  openNewAgentPicker,
   selectSession,
   selectTerminal,
-  toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
-import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
-import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
+import type { TerminalOwnerRef } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
-import type { SessionView, TerminalView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// The set of actions the sidebar's ⋯ menu offers for a session, reused verbatim
-// here so the mobile menu and the desktop menu never drift.
-function SessionActions({ session }: { session: SessionView }) {
-  function handleToggleAutoReopen() {
-    toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)
-  }
-
-  // "New agent tab" mirrors the desktop sidebar's menu item: it is reachable at ANY
-  // tab count (including the common 1-tab case), since the in-strip "+" only
-  // renders once a session already has two or more tabs.
-  const { bootstrap, spine, createTabInFlight } = useDux()
-  const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
-  const atTabCap = session.tabs.length >= tabCap
-  const addingTab = createTabInFlight.includes(session.id)
-  const providers = bootstrap?.available_providers ?? []
-  const defaultProvider = defaultProviderForSession(spine, session)
-
-  return (
-    <DropdownMenuGroup>
-      {/* The most common action leads the menu (matching the desktop sidebar):
-          spawn another provider tab in this agent's worktree. */}
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
-          <Plus />
-          New agent tab…
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent>
-          {providers.map((p) => {
-            const isDefault = p === defaultProvider
-            return (
-              <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
-                {isDefault ? <Check /> : <Bot />}
-                {p}
-                {isDefault ? (
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    default
-                  </span>
-                ) : null}
-              </DropdownMenuItem>
-            )
-          })}
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
-      <DropdownMenuSeparator />
-      {/* Connection lifecycle: force-recreate is confirmed (it abandons the
-          current conversation for a fresh session). */}
-      <DropdownMenuItem onClick={() => openForceReconnect(session.id)}>
-        <RotateCcw />
-        Force recreate agent…
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => openRename(session.id)}>
-        <Pencil />
-        Rename agent…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
-        <GitFork />
-        Fork agent…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
-        <Cpu />
-        Change agent provider…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
-        <Info />
-        Agent info…
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={handleToggleAutoReopen}>
-        <RefreshCw />
-        {session.auto_reopen_enabled
-          ? "Disable agent auto-reopen"
-          : "Enable agent auto-reopen"}
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onClick={() => createTerminal(session.id)}>
-        <SquareTerminal />
-        New terminal
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      {/* Startup command + env (project-scoped; see the desktop Sidebar note) and
-          the per-agent runtime ops, kept in sync with the desktop menu. */}
-      <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
-        <SquareChevronRight />
-        Configure startup command…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
-        <Variable />
-        Configure environment variables…
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
-        <Play />
-        Rerun startup command
-      </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
-        <ScrollText />
-        Startup command logs…
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      {/* Destructive action, isolated. Tinted red (dim at rest, bright on hover)
-          to match the desktop sidebar's Delete item — see the CLAUDE.md
-          web-UI menu tenet; the confirmation dialog still gates it. */}
-      <DropdownMenuItem
-        variant="destructive"
-        className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
-        onClick={() => openDelete(session.id)}
-      >
-        <Trash2 />
-        Delete agent…
-      </DropdownMenuItem>
-    </DropdownMenuGroup>
-  )
-}
-
-// Tapping a session on the hub focuses it AND drives the spoke navigation, so
-// the user lands on the full-screen terminal in one tap.
+// Tapping a session on the hub focuses it AND drives the spoke navigation, so the
+// user lands on the full-screen terminal in one tap.
 function selectAndOpen(sessionId: string): void {
   selectSession(sessionId)
   mobileNavigate("terminal")
@@ -243,442 +46,12 @@ function selectTerminalAndOpen(
   mobileNavigate("terminal")
 }
 
-// One companion terminal nested under its session — touch-sized, with a close
-// action spaced away from the row tap target.
-function TerminalRow({
-  terminal,
-  siblings,
-  owner,
-  active,
-}: {
-  terminal: SessionView["terminals"][number]
-  siblings: readonly SessionView["terminals"][number][]
-  owner: TerminalOwnerRef
-  active: boolean
-}) {
-  // Title is the foreground command when one is running, otherwise the stable
-  // "Terminal N" label; a sibling running the same app adds the terminal's
-  // number ("vim (#1)") so the rows stay distinct.
-  const title = terminalTitle(terminal, siblings)
-  return (
-    <div className="flex items-center gap-1 pl-6">
-      <Button
-        variant={active ? "secondary" : "ghost"}
-        className="min-h-11 flex-1 justify-start gap-2 px-2"
-        onClick={() => selectTerminalAndOpen(terminal.id, owner)}
-      >
-        <SquareTerminal />
-        {/* When no foreground command is running, `title` already equals
-            `terminal.label` (see terminalTitle), so the tooltip would just
-            repeat the visible text — only show it once the two diverge. */}
-        <SimpleTooltip content={title !== terminal.label ? terminal.label : null}>
-          <span className="flex-1 truncate text-left">{title}</span>
-        </SimpleTooltip>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-11 shrink-0"
-        aria-label="Close terminal"
-        onClick={() => openDeleteTerminal(terminal.id)}
-      >
-        <X />
-      </Button>
-    </div>
-  )
-}
-
-// A session row on the hub: tap to stream, with the same ⋯ actions the sidebar
-// offers and the companion terminals nested beneath.
-function SessionRow({
-  session,
-  selectedTarget,
-}: {
-  session: SessionView
-  selectedTarget: SelectedTarget | null
-}) {
-  const label = session.title || session.branch_name
-  const agentSelected =
-    selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
-  // Running agents shimmer their name; non-running (detached/exited) recede.
-  // `attention` adds a cyan dot when the agent needs the user.
-  const { shimmer, dimmed, attention } = agentRowVisual(
-    session.status,
-    session.working,
-    session.needs_attention
-  )
-
-  // Long-press (250ms) starts the drag so taps still select and vertical scroll
-  // isn't hijacked — see the sensor config on the enclosing DndContext. The
-  // session BUTTON is the handle; nested terminal rows ride along in the node
-  // but aren't themselves draggable.
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: session.id })
-  const style: CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    transition,
-    opacity: isDragging ? 0.6 : undefined,
-  }
-
-  return (
-    <div ref={setNodeRef} style={style} className="flex flex-col gap-1">
-      <div className="flex items-center gap-1">
-        <Button
-          {...attributes}
-          {...listeners}
-          variant={agentSelected ? "secondary" : "ghost"}
-          className={cn(
-            "min-h-11 flex-1 touch-manipulation justify-start gap-2 px-2",
-            // Non-running agents recede: dim the whole row (name, icon, and the
-            // status indicator) so the running ones read first.
-            dimmed && "opacity-70"
-          )}
-          onClick={() => selectAndOpen(session.id)}
-        >
-          {/* While the agent streams output the icon bobs (motion-safe); the
-              transition settles it back to rest (translateY(0)) when streaming
-              stops mid-bounce instead of freezing at the top or bottom.
-
-              The icon doubles as the attention indicator: cyan + the shared
-              double-pulse-then-hold blink while the agent needs the user. Blink
-              (opacity) on this wrapper, bob (transform) on the inner icon, so
-              the two Tailwind `animate-*` utilities never fight over the
-              `animation` property and the cues mix cleanly. Steady cyan under
-              reduced motion. COLOR PAIRING: cyan-100, matching `AttentionDot`
-              and `ATTENTION_DOT_FILL` in lib/favicon.ts.
-
-              SIZING NOTE: the icon sizes itself (`size-4.5`, a step up from the
-              button's default 16px); the explicit size- class also opts it out
-              of the shared Button's `[&_svg:not([class*='size-'])]` sizing. */}
-          <span
-            aria-label={attention ? "Needs attention" : undefined}
-            className={cn(
-              "inline-flex shrink-0",
-              attention &&
-                "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
-            )}
-          >
-            <Bot
-              className={cn(
-                "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
-                shimmer && "motion-safe:animate-agent-working"
-              )}
-            />
-          </span>
-          {/* Its name also dims with a soft white highlight sweeping through (see
-              .agent-name-shimmer), a second working cue alongside the bob. The
-              base class is always applied so the fill cross-fades back to solid
-              text when work stops; `--on` toggles the active sweep. */}
-          <span
-            className={cn(
-              "flex-1 truncate text-left agent-name-shimmer",
-              shimmer && "agent-name-shimmer--on"
-            )}
-          >
-            {label}
-          </span>
-          <span className="flex shrink-0 items-center gap-1">
-            {session.pr ? (
-              // Icon-only PR link (no tooltip on touch — the banner on the
-              // terminal screen carries the full detail). State-tinted glyph
-              // with an explicit, readable hover.
-              <a
-                href={session.pr.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
-                className={cn(
-                  "inline-flex items-center rounded p-0.5 transition-colors",
-                  prIconClass(session.pr.state),
-                  prIconHoverClass(session.pr.state)
-                )}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  window.open(session.pr!.url, "_blank", "noopener")
-                }}
-              >
-                <GitPullRequest className="size-4" />
-              </a>
-            ) : null}
-            <StatusBadge
-              status={session.status}
-              working={session.working}
-              iconOnly
-            />
-          </span>
-        </Button>
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-11 shrink-0"
-                aria-label="Session actions"
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <SessionActions session={session} />
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      {session.terminals.map((terminal) => (
-        <TerminalRow
-          key={terminal.id}
-          terminal={terminal}
-          siblings={session.terminals}
-          owner={{ kind: "session", sessionId: session.id }}
-          active={
-            selectedTarget?.kind === "terminal" &&
-            selectedTarget.terminalId === terminal.id
-          }
-        />
-      ))}
-    </div>
-  )
-}
-
-// A project heading plus its session rows (or "New agent" entry point when it
-// has none), with the same ⋯ actions the sidebar's project menu offers. The
-// sessions get their OWN DndContext (scoped to this project) so a session drag
-// never bubbles into the project drag.
-function ProjectBlock({
-  id,
-  name,
-  branch,
-  sessions,
-  terminals,
-  selectedTarget,
-}: {
-  id: string
-  name: string
-  branch: ProjectBranchDisplay | null
-  sessions: SessionView[]
-  terminals: TerminalView[]
-  selectedTarget: SelectedTarget | null
-}) {
-  // The project HEADER is the drag handle (not the whole block, whose body
-  // hosts the sessions' own SortableContext). Long-press starts the drag.
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id })
-  const style: CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    transition,
-    opacity: isDragging ? 0.6 : undefined,
-  }
-
-  // Per-project session sensor: long-press (250ms) + 8px tolerance so taps
-  // select and scrolling isn't hijacked.
-  const sessionSensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { delay: 250, tolerance: 8 },
-    }),
-  )
-
-  function handleSessionDragEnd(event: DragEndEvent) {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
-    const ids = sessions.map((s) => s.id)
-    reorderSessions(id, moveItem(ids, String(active.id), String(over.id)))
-  }
-
-  return (
-    <div ref={setNodeRef} style={style} className="flex flex-col gap-1">
-      <div className="flex items-center gap-1">
-        <div
-          {...attributes}
-          {...listeners}
-          className="flex min-h-11 flex-1 touch-manipulation items-center gap-2 px-2"
-        >
-          {/* Name + branch share a baseline-aligned inner flex so the smaller
-              text-xs branch sits on the name's baseline instead of floating
-              high like a superscript (the outer row is items-center, which
-              centers the two different font sizes). The count badge stays
-              outside this inner flex so it remains vertically centered. min-w-0
-              lets both the inner flex and each span shrink-truncate. */}
-          <span className="flex min-w-0 items-baseline gap-1.5">
-            <span className="min-w-0 truncate font-semibold">{name}</span>
-            {/* Current branch as a muted, monospace secondary span; non-leading
-                branches are warning-tinted (amber) with an explanatory title.
-                Omitted entirely for empty/unknown branches (e.g. path_missing). */}
-            {branch ? (
-              <SimpleTooltip content={branch.tooltip ?? undefined}>
-                <span
-                  className={`min-w-0 truncate font-mono text-sm ${
-                    branch.warn ? "text-amber-500" : "text-muted-foreground"
-                  }`}
-                >
-                  {branch.branch}
-                </span>
-              </SimpleTooltip>
-            ) : null}
-          </span>
-          {sessions.length > 0 ? (
-            <Badge variant="secondary" className="shrink-0">
-              {sessions.length}
-            </Badge>
-          ) : null}
-        </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-11 shrink-0"
-                aria-label="Project actions"
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <ProjectMenuItems id={id} />
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      {sessions.length > 0 ? (
-        <DndContext
-          sensors={sessionSensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleSessionDragEnd}
-        >
-          <SortableContext
-            items={sessions.map((s) => s.id)}
-            strategy={verticalListSortingStrategy}
-          >
-            {sessions.map((session) => (
-              <SessionRow
-                key={session.id}
-                session={session}
-                selectedTarget={selectedTarget}
-              />
-            ))}
-          </SortableContext>
-        </DndContext>
-      ) : null}
-
-      {/* Project terminals: shells at the project's repo root with no agent
-          attached, nested under the project header exactly like session
-          terminals nest under their agent. */}
-      {terminals.map((terminal) => (
-        <TerminalRow
-          key={terminal.id}
-          terminal={terminal}
-          siblings={terminals}
-          owner={{ kind: "project", projectId: id }}
-          active={
-            selectedTarget?.kind === "terminal" &&
-            selectedTarget.terminalId === terminal.id
-          }
-        />
-      ))}
-    </div>
-  )
-}
-
-// One sortable group of project blocks (with-agents or no-agents). Its OWN
-// DndContext keeps a project drag from crossing into the other group; on drop it
-// splices the group's new order into the full project list the server requires.
-function ProjectGroupList({
-  members,
-  fullOrder,
-  grouped,
-  projectName,
-  projectBranch,
-  projectTerminals,
-  selectedTarget,
-}: {
-  members: string[]
-  fullOrder: string[]
-  grouped: Map<string, SessionView[]>
-  projectName: (id: string) => string
-  projectBranch: (id: string) => ProjectBranchDisplay | null
-  projectTerminals: (id: string) => TerminalView[]
-  selectedTarget: SelectedTarget | null
-}) {
-  const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: { delay: 250, tolerance: 8 },
-    }),
-  )
-
-  function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
-    reorderProjects(
-      reorderProjectsInGroup(
-        fullOrder,
-        members,
-        String(active.id),
-        String(over.id),
-      ),
-    )
-  }
-
-  return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={closestCenter}
-      onDragEnd={handleDragEnd}
-    >
-      <SortableContext items={members} strategy={verticalListSortingStrategy}>
-        {members.map((projectId) => (
-          <ProjectBlock
-            key={projectId}
-            id={projectId}
-            name={projectName(projectId)}
-            branch={projectBranch(projectId)}
-            sessions={grouped.get(projectId) ?? []}
-            terminals={projectTerminals(projectId)}
-            selectedTarget={selectedTarget}
-          />
-        ))}
-      </SortableContext>
-    </DndContext>
-  )
-}
-
-// The hub: a grouped, tappable list of every project and its sessions, mirroring
-// the sidebar's partition (projects with agents first, agent-less ones under
-// their own heading).
+// The hub: the shared flat agent list at touch size, mirroring the desktop
+// sidebar. The New-agent picker button + search + sort live in the list header;
+// the Add-project split button sits below it.
 function HomeScreen() {
-  const {
-    spine,
-    bootstrap,
-    selectedTarget,
-    pendingSessionOrder,
-    pendingProjectOrder,
-  } = useDux()
+  const { bootstrap } = useDux()
   const [menuOpen, setMenuOpen] = useState(false)
-  const rawSessions = spine?.sessions ?? []
-  const rawProjects = spine?.projects ?? []
-  // Fold the optimistic drag overlays over the server order (see
-  // `applyPendingOrders`) so rows don't snap back during the round-trip.
-  const { projects, sessions } = applyPendingOrders(
-    rawProjects,
-    rawSessions,
-    pendingSessionOrder,
-    pendingProjectOrder,
-  )
-  const { grouped, withAgents, withoutAgents, realOrder, projectName } =
-    partitionProjects(spine?.sidebar, projects, sessions)
-  // Resolve a project id to its branch-row display (or null when there's
-  // nothing to render). Orphan ids (a session whose project is absent) resolve
-  // to null, so no stray branch span is emitted.
-  const projectBranch = (id: string): ProjectBranchDisplay | null => {
-    const project = projects.find((p) => p.id === id)
-    return project ? projectBranchDisplay(project) : null
-  }
-  // The project's own terminals (project terminals). Orphan ids resolve to [].
-  const projectTerminals = (id: string): TerminalView[] =>
-    projects.find((p) => p.id === id)?.terminals ?? []
-  const hasProjects = projects.length > 0 || sessions.length > 0
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
   return (
@@ -686,18 +59,12 @@ function HomeScreen() {
       <header className="flex shrink-0 items-center gap-2 border-b px-3 py-3">
         <span className="relative shrink-0">
           <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
-          {/* Connection health badge on the logo corner — the mobile twin of the
-              desktop sidebar's dot, now that the status bar is gone. */}
           <ConnDot className="absolute -right-0.5 -bottom-0.5 ring-2 ring-background" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 leading-none">
           <span className="truncate font-semibold">{instanceTitle}</span>
           <span className="text-sm text-muted-foreground">agent sessions</span>
         </div>
-        {/* Was a "Search" button opening the command palette. The palette only
-            ever searched COMMANDS, so no search capability is lost by making
-            this the app-menu cog: it is the mobile twin of the desktop header's
-            cog, and opens the same menu as a bottom sheet. */}
         <Button
           variant="outline"
           size="icon"
@@ -710,68 +77,29 @@ function HomeScreen() {
       </header>
       <AppMenuSheet open={menuOpen} onOpenChange={setMenuOpen} />
 
-      {hasProjects ? (
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="flex flex-col gap-4 p-3">
-            <div className="flex flex-col gap-2">
-              {withAgents.length > 0 ? (
-                <p className="px-2 text-sm font-medium text-muted-foreground">
-                  Projects
-                </p>
-              ) : null}
-              {withAgents.length > 0 ? (
-                <ProjectGroupList
-                  members={withAgents}
-                  fullOrder={realOrder}
-                  grouped={grouped}
-                  projectName={projectName}
-                  projectBranch={projectBranch}
-                  projectTerminals={projectTerminals}
-                  selectedTarget={selectedTarget}
-                />
-              ) : null}
-            </div>
+      <FlatAgentList
+        handlers={{
+          onSelectSession: selectAndOpen,
+          onSelectTerminal: selectTerminalAndOpen,
+        }}
+      />
 
-            {withoutAgents.length > 0 ? (
-              <div className="flex flex-col gap-2">
-                <p className="px-2 text-sm font-medium text-muted-foreground">
-                  Projects with no agents
-                </p>
-                <ProjectGroupList
-                  members={withoutAgents}
-                  fullOrder={realOrder}
-                  grouped={grouped}
-                  projectName={projectName}
-                  projectBranch={projectBranch}
-                  projectTerminals={projectTerminals}
-                  selectedTarget={selectedTarget}
-                />
-              </div>
-            ) : null}
-
-            <AddProjectSplitButton className="w-full" />
-          </div>
-        </ScrollArea>
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-6">
-          <Empty className="border-0">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <FolderOpen />
-              </EmptyMedia>
-              <EmptyTitle>No projects</EmptyTitle>
-              <EmptyDescription>Add a project to get started.</EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-          <AddProjectSplitButton />
-        </div>
-      )}
+      <div className="flex shrink-0 items-center gap-2 border-t p-3">
+        <Button
+          className="min-h-11 flex-1"
+          aria-label="New agent"
+          onClick={openNewAgentPicker}
+        >
+          <Plus />
+          New agent
+        </Button>
+        <AddProjectSplitButton className="flex-1" />
+      </div>
     </div>
   )
 }
 
-// The focused-terminal spoke: a slim top bar (back · branch · PR · changes
-// count · ⋯ actions) over the full-screen shared terminal.
+// The focused-terminal spoke: a slim top bar over the full-screen shared terminal.
 function TerminalScreen() {
   const {
     spine,
@@ -783,16 +111,11 @@ function TerminalScreen() {
     startedDormantTabs,
   } = useDux()
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  // Only count changes when the loaded slice belongs to this client's selection,
-  // so the badge never briefly shows another session's count.
   const changeCount =
     changes.sessionId === selectedSessionId && changes.phase === "loaded"
       ? changes.staged.length + changes.unstaged.length
       : 0
 
-  // A focused PROJECT terminal has no session context at all: its own slim
-  // screen shows the project name over the full-screen pane (no PR chip, no
-  // changes count; those are session-scoped).
   if (
     selectedTarget?.kind === "terminal" &&
     selectedTarget.owner.kind === "project"
@@ -838,10 +161,6 @@ function TerminalScreen() {
     )
   }
 
-  // Defensive fallback: the agent exited (TerminalPane reset the selection) or
-  // the target was pruned while we sat here. Show the hub content rather than a
-  // dead terminal. No navigation side effects in render — the next Back press
-  // still unwinds cleanly via the popstate listener.
   if (!selectedTarget || !session) {
     return <HomeScreen />
   }
@@ -850,8 +169,6 @@ function TerminalScreen() {
     selectedTarget.kind === "terminal"
       ? selectedTarget.terminalId
       : selectedTarget.tabId
-  // Remount on reconnect (see App.tsx TerminalArea): a bumped epoch forces the
-  // focused agent pane to re-subscribe to the freshly launched provider.
   const paneKey =
     selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
 
@@ -860,8 +177,6 @@ function TerminalScreen() {
     selectedTarget.kind === "agent"
       ? tabs.find((t) => t.id === selectedTarget.tabId)
       : undefined
-  // A dormant tab (see App.tsx): render its card WITHOUT mounting the
-  // pane, since mounting subscribes = force-launches the provider.
   const isExtraDormant = isExtraTabDormant(
     selectedTarget,
     focusedTab,
@@ -870,11 +185,6 @@ function TerminalScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* A single slim bar (h-11) instead of the old h-12 header + separate PR
-          banner. To reclaim the phone's scarce vertical space for the PTY, the
-          project name is dropped (the branch identifies the agent) and the PR is
-          folded into a compact state-tinted icon chip rather than its own full
-          strip. Controls are 40px touch targets in a 44px bar. */}
       <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <Button
           variant="ghost"
@@ -900,7 +210,7 @@ function TerminalScreen() {
               className={cn(
                 "inline-flex size-10 shrink-0 items-center justify-center rounded-md transition-colors",
                 prIconClass(session.pr.state),
-                prIconHoverClass(session.pr.state)
+                prIconHoverClass(session.pr.state),
               )}
             >
               <GitPullRequest className="size-4" />
@@ -930,7 +240,7 @@ function TerminalScreen() {
             <Ellipsis />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <SessionActions session={session} />
+            <AgentActionsMenu session={session} />
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
@@ -945,10 +255,6 @@ function TerminalScreen() {
       ) : null}
 
       <div className="min-h-0 flex-1">
-        {/* Suspense fallback null: the lazy chunk loads fast and TerminalPane
-            shows its own readiness spinner once mounted. ChunkBoundary wraps
-            Suspense so a stale-bundle import failure recovers instead of
-            unmounting the tree. */}
         {isExtraDormant && focusedTab && selectedTarget.kind === "agent" ? (
           <DormantTabCard
             sessionId={selectedTarget.sessionId}

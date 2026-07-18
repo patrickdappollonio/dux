@@ -206,6 +206,15 @@ pub enum WireCommand {
     /// `config.changed` refetch carries the new value so the web moves the PR
     /// banner lane. Low-stakes preference, lazy write.
     TogglePrBannerPosition {},
+    /// Set `ui.agent_sort` to an explicit mode ("active" | "updated" | "created"
+    /// | "name" | "manual") and persist it. Unlike the toggles, this carries a
+    /// value: the web sidebar's sort control sets it directly, and a drag-reorder
+    /// sets it to "manual". The next `config.changed` refetch carries the new value
+    /// so every client's sort control agrees. Unknown values are rejected. Low-stakes
+    /// preference, lazy write.
+    SetAgentSort {
+        sort: String,
+    },
     /// Flip `ui.github_integration` and persist it, mirroring the TUI's
     /// `toggle-github-integration` palette command. Beyond the config flag this
     /// drives the engine's PR-sync side effects (start/stop background PR refresh,
@@ -366,6 +375,13 @@ pub enum WireCommand {
     /// drag-and-drop reordering.
     ReorderSessions {
         project_id: String,
+        session_ids: Vec<String>,
+    },
+    /// Persist a GLOBAL custom order for every agent (the flat model). `session_ids`
+    /// must list exactly the full set of all sessions, in the desired order (the
+    /// engine validates strictly). This is the web flat list's drag: agents reorder
+    /// as one independent list, so a drop can land anywhere regardless of project.
+    ReorderAgents {
         session_ids: Vec<String>,
     },
     /// Persist a custom display order for the workspace's projects.
@@ -725,6 +741,7 @@ impl WireCommand {
                 | WireCommand::SetChangesPaneVisible { .. }
                 | WireCommand::ToggleRandomizedPetNameDefault {}
                 | WireCommand::TogglePrBannerPosition {}
+                | WireCommand::SetAgentSort { .. }
                 | WireCommand::ToggleCopyOnSelect {}
                 | WireCommand::ToggleGithubIntegration {}
                 | WireCommand::ToggleAlwaysShowTabStrip {}
@@ -1117,6 +1134,13 @@ impl Engine {
                     created_op_id: None,
                 });
             }
+            WireCommand::SetAgentSort { sort } => {
+                let status = self.set_agent_sort(&sort);
+                return Ok(WireCommandOutcome {
+                    status: Some(status),
+                    created_op_id: None,
+                });
+            }
             WireCommand::ToggleCopyOnSelect {} => {
                 let status = self.toggle_copy_on_select();
                 return Ok(WireCommandOutcome {
@@ -1468,6 +1492,28 @@ impl Engine {
             "info",
             format!("PR banner moved to the {next} of the agent pane."),
         )
+    }
+
+    /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Rejects
+    /// unknown values (the web control only sends known ones, but the wire is a
+    /// trust boundary). Low-stakes preference, lazy write.
+    fn set_agent_sort(&mut self, sort: &str) -> WireStatus {
+        const VALID: [&str; 5] = ["active", "updated", "created", "name", "manual"];
+        if !VALID.contains(&sort) {
+            return WireStatus::new(
+                "error",
+                format!(
+                    "Unknown agent sort \"{sort}\". Expected one of: {}.",
+                    VALID.join(", ")
+                ),
+            );
+        }
+        if self.config.ui.agent_sort == sort {
+            return WireStatus::new("info", format!("Agent sort is already \"{sort}\"."));
+        }
+        self.config.ui.agent_sort = sort.to_string();
+        self.config_writer.save_lazy(self.config.clone());
+        WireStatus::new("info", format!("Agent list now sorted by \"{sort}\"."))
     }
 
     /// Flip `ui.copy_on_select` and persist it, mirroring the web
@@ -3625,6 +3671,7 @@ impl Engine {
             | WireCommand::SetSettings(..)
             | WireCommand::ToggleRandomizedPetNameDefault {}
             | WireCommand::TogglePrBannerPosition {}
+            | WireCommand::SetAgentSort { .. }
             | WireCommand::ToggleCopyOnSelect {}
             | WireCommand::ToggleGithubIntegration {}
             | WireCommand::ToggleAlwaysShowTabStrip {}
@@ -3634,7 +3681,7 @@ impl Engine {
             | WireCommand::ChangeAgentTabProvider { .. }
             | WireCommand::SetLastFocusedTab { .. } => {
                 unreachable!(
-                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
+                    "rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/kill-session-pty/detach-agent/close-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"
                 )
             }
             WireCommand::ReorderSessions {
@@ -3644,6 +3691,9 @@ impl Engine {
                 project_id,
                 session_ids,
             },
+            WireCommand::ReorderAgents { session_ids } => {
+                Command::ReorderAgents { session_ids }
+            }
             WireCommand::ReorderProjects { project_ids } => {
                 Command::ReorderProjects { project_ids }
             }
@@ -4430,6 +4480,38 @@ mod tests {
             engine.config.defaults.enable_randomized_pet_name_by_default,
             start
         );
+    }
+
+    #[test]
+    fn apply_wire_set_agent_sort_persists_valid_and_rejects_unknown() {
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(engine.config.ui.agent_sort, "active");
+
+        // A valid mode is accepted and persisted.
+        let outcome = engine
+            .apply_wire(WireCommand::SetAgentSort {
+                sort: "manual".to_string(),
+            })
+            .expect("apply set-agent-sort");
+        assert_eq!(engine.config.ui.agent_sort, "manual");
+        assert_eq!(outcome.status.map(|s| s.tone), Some("info".to_string()));
+
+        engine.config_writer.flush();
+        let disk =
+            std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
+        assert!(
+            disk.contains("agent_sort = \"manual\""),
+            "flushed config must carry the sort, got:\n{disk}"
+        );
+
+        // An unknown mode is rejected with an error tone and leaves the value alone.
+        let outcome = engine
+            .apply_wire(WireCommand::SetAgentSort {
+                sort: "bogus".to_string(),
+            })
+            .expect("apply set-agent-sort (invalid)");
+        assert_eq!(outcome.status.map(|s| s.tone), Some("error".to_string()));
+        assert_eq!(engine.config.ui.agent_sort, "manual");
     }
 
     #[test]

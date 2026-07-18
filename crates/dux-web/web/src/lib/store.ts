@@ -8,6 +8,7 @@ import { sessionsApi, SessionsApiError } from "./sessionsApi"
 
 import { ordersMatch } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
+import type { FlatSortKey } from "./flatList"
 import { EventsSocket } from "./eventsSocket"
 import { getActivePtySocket } from "./ptySocket"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
@@ -361,6 +362,9 @@ export interface DuxState {
   // in flight, which is the overwhelmingly common case.
   pendingSessionOrder: PendingSessionOrder | null
   pendingProjectOrder: string[] | null
+  // Optimistic overlay for the flat model's GLOBAL agent order: the complete list
+  // of session ids in the just-dragged order, cleared once the spine confirms it.
+  pendingAgentOrder: string[] | null
   // While an agent-create THIS client initiated is in flight, holds the session
   // ids that already existed when we submitted, plus the project the new agent
   // will land in. Agent creation is an async server job whose only completion
@@ -386,6 +390,19 @@ export interface DuxState {
   // reads this so a collapse survives re-renders, and creating an agent under a
   // collapsed project can force it open (see `focusNewlyCreatedSession`).
   projectOpen: Record<string, boolean>
+  // The flat agent list's display sort (shared by desktop + mobile), persisted
+  // SERVER-SIDE in `config.ui.agent_sort` so it survives restarts and every client
+  // agrees. This field is the optimistic OVERRIDE (null = follow config), reconciled
+  // by applyBootstrap exactly like `changesPaneOverride`; the effective mode is
+  // `agentSort ?? bootstrap.agent_sort ?? "active"`. A drag flips it to "manual" so
+  // the dropped order (stored in SQLite) sticks. Active-first is recomputed live.
+  agentSort: FlatSortKey | null
+  // The shared search query filtering the flat agent/terminal list on both
+  // surfaces. Empty string shows everything.
+  agentSearch: string
+  // Whether the New-agent picker dialog is open. The picker is the home for agent
+  // creation and every project action now that there are no project headers.
+  newAgentPickerOpen: boolean
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -530,8 +547,12 @@ let state: DuxState = {
   mobileScreen: "home",
   pendingSessionOrder: null,
   pendingProjectOrder: null,
+  pendingAgentOrder: null,
   pendingCreateFocus: null,
   projectOpen: {},
+  agentSort: null,
+  agentSearch: "",
+  newAgentPickerOpen: false,
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
@@ -834,6 +855,12 @@ function applyBootstrap(b: Bootstrap): void {
       state.changesPaneOverride === b.show_changes_pane
         ? null
         : state.changesPaneOverride,
+    // Same reconcile as changesPaneOverride: drop the optimistic sort override once
+    // the refetched config confirms it, so config.ui.agent_sort is the single truth.
+    agentSort:
+      state.agentSort !== null && state.agentSort === b.agent_sort
+        ? null
+        : state.agentSort,
   })
   // Reflect the configured instance name and favicon in the browser tab, plus the
   // live attention count/dot. Guarded inside `refreshAttentionChrome` because the
@@ -920,6 +947,7 @@ function applySpine(rawSpine: Spine, seq: number): void {
       prunedDormant.length === state.startedDormantTabs.length ? state.startedDormantTabs : prunedDormant,
     pendingSessionOrder: reconcilePendingSessionOrder(spine, state.pendingSessionOrder),
     pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
+    pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
   })
   // Restore a boot-time deep-link before focus/prune: it selects only a session
   // present in this spine (so prune leaves it alone), and it is a one-shot that
@@ -986,6 +1014,18 @@ function reconcilePendingProjectOrder(
 ): string[] | null {
   if (!pending) return null
   const serverIds = spine.projects.map((p) => p.id)
+  return ordersMatch(serverIds, pending) ? null : pending
+}
+
+// Drop the global agent-order overlay once the server's session order (spine is
+// already in global sort_order) matches what we optimistically applied. The
+// server's list is the full session set, so compare against every session id.
+function reconcilePendingAgentOrder(
+  spine: Spine,
+  pending: string[] | null,
+): string[] | null {
+  if (!pending) return null
+  const serverIds = spine.sessions.map((s) => s.id)
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
@@ -1138,7 +1178,11 @@ eventsSocket.onConn = (conn) => {
 // it into a single `setState`. Used on every error path so a rejected reorder
 // snaps the UI back to the server's authoritative order.
 function clearPendingOrders(): Partial<DuxState> {
-  return { pendingSessionOrder: null, pendingProjectOrder: null }
+  return {
+    pendingSessionOrder: null,
+    pendingProjectOrder: null,
+    pendingAgentOrder: null,
+  }
 }
 
 // Clear every transient, optimistic client intent at once: the reorder overlays,
@@ -2948,6 +2992,72 @@ export function createAgent(
     .catch((e) => toastCreateError(e, "Could not create the agent."))
 }
 
+// The New-agent picker's one-click create: spawn an agent in `projectId` with an
+// auto-generated pet name (empty name), honoring the picker's provider selection.
+// The create endpoint has no provider field (the agent launches on the project
+// default), so a non-default choice is applied as a follow-up PATCH, which the
+// server turns into a pending reconnect onto the chosen provider, the same path
+// the "Change agent provider" menu uses. Focus is armed so the picker's create
+// lands the user on the new agent, matching the name-dialog flow. Copy-changes
+// follows the configured default (the picker has no per-create checkbox; the
+// per-project "New agent…" name dialog remains the place to tune those).
+export function createAgentInProject(projectId: string, provider?: string): void {
+  const project = state.spine?.projects.find((p) => p.id === projectId)
+  const defaultProvider = project?.default_provider
+  armCreateFocus(projectId)
+  if (state.newAgentPickerOpen) setState({ newAgentPickerOpen: false })
+  sessionsApi
+    .create({
+      kind: "new",
+      project_id: projectId,
+      name: "",
+      copy_uncommitted_changes:
+        state.bootstrap?.copy_uncommitted_changes_by_default ?? true,
+    })
+    .then((session) => {
+      if (provider && provider !== defaultProvider && session?.id) {
+        return sessionsApi.patch(session.id, { provider }).then(() => undefined)
+      }
+      return undefined
+    })
+    .catch((e) => toastCreateError(e, "Could not create the agent."))
+}
+
+// Flat-list display controls (shared desktop + mobile), plus the New-agent
+// picker's open/close. All plain state writes.
+// Set the flat-list sort mode and persist it server-side (config.ui.agent_sort).
+// Optimistic: set the override now, POST to the dedicated endpoint; the engine
+// persists and emits config.changed, and the refetched bootstrap drops the
+// override (applyBootstrap) once config matches. On failure, clear the override so
+// the UI snaps back to the authoritative config value.
+export function setAgentSort(sort: FlatSortKey): void {
+  setState({ agentSort: sort })
+  configApi.setAgentSort(sort).catch((e) => {
+    setState({ agentSort: null })
+    toast.error(
+      e instanceof Error ? e.message : "Could not change the agent sort.",
+    )
+  })
+}
+
+// The effective sort mode: optimistic override, else the server-persisted config,
+// else the default. Consumers read this, never the raw override field.
+export function agentSortValue(s: DuxState): FlatSortKey {
+  return s.agentSort ?? s.bootstrap?.agent_sort ?? "active"
+}
+
+export function setAgentSearch(query: string): void {
+  setState({ agentSearch: query })
+}
+
+export function openNewAgentPicker(): void {
+  setState({ newAgentPickerOpen: true })
+}
+
+export function closeNewAgentPicker(): void {
+  setState({ newAgentPickerOpen: false })
+}
+
 // Ask the server to fork an existing session into a fresh branched worktree.
 // Unlike create, a fork requires a non-empty name (the server rejects empty).
 export function forkAgent(sessionId: string, name: string): void {
@@ -2997,6 +3107,21 @@ export function submitNameDialog(name: string): void {
 // MUST be the complete ordered set of that project's session ids — the server
 // validates it as a strict permutation and rejects partial/stale sets. The
 // overlay clears when the next spine confirms the order (or on error).
+// Flat model: reorder every agent as one global list. `orderedIds` MUST be the
+// complete set of ALL session ids (the server validates it as a strict
+// permutation and rejects partial/stale sets). Optimistic overlay clears when the
+// next spine confirms the order (or on error).
+export function reorderAgents(orderedIds: string[]): void {
+  setState({ pendingAgentOrder: orderedIds })
+  sessionsApi.reorderGlobal(orderedIds).catch((e) => {
+    // A rejected reorder is never reconciled by a spine, so the overlay would
+    // linger forever. Clear it so the UI snaps back to the authoritative order,
+    // then surface the failure.
+    setState({ pendingAgentOrder: null })
+    toast.error(e instanceof Error ? e.message : "Could not reorder the agents.")
+  })
+}
+
 export function reorderSessions(projectId: string, orderedIds: string[]): void {
   setState({ pendingSessionOrder: { projectId, ids: orderedIds } })
   sessionsApi

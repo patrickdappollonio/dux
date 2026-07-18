@@ -1,0 +1,809 @@
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core"
+import type { DragEndEvent } from "@dnd-kit/core"
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable"
+import {
+  ArrowUpDown,
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ClipboardCopy,
+  Cpu,
+  Ellipsis,
+  FileCode2,
+  Folder,
+  GitFork,
+  GitPullRequest,
+  Info,
+  Pencil,
+  Play,
+  Plus,
+  RotateCcw,
+  RefreshCw,
+  ScrollText,
+  Search,
+  SquareChevronRight,
+  SquareTerminal,
+  Trash2,
+  Variable,
+  X,
+} from "lucide-react"
+import type { CSSProperties } from "react"
+import { useState } from "react"
+
+import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
+import { ProjectMenuItems } from "@/components/ProjectMenuItems"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import { agentRowVisual } from "@/lib/agentRow"
+import { defaultProviderForSession } from "@/lib/agentTabs"
+import { matchesSessionQuery, matchesTerminalQuery } from "@/lib/agentSearch"
+import { changesCountFor } from "@/lib/agentVitals"
+import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
+import { clipboardWorktree } from "@/lib/flatClipboard"
+import {
+  FLAT_SORT_LABELS,
+  partitionQuiet,
+  sortMainSessions,
+  stateWord,
+  type FlatSortKey,
+} from "@/lib/flatList"
+import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
+import { partitionProjects } from "@/lib/projects"
+import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
+import {
+  addTab,
+  agentSortValue,
+  createTerminal,
+  openAgentEnv,
+  openAgentInfo,
+  openAgentStartupCommand,
+  openChangeProvider,
+  openDelete,
+  openDeleteTerminal,
+  openEditor,
+  openForceReconnect,
+  openForkAgent,
+  openRename,
+  openStartupLogs,
+  reorderAgents,
+  rerunStartupCommand,
+  setAgentSearch,
+  setAgentSort,
+  toggleSessionAutoReopen,
+  useDux,
+} from "@/lib/store"
+import { terminalTitle } from "@/lib/terminals"
+import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
+import type { SessionView, TerminalView } from "@/lib/types"
+import { cn } from "@/lib/utils"
+
+// How a flat row's tap resolves. Desktop just selects; mobile also drives the
+// hub-to-terminal navigation. Passed in so the one shared list serves both.
+export interface FlatSelectHandlers {
+  onSelectSession: (sessionId: string) => void
+  onSelectTerminal: (terminalId: string, owner: TerminalOwnerRef) => void
+}
+
+// The shared agent ⋯ actions menu body, every per-agent action from the parity
+// inventory, in one place so desktop and mobile can never drift. Reused verbatim
+// by both surfaces (this is the SessionActions menu the redesign must preserve).
+export function AgentActionsMenu({ session }: { session: SessionView }) {
+  const { bootstrap, spine, createTabInFlight } = useDux()
+  const tabCap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
+  const atTabCap = session.tabs.length >= tabCap
+  const addingTab = createTabInFlight.includes(session.id)
+  const providers = bootstrap?.available_providers ?? []
+  const defaultProvider = defaultProviderForSession(spine, session)
+
+  return (
+    <DropdownMenuGroup>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger disabled={atTabCap || addingTab}>
+          <Plus />
+          New agent tab…
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          {providers.map((p) => {
+            const isDefault = p === defaultProvider
+            return (
+              <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
+                {isDefault ? <Check /> : <Bot />}
+                {p}
+                {isDefault ? (
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    default
+                  </span>
+                ) : null}
+              </DropdownMenuItem>
+            )
+          })}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      {/* Project actions live here (and in the New-agent picker) now that the
+          flat list has no project header. */}
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger>
+          <Folder />
+          Project…
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent>
+          <ProjectMenuItems id={session.project_id} />
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openForceReconnect(session.id)}>
+        <RotateCcw />
+        Force recreate agent…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}>
+        <RefreshCw />
+        {session.auto_reopen_enabled
+          ? "Disable agent auto-reopen"
+          : "Enable agent auto-reopen"}
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openRename(session.id)}>
+        <Pencil />
+        Rename agent…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openForkAgent(session.id)}>
+        <GitFork />
+        Fork agent…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openChangeProvider(session.id)}>
+        <Cpu />
+        Change agent provider…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openAgentInfo(session.id)}>
+        <Info />
+        Agent info…
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openAgentStartupCommand(session.id)}>
+        <SquareChevronRight />
+        Configure startup command…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openAgentEnv(session.id)}>
+        <Variable />
+        Configure environment variables…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => rerunStartupCommand(session.id)}>
+        <Play />
+        Rerun startup command
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openStartupLogs(session.id)}>
+        <ScrollText />
+        Startup command logs…
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onClick={() => openEditor(session.id)}>
+        <FileCode2 />
+        Open editor
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => createTerminal(session.id)}>
+        <SquareTerminal />
+        New terminal
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => clipboardWorktree(session.worktree_path)}>
+        <ClipboardCopy />
+        Copy local path
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      {/* The one deliberate red-tinted destructive menu item (dim at rest, bright
+          on hover), per the CLAUDE.md web-UI menu tenet; the confirm dialog gates it. */}
+      <DropdownMenuItem
+        variant="destructive"
+        className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
+        onClick={() => openDelete(session.id)}
+      >
+        <Trash2 />
+        Delete agent…
+      </DropdownMenuItem>
+    </DropdownMenuGroup>
+  )
+}
+
+// Display-only project label on a row's second line. It shows which project the
+// agent belongs to; the project's ACTIONS live in the agent's ⋯ menu (a "Project"
+// submenu) and in the New-agent picker, so this label stays a plain span and the
+// whole row remains one clean click target for selecting the agent.
+function ProjectTag({ name }: { name: string }) {
+  return (
+    <span className="flex min-w-0 shrink items-center gap-1 text-muted-foreground">
+      <Folder className="size-3 shrink-0" />
+      <span className="min-w-0 truncate">{name}</span>
+    </span>
+  )
+}
+
+function Dot({ className }: { className: string }) {
+  return <span className={cn("size-1 shrink-0 rounded-full bg-current opacity-50", className)} />
+}
+
+// The two-line agent row: line one is the Bot (with the verbatim working bob +
+// attention pulse + name shimmer cues) + name + PR link + relative time; line two
+// is the clickable project tag, a colored state word, and (when they diverge) the
+// branch and a tab count. Uses ONLY fields that exist today.
+function AgentFlatRow({
+  session,
+  projectName,
+  selectedTarget,
+  handlers,
+  sortable,
+}: {
+  session: SessionView
+  projectName: string
+  selectedTarget: SelectedTarget | null
+  handlers: FlatSelectHandlers
+  sortable: boolean
+}) {
+  const label = session.title || session.branch_name
+  const agentSelected =
+    selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
+  const { shimmer, dimmed, attention } = agentRowVisual(
+    session.status,
+    session.working,
+    session.needs_attention,
+  )
+  const word = stateWord(session)
+  const branchDiverges = session.branch_name !== label
+  const tabCount = session.tabs.length
+
+  const { changes } = useDux()
+  const changesCount = changesCountFor(changes, session.id)
+
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: session.id })
+  const style: CSSProperties = {
+    // Vertical reorder list: lock the drag to the Y axis. Without this, dragging
+    // right translates the row past the sidebar's edge (the scroll container is
+    // overflow-x visible), so it flies out over the center pane. Zeroing x keeps
+    // every row inside the column; siblings only ever shift vertically anyway.
+    transform: transform
+      ? `translate3d(0, ${Math.round(transform.y)}px, 0)`
+      : undefined,
+    transition,
+    opacity: isDragging ? 0.6 : undefined,
+  }
+  const dragProps = sortable ? { ...attributes, ...listeners } : {}
+
+  return (
+    <div ref={setNodeRef} style={style} className="flex flex-col">
+      <div
+        className={cn(
+          // The wrapper owns the highlight (rounded, full-width) so it spans both
+          // lines AND the trailing ⋯, matching the app's other rows. The button
+          // below is transparent and fills the row, so a click anywhere on either
+          // line selects the agent.
+          "group/flat-row relative flex items-stretch rounded-md pr-1 transition-colors",
+          "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
+        )}
+      >
+        <SimpleTooltip
+          content={
+            <AgentVitalsTooltip
+              session={session}
+              projectName={projectName}
+              changesCount={changesCount}
+            />
+          }
+          side="right"
+          delay={600}
+        >
+          <button
+            {...dragProps}
+            type="button"
+            onClick={() => handlers.onSelectSession(session.id)}
+            className={cn(
+              "flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-11",
+              dimmed && "opacity-70",
+            )}
+          >
+            <span
+              aria-label={attention ? "Needs attention" : undefined}
+              className={cn(
+                "mt-0.5 inline-flex shrink-0",
+                attention
+                  ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                  : "text-sidebar-accent-foreground",
+              )}
+            >
+              <Bot
+                className={cn(
+                  "size-4.5 shrink-0 motion-safe:transition-transform motion-safe:duration-300",
+                  shimmer && "motion-safe:animate-agent-working",
+                )}
+              />
+            </span>
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              {/* Line one: name + PR + time. */}
+              <span className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-sm agent-name-shimmer",
+                    shimmer && "agent-name-shimmer--on",
+                  )}
+                >
+                  {label}
+                </span>
+                {session.pr ? (
+                  <SimpleTooltip
+                    content={`#${session.pr.number} · ${session.pr.title} (${prStateLabel(session.pr.state)})`}
+                    side="right"
+                  >
+                    <a
+                      href={session.pr.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
+                      className={cn(
+                        "inline-flex shrink-0 items-center rounded p-0.5 transition-colors",
+                        prIconClass(session.pr.state),
+                        prIconHoverClass(session.pr.state),
+                      )}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        window.open(session.pr!.url, "_blank", "noopener")
+                      }}
+                    >
+                      <GitPullRequest className="size-3.5" />
+                    </a>
+                  </SimpleTooltip>
+                ) : null}
+              </span>
+              {/* Line two: display-only project + state word + branch + tabs.
+                  Sans throughout to match the app; only the branch is mono. */}
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <ProjectTag name={projectName} />
+                <Dot className="text-muted-foreground" />
+                <span className={cn("shrink-0 font-medium", word.className)}>
+                  {word.label}
+                </span>
+                {branchDiverges ? (
+                  <>
+                    <Dot className="text-muted-foreground" />
+                    <span className="min-w-0 truncate font-mono">
+                      {session.branch_name}
+                    </span>
+                  </>
+                ) : null}
+                {tabCount > 1 ? (
+                  <>
+                    <Dot className="text-muted-foreground" />
+                    <span className="shrink-0">{tabCount} tabs</span>
+                  </>
+                ) : null}
+              </span>
+            </span>
+          </button>
+        </SimpleTooltip>
+
+        <DropdownMenu>
+          <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-row:max-w-8 md:group-hover/flat-row:opacity-100 md:group-focus-within/flat-row:max-w-8 md:group-focus-within/flat-row:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100">
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0 max-md:size-10"
+                  aria-label="Session actions"
+                />
+              }
+            >
+              <Ellipsis />
+            </DropdownMenuTrigger>
+          </div>
+          <DropdownMenuContent side="right" align="start">
+            <AgentActionsMenu session={session} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {/* Companion terminals for this agent, as their own inline rows. */}
+      {session.terminals.map((terminal) => (
+        <TerminalFlatRow
+          key={terminal.id}
+          terminal={terminal}
+          siblings={session.terminals}
+          owner={{ kind: "session", sessionId: session.id }}
+          ownerLabel={label}
+          projectName={projectName}
+          active={
+            selectedTarget?.kind === "terminal" &&
+            selectedTarget.terminalId === terminal.id
+          }
+          onSelect={handlers.onSelectTerminal}
+        />
+      ))}
+    </div>
+  )
+}
+
+// A one-line terminal row (its second line is the muted owner tag). Terminals are
+// runtime-only, so a listed terminal is a live PTY: it shows a green running dot.
+// There is no per-terminal timestamp field, so no relative time is shown (a
+// deliberate, field-backed omission). Owner label is the agent name (session
+// terminal) or the project (project terminal), each tagged on the second line.
+function TerminalFlatRow({
+  terminal,
+  siblings,
+  owner,
+  ownerLabel,
+  projectName,
+  active,
+  onSelect,
+}: {
+  terminal: TerminalView
+  siblings: readonly TerminalView[]
+  owner: TerminalOwnerRef
+  ownerLabel: string | null
+  projectName: string
+  active: boolean
+  onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
+}) {
+  const title = terminalTitle(terminal, siblings)
+  return (
+    <div
+      className={cn(
+        "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
+        "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        active && "bg-sidebar-accent text-sidebar-accent-foreground",
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => onSelect(terminal.id, owner)}
+        className="flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-10"
+      >
+        <SquareTerminal className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="flex items-center gap-2">
+            <SimpleTooltip
+              content={title !== terminal.label ? terminal.label : null}
+              side="right"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm">{title}</span>
+            </SimpleTooltip>
+            <Dot className="text-green-500 opacity-100" />
+          </span>
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ProjectTag name={projectName} />
+            <Dot className="text-muted-foreground" />
+            <span className="min-w-0 truncate">
+              {ownerLabel ? `${ownerLabel} · terminal` : "terminal"}
+            </span>
+          </span>
+        </span>
+      </button>
+      <DropdownMenu>
+        <div className="flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-term:max-w-8 md:group-hover/flat-term:opacity-100 md:group-focus-within/flat-term:max-w-8 md:group-focus-within/flat-term:opacity-100 md:has-[[data-popup-open]]:max-w-8 md:has-[[data-popup-open]]:opacity-100">
+          <DropdownMenuTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 max-md:size-10"
+                aria-label="Terminal actions"
+              />
+            }
+          >
+            <Ellipsis />
+          </DropdownMenuTrigger>
+        </div>
+        <DropdownMenuContent side="right" align="start">
+          <DropdownMenuItem onClick={() => onSelect(terminal.id, owner)}>
+            <SquareTerminal />
+            Stream
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
+            <X />
+            Close…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
+// The collapsed Quiet tail: detached / exited agents, hidden by default so
+// dormant work stops hogging the list. Its rows reuse the same AgentFlatRow (they
+// render dimmed via agentRowVisual and carry the Detached/Exited state word).
+function QuietTail({
+  sessions,
+  projectName,
+  selectedTarget,
+  handlers,
+}: {
+  sessions: SessionView[]
+  projectName: (id: string) => string
+  selectedTarget: SelectedTarget | null
+  handlers: FlatSelectHandlers
+}) {
+  const [open, setOpen] = useState(false)
+  if (sessions.length === 0) return null
+  return (
+    <div className="mt-2 border-t border-border/50 pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
+      >
+        <ChevronRight
+          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+        />
+        <span>Quiet</span>
+        <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
+          {sessions.length}
+        </span>
+      </button>
+      {open ? (
+        <div className="mt-1 flex flex-col gap-1">
+          {sessions.map((session) => (
+            <AgentFlatRow
+              key={session.id}
+              session={session}
+              projectName={projectName(session.project_id)}
+              selectedTarget={selectedTarget}
+              handlers={handlers}
+              sortable={false}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// The sort control: a small dropdown listing the flat-list sort options. Default
+// "active first"; "manual" is the only mode that enables drag-reorder.
+const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manual"]
+
+function SortControl() {
+  const agentSort = agentSortValue(useDux())
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="flex items-center gap-1.5 rounded-md border border-border/60 bg-input/30 px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-input/60 hover:text-foreground data-[popup-open]:border-border data-[popup-open]:bg-input/60 data-[popup-open]:text-foreground max-md:min-h-9"
+            aria-label="Sort agents"
+          />
+        }
+      >
+        <ArrowUpDown className="size-3 shrink-0" />
+        <span className="text-foreground/90">{FLAT_SORT_LABELS[agentSort]}</span>
+        <ChevronDown className="size-3 shrink-0 opacity-60" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {SORT_KEYS.map((key) => (
+          <DropdownMenuItem key={key} onClick={() => setAgentSort(key)}>
+            {agentSort === key ? <Check /> : <span className="size-4" />}
+            {FLAT_SORT_LABELS[key]}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+// The shared flat list: header controls (New agent, search, sort) over one
+// active-first, cross-project list with a collapsible Quiet tail. Rendered inside
+// the desktop sidebar's expanded content and the mobile hub alike.
+export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
+  const dux = useDux()
+  const {
+    spine,
+    selectedTarget,
+    agentSearch: rawAgentSearch,
+    pendingAgentOrder,
+  } = dux
+  const agentSort = agentSortValue(dux)
+  const agentSearch = rawAgentSearch ?? ""
+
+  const rawSessions = spine?.sessions ?? []
+  const rawProjects = spine?.projects ?? []
+  // partitionProjects still supplies the per-session project name, the project
+  // terminals, and the project id sets. Ordering, however, is now a single GLOBAL
+  // flat list (agents are independent of project grouping).
+  const { withAgents, withoutAgents, projectName } = partitionProjects(
+    spine?.sidebar,
+    rawProjects,
+    rawSessions,
+  )
+
+  // Flat model: agents are one global list ordered by the server's `sort_order`
+  // (spine.sessions already arrives in that order). The optimistic drag overlay,
+  // when present, names every session in the just-dropped order.
+  const coreSessions: SessionView[] = pendingAgentOrder
+    ? reorderById(rawSessions, pendingAgentOrder)
+    : rawSessions
+
+  // Split into main (active) and quiet (dormant), then order the main list by the
+  // chosen sort. Search filters both, and the project terminals, by name/branch/
+  // provider/owner.
+  const { main, quiet } = partitionQuiet(coreSessions)
+  const sortedMain = sortMainSessions(main, agentSort)
+
+  const query = agentSearch
+  const visibleMain = sortedMain.filter((s) =>
+    matchesSessionQuery(s, projectName(s.project_id), query),
+  )
+  const visibleQuiet = quiet.filter((s) =>
+    matchesSessionQuery(s, projectName(s.project_id), query),
+  )
+
+  // Project terminals (owned by a project, not an agent), including those of
+  // agent-less projects, otherwise a running project shell would render nowhere
+  // in the flat list. Shown after the agent list, each tagged with its project.
+  const projectTerminals = [...withAgents, ...withoutAgents].flatMap((id) => {
+    const terms = rawProjects.find((p) => p.id === id)?.terminals ?? []
+    return terms
+      .filter((t) => matchesTerminalQuery(t, projectName(id), projectName(id), query))
+      .map((terminal) => ({ terminal, projectId: id, siblings: terms }))
+  })
+
+  const manual = agentSort === "manual"
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  )
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    // Global flat reorder: move the dragged agent to the drop target's slot in the
+    // complete session order, regardless of project. No project-block special case.
+    const fullOrder = coreSessions.map((s) => s.id)
+    const next = moveItem(fullOrder, String(active.id), String(over.id))
+    if (ordersMatch(fullOrder, next)) return
+    // A drag is an explicit request for manual control. If the user reordered from
+    // a computed sort (active-first, name, ...), flip the sort to manual so the
+    // dropped position sticks instead of being immediately re-sorted away. The order
+    // persists in SQLite; persisting `agentSort` too (see store) keeps the manual
+    // view across restarts.
+    if (!manual) setAgentSort("manual")
+    reorderAgents(next)
+  }
+
+  const nothing =
+    coreSessions.length === 0 &&
+    projectTerminals.length === 0 &&
+    quiet.length === 0
+  const nothingMatches =
+    query.trim() !== "" &&
+    visibleMain.length === 0 &&
+    visibleQuiet.length === 0 &&
+    projectTerminals.length === 0
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Header: title + sort on one row, then search. The New-agent action now
+          lives in the bottom bar next to Add project (both surfaces). px-1 matches
+          the list below so the search box lines up edge-to-edge with the agent rows. */}
+      <div className="flex flex-col gap-2 px-1 pt-2 pb-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">Agents</span>
+          <span className="text-xs text-muted-foreground">
+            {coreSessions.length}
+          </span>
+          {coreSessions.length > 0 ? (
+            <div className="ml-auto">
+              <SortControl />
+            </div>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-2.5 max-md:min-h-10">
+          <Search className="size-4 shrink-0 text-muted-foreground" />
+          <input
+            value={agentSearch}
+            onChange={(event) => setAgentSearch(event.target.value)}
+            placeholder="Search agents"
+            aria-label="Search agents"
+            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-foreground"
+          />
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2 no-scrollbar">
+        {nothing ? (
+          <Empty className="border-0 p-4">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Bot />
+              </EmptyMedia>
+              <EmptyTitle>No agents yet</EmptyTitle>
+              <EmptyDescription>
+                Create one from the New agent picker.
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : nothingMatches ? (
+          <p className="px-3 py-4 text-sm text-muted-foreground">
+            Nothing matches “{query}”.
+          </p>
+        ) : (
+          <>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={visibleMain.map((s) => s.id)}
+                strategy={verticalListSortingStrategy}
+              >
+                <div className="flex flex-col gap-1">
+                  {visibleMain.map((session) => (
+                    <AgentFlatRow
+                      key={session.id}
+                      session={session}
+                      projectName={projectName(session.project_id)}
+                      selectedTarget={selectedTarget}
+                      handlers={handlers}
+                      sortable
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+
+            {projectTerminals.map(({ terminal, projectId, siblings }) => (
+              <TerminalFlatRow
+                key={terminal.id}
+                terminal={terminal}
+                siblings={siblings}
+                owner={{ kind: "project", projectId }}
+                ownerLabel={null}
+                projectName={projectName(projectId)}
+                active={
+                  selectedTarget?.kind === "terminal" &&
+                  selectedTarget.terminalId === terminal.id
+                }
+                onSelect={handlers.onSelectTerminal}
+              />
+            ))}
+
+            <QuietTail
+              sessions={visibleQuiet}
+              projectName={projectName}
+              selectedTarget={selectedTarget}
+              handlers={handlers}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

@@ -94,6 +94,11 @@ pub struct BootstrapView {
     /// "bottom", matching the TUI's `pr_banner_at_bottom` semantics. Mobile
     /// ignores this and always renders the banner on top.
     pub pr_banner_position: String,
+    /// Mirrors `config.ui.agent_sort`. The web flat agent list initializes its
+    /// sort control from this so a chosen order (including the manual drag order)
+    /// survives restarts and is shared across clients. Older servers omit it, so
+    /// the web treats a missing value as "active".
+    pub agent_sort: String,
     /// Mirrors `config.ui.agent_scrollback_lines`. The web sizes each xterm.js
     /// instance's scrollback to this so it can retain the full history the
     /// reconnect repaint replays — without it, xterm.js silently caps at its
@@ -717,6 +722,7 @@ impl Engine {
             .as_str()
             .to_string(),
             pr_banner_position: self.config.ui.pr_banner_position.clone(),
+            agent_sort: self.config.ui.agent_sort.clone(),
             agent_scrollback_lines: self.config.ui.agent_scrollback_lines,
             show_changes_pane: self.config.ui.show_changes_pane,
             global_env: self.config.env.clone(),
@@ -1378,6 +1384,19 @@ mod tests {
         // mirror the TUI's placement.
         engine.config.ui.pr_banner_position = "top".to_string();
         assert_eq!(engine.bootstrap().pr_banner_position, "top");
+    }
+
+    #[test]
+    fn agent_sort_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Default is "active" so a fresh client sorts working agents to the top.
+        assert_eq!(engine.bootstrap().agent_sort, "active");
+
+        // A persisted mode projects verbatim so every client's sort control agrees
+        // and a saved manual order stays visible across restarts.
+        engine.config.ui.agent_sort = "manual".to_string();
+        assert_eq!(engine.bootstrap().agent_sort, "manual");
     }
 
     #[test]

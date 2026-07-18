@@ -513,6 +513,12 @@ pub struct UiConfig {
     /// switch turns it off independently of `attention_indicator`. Default true.
     pub attention_on_bell: bool,
     pub pr_banner_position: String,
+    /// The web agent-list sort mode, persisted so a chosen order (and the manual
+    /// drag order it enables) survives restarts and is shared across clients:
+    /// "active" (working/attention float up, the default), "updated", "created",
+    /// "name", or "manual" (the raw persisted order, enabled by drag-reorder).
+    /// Web-only today; the TUI keeps its one-shot sort palette commands.
+    pub agent_sort: String,
     pub theme: String,
 }
 
@@ -742,6 +748,7 @@ impl Default for UiConfig {
             attention_indicator: true,
             attention_on_bell: true,
             pr_banner_position: "bottom".to_string(),
+            agent_sort: "active".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
         }
     }
@@ -1223,6 +1230,7 @@ impl Default for Config {
                 attention_indicator: true,
                 attention_on_bell: true,
                 pr_banner_position: "bottom".to_string(),
+                agent_sort: "active".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
             },
             capabilities: CapabilitiesConfig::default(),
