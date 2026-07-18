@@ -1717,25 +1717,177 @@ impl LeftItem {
     }
 }
 
+/// The agent-list display sort mode, driven by the shared `config.ui.agent_sort`
+/// preference. This is a pure DISPLAY ordering computed at render time: the TUI
+/// never rewrites `engine.sessions` and never persists a sort order (that stored
+/// order IS the `Manual` display order, set only by the web's drag-reorder).
+///
+/// The TUI's own picker OFFERS the five non-manual modes (see `TUI_CYCLE`) but
+/// DISPLAYS `Manual` when the web set it. The web mirror OFFERS
+/// active/updated/created/name/manual and DISPLAYS a TUI-set `NameDesc`. The
+/// shared value set therefore has six modes; both surfaces render all six.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentSortMode {
+    /// Working / needs-attention agents float to the top (a stable float, not a
+    /// re-sort), each group keeping incoming order. The default.
+    Active,
+    /// Most recently updated first (`Reverse(updated_at)`).
+    Updated,
+    /// Most recently created first (`Reverse(created_at)`).
+    Created,
+    /// By name (title-or-branch, case-insensitive), A to Z.
+    NameAsc,
+    /// By name (title-or-branch, case-insensitive), Z to A.
+    NameDesc,
+    /// The stored global order verbatim (the web's drag-reorder order). Display
+    /// only in the TUI, which never offers it.
+    Manual,
+}
+
+impl AgentSortMode {
+    /// The five modes the TUI's `sort-agents` picker cycles through. `Manual` is
+    /// deliberately excluded (it is display-only, set only by the web's drag).
+    pub(crate) const TUI_CYCLE: [AgentSortMode; 5] = [
+        AgentSortMode::Active,
+        AgentSortMode::Updated,
+        AgentSortMode::Created,
+        AgentSortMode::NameAsc,
+        AgentSortMode::NameDesc,
+    ];
+
+    /// Parse the shared `config.ui.agent_sort` string. Unknown values fall back to
+    /// `Active` (the default), matching the web's tolerance for a value it does
+    /// not offer.
+    pub(crate) fn from_config_str(s: &str) -> AgentSortMode {
+        match s {
+            "updated" => AgentSortMode::Updated,
+            "created" => AgentSortMode::Created,
+            "name" => AgentSortMode::NameAsc,
+            "name_desc" => AgentSortMode::NameDesc,
+            "manual" => AgentSortMode::Manual,
+            _ => AgentSortMode::Active,
+        }
+    }
+
+    /// The `config.ui.agent_sort` string for this mode (the shared wire value).
+    pub(crate) fn as_config_str(&self) -> &'static str {
+        match self {
+            AgentSortMode::Active => "active",
+            AgentSortMode::Updated => "updated",
+            AgentSortMode::Created => "created",
+            AgentSortMode::NameAsc => "name",
+            AgentSortMode::NameDesc => "name_desc",
+            AgentSortMode::Manual => "manual",
+        }
+    }
+
+    /// A human-readable label for status lines.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            AgentSortMode::Active => "Active first",
+            AgentSortMode::Updated => "Recently updated",
+            AgentSortMode::Created => "Recently created",
+            AgentSortMode::NameAsc => "Name (A to Z)",
+            AgentSortMode::NameDesc => "Name (Z to A)",
+            AgentSortMode::Manual => "Manual order",
+        }
+    }
+
+    /// The next mode in the TUI cycle. If the current mode is not in the cycle
+    /// (i.e. `Manual`, which the TUI never offers), start the cycle at `Active`.
+    pub(crate) fn next_in_tui_cycle(&self) -> AgentSortMode {
+        match Self::TUI_CYCLE.iter().position(|m| m == self) {
+            Some(i) => Self::TUI_CYCLE[(i + 1) % Self::TUI_CYCLE.len()],
+            None => AgentSortMode::Active,
+        }
+    }
+}
+
 /// Build the flat left-pane list: a single globally-ordered agent list with no
 /// project grouping. Active agents come first; detached/exited ("inactive") agents
-/// collapse under an `InactiveToggle` tail (default collapsed). Order within each
-/// section is the caller's `sessions` order (the global `sort_order`); the
-/// active-first float and the sort modes layer on top in the App (see the sort
-/// state). Orphan (removed-project) sessions are plain `Session` rows here; the
-/// renderer marks them inline.
+/// collapse under an `InactiveToggle` tail (default collapsed). Orphan
+/// (removed-project) sessions are plain `Session` rows here; the renderer marks
+/// them inline.
+///
+/// The returned `LeftItem::Session(index)` values are indices into `sessions`
+/// (unchanged meaning): this reorders WHICH indices appear in WHICH order for
+/// display, and never mutates `sessions` itself. The active/inactive partition
+/// always preserves incoming order first, then each bucket is ordered by the
+/// display `sort_mode`:
+///
+/// - `Active`: the active bucket floats `is_hot` indices up (a stable float
+///   keeping incoming order within each group); the inactive bucket is ordered by
+///   most recently updated (`Reverse(updated_at)`).
+/// - `Updated` / `Created` / `NameAsc` / `NameDesc`: BOTH buckets sorted by that
+///   comparator. These match the web's comparators exactly.
+/// - `Manual`: both buckets verbatim (the stored global order, the web's
+///   drag-reorder order). The TUI displays this but never offers it.
+///
+/// `is_hot(index)` reports whether the session at that index is working or needs
+/// attention (used only by `Active`).
 pub(crate) fn build_left_items(
     sessions: &[AgentSession],
     inactive_collapsed: bool,
+    sort_mode: AgentSortMode,
+    is_hot: &dyn Fn(usize) -> bool,
 ) -> Vec<LeftItem> {
-    let mut active = Vec::new();
-    let mut inactive = Vec::new();
+    let mut active: Vec<usize> = Vec::new();
+    let mut inactive: Vec<usize> = Vec::new();
     for (index, session) in sessions.iter().enumerate() {
         match session.status {
             crate::model::SessionStatus::Detached | crate::model::SessionStatus::Exited => {
                 inactive.push(index)
             }
             _ => active.push(index),
+        }
+    }
+
+    // Case-insensitive name key: title-or-branch lowercased. Rust's `str::cmp` on
+    // this lowercased key matches the web's code-point comparison in
+    // `sortSessions.ts` (UTF-8 byte order equals code-point order).
+    let name_key = |index: usize| -> String {
+        let s = &sessions[index];
+        s.title.as_deref().unwrap_or(&s.branch_name).to_lowercase()
+    };
+    // Comparator-based ordering shared by both buckets for the non-Active modes.
+    // `sort_by` / `sort_by_key` are stable, so equal keys keep incoming order.
+    let order_bucket = |bucket: &mut Vec<usize>| match sort_mode {
+        AgentSortMode::Updated => {
+            bucket.sort_by_key(|&i| std::cmp::Reverse(sessions[i].updated_at))
+        }
+        AgentSortMode::Created => {
+            bucket.sort_by_key(|&i| std::cmp::Reverse(sessions[i].created_at))
+        }
+        AgentSortMode::NameAsc => bucket.sort_by_key(|&i| name_key(i)),
+        AgentSortMode::NameDesc => bucket.sort_by_key(|&i| std::cmp::Reverse(name_key(i))),
+        // Active and Manual do not use the shared comparator.
+        AgentSortMode::Active | AgentSortMode::Manual => {}
+    };
+
+    match sort_mode {
+        AgentSortMode::Active => {
+            // Stable float: hot indices rise above the rest, each group keeping
+            // incoming order. Matches the web's `activeFirstSessions`.
+            let mut hot: Vec<usize> = Vec::new();
+            let mut rest: Vec<usize> = Vec::new();
+            for &i in &active {
+                if is_hot(i) {
+                    hot.push(i);
+                } else {
+                    rest.push(i);
+                }
+            }
+            active = hot;
+            active.extend(rest);
+            // The collapsed tail sorts most-recent-updated first.
+            inactive.sort_by_key(|&i| std::cmp::Reverse(sessions[i].updated_at));
+        }
+        AgentSortMode::Manual => {
+            // Both buckets stay verbatim (incoming order).
+        }
+        _ => {
+            order_bucket(&mut active);
+            order_bucket(&mut inactive);
         }
     }
 
@@ -2775,16 +2927,8 @@ impl App {
                 self.help_scroll = Some(0);
                 Ok(())
             }
-            "sort-agents-by-updated" => {
-                self.sort_sessions_by_updated();
-                Ok(())
-            }
-            "sort-agents-by-created" => {
-                self.sort_sessions_by_created();
-                Ok(())
-            }
-            "sort-agents-by-name" => {
-                self.sort_sessions_by_name();
+            "sort-agents" => {
+                self.cycle_agent_sort();
                 Ok(())
             }
             "edit-macros" => {
@@ -3070,7 +3214,23 @@ impl App {
     }
 
     pub(crate) fn rebuild_left_items(&mut self) {
-        self.left_items_cache = build_left_items(&self.engine.sessions, self.inactive_collapsed);
+        let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
+        // Precompute the "hot" bit (working || needs-attention) per session so the
+        // predicate can borrow this Vec while `build_left_items` borrows
+        // `self.engine.sessions` (avoids borrowing `self.engine` twice).
+        let hot: Vec<bool> = self
+            .engine
+            .sessions
+            .iter()
+            .map(|s| {
+                self.engine.session_is_streaming(&s.id)
+                    || self.engine.session_needs_attention(&s.id)
+            })
+            .collect();
+        self.left_items_cache =
+            build_left_items(&self.engine.sessions, self.inactive_collapsed, mode, &|i| {
+                hot[i]
+            });
         self.ensure_selectable_left_item();
     }
 
@@ -3115,54 +3275,21 @@ impl App {
         }
     }
 
-    pub(crate) fn sort_sessions_by_updated(&mut self) {
-        self.engine
-            .sessions
-            .sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    /// Advance the shared `config.ui.agent_sort` to the next TUI display mode
+    /// (active -> updated -> created -> name A to Z -> name Z to A -> active),
+    /// persist it via the engine, and rebuild the display order. This is purely a
+    /// DISPLAY sort: `engine.sessions` is never reordered and no `sort_order` is
+    /// persisted. If the current stored mode is the web-only `manual`, the cycle
+    /// restarts at `active`.
+    pub(crate) fn cycle_agent_sort(&mut self) {
+        let current = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
+        let next = current.next_in_tui_cycle();
+        self.engine.set_agent_sort(next.as_config_str());
         self.rebuild_left_items();
-        if self.persist_sorted_session_order() {
-            self.set_info("Agents sorted by most recently updated.");
-        }
-    }
-
-    pub(crate) fn sort_sessions_by_created(&mut self) {
-        self.engine
-            .sessions
-            .sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        self.rebuild_left_items();
-        if self.persist_sorted_session_order() {
-            self.set_info("Agents sorted by creation date (newest first).");
-        }
-    }
-
-    pub(crate) fn sort_sessions_by_name(&mut self) {
-        self.engine.sessions.sort_by(|a, b| {
-            let name_a = a.title.as_deref().unwrap_or(&a.branch_name);
-            let name_b = b.title.as_deref().unwrap_or(&b.branch_name);
-            name_a.to_lowercase().cmp(&name_b.to_lowercase())
-        });
-        self.rebuild_left_items();
-        if self.persist_sorted_session_order() {
-            self.set_info("Agents sorted alphabetically by name.");
-        }
-    }
-
-    /// Persist the freshly-sorted in-memory session order into SQLite so it
-    /// survives a reload and matches the web UI by construction. Returns `true`
-    /// on success. A failure is non-fatal: the sort still applies in-memory; we
-    /// log and surface a status-line error rather than crash, and the caller
-    /// skips its success message so the error stays visible.
-    fn persist_sorted_session_order(&mut self) -> bool {
-        match self.engine.persist_session_order() {
-            Ok(()) => true,
-            Err(err) => {
-                logger::error(&format!("failed to persist sorted agent order: {err:#}"));
-                self.set_error(format!(
-                    "Sorted agents on screen, but couldn't save the new order: {err}"
-                ));
-                false
-            }
-        }
+        self.set_info(format!(
+            "Sorting agents by {}.",
+            next.label().to_lowercase()
+        ));
     }
 
     /// Toggle the flat list's "Inactive" tail open/closed. Bound to the same key
@@ -4455,13 +4582,13 @@ mod tests {
         // Collapsed (default): the active row, then a single Inactive toggle; the
         // inactive session is hidden.
         assert_eq!(
-            build_left_items(&sessions, true),
+            build_left_items(&sessions, true, AgentSortMode::Active, &|_| false),
             vec![LeftItem::Session(0), LeftItem::InactiveToggle],
         );
 
         // Expanded: the inactive session follows the toggle.
         assert_eq!(
-            build_left_items(&sessions, false),
+            build_left_items(&sessions, false, AgentSortMode::Active, &|_| false),
             vec![
                 LeftItem::Session(0),
                 LeftItem::InactiveToggle,
@@ -4476,7 +4603,7 @@ mod tests {
         a.status = SessionStatus::Active;
         let mut b = test_session("b", "other", 0);
         b.status = SessionStatus::Active;
-        let items = build_left_items(&[a, b], true);
+        let items = build_left_items(&[a, b], true, AgentSortMode::Active, &|_| false);
         assert_eq!(items, vec![LeftItem::Session(0), LeftItem::Session(1)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
     }
@@ -4491,8 +4618,101 @@ mod tests {
         let mut ghost = test_session("ghost", "gone-project", 0);
         ghost.status = SessionStatus::Active;
         assert_eq!(
-            build_left_items(&[real, ghost], true),
+            build_left_items(&[real, ghost], true, AgentSortMode::Active, &|_| false),
             vec![LeftItem::Session(0), LeftItem::Session(1)],
+        );
+    }
+
+    #[test]
+    fn build_left_items_active_mode_floats_hot_and_orders_inactive_by_updated() {
+        // Three active agents (indices 0,1,2) and two inactive (3,4). Only index 2
+        // is hot. Active mode floats it above the non-hot actives while keeping
+        // their incoming order; the inactive tail sorts most-recently-updated.
+        let t0 = Utc::now();
+        let mk = |id: &str, status: SessionStatus, updated_offset: i64| {
+            let mut s = test_session(id, "p", 0);
+            s.status = status;
+            s.updated_at = t0 + chrono::Duration::seconds(updated_offset);
+            s
+        };
+        let sessions = vec![
+            mk("a0", SessionStatus::Active, 0),
+            mk("a1", SessionStatus::Active, 0),
+            mk("a2", SessionStatus::Active, 0),
+            mk("i3", SessionStatus::Detached, 10), // older
+            mk("i4", SessionStatus::Exited, 20),   // newer
+        ];
+        let hot = |i: usize| i == 2;
+        let items = build_left_items(&sessions, false, AgentSortMode::Active, &hot);
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Session(2), // hot floats up
+                LeftItem::Session(0),
+                LeftItem::Session(1),
+                LeftItem::InactiveToggle,
+                LeftItem::Session(4), // newer updated_at first
+                LeftItem::Session(3),
+            ],
+        );
+    }
+
+    #[test]
+    fn build_left_items_name_and_name_desc_are_reversed_without_touching_sessions() {
+        let mk = |id: &str, name: &str| {
+            let mut s = test_session(id, "p", 0);
+            s.status = SessionStatus::Active;
+            s.branch_name = name.to_string();
+            s.title = None;
+            s
+        };
+        let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
+
+        let asc = build_left_items(&sessions, true, AgentSortMode::NameAsc, &|_| false);
+        assert_eq!(
+            asc,
+            vec![
+                LeftItem::Session(1), // alpha
+                LeftItem::Session(2), // bravo
+                LeftItem::Session(0), // charlie
+            ],
+        );
+
+        let desc = build_left_items(&sessions, true, AgentSortMode::NameDesc, &|_| false);
+        assert_eq!(
+            desc,
+            vec![
+                LeftItem::Session(0), // charlie
+                LeftItem::Session(2), // bravo
+                LeftItem::Session(1), // alpha
+            ],
+        );
+
+        // `sessions` order is untouched: still the incoming order.
+        assert_eq!(sessions[0].branch_name, "charlie");
+        assert_eq!(sessions[1].branch_name, "alpha");
+        assert_eq!(sessions[2].branch_name, "bravo");
+    }
+
+    #[test]
+    fn build_left_items_manual_renders_verbatim_incoming_order() {
+        // A web-set "manual" mode displays engine.sessions verbatim (the TUI shows
+        // it but never offers it).
+        let mk = |id: &str, name: &str| {
+            let mut s = test_session(id, "p", 0);
+            s.status = SessionStatus::Active;
+            s.branch_name = name.to_string();
+            s
+        };
+        let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
+        let items = build_left_items(&sessions, true, AgentSortMode::Manual, &|_| false);
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Session(0),
+                LeftItem::Session(1),
+                LeftItem::Session(2),
+            ],
         );
     }
 

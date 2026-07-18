@@ -672,7 +672,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "agent_sort",
             comment: Some(CommentSource::Static(
-                "# Web agent-list sort mode, persisted across restarts and shared by all\n# web clients: \"active\" (default; working / attention agents float up),\n# \"updated\", \"created\", \"name\", or \"manual\" (the raw drag-reorder order).\n# Set it from the web sidebar's sort control; a drag-reorder switches it to\n# \"manual\" automatically. Web-only; the TUI keeps its one-shot sort commands.",
+                "# Agent-list sort mode, persisted across restarts and shared by the TUI\n# and the web. One of:\n#   \"active\"    (default) working / needs-attention agents float to the top\n#   \"updated\"   most recently updated first\n#   \"created\"   most recently created first\n#   \"name\"      by name, A to Z\n#   \"name_desc\" by name, Z to A\n#   \"manual\"    the web's drag-reorder order (the stored global order)\n# The TUI cycles the five non-manual modes via the \"sort-agents\" palette\n# command; the web sets it from its sidebar sort control, where a drag\n# switches it to \"manual\" automatically. Each surface offers its own subset\n# but displays whatever value the other set.",
             )),
             value_fn: |c| FieldValue::Str(c.ui.agent_sort.clone()),
         },

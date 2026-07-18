@@ -207,7 +207,7 @@ pub enum WireCommand {
     /// banner lane. Low-stakes preference, lazy write.
     TogglePrBannerPosition {},
     /// Set `ui.agent_sort` to an explicit mode ("active" | "updated" | "created"
-    /// | "name" | "manual") and persist it. Unlike the toggles, this carries a
+    /// | "name" | "name_desc" | "manual") and persist it. Unlike the toggles, this carries a
     /// value: the web sidebar's sort control sets it directly, and a drag-reorder
     /// sets it to "manual". The next `config.changed` refetch carries the new value
     /// so every client's sort control agrees. Unknown values are rejected. Low-stakes
@@ -1497,8 +1497,22 @@ impl Engine {
     /// Set `ui.agent_sort` to an explicit, validated mode and persist it. Rejects
     /// unknown values (the web control only sends known ones, but the wire is a
     /// trust boundary). Low-stakes preference, lazy write.
-    fn set_agent_sort(&mut self, sort: &str) -> WireStatus {
-        const VALID: [&str; 5] = ["active", "updated", "created", "name", "manual"];
+    ///
+    /// The shared value set has six modes: "active" (default), "updated",
+    /// "created", "name" (ascending), "name_desc" (descending), and "manual" (the
+    /// web's drag-reorder order). Each surface OFFERS its own subset in its picker
+    /// but DISPLAYS any value the other set: the TUI cycles the five non-manual
+    /// modes and the web sets active/updated/created/name/manual. This method is
+    /// `pub` so the TUI's `sort-agents` palette command can drive it too.
+    pub fn set_agent_sort(&mut self, sort: &str) -> WireStatus {
+        const VALID: [&str; 6] = [
+            "active",
+            "updated",
+            "created",
+            "name",
+            "name_desc",
+            "manual",
+        ];
         if !VALID.contains(&sort) {
             return WireStatus::new(
                 "error",
@@ -4496,11 +4510,21 @@ mod tests {
         assert_eq!(engine.config.ui.agent_sort, "manual");
         assert_eq!(outcome.status.map(|s| s.tone), Some("info".to_string()));
 
+        // The descending-name mode is a valid value too (the TUI can set it even
+        // though the web picker does not offer it).
+        let outcome = engine
+            .apply_wire(WireCommand::SetAgentSort {
+                sort: "name_desc".to_string(),
+            })
+            .expect("apply set-agent-sort (name_desc)");
+        assert_eq!(engine.config.ui.agent_sort, "name_desc");
+        assert_eq!(outcome.status.map(|s| s.tone), Some("info".to_string()));
+
         engine.config_writer.flush();
         let disk =
             std::fs::read_to_string(&engine.paths.config_path).expect("read config after flush");
         assert!(
-            disk.contains("agent_sort = \"manual\""),
+            disk.contains("agent_sort = \"name_desc\""),
             "flushed config must carry the sort, got:\n{disk}"
         );
 
@@ -4511,7 +4535,7 @@ mod tests {
             })
             .expect("apply set-agent-sort (invalid)");
         assert_eq!(outcome.status.map(|s| s.tone), Some("error".to_string()));
-        assert_eq!(engine.config.ui.agent_sort, "manual");
+        assert_eq!(engine.config.ui.agent_sort, "name_desc");
     }
 
     #[test]

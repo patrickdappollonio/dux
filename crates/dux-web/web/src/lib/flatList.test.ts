@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   activeFirstSessions,
+  FLAT_SORT_LABELS,
   partitionQuiet,
   sortMainSessions,
   stateWord,
@@ -88,10 +89,22 @@ describe("sortMainSessions", () => {
     expect(sortMainSessions(sessions, "updated").map((s) => s.id)).toEqual(["a", "b"])
   })
 
+  it("sorts by name descending (Z to A) for a TUI-set name_desc", () => {
+    // The web does not offer name_desc in its picker but must DISPLAY it.
+    expect(sortMainSessions(sessions, "name_desc").map((s) => s.id)).toEqual(["b", "a"])
+  })
+
   it("does not mutate the input array", () => {
     const input = sessions.slice()
     sortMainSessions(input, "name")
     expect(input.map((s) => s.id)).toEqual(["b", "a"])
+  })
+})
+
+describe("FLAT_SORT_LABELS", () => {
+  it("labels name ascending and descending symmetrically", () => {
+    expect(FLAT_SORT_LABELS.name).toBe("Name (A to Z)")
+    expect(FLAT_SORT_LABELS.name_desc).toBe("Name (Z to A)")
   })
 })
 

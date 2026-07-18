@@ -123,6 +123,38 @@ describe("sortedSessionIds — name", () => {
   })
 })
 
+describe("sortedSessionIds — name_desc", () => {
+  it("orders case-insensitively descending (Z to A), the reverse of name", () => {
+    const sessions = [
+      session({ id: "1", title: "Charlie" }),
+      session({ id: "2", title: "alpha" }),
+      session({ id: "3", title: "Bravo" }),
+    ]
+    expect(sortedSessionIds(sessions, "name_desc")).toEqual(["1", "3", "2"])
+    // Exactly the reverse of the ascending order.
+    expect(sortedSessionIds(sessions, "name_desc")).toEqual(
+      sortedSessionIds(sessions, "name").reverse(),
+    )
+  })
+
+  it("falls back to branch_name when title is null", () => {
+    const sessions = [
+      session({ id: "1", title: null, branch_name: "alpha" }),
+      session({ id: "2", title: null, branch_name: "zebra" }),
+    ]
+    expect(sortedSessionIds(sessions, "name_desc")).toEqual(["2", "1"])
+  })
+
+  it("keeps original order for equal names (stable descending sort)", () => {
+    const sessions = [
+      session({ id: "a", title: "dup" }),
+      session({ id: "b", title: "Dup" }),
+      session({ id: "c", title: "dup" }),
+    ]
+    expect(sortedSessionIds(sessions, "name_desc")).toEqual(["a", "b", "c"])
+  })
+})
+
 describe("sortedSessionIds — purity", () => {
   it("does not mutate the input array", () => {
     const sessions = [

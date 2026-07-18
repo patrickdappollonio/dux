@@ -23,7 +23,10 @@ export const FLAT_SORT_LABELS: Record<FlatSortKey, string> = {
   active: "Active first",
   updated: "Recently updated",
   created: "Recently created",
-  name: "Name",
+  name: "Name (A to Z)",
+  // The web picker does not OFFER name_desc (only the TUI cycles into it), but
+  // the web must DISPLAY it when the TUI set it, so it needs a label.
+  name_desc: "Name (Z to A)",
   manual: "Manual order",
 }
 

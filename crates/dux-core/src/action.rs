@@ -116,9 +116,7 @@ pub enum Action {
     RenameSession,
     DeleteProject,
     RemoveProject,
-    SortAgentsByUpdated,
-    SortAgentsByCreated,
-    SortAgentsByName,
+    SortAgents,
     RemoveGitPane,
     EditMacros,
     DebugInput,
@@ -233,9 +231,7 @@ impl Action {
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
-            Action::SortAgentsByUpdated => "sort_agents_by_updated",
-            Action::SortAgentsByCreated => "sort_agents_by_created",
-            Action::SortAgentsByName => "sort_agents_by_name",
+            Action::SortAgents => "sort_agents",
             Action::ForceRedraw => "force_redraw",
             Action::RemoveGitPane => "remove_git_pane",
             Action::EditMacros => "edit_macros",
@@ -371,9 +367,9 @@ impl Action {
             Action::RenameSession => "Rename the selected agent session.",
             Action::DeleteProject => "Remove the selected project and its sessions.",
             Action::RemoveProject => "Remove project from app (keeps files on disk).",
-            Action::SortAgentsByUpdated => "Sort agents by most recently updated.",
-            Action::SortAgentsByCreated => "Sort agents by creation date (newest first).",
-            Action::SortAgentsByName => "Sort agents alphabetically by name.",
+            Action::SortAgents => {
+                "Cycle the agent-list sort mode (active, updated, created, name)."
+            }
             Action::ForceRedraw => "Force a full terminal redraw.",
             Action::RemoveGitPane => "Remove or restore the git pane.",
             Action::EditMacros => "Open the text macros editor.",
@@ -507,9 +503,7 @@ impl Action {
             | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject
-            | Action::SortAgentsByUpdated
-            | Action::SortAgentsByCreated
-            | Action::SortAgentsByName
+            | Action::SortAgents
             | Action::EditMacros
             | Action::DebugInput
             | Action::ToggleDiffLineNumbers

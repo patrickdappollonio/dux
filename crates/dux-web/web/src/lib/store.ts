@@ -3147,12 +3147,13 @@ export function reorderSessions(projectId: string, orderedIds: string[]): void {
     })
 }
 
-// Sort every project's sessions by the chosen key, mirroring the TUI palette
-// commands sort-agents-by-{updated,created,name}. There's no dedicated web sort
-// state: for each project we compute the sorted id order (sortedSessionIds, which
-// mirrors the TUI comparators exactly) and send the EXISTING `reorder_sessions`
-// command, which the server persists into the same shared order the TUI uses —
-// so the two surfaces stay in sync by construction.
+// Sort every project's sessions by the chosen key. This is the app menu's
+// ONE-SHOT reorder (distinct from the flat-list sidebar sort control, which sets
+// the shared `config.ui.agent_sort` display mode via setAgentSort): for each
+// project we compute the sorted id order (sortedSessionIds, which mirrors the TUI
+// comparators exactly) and send the EXISTING `reorder_sessions` command, which
+// the server persists into the shared global order — so the stored order the TUI
+// displays under "manual" stays in sync by construction.
 //
 // We deliberately DON'T set the optimistic `pendingSessionOrder` overlay here.
 // That overlay holds a single project; a sort touches N projects, so an overlay

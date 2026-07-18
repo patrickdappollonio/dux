@@ -195,6 +195,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Palette-only: opens the project chooser to pick a project that
+        // subsequent project-scoped palette commands act on. No default key.
+        action: Action::ManageProjects,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ForkAgent,
         default_keys: &[key!(f)],
         scopes: &[BindingScope::Left],
@@ -1111,21 +1120,7 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        action: Action::SortAgentsByUpdated,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
-    BindingDef {
-        action: Action::SortAgentsByCreated,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
-    BindingDef {
-        action: Action::SortAgentsByName,
+        action: Action::SortAgents,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -2264,6 +2259,7 @@ mod tests {
             "help",
             "input-debugging",
             "kill-running",
+            "manage-projects",
             "new-agent",
             "new-agent-from-pr",
             "new-agent-from-worktree",
@@ -2282,9 +2278,7 @@ mod tests {
             "resource-monitor",
             "show-agent",
             "show-terminal",
-            "sort-agents-by-created",
-            "sort-agents-by-name",
-            "sort-agents-by-updated",
+            "sort-agents",
             "start-web-server",
             "toggle-agent-auto-reopen",
             "toggle-always-show-tabs",

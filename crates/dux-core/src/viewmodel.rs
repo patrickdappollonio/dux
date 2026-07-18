@@ -249,14 +249,13 @@ pub struct SessionView {
     /// any-tab, mirroring `working`. Memory-only runtime state; the web surfaces
     /// this as a sidebar dot, a browser-tab count, and a favicon dot.
     pub needs_attention: bool,
-    /// Session creation time as an RFC 3339 / ISO 8601 string. Exposed so the
-    /// web client can compute the same sort orders the TUI offers
-    /// (`sort-agents-by-created`) and feed the result back through
-    /// `reorder_sessions`. Both surfaces persist into the shared order, so a
-    /// sort on either stays in sync by construction.
+    /// Session creation time as an RFC 3339 / ISO 8601 string. Exposed so both
+    /// surfaces can compute the same "recently created" display order over the
+    /// shared `config.ui.agent_sort` mode, so a sort set on either stays in sync
+    /// by construction.
     pub created_at: String,
     /// Session last-update time as an RFC 3339 / ISO 8601 string. Mirror of
-    /// `created_at`; backs the web's `sort-agents-by-updated` parity command.
+    /// `created_at`; backs the shared "recently updated" display sort.
     pub updated_at: String,
     /// The tab id the user last focused on this agent, verbatim from
     /// [`crate::model::AgentSession::last_focused_tab`]. `None` (or a value

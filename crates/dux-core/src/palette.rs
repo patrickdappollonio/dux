@@ -331,25 +331,13 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-project: web removes a project from its per-project menu/dialog.
     },
     PaletteCommand {
-        action: Action::SortAgentsByUpdated,
-        name: "sort-agents-by-updated",
-        description: "Sort agents by most recently updated",
-        // GLOBAL: reorders every project's agents; no target.
-        // Web equivalent: the app menu's "Sort agents by" submenu.
-    },
-    PaletteCommand {
-        action: Action::SortAgentsByCreated,
-        name: "sort-agents-by-created",
-        description: "Sort agents by creation date (newest first)",
-        // GLOBAL: reorders every project's agents; no target.
-        // Web equivalent: the app menu's "Sort agents by" submenu.
-    },
-    PaletteCommand {
-        action: Action::SortAgentsByName,
-        name: "sort-agents-by-name",
-        description: "Sort agents alphabetically by name",
-        // GLOBAL: reorders every project's agents; no target.
-        // Web equivalent: the app menu's "Sort agents by" submenu.
+        action: Action::SortAgents,
+        name: "sort-agents",
+        description: "Cycle the agent-list sort mode (active, updated, created, name)",
+        // GLOBAL: a display-only sort over the shared `config.ui.agent_sort`; no
+        // target. Cycles the five TUI modes (active, updated, created, name A to Z,
+        // name Z to A); it never reorders the stored order. Web equivalent: the
+        // sidebar's sort control (which also offers the web-only "manual" mode).
     },
     PaletteCommand {
         action: Action::RemoveGitPane,

@@ -8205,15 +8205,15 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn sort_sessions_by_name_persists_order_to_store() {
+    fn name_sort_mode_orders_display_without_mutating_sessions() {
+        // The TUI's name sort is a DISPLAY ordering only: setting
+        // config.ui.agent_sort = "name" and rebuilding orders left_items()
+        // alphabetically while engine.sessions stays in its incoming order.
         let mut app = test_app(default_bindings());
         let now = Utc::now();
         let project_id = app.engine.projects[0].id.clone();
         let project_path = app.engine.projects[0].path.clone();
 
-        // Replace the seeded session set with three named sessions so we can
-        // assert a deterministic alphabetical order. Each must also exist in the
-        // store so reorder_sessions can update its row.
         app.engine.sessions.clear();
         for name in ["charlie", "alpha", "bravo"] {
             let session = AgentSession {
@@ -8235,7 +8235,7 @@ not_a_real_action = ["x"]
                 started_providers: Vec::new(),
                 desired_running: false,
                 auto_reopen_enabled: true,
-                status: SessionStatus::Detached,
+                status: SessionStatus::Active,
                 created_at: now,
                 updated_at: now,
                 last_focused_tab: None,
@@ -8244,28 +8244,100 @@ not_a_real_action = ["x"]
             app.engine.sessions.push(session);
         }
 
-        app.sort_sessions_by_name();
+        app.engine.config.ui.agent_sort = "name".to_string();
+        app.rebuild_left_items();
 
-        // In-memory Vec is alphabetical.
+        // The DISPLAY order (left_items) is alphabetical.
+        let displayed: Vec<String> = app
+            .left_items()
+            .iter()
+            .filter_map(|item| match item {
+                LeftItem::Session(i) => Some(app.engine.sessions[*i].branch_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(displayed, vec!["alpha", "bravo", "charlie"]);
+
+        // engine.sessions is UNTOUCHED: still the incoming (charlie, alpha, bravo)
+        // order. The TUI never mutates the stored order for a display sort.
         let in_memory: Vec<String> = app
             .engine
             .sessions
             .iter()
             .map(|s| s.branch_name.clone())
             .collect();
-        assert_eq!(in_memory, vec!["alpha", "bravo", "charlie"]);
+        assert_eq!(in_memory, vec!["charlie", "alpha", "bravo"]);
+    }
 
-        // Reloading the store reflects the same persisted order.
-        let reloaded: Vec<String> = app
-            .engine
-            .session_store
-            .load_sessions()
-            .unwrap()
-            .into_iter()
-            .filter(|s| s.project_id == project_id)
-            .map(|s| s.branch_name)
+    #[test]
+    fn cycle_agent_sort_advances_through_five_modes_and_writes_config() {
+        let mut app = test_app(default_bindings());
+        // Default is "active".
+        assert_eq!(app.engine.config.ui.agent_sort, "active");
+
+        let expected = ["updated", "created", "name", "name_desc", "active"];
+        for want in expected {
+            app.cycle_agent_sort();
+            assert_eq!(app.engine.config.ui.agent_sort, want);
+        }
+
+        // A web-set "manual" restarts the cycle at "active" (the TUI never offers
+        // manual).
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.cycle_agent_sort();
+        assert_eq!(app.engine.config.ui.agent_sort, "active");
+    }
+
+    #[test]
+    fn manual_mode_displays_sessions_in_verbatim_order() {
+        // A web-set "manual" renders engine.sessions in verbatim order; the TUI
+        // displays but never offers manual.
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        let project_path = app.engine.projects[0].path.clone();
+
+        app.engine.sessions.clear();
+        for name in ["charlie", "alpha", "bravo"] {
+            let session = AgentSession {
+                id: format!("session-{name}"),
+                project_id: project_id.clone(),
+                project_path: Some(project_path.clone()),
+                provider: ProviderKind::from_str("codex"),
+                source_branch: "main".to_string(),
+                branch_name: name.to_string(),
+                initial_branch: name.to_string(),
+                worktree_path: app
+                    .engine
+                    .paths
+                    .worktrees_root
+                    .join(name)
+                    .display()
+                    .to_string(),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: true,
+                status: SessionStatus::Active,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            };
+            app.engine.sessions.push(session);
+        }
+
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.rebuild_left_items();
+
+        let displayed: Vec<String> = app
+            .left_items()
+            .iter()
+            .filter_map(|item| match item {
+                LeftItem::Session(i) => Some(app.engine.sessions[*i].branch_name.clone()),
+                _ => None,
+            })
             .collect();
-        assert_eq!(reloaded, vec!["alpha", "bravo", "charlie"]);
+        assert_eq!(displayed, vec!["charlie", "alpha", "bravo"]);
     }
 
     #[test]

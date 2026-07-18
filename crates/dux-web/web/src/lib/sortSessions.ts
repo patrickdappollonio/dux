@@ -1,14 +1,12 @@
-// Pure sort helper backing the web's "Sort agents by …" palette commands. These
-// mirror the TUI palette commands sort-agents-by-{updated,created,name} EXACTLY
-// (dux-tui/src/app/mod.rs sort_sessions_by_*), so a sort on either surface
-// produces the same order. The web has no dedicated sort state: it computes the
-// sorted id order here and feeds it back through the existing `reorder_sessions`
-// wire command (which the server persists into the same shared order the TUI
-// uses). Kept React-free so it's trivially unit-testable.
+// Pure comparators backing the shared agent-list display sort. These mirror the
+// TUI's `build_left_items` comparators EXACTLY (dux-tui/src/app/mod.rs), so a
+// mode set on either surface produces the same order. The sort mode is the shared
+// `config.ui.agent_sort` preference; this helper turns a mode into the ordered id
+// list the flat list renders. Kept React-free so it's trivially unit-testable.
 
 import type { SessionView } from "./types"
 
-export type SortKey = "updated" | "created" | "name"
+export type SortKey = "updated" | "created" | "name" | "name_desc"
 
 // The TUI's name key: title.as_deref().unwrap_or(&branch_name), lowercased.
 function nameKey(s: SessionView): string {
@@ -23,9 +21,29 @@ function epoch(iso: string): number {
   return Number.isNaN(ms) ? 0 : ms
 }
 
+// Compare two sessions by name (title-or-branch, lowercased) using Unicode CODE
+// POINTS, not UTF-16 code units: plain JS string comparison orders an
+// astral-plane char (emoji, U+10000+) by its surrogate halves, flipping the
+// order Rust's String::cmp (code points) produces — the two surfaces would
+// disagree for such titles. Spreading iterates code points, matching Rust's
+// `str::cmp` on the lowercased key exactly. Returns <0 / 0 / >0 (ascending).
+function compareName(a: SessionView, b: SessionView): number {
+  const ka = [...nameKey(a)]
+  const kb = [...nameKey(b)]
+  const len = Math.min(ka.length, kb.length)
+  for (let i = 0; i < len; i++) {
+    const ca = ka[i].codePointAt(0) ?? 0
+    const cb = kb[i].codePointAt(0) ?? 0
+    if (ca !== cb) return ca - cb
+  }
+  return ka.length - kb.length
+}
+
 // Return the session ids sorted by `by`, mirroring the TUI comparators:
 //   updated / created → newest first (Rust `Reverse(timestamp)`)
-//   name              → case-insensitive ascending on title-or-branch
+//   name              → case-insensitive ascending on title-or-branch (A to Z)
+//   name_desc         → the exact reverse of name (Z to A); the TUI sets this,
+//                       the web displays it but does not offer it in its picker
 //
 // Stability: the TUI uses Rust's `sort_by_key` / `sort_by`, which are stable.
 // `Array.prototype.sort` is required to be stable by the ECMAScript spec, so
@@ -44,22 +62,11 @@ export function sortedSessionIds(
       sorted.sort((a, b) => epoch(b.created_at) - epoch(a.created_at))
       break
     case "name":
-      sorted.sort((a, b) => {
-        // Compare by Unicode CODE POINTS, not UTF-16 code units: plain JS
-        // string comparison orders an astral-plane char (emoji, U+10000+) by
-        // its surrogate halves, flipping the order Rust's String::cmp (code
-        // points) produces — the two surfaces would disagree for such titles.
-        // Spreading iterates code points, matching Rust exactly.
-        const ka = [...nameKey(a)]
-        const kb = [...nameKey(b)]
-        const len = Math.min(ka.length, kb.length)
-        for (let i = 0; i < len; i++) {
-          const ca = ka[i].codePointAt(0) ?? 0
-          const cb = kb[i].codePointAt(0) ?? 0
-          if (ca !== cb) return ca - cb
-        }
-        return ka.length - kb.length
-      })
+      sorted.sort(compareName)
+      break
+    case "name_desc":
+      // Exactly the reverse of "name": same code-point key, inverted result.
+      sorted.sort((a, b) => -compareName(a, b))
       break
   }
   return sorted.map((s) => s.id)
