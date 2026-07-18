@@ -1007,6 +1007,19 @@ impl Engine {
             .any(|t| t.session_id == session_id && self.needs_attention.contains(&t.id))
     }
 
+    /// Whether ANY tab of the session (session-slot or extra) is currently
+    /// streaming output. The any-tab rollup the sidebar row's "working" spinner
+    /// uses, mirroring `session_needs_attention` and the viewmodel's `working`
+    /// field — so an agent whose non-slot tab is streaming still reads as working.
+    pub fn session_is_streaming(&self, session_id: &str) -> bool {
+        if self.is_agent_streaming(session_id) {
+            return true;
+        }
+        self.agent_tabs
+            .values()
+            .any(|t| t.session_id == session_id && self.is_agent_streaming(&t.id))
+    }
+
     /// True if the given key is currently marked in-flight.
     pub fn is_in_flight(&self, key: &InFlightKey) -> bool {
         self.in_flight.contains(key)
@@ -2855,6 +2868,35 @@ mod tests {
             .validate_project_init_path(fresh.path().to_string_lossy().as_ref())
             .expect("a plain folder must validate for init");
         assert_eq!(ok, fresh.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn session_is_streaming_rolls_up_any_tab() {
+        let (mut engine, _tmp) = test_engine();
+        // An extra tab of session s1 (its own tab id, session_id = s1) is streaming,
+        // while the session-slot tab (s1) is idle.
+        engine.agent_tabs.insert(
+            "s1-x".to_string(),
+            AgentTab {
+                id: "s1-x".to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        engine
+            .pty_activity
+            .insert("s1-x".to_string(), Instant::now());
+
+        assert!(
+            !engine.is_agent_streaming("s1"),
+            "the session-slot tab itself is idle"
+        );
+        assert!(
+            engine.session_is_streaming("s1"),
+            "the any-tab rollup must see the streaming extra tab"
+        );
     }
 
     #[test]

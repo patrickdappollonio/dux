@@ -798,7 +798,7 @@ impl App {
                         };
                         (glyph.to_string(), self.theme.session_attention)
                     } else if matches!(session.status, crate::model::SessionStatus::Active)
-                        && self.engine.is_agent_streaming(&session.id)
+                        && self.engine.session_is_streaming(&session.id)
                     {
                         let idx = self.spinner_frame_index();
                         (
