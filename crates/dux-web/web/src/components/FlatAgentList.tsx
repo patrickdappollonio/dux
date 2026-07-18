@@ -563,7 +563,7 @@ function QuietTail({
         <ChevronRight
           className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
         />
-        <span>Quiet</span>
+        <span>Inactive</span>
         <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
           {sessions.length}
         </span>

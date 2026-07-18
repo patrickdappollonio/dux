@@ -459,9 +459,9 @@ describe("AppSidebar flat agent row", () => {
     expect(screen.getByText("Project…")).toBeTruthy()
   })
 
-  it("collapses detached/exited agents into a Quiet tail", () => {
+  it("collapses detached/exited agents into an Inactive tail", () => {
     // Two projects: s1 (Repo) active, s2 (Other) detached. The detached agent must
-    // land under the collapsible "Quiet" toggle (label + a count badge), not the
+    // land under the collapsible "Inactive" toggle (label + a count badge), not the
     // main list.
     mockState = makeState({
       spine: makeTwoProjectSpine(),
@@ -477,9 +477,9 @@ describe("AppSidebar flat agent row", () => {
         <AppSidebar />
       </SidebarProvider>,
     )
-    const quietToggle = screen.getByRole("button", { name: /Quiet/ })
+    const quietToggle = screen.getByRole("button", { name: /Inactive/ })
     expect(quietToggle).toBeTruthy()
-    // The count rides in a badge next to the label, not inline as "Quiet · 1".
+    // The count rides in a badge next to the label, not inline as "Inactive · 1".
     expect(quietToggle.textContent).toContain("1")
   })
 })
