@@ -277,6 +277,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_checkout_inspect_ops: std::collections::HashMap::new(),
         pending_server_flip_op: None,
         pending_config_reload_op: None,
+        project_chooser_context: None,
     };
     app.interactive_patterns = app.bindings.interactive_byte_patterns();
     app.rebuild_left_items();

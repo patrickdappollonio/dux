@@ -18,6 +18,7 @@ pub enum Action {
     NewAgent,
     NewAgentFromPr,
     NewAgentFromWorktree,
+    ManageProjects,
     ForkAgent,
     ChangeAgentProvider,
     ChangeDefaultProvider,
@@ -154,6 +155,7 @@ impl Action {
             Action::NewAgent => "new_agent",
             Action::NewAgentFromPr => "new_agent_from_pr",
             Action::NewAgentFromWorktree => "new_agent_from_worktree",
+            Action::ManageProjects => "manage_projects",
             Action::ForkAgent => "fork_agent",
             Action::ChangeAgentProvider => "change_agent_provider",
             Action::ChangeDefaultProvider => "change_default_provider",
@@ -269,6 +271,9 @@ impl Action {
             Action::NewAgent => "Create a new agent session (worktree).",
             Action::NewAgentFromPr => "Create a new agent session from a GitHub pull request.",
             Action::NewAgentFromWorktree => "Create a new agent from an existing git worktree.",
+            Action::ManageProjects => {
+                "Choose a project to target for project-scoped palette actions."
+            }
             Action::ForkAgent => "Fork the selected agent into a fresh worktree and session.",
             Action::ChangeAgentProvider => {
                 "Swap the selected agent worktree to a different provider."
@@ -438,7 +443,7 @@ impl Action {
             | Action::ReconnectAgent
             | Action::DeleteSession
             | Action::DeleteTerminal => Some("Projects pane"),
-            Action::NewAgentFromPr => None,
+            Action::NewAgentFromPr | Action::ManageProjects => None,
             Action::ExitInteractive
             | Action::OpenMacroBar
             | Action::OpenCurrentPullRequest

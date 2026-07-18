@@ -4337,6 +4337,119 @@ impl App {
                     offset: state.offset(),
                 };
             }
+            PromptState::PickProject {
+                intent,
+                entries,
+                selected,
+            } => {
+                self.render_dim_overlay(frame);
+                let area = centered_rect(72, 58, frame.area());
+                self.clear_overlay_area(frame, area);
+
+                let confirm_key = self.bindings.label_for(Action::Confirm);
+                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let move_down = self.bindings.label_for(Action::MoveDown);
+                let move_up = self.bindings.label_for(Action::MoveUp);
+                let mut bottom_spans = vec![Span::raw(" ")];
+                bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                bottom_spans.push(Span::styled(
+                    " down  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                bottom_spans.push(Span::styled(
+                    " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                bottom_spans.push(Span::styled(
+                    " choose  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                bottom_spans.push(Span::styled(
+                    " cancel",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+
+                let name_col = entries
+                    .iter()
+                    .map(|entry| entry.name.chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 28);
+                let items = entries
+                    .iter()
+                    .map(|entry| {
+                        let mut spans: Vec<Span> = Vec::new();
+                        if entry.path_missing {
+                            spans.push(Span::styled(
+                                " ⚠ ",
+                                Style::default().fg(self.theme.warning_fg),
+                            ));
+                        } else {
+                            spans.push(Span::raw("   "));
+                        }
+                        let name = git::ellipsize_middle(&entry.name, name_col);
+                        spans.push(Span::styled(
+                            format!("{:name_col$}", name),
+                            Style::default()
+                                .fg(self.theme.text_fg)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        let count_label = match entry.agent_count {
+                            0 => "  no agents".to_string(),
+                            1 => "  1 agent".to_string(),
+                            n => format!("  {n} agents"),
+                        };
+                        spans.push(Span::styled(
+                            count_label,
+                            Style::default().fg(self.theme.hint_desc_fg),
+                        ));
+                        spans.push(Span::styled(
+                            format!("  {}", entry.path),
+                            Style::default().fg(self.theme.hint_dim_desc_fg),
+                        ));
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect::<Vec<_>>();
+
+                let [details_area, list_area] = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3), Constraint::Min(4)])
+                    .areas(area);
+
+                let detail_lines = vec![Line::from(vec![Span::styled(
+                    format!(" Pick a project to continue ({} available).", entries.len()),
+                    Style::default().fg(self.theme.hint_desc_fg),
+                )])];
+                Paragraph::new(detail_lines)
+                    .block(
+                        self.themed_overlay_block(intent.title())
+                            .title_bottom(Line::from(bottom_spans)),
+                    )
+                    .render(details_area, frame.buffer_mut());
+
+                let mut state = ListState::default().with_selected(Some(*selected));
+                let list_block = Block::default()
+                    .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.overlay_border))
+                    .style(Style::default().bg(self.theme.overlay_bg));
+                let list_inner = list_block.inner(list_area);
+                StatefulWidget::render(
+                    List::new(items)
+                        .block(list_block)
+                        .highlight_style(self.theme.selection_style()),
+                    list_area,
+                    frame.buffer_mut(),
+                    &mut state,
+                );
+                self.overlay_layout.active = OverlayMouseLayout::PickProject {
+                    list: list_inner,
+                    items: entries.len(),
+                    offset: state.offset(),
+                };
+            }
             PromptState::KillRunning(prompt) => {
                 self.render_dim_overlay(frame);
                 let popup = centered_rect(78, 72, frame.area());

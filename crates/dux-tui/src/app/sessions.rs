@@ -170,18 +170,111 @@ impl App {
         Ok(())
     }
 
+    /// `new-agent` / `n`: open the project chooser to pick which project the new
+    /// agent belongs to. The flat agent list has no project header to select, so
+    /// every project (agent-less included) is reachable only through the chooser.
     pub(crate) fn create_agent_for_selected_project(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.open_project_chooser(ProjectChooserIntent::NewAgent)
+    }
 
+    /// Per-project body for `NewAgent`: kicks off branch inspection, which then
+    /// opens the name prompt. Shared by the chooser and any direct selection
+    /// path so the creation logic lives in exactly one place.
+    pub(crate) fn begin_new_agent_for_project(&mut self, project: Project) -> Result<()> {
+        // Close the chooser (or any prior prompt) before dispatching; the name
+        // prompt is opened later by the branch-inspection completion handler.
+        self.prompt = PromptState::None;
         if project.path_missing {
             return Ok(());
         }
-
         self.dispatch_create_agent_branch_inspection(project);
         Ok(())
+    }
+
+    /// Build one chooser row per project from the live engine state, counting the
+    /// sessions that belong to each. Runtime-derived, display-only.
+    pub(crate) fn build_project_chooser_entries(&self) -> Vec<ProjectChooserEntry> {
+        self.engine
+            .projects
+            .iter()
+            .map(|project| {
+                let agent_count = self
+                    .engine
+                    .sessions
+                    .iter()
+                    .filter(|session| session.project_id == project.id)
+                    .count();
+                ProjectChooserEntry {
+                    id: project.id.clone(),
+                    name: project.name.clone(),
+                    path: project.path.clone(),
+                    agent_count,
+                    path_missing: project.path_missing,
+                }
+            })
+            .collect()
+    }
+
+    /// Open the project chooser for the given intent. With zero projects there is
+    /// nothing to pick, so this sets a helpful error instead of showing an empty
+    /// modal. The gh availability gate for the PR intent is enforced by the
+    /// caller (`open_new_agent_from_pr_prompt`) before we get here.
+    pub(crate) fn open_project_chooser(&mut self, intent: ProjectChooserIntent) -> Result<()> {
+        let entries = self.build_project_chooser_entries();
+        if entries.is_empty() {
+            self.set_error("No projects yet. Add one first.");
+            return Ok(());
+        }
+        self.input_target = InputTarget::None;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.prompt = PromptState::PickProject {
+            intent,
+            entries,
+            selected: 0,
+        };
+        Ok(())
+    }
+
+    /// Confirm the highlighted project in the chooser and dispatch by intent. An
+    /// empty list is a no-op; a vanished project surfaces an error. `Manage`
+    /// stores the pick as the project-action context and closes the modal.
+    pub(crate) fn confirm_project_chooser_selection(&mut self) -> Result<()> {
+        let (intent, project_id) = match &self.prompt {
+            PromptState::PickProject {
+                intent,
+                entries,
+                selected,
+            } => match entries.get(*selected) {
+                Some(entry) => (*intent, entry.id.clone()),
+                None => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        let Some(project) = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .cloned()
+        else {
+            self.prompt = PromptState::None;
+            self.set_error("That project is no longer available.");
+            return Ok(());
+        };
+        match intent {
+            ProjectChooserIntent::NewAgent => self.begin_new_agent_for_project(project),
+            ProjectChooserIntent::FromPr => self.begin_pr_agent_for_project(project),
+            ProjectChooserIntent::FromWorktree => self.begin_worktree_agent_for_project(project),
+            ProjectChooserIntent::Manage => {
+                self.project_chooser_context = Some(project.id.clone());
+                self.prompt = PromptState::None;
+                self.set_info(format!(
+                    "Project \"{}\" is now the target for project actions.",
+                    project.name
+                ));
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn continue_create_agent_after_branch_inspection(
@@ -214,13 +307,17 @@ impl App {
         })
     }
 
+    /// `new-agent-from-worktree`: open the project chooser, then (per project)
+    /// load that project's worktrees into `PickProjectWorktree`.
     pub(crate) fn create_agent_from_existing_worktree(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
-            self.set_error("Select a project first.");
-            return Ok(());
-        };
+        self.open_project_chooser(ProjectChooserIntent::FromWorktree)
+    }
 
+    /// Per-project body for `FromWorktree`: opens the worktree picker and spawns
+    /// the worktrees loader. Shared by the chooser and any direct selection path.
+    pub(crate) fn begin_worktree_agent_for_project(&mut self, project: Project) -> Result<()> {
         if project.path_missing {
+            self.prompt = PromptState::None;
             self.set_warning(format!("Project path not found: {}", project.path));
             return Ok(());
         }
@@ -278,6 +375,8 @@ impl App {
         })
     }
 
+    /// `new-agent-from-pr`: fail fast if gh integration is unavailable, otherwise
+    /// open the project chooser. The chosen project then opens the PR input.
     pub(crate) fn open_new_agent_from_pr_prompt(&mut self) -> Result<()> {
         if !self.github_pr_agent_command_available() {
             self.set_error(
@@ -285,11 +384,14 @@ impl App {
             );
             return Ok(());
         }
-        let Some(project) = self.selected_project().cloned() else {
-            self.set_error("Select a project first to create an agent from a PR.");
-            return Ok(());
-        };
+        self.open_project_chooser(ProjectChooserIntent::FromPr)
+    }
+
+    /// Per-project body for `FromPr`: opens the PR-number/URL input for the
+    /// chosen project. Shared by the chooser and any direct selection path.
+    pub(crate) fn begin_pr_agent_for_project(&mut self, project: Project) -> Result<()> {
         if project.path_missing {
+            self.prompt = PromptState::None;
             self.set_warning(format!(
                 "Cannot create an agent from a PR: path not found for \"{}\"",
                 project.name
@@ -302,7 +404,7 @@ impl App {
             project,
             input: TextInput::new(),
         };
-        self.set_info("Paste a GitHub PR URL or enter a PR number for the selected project.");
+        self.set_info("Paste a GitHub PR URL or enter a PR number for the chosen project.");
         Ok(())
     }
 
@@ -3827,6 +3929,7 @@ mod tests {
             pending_checkout_inspect_ops: std::collections::HashMap::new(),
             pending_server_flip_op: None,
             pending_config_reload_op: None,
+            project_chooser_context: None,
         };
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         app.rebuild_left_items();

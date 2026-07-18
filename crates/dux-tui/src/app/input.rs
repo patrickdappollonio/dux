@@ -75,6 +75,7 @@ enum PromptMouseTarget {
     BrowseProjectItem(usize),
     PickEditorItem(usize),
     PickProjectWorktreeItem(usize),
+    PickProjectItem(usize),
     ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
     ChangeAgentProviderCancel,
@@ -231,6 +232,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::BrowseProjectItem(_)
             | PromptMouseTarget::PickEditorItem(_)
             | PromptMouseTarget::PickProjectWorktreeItem(_)
+            | PromptMouseTarget::PickProjectItem(_)
             | PromptMouseTarget::StartupCommandLogItem(_)
             | PromptMouseTarget::StartupCommandInput
             | PromptMouseTarget::ChangeThemeItem(_)
@@ -642,6 +644,7 @@ impl App {
                 Action::MoveDown => {
                     if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
                         self.selected_left = next;
+                        self.project_chooser_context = None;
                         self.close_diff_view();
                         self.reload_changed_files();
                         self.update_missing_project_warning();
@@ -657,6 +660,7 @@ impl App {
                         self.previous_selectable_left_item_before(self.selected_left)
                     {
                         self.selected_left = prev;
+                        self.project_chooser_context = None;
                         self.close_diff_view();
                         self.reload_changed_files();
                         self.update_missing_project_warning();
@@ -2519,6 +2523,30 @@ impl App {
             return Ok(false);
         }
 
+        if let PromptState::PickProject {
+            entries, selected, ..
+        } = &mut self.prompt
+        {
+            match self.bindings.lookup(&key, BindingScope::Palette) {
+                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                Some(Action::MoveDown) => {
+                    if *selected + 1 < entries.len() {
+                        *selected += 1;
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                Some(Action::Confirm) => {
+                    self.confirm_project_chooser_selection()?;
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+
         if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -3806,6 +3834,13 @@ impl App {
                 ..
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickProjectWorktreeItem),
+            OverlayMouseLayout::PickProject {
+                list,
+                items,
+                offset,
+                ..
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::PickProjectItem),
             OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::StartupCommandLogs {
                 list,
@@ -4269,6 +4304,7 @@ impl App {
         self.fullscreen_overlay = FullscreenOverlay::None;
         if self.selected_left != index {
             self.selected_left = index;
+            self.project_chooser_context = None;
             self.close_diff_view();
             self.reload_changed_files();
         }
@@ -5600,6 +5636,20 @@ impl App {
                     self.set_error(format!("{err:#}"));
                 }
             }
+            PromptMouseTarget::PickProjectItem(index) => {
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                if let PromptState::PickProject {
+                    entries, selected, ..
+                } = &mut self.prompt
+                    && index < entries.len()
+                {
+                    *selected = index;
+                }
+                if double_click && let Err(err) = self.confirm_project_chooser_selection() {
+                    self.set_error(format!("{err:#}"));
+                }
+            }
             PromptMouseTarget::StartupCommandLogItem(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
@@ -6880,9 +6930,9 @@ mod tests {
         KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
         LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
         NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        PickProjectWorktreePrompt, ProcessInfo, ProjectWorktreeEntry, PromptState, PullTarget,
-        ResourceKind, ResourceStats, RightSection, RuntimeTargetId, StartupCommandLogPrompt,
-        TextInput, WorkerEvent,
+        PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry,
+        PromptState, PullTarget, ResourceKind, ResourceStats, RightSection, RuntimeTargetId,
+        StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
@@ -8324,7 +8374,8 @@ not_a_real_action = ["x"]
     fn create_agent_always_opens_name_prompt_empty_by_default() {
         let mut app = test_app(default_bindings());
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
@@ -8357,7 +8408,8 @@ not_a_real_action = ["x"]
         set_remote_default(&repo_path, "main");
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
         match &app.prompt {
@@ -8378,7 +8430,8 @@ not_a_real_action = ["x"]
         let repo_path = PathBuf::from(&app.engine.projects[0].path);
         run_git(&repo_path, &["switch", "-c", "feature"]);
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "feature", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
@@ -8388,7 +8441,8 @@ not_a_real_action = ["x"]
     fn create_agent_unknown_default_on_main_opens_name_prompt() {
         let mut app = test_app(default_bindings());
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         assert!(matches!(app.prompt, PromptState::NameNewAgent { .. }));
@@ -8477,7 +8531,8 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         app.engine.projects[0].leading_branch = Some("missing-main".to_string());
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         drain_until(&mut app, |app| {
             app.status
                 .text()
@@ -8550,7 +8605,8 @@ not_a_real_action = ["x"]
             .defaults
             .enable_randomized_pet_name_by_default = true;
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -8599,10 +8655,19 @@ not_a_real_action = ["x"]
     #[test]
     fn palette_command_opens_project_worktree_picker() {
         let mut app = test_app(default_bindings());
-        // Flat model: the picker targets the selected agent's project (the
-        // fixture selects the seeded session, which belongs to projects[0]).
-
+        // Flat model: new-agent-from-worktree opens the project chooser first;
+        // confirming a project then loads that project's worktrees.
         app.execute_command("new-agent-from-worktree".to_string())
+            .unwrap();
+        assert!(matches!(
+            app.prompt,
+            PromptState::PickProject {
+                intent: ProjectChooserIntent::FromWorktree,
+                ..
+            }
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
@@ -8613,6 +8678,224 @@ not_a_real_action = ["x"]
             }
             other => panic!("expected PickProjectWorktree prompt, got {other:?}"),
         }
+    }
+
+    /// Push a second, agent-less project onto the fixture's engine so the chooser
+    /// has more than one row. Returns its id.
+    fn add_agentless_project(app: &mut App, id: &str, name: &str) -> String {
+        app.engine.projects.push(Project {
+            id: id.to_string(),
+            name: name.to_string(),
+            path: format!("/tmp/{id}"),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: None,
+        });
+        id.to_string()
+    }
+
+    #[test]
+    fn new_agent_opens_chooser_listing_all_projects_with_agent_counts() {
+        let mut app = test_app(default_bindings());
+        // The fixture seeds one project ("demo") with one session; add a second,
+        // agent-less project so the chooser must surface both.
+        add_agentless_project(&mut app, "project-2", "empty");
+
+        app.execute_command("new-agent".to_string()).unwrap();
+
+        match &app.prompt {
+            PromptState::PickProject {
+                intent, entries, ..
+            } => {
+                assert_eq!(*intent, ProjectChooserIntent::NewAgent);
+                assert_eq!(entries.len(), 2);
+                let demo = entries.iter().find(|e| e.id == "project-1").unwrap();
+                assert_eq!(demo.agent_count, 1);
+                let empty = entries.iter().find(|e| e.id == "project-2").unwrap();
+                assert_eq!(empty.agent_count, 0);
+            }
+            other => panic!("expected PickProject prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_agent_with_no_projects_sets_error_and_opens_no_modal() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions.clear();
+        app.engine.projects.clear();
+        app.rebuild_left_items();
+
+        app.execute_command("new-agent".to_string()).unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("No projects yet"));
+    }
+
+    #[test]
+    fn chooser_new_agent_on_agentless_project_proceeds_to_branch_inspection() {
+        let mut app = test_app(default_bindings());
+        // Point the second project at a real repo so branch inspection can run.
+        let repo = PathBuf::from(&app.engine.projects[0].path)
+            .parent()
+            .unwrap()
+            .join("second-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_test_repo(&repo);
+        app.engine.projects.push(Project {
+            id: "project-2".to_string(),
+            name: "second".to_string(),
+            path: repo.to_string_lossy().to_string(),
+            explicit_default_provider: None,
+            default_provider: ProviderKind::from_str("codex"),
+            leading_branch: Some("main".to_string()),
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: Default::default(),
+            current_branch: "main".to_string(),
+            branch_status: ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: None,
+        });
+
+        app.execute_command("new-agent".to_string()).unwrap();
+        // Move to the agent-less second project and confirm.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
+        // Simulate the branch-inspection worker returning for the chosen project.
+        let project = app.engine.projects[1].clone();
+        assert_eq!(project.id, "project-2");
+        app.engine
+            .worker_tx
+            .send(WorkerEvent::CreateAgentBranchInspected {
+                project,
+                result: Ok(CreateAgentBranchInspection {
+                    current_branch: "main".to_string(),
+                    leading_branch: "main".to_string(),
+                }),
+                status_op_id: None,
+            })
+            .unwrap();
+        app.drain_events();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { request, .. } => match request {
+                CreateAgentRequest::NewProject { project, .. } => {
+                    assert_eq!(project.id, "project-2");
+                }
+                other => panic!("expected NewProject request, got {other:?}"),
+            },
+            other => panic!("expected NameNewAgent prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pr_chooser_respects_gh_gate() {
+        let mut app = test_app(default_bindings());
+        // gh integration is disabled in the fixture, so the command must fail
+        // fast without opening the chooser.
+        assert!(!app.github_pr_agent_command_available());
+
+        app.execute_command("new-agent-from-pr".to_string())
+            .unwrap();
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status
+                .text()
+                .contains("GitHub PR agent creation requires")
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_project_chooser() {
+        let mut app = test_app(default_bindings());
+        app.execute_command("manage-projects".to_string()).unwrap();
+        assert!(matches!(app.prompt, PromptState::PickProject { .. }));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn manage_projects_context_targets_project_until_agent_reselected() {
+        let mut app = test_app(default_bindings());
+        let other = add_agentless_project(&mut app, "project-2", "empty");
+
+        // Give project-1 two Active agent rows so navigation moves between two
+        // Session rows deterministically (no Inactive tail / toggle).
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        let project_path = app.engine.projects[0].path.clone();
+        app.engine.sessions.clear();
+        for name in ["alpha", "bravo"] {
+            app.engine.sessions.push(AgentSession {
+                id: format!("session-{name}"),
+                project_id: project_id.clone(),
+                project_path: Some(project_path.clone()),
+                provider: ProviderKind::from_str("codex"),
+                source_branch: "main".to_string(),
+                branch_name: name.to_string(),
+                initial_branch: name.to_string(),
+                worktree_path: app
+                    .engine
+                    .paths
+                    .worktrees_root
+                    .join(name)
+                    .display()
+                    .to_string(),
+                title: None,
+                started_providers: Vec::new(),
+                desired_running: false,
+                auto_reopen_enabled: true,
+                status: SessionStatus::Active,
+                created_at: now,
+                updated_at: now,
+                last_focused_tab: None,
+            });
+        }
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("a session row");
+
+        // Pick the agent-less project via the manage-projects chooser.
+        app.execute_command("manage-projects".to_string()).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(app.project_chooser_context.as_deref(), Some(other.as_str()));
+        assert_eq!(
+            app.selected_project().map(|p| p.id.clone()),
+            Some(other.clone())
+        );
+
+        // Navigating to a different agent row clears the context and reverts to
+        // the selected agent's project.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.project_chooser_context.is_none());
+        assert_eq!(
+            app.selected_project().map(|p| p.id.clone()),
+            Some("project-1".to_string())
+        );
     }
 
     #[test]
@@ -8891,7 +9174,8 @@ not_a_real_action = ["x"]
             .defaults
             .pull_before_creating_agent_by_default = true;
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         match &app.prompt {
@@ -8915,7 +9199,8 @@ not_a_real_action = ["x"]
             .defaults
             .pull_before_creating_agent_by_default = true;
 
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         let expect_focus = |app: &App, expected: NameNewAgentFocus| match &app.prompt {
@@ -9013,7 +9298,8 @@ not_a_real_action = ["x"]
     #[test]
     fn name_prompt_toggle_randomized_name_fills_and_clears_input() {
         let mut app = test_app(default_bindings());
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -13105,7 +13391,8 @@ cyan = "#00ffff"
     #[test]
     fn mouse_click_name_prompt_checkbox_toggles_randomized_name() {
         let mut app = test_app(default_bindings());
-        app.create_agent_for_selected_project().unwrap();
+        let project = app.selected_project().cloned().expect("selected project");
+        app.begin_new_agent_for_project(project).unwrap();
         complete_create_agent_branch_inspection(&mut app, "main", "main");
         install_name_new_agent_overlay(&mut app);
 

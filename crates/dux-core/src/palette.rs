@@ -73,6 +73,15 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-project: web's attach-worktree dialog is launched per project.
     },
     PaletteCommand {
+        action: Action::ManageProjects,
+        name: "manage-projects",
+        description: "Choose a project to target for project actions",
+        // Per-project (chooser): opens the project chooser so project-scoped
+        // palette commands act on the picked project. The web reaches every
+        // project through its Add-project picker and per-project ⋯ menus, so
+        // there is no equivalent app-menu entry.
+    },
+    PaletteCommand {
         action: Action::ForkAgent,
         name: "fork-agent",
         description: "Fork the selected agent into a fresh worktree and session",

@@ -332,6 +332,12 @@ pub struct App {
     /// TUI's view-handler final is routed through the op.
     pub(crate) pending_config_reload_op:
         Option<dux_core::engine::HandlerStatusOp<TuiConfigReloadOutcome>>,
+    /// The project the `manage-projects` chooser picked, if any. When set (and
+    /// the project still exists), `selected_project()` resolves to it instead of
+    /// the selected agent's project, so project-scoped palette commands act on
+    /// the chosen project. Cleared when the user navigates to a different agent
+    /// row, so it never silently hijacks selection.
+    pub(crate) project_chooser_context: Option<String>,
 }
 
 /// Handler-resolved outcome for the server-flip op (see
@@ -970,6 +976,47 @@ pub(crate) enum ProjectWorktreeVisualRow {
     Entry(usize),
 }
 
+/// Why the project chooser modal is open. A flat agent list has no project
+/// header to select, so every project-scoped creation entry point (and the
+/// palette's `manage-projects`) routes through the chooser, which lists ALL
+/// projects (agent-less included). The intent decides what confirming a project
+/// does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectChooserIntent {
+    /// Create a new agent in the chosen project.
+    NewAgent,
+    /// Create a new agent from a GitHub PR in the chosen project.
+    FromPr,
+    /// Create a new agent from an existing worktree of the chosen project.
+    FromWorktree,
+    /// Make the chosen project the target for project-scoped palette commands.
+    Manage,
+}
+
+impl ProjectChooserIntent {
+    /// Modal title reflecting the pending action.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            ProjectChooserIntent::NewAgent => "New agent in project",
+            ProjectChooserIntent::FromPr => "New agent from PR",
+            ProjectChooserIntent::FromWorktree => "New agent from worktree",
+            ProjectChooserIntent::Manage => "Manage project",
+        }
+    }
+}
+
+/// One row in the project chooser: a project plus derived, display-only facts
+/// (its agent count and whether its path is missing). Built from the live
+/// `engine.projects` + `engine.sessions`; never persisted.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectChooserEntry {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) agent_count: usize,
+    pub(crate) path_missing: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PickProjectWorktreePrompt {
     pub(crate) project: Project,
@@ -1084,6 +1131,14 @@ pub(crate) enum PromptState {
     },
     #[allow(dead_code)]
     StartupCommandLogs(StartupCommandLogPrompt),
+    /// The project chooser: lists every project (agent-less included) so a
+    /// project-scoped action can target one when the flat agent list has no
+    /// project header to select. `selected` indexes `entries`.
+    PickProject {
+        intent: ProjectChooserIntent,
+        entries: Vec<ProjectChooserEntry>,
+        selected: usize,
+    },
     PickProjectWorktree(PickProjectWorktreePrompt),
     KillRunning(KillRunningPrompt),
     ConfirmKillRunning(ConfirmKillRunningPrompt),
@@ -1509,6 +1564,11 @@ pub(crate) enum OverlayMouseLayout {
         offset: usize,
     },
     PickProjectWorktree {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
+    PickProject {
         list: Rect,
         items: usize,
         offset: usize,
@@ -1969,6 +2029,7 @@ impl App {
             pending_checkout_inspect_ops: HashMap::new(),
             pending_server_flip_op: None,
             pending_config_reload_op: None,
+            project_chooser_context: None,
         };
         // First boot relaunches prior sessions; a resume must not — the engine
         // handed back from the web server already owns the live providers, and
@@ -2647,6 +2708,7 @@ impl App {
             "new-agent" => self.create_agent_for_selected_project(),
             "new-agent-from-pr" => self.open_new_agent_from_pr_prompt(),
             "new-agent-from-worktree" => self.create_agent_from_existing_worktree(),
+            "manage-projects" => self.open_project_chooser(ProjectChooserIntent::Manage),
             "fork-agent" => self.fork_selected_session(),
             "change-agent-provider" => self.open_change_agent_provider_prompt(),
             "new-agent-tab" => self.open_new_tab_provider_prompt(),
@@ -3123,6 +3185,15 @@ impl App {
     /// Inactive toggle) or the agent's project record is gone (orphan). Reaching an
     /// agent-less project's actions goes through the project chooser, not selection.
     pub(crate) fn selected_project(&self) -> Option<&Project> {
+        // A `manage-projects` pick wins while it points at a project that still
+        // exists; this is how project-scoped palette commands reach an
+        // agent-less project. A stale id (the project was removed) falls through
+        // to the selected agent's project.
+        if let Some(id) = &self.project_chooser_context
+            && let Some(project) = self.engine.projects.iter().find(|p| &p.id == id)
+        {
+            return Some(project);
+        }
         match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => {
                 self.engine.sessions.get(*index).and_then(|session| {
