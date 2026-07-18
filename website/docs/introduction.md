@@ -31,7 +31,8 @@ walk away and reconnect later.
 
 The window is split into three panes:
 
-- The **left pane** lists your projects and the agent sessions under each one.
+- The **left pane** lists your agents in a single flat list, most-active first,
+  with a search filter and a project chooser for creating or targeting a project.
 - The **center pane** shows the focused agent's live terminal output, or a diff
   view when you want to review changes.
 - The **right pane** shows the files an agent has changed, with diffs.

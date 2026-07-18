@@ -52,9 +52,9 @@ enable_randomized_pet_name_by_default = false
 
 ## Creating a new agent from scratch
 
-Select a project in the left pane and run the `new-agent` palette command. dux
-inspects the project's current branch in the background, then opens the naming
-prompt.
+Run the `new-agent` palette command and pick a project from the chooser (every
+project is listed, including ones with no agents yet). dux inspects that
+project's current branch in the background, then opens the naming prompt.
 
 On confirmation, dux runs `git worktree add -b <name> <path> <leading-branch>`,
 branching from the project's leading branch. If the name you entered matches an
@@ -98,7 +98,7 @@ and embedded-repository contents, and empty directories.
 
 ## Creating an agent from a GitHub PR
 
-Select a project and run the `new-agent-from-pr` palette command. This path is
+Run the `new-agent-from-pr` palette command and pick a project from the chooser. This path is
 only available when the `gh` CLI is installed, authenticated (`gh auth login`),
 and the `github_integration` setting is enabled (it defaults to `true`):
 
@@ -143,8 +143,9 @@ dux pauses PR checks until it recovers and tells you in the status line.
 
 ## Creating an agent from an existing worktree
 
-Select a project and run the `new-agent-from-worktree` palette command. dux opens
-a picker that lists every git worktree it finds for that project's repository.
+Run the `new-agent-from-worktree` palette command and pick a project from the
+chooser. dux opens a picker that lists every git worktree it finds for that
+project's repository.
 Worktrees are grouped into two categories:
 
 - **Managed worktrees**: worktrees already under dux's `worktrees/` directory.

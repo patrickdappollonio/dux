@@ -14,9 +14,13 @@ everything one click away.
 
 On a desktop-width screen it is three panes, same as the TUI:
 
-- A collapsible **left sidebar** lists your projects and the agents under each,
-  grouped into projects that have agents and projects that do not. Drag rows to
-  reorder projects and sessions. Toggle the sidebar with `Ctrl-b`.
+- A collapsible **left sidebar** lists your agents in a single flat list, no
+  longer grouped by project, with the dormant ones tucked into a collapsible
+  Inactive tail. A sort control orders the list (Active first by default, or by
+  recently updated, recently created, name, or a manual drag order), and a
+  search box filters it. Drag rows to arrange them by hand, and use the New
+  agent and Add project controls (each a split button with a menu) to create
+  work or reach a project. Toggle the sidebar with `Ctrl-b`.
 - The **center pane** is the focused agent's live terminal, or a welcome screen
   when nothing is selected.
 - The **right Changes pane** shows what the focused agent has changed. You can
