@@ -64,6 +64,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
        is to be noticed from the corner of your eye. Pure opacity so reduced
        motion can drop it wholesale (`motion-reduce:animate-none` on the dot). */
     --animate-attention-pulse: attention-pulse 2s ease-in-out infinite;
+    /* One-shot fade+rise for the row's state word (Working / Idle / Detached / …)
+       so it transitions on change instead of snapping. Replayed by keying the span
+       on the label, which remounts it each time the state changes. */
+    --animate-state-word: state-word-swap 0.28s ease-out;
+}
+
+@keyframes state-word-swap {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes agent-working {

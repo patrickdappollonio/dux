@@ -386,7 +386,16 @@ function AgentFlatRow({
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <ProjectTag name={projectName} />
                 <Dot className="text-muted-foreground" />
-                <span className={cn("shrink-0 font-medium", word.className)}>
+                {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
+                    …) remounts the span and replays the one-shot fade+rise instead
+                    of snapping the text. */}
+                <span
+                  key={word.label}
+                  className={cn(
+                    "shrink-0 font-medium motion-safe:animate-state-word",
+                    word.className,
+                  )}
+                >
                   {word.label}
                 </span>
                 {branchDiverges ? (
