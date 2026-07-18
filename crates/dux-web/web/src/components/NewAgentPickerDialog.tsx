@@ -20,6 +20,8 @@ import {
   closeNewAgentPicker,
   createAgentInProject,
   openAddProject,
+  openAttachWorktree,
+  openCreateAgentFromPr,
   useDux,
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
@@ -51,8 +53,30 @@ export function NewAgentPickerDialog() {
   )
 }
 
+// Per-intent copy + the action a project row fires. "new" keeps the pick-provider-
+// then-Create flow; the other two are guided "pick a project" flows that hand off
+// to the existing from-PR / attach-worktree dialogs.
+const INTENT_COPY = {
+  new: {
+    title: "New agent",
+    description:
+      "Pick a project and a provider, then create. Every project action lives in each project's menu.",
+  },
+  from_pr: {
+    title: "New agent from PR",
+    description: "Pick a project to create an agent from a pull request.",
+  },
+  from_worktree: {
+    title: "New agent from existing worktree",
+    description: "Pick a project to adopt an existing worktree as an agent.",
+  },
+} as const
+
 function PickerBody() {
-  const { spine, bootstrap } = useDux()
+  const { spine, bootstrap, newAgentPickerIntent } = useDux()
+  // Default to "new" so a missing value (older state, a test that only sets
+  // newAgentPickerOpen) still renders the standard create flow.
+  const intent = newAgentPickerIntent ?? "new"
   const projects = useMemo(() => spine?.projects ?? [], [spine])
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
   const providers = bootstrap?.available_providers ?? []
@@ -93,6 +117,23 @@ function PickerBody() {
     setProvider(project.default_provider)
   }
 
+  // What clicking a project row does, by intent. "new" just selects it (Create
+  // finishes the flow); the from-PR / from-worktree intents close this picker and
+  // hand off to that project's dedicated dialog immediately.
+  function onProjectRow(project: ProjectView) {
+    if (intent === "from_pr") {
+      closeNewAgentPicker()
+      openCreateAgentFromPr(project.id)
+      return
+    }
+    if (intent === "from_worktree") {
+      closeNewAgentPicker()
+      openAttachWorktree(project.id)
+      return
+    }
+    selectProject(project)
+  }
+
   function handleCreate() {
     if (!selected) return
     createAgentInProject(selected.id, provider ?? undefined)
@@ -101,11 +142,8 @@ function PickerBody() {
   return (
     <>
       <DialogHeader className="p-4 pb-3">
-          <DialogTitle>New agent</DialogTitle>
-          <DialogDescription>
-            Pick a project and a provider, then create. Every project action lives
-            in each project's menu.
-          </DialogDescription>
+          <DialogTitle>{INTENT_COPY[intent].title}</DialogTitle>
+          <DialogDescription>{INTENT_COPY[intent].description}</DialogDescription>
           <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10">
             <Search className="size-4 shrink-0 text-muted-foreground" />
             <input
@@ -131,7 +169,9 @@ function PickerBody() {
             ) : (
               filtered.map((project) => {
                 const count = agentCounts.get(project.id) ?? 0
-                const isSelected = project.id === selectedId
+                // Only the "new" flow has a persistent selection; the guided
+                // from-PR / from-worktree flows act on click, so no row is "chosen".
+                const isSelected = intent === "new" && project.id === selectedId
                 return (
                   <div
                     key={project.id}
@@ -144,7 +184,7 @@ function PickerBody() {
                   >
                     <button
                       type="button"
-                      onClick={() => selectProject(project)}
+                      onClick={() => onProjectRow(project)}
                       className="flex min-w-0 flex-1 items-center gap-2.5 py-2 text-left"
                     >
                       <Folder className="size-4 shrink-0 text-muted-foreground" />
@@ -190,6 +230,7 @@ function PickerBody() {
           </button>
         </div>
 
+        {intent === "new" ? (
         <div className="flex flex-wrap items-center gap-2 border-t p-3">
           {providers.length > 0 ? (
             <>
@@ -223,6 +264,7 @@ function PickerBody() {
             Create agent
           </Button>
         </div>
+        ) : null}
     </>
   )
 }

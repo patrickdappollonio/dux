@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react"
 import { agentRowVisual } from "@/lib/agentRow"
 
 import { AddProjectMenuItems } from "@/components/AddProjectMenuItems"
+import { NewAgentSplitButton } from "@/components/NewAgentSplitButton"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { ConnDot } from "@/components/ConnDot"
 import { FlatAgentList } from "@/components/FlatAgentList"
@@ -295,16 +296,18 @@ export function AppSidebar() {
 
       <SidebarFooter>
         <div className="flex items-center gap-2 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center">
-          {/* Primary New-agent action (moved here from the list header) sits
-              beside the Add-project split button. Collapses to an icon. */}
+          {/* Primary New-agent action (moved here from the list header): a split
+              button whose ⋯ offers the from-PR / from-worktree variants, beside the
+              Add-project split button. Both collapse to bare icons in the rail. */}
+          <NewAgentSplitButton className="flex-1 group-data-[collapsible=icon]:hidden" />
+          {/* Collapsed rail: New agent as a bare icon. */}
           <Button
             size="sm"
             aria-label="New agent"
-            onClick={openNewAgentPicker}
-            className="flex-1 group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
+            onClick={() => openNewAgentPicker("new")}
+            className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:flex-none group-data-[collapsible=icon]:p-0"
           >
             <Plus />
-            <span className="group-data-[collapsible=icon]:hidden">New agent</span>
           </Button>
           <ButtonGroup className="group-data-[collapsible=icon]:hidden [&>button:last-of-type]:rounded-r-lg">
             <Button

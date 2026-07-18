@@ -403,6 +403,11 @@ export interface DuxState {
   // Whether the New-agent picker dialog is open. The picker is the home for agent
   // creation and every project action now that there are no project headers.
   newAgentPickerOpen: boolean
+  // How the New-agent picker was opened, so it can guide the right creation flow:
+  // "new" (pick project + provider + Create), "from_pr" (pick a project to create
+  // an agent from a PR), or "from_worktree" (pick a project to adopt an existing
+  // worktree). The split button's ⋯ menu sets this; a bare open defaults to "new".
+  newAgentPickerIntent: "new" | "from_pr" | "from_worktree"
   sidebarWidth: string
   // Optimistic override for the Changes pane's visibility (desktop). `null`
   // follows the persisted config (`bootstrap.show_changes_pane`); the palette and
@@ -553,6 +558,7 @@ let state: DuxState = {
   agentSort: null,
   agentSearch: "",
   newAgentPickerOpen: false,
+  newAgentPickerIntent: "new",
   sidebarWidth: loadSidebarWidth(),
   changesPaneOverride: null,
   editorTarget: null,
@@ -3050,8 +3056,10 @@ export function setAgentSearch(query: string): void {
   setState({ agentSearch: query })
 }
 
-export function openNewAgentPicker(): void {
-  setState({ newAgentPickerOpen: true })
+export function openNewAgentPicker(
+  intent: DuxState["newAgentPickerIntent"] = "new",
+): void {
+  setState({ newAgentPickerOpen: true, newAgentPickerIntent: intent })
 }
 
 export function closeNewAgentPicker(): void {

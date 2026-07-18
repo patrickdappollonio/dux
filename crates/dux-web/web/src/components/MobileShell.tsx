@@ -1,7 +1,8 @@
-import { ChevronLeft, Ellipsis, GitPullRequest, Plus, Settings } from "lucide-react"
+import { ChevronLeft, Ellipsis, GitPullRequest, Settings } from "lucide-react"
 import { Suspense, useState } from "react"
 
 import { AddProjectSplitButton } from "@/components/AddProjectSplitButton"
+import { NewAgentSplitButton } from "@/components/NewAgentSplitButton"
 import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -21,7 +22,6 @@ import { isExtraTabDormant, shouldShowTabStrip } from "@/lib/agentTabs"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   mobileNavigate,
-  openNewAgentPicker,
   selectSession,
   selectTerminal,
   useDux,
@@ -85,14 +85,7 @@ function HomeScreen() {
       />
 
       <div className="flex shrink-0 items-center gap-2 border-t p-3">
-        <Button
-          className="min-h-11 flex-1"
-          aria-label="New agent"
-          onClick={openNewAgentPicker}
-        >
-          <Plus />
-          New agent
-        </Button>
+        <NewAgentSplitButton className="flex-1" />
         <AddProjectSplitButton className="flex-1" />
       </div>
     </div>
