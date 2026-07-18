@@ -1256,6 +1256,12 @@ impl App {
                     &outcome.tab_id,
                     TuiReconnectOutcome::Ready { status_message },
                 );
+                // The engine flipped the session Active while launching it, so the
+                // flat list must re-partition: a just-reconnected agent leaves the
+                // Inactive tail and rejoins the active section. Re-follow it by id
+                // so the cursor stays on the agent as its row moves.
+                self.rebuild_left_items();
+                self.reselect_left_session(&outcome.session.id);
             }
             AgentLaunchReadyView::ResumeFallback {
                 session_id,
@@ -1272,6 +1278,9 @@ impl App {
                     &session_id,
                     TuiReconnectOutcome::Ready { status_message },
                 );
+                // Same re-partition as Reconnect: the resumed agent is Active now.
+                self.rebuild_left_items();
+                self.reselect_left_session(&session_id);
             }
             AgentLaunchReadyView::StartupAutoReopen => {}
         }
@@ -1662,6 +1671,55 @@ mod tests {
         assert!(
             app.project_chooser_context.is_none(),
             "creating an agent must clear the manage-projects target",
+        );
+    }
+
+    /// Reconnecting a dormant agent flips it Active in the engine; the view must
+    /// rebuild the flat list so the agent leaves the collapsed Inactive tail and
+    /// rejoins the active section (regression: the Reconnect arm forgot to
+    /// rebuild, stranding a just-reactivated agent under Inactive).
+    #[test]
+    fn reconnect_moves_a_reactivated_agent_out_of_the_inactive_tail() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+        assert!(
+            matches!(
+                app.engine.sessions[0].status,
+                crate::model::SessionStatus::Detached
+            ),
+            "fixture precondition: the seeded agent starts Detached",
+        );
+        assert!(
+            app.left_items()
+                .iter()
+                .any(|i| matches!(i, LeftItem::InactiveToggle)),
+            "a Detached agent sits under an Inactive toggle before reconnect",
+        );
+
+        // The engine marks the session Active while (re)launching it; mirror that,
+        // then apply the reconnect view without rebuilding the list by hand.
+        app.engine
+            .mark_session_status(&session.id, crate::model::SessionStatus::Active);
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session: session.clone(),
+            pty_size: (80, 24),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::Reconnect {
+                status_message: "Reconnected.".to_string(),
+            },
+        });
+
+        assert!(
+            !app.left_items()
+                .iter()
+                .any(|i| matches!(i, LeftItem::InactiveToggle)),
+            "after reconnect no dormant agents remain, so the Inactive tail is gone",
+        );
+        assert!(
+            matches!(app.left_items().first(), Some(LeftItem::Session(0))),
+            "the reactivated agent must render in the active section",
         );
     }
 

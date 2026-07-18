@@ -793,7 +793,7 @@ impl App {
 
     /// After leaving filter mode, move the Left selection back onto the row for
     /// `session_id` in the restored full list, if it is still present.
-    fn reselect_left_session(&mut self, session_id: &str) {
+    pub(crate) fn reselect_left_session(&mut self, session_id: &str) {
         if let Some(index) = self.left_items().iter().position(|item| {
             matches!(item, LeftItem::Session(i)
                 if self.engine.sessions.get(*i).is_some_and(|s| s.id == session_id))
