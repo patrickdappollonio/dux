@@ -961,15 +961,13 @@ impl App {
                 status_message,
             } => {
                 self.rebuild_left_items();
-                if let Some(index) = self.left_items().iter().position(|item| {
-                    matches!(item, LeftItem::Project(project_index) if self.engine.projects[*project_index].id == project_id)
-                }) {
-                    self.selected_left = index;
-                }
-                // The freshly added project is now selected and has no agents,
-                // so refresh the right-pane file lists. Without this, the
-                // previously selected project's changed files linger and look
-                // like they belong to the brand-new project.
+                // A freshly added project has no agents, so it contributes no row to
+                // the flat list — there is nothing to select. (Its first agent is
+                // created via the project chooser.) `project_id` is unused now.
+                let _ = &project_id;
+                // Refresh the right-pane file lists so the previously selected
+                // project's changed files don't linger and look like they belong to
+                // the brand-new project.
                 self.reload_changed_files();
                 // Add is INLINE: the engine handler already wrote config.toml
                 // through the eager queue (with SQLite rollback on failure). Do

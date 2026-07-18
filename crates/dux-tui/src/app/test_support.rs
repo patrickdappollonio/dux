@@ -236,7 +236,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         tick_count: 0,
         start_time: std::time::Instant::now(),
         readonly_nudge_tick: None,
-        collapsed_projects: std::collections::HashSet::new(),
+        inactive_collapsed: false,
         left_items_cache: Vec::new(),
         mouse_layout: MouseLayoutState::default(),
         overlay_layout: OverlayMouseLayoutState::default(),

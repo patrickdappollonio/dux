@@ -5894,49 +5894,6 @@ impl App {
     /// minimizes a (defensively possible) fullscreen overlay or is a no-op.
     fn activate_selected_left_item(&mut self, allow_launch: bool) -> Result<()> {
         match self.left_items().get(self.selected_left) {
-            Some(LeftItem::Project(project_index)) => {
-                let project = &self.engine.projects[*project_index];
-                if project.path_missing {
-                    self.set_warning(format!("Project path not found: {}", project.path));
-                    return Ok(());
-                }
-                let project_id = project.id.clone();
-                let has_sessions = self
-                    .engine
-                    .sessions
-                    .iter()
-                    .any(|s| s.project_id == project_id);
-                if has_sessions {
-                    if self.collapsed_projects.contains(&project_id) {
-                        self.collapsed_projects.remove(&project_id);
-                        self.rebuild_left_items();
-                    }
-                    if let Some(pos) = self.left_items().iter().position(|item| {
-                        matches!(item, LeftItem::Session(si) if self.engine.sessions[*si].project_id == project_id)
-                    }) {
-                        self.selected_left = pos;
-                        self.center_mode = CenterMode::Agent;
-                        self.focus = FocusPane::Center;
-                        self.reload_changed_files();
-                        if self
-                            .selected_session()
-                            .map(|s| self.engine.providers.contains_key(&s.id))
-                            .unwrap_or(false)
-                        {
-                            self.input_target = InputTarget::Agent;
-                            self.fullscreen_overlay = FullscreenOverlay::Agent;
-                        } else if self.selected_session().is_some() {
-                            if allow_launch {
-                                self.reconnect_selected_session()?;
-                            } else {
-                                self.exit_interactive_without_launch();
-                            }
-                        }
-                    }
-                } else if allow_launch {
-                    self.create_agent_for_selected_project()?;
-                }
-            }
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
                 self.focus = FocusPane::Center;
@@ -5956,10 +5913,8 @@ impl App {
                     }
                 }
             }
-            Some(LeftItem::EmptyProjectsSpacer) => {}
-            Some(LeftItem::EmptyProjectsSeparator) => {}
-            // Non-selectable header; selection never lands here, so no action.
-            Some(LeftItem::OrphanProject(_)) => {}
+            // Enter/activate on the Inactive tail toggles it open/closed.
+            Some(LeftItem::InactiveToggle) => self.toggle_collapse_selected_project(),
             None => {}
         }
         Ok(())
@@ -7413,7 +7368,13 @@ not_a_real_action = ["x"]
     #[test]
     fn refresh_selected_project_blocks_repeat_presses_while_pull_is_running() {
         let mut app = test_app(default_bindings());
-        app.selected_left = 0;
+        // Flat model: project actions resolve the selected AGENT's project, so
+        // select the seeded session's row rather than a (now-absent) project header.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::Session(_)))
+            .expect("session row");
 
         app.refresh_selected_project()
             .expect("start project refresh");
@@ -8638,7 +8599,8 @@ not_a_real_action = ["x"]
     #[test]
     fn palette_command_opens_project_worktree_picker() {
         let mut app = test_app(default_bindings());
-        app.selected_left = 0;
+        // Flat model: the picker targets the selected agent's project (the
+        // fixture selects the seeded session, which belongs to projects[0]).
 
         app.execute_command("new-agent-from-worktree".to_string())
             .unwrap();
@@ -9131,9 +9093,9 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn copy_path_copies_selected_project_path() {
+    fn copy_path_copies_selected_agent_path() {
         let mut app = test_app(default_bindings());
-        app.selected_left = 0;
+        // Flat model: copy-path acts on the selected agent's worktree path.
         app.clipboard = Clipboard::from_fn(clipboard_ok);
 
         app.copy_selected_path().unwrap();
@@ -9521,21 +9483,6 @@ not_a_real_action = ["x"]
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
         assert_eq!(app.focus, FocusPane::Left);
-    }
-
-    #[test]
-    fn mouse_double_click_project_row_activates_like_enter() {
-        let mut app = test_app(default_bindings());
-        install_mouse_layout(&mut app);
-        app.selected_left = 0;
-        app.focus = FocusPane::Left;
-
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 1));
-
-        // Double-clicking a project activates it (opens latest session).
-        assert_eq!(app.focus, FocusPane::Center);
-        assert!(matches!(app.center_mode, CenterMode::Agent));
     }
 
     #[test]
@@ -10023,68 +9970,6 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.selected_left, 0);
         assert!(matches!(app.center_mode, CenterMode::Agent));
-    }
-
-    fn append_empty_projects(app: &mut App, count: usize) {
-        let path = app.engine.projects[0].path.clone();
-        for idx in 0..count {
-            app.engine.projects.push(Project {
-                id: format!("empty-project-{idx}"),
-                name: format!("empty {idx}"),
-                path: path.clone(),
-                explicit_default_provider: None,
-                default_provider: ProviderKind::from_str("codex"),
-                leading_branch: Some("main".to_string()),
-                auto_reopen_agents: None,
-                startup_command: None,
-                env: Default::default(),
-                current_branch: "main".to_string(),
-                branch_status: ProjectBranchStatus::Unknown,
-                path_missing: false,
-                created_at: None,
-            });
-        }
-    }
-
-    #[test]
-    fn left_navigation_skips_empty_projects_separator() {
-        let mut app = test_app(default_bindings());
-        append_empty_projects(&mut app, 4);
-        app.engine.config.ui.empty_project_separator_min_projects = 5;
-        app.rebuild_left_items();
-        app.selected_left = 1;
-        app.focus = FocusPane::Left;
-
-        assert!(matches!(
-            app.left_items().get(2),
-            Some(LeftItem::EmptyProjectsSpacer)
-        ));
-        assert!(matches!(
-            app.left_items().get(3),
-            Some(LeftItem::EmptyProjectsSeparator)
-        ));
-
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.selected_left, 4);
-
-        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.selected_left, 1);
-    }
-
-    #[test]
-    fn mouse_click_empty_projects_separator_keeps_selection() {
-        let mut app = test_app(default_bindings());
-        append_empty_projects(&mut app, 4);
-        app.engine.config.ui.empty_project_separator_min_projects = 5;
-        app.rebuild_left_items();
-        install_mouse_layout(&mut app);
-        app.selected_left = 1;
-
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 4));
-
-        assert_eq!(app.selected_left, 1);
     }
 
     #[test]
@@ -11174,7 +11059,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn added_project_is_selected_after_save_completes() {
+    fn added_project_appears_in_workspace_after_save_completes() {
         let mut app = test_app(default_bindings());
         let project_dir = app.engine.paths.root.join("second-project");
         std::fs::create_dir_all(&project_dir).expect("project dir");
@@ -11188,10 +11073,17 @@ cyan = "#00ffff"
                 .contains("Added project \"second-project\" to workspace")
         });
 
-        let selected = app.selected_project().expect("selected project");
-        assert_eq!(selected.name, "second-project");
+        // Flat model: an agent-less project is not a selectable sidebar row, so
+        // adding one no longer moves the selection. It joins the workspace and
+        // becomes reachable once it has an agent (or via the project chooser).
+        let added = app
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.name == "second-project")
+            .expect("added project present in workspace");
         assert_eq!(
-            PathBuf::from(&selected.path).canonicalize().unwrap(),
+            PathBuf::from(&added.path).canonicalize().unwrap(),
             project_dir.canonicalize().unwrap()
         );
     }
@@ -12551,52 +12443,12 @@ cyan = "#00ffff"
         );
     }
 
-    #[test]
-    fn new_companion_terminal_with_project_selected_spawns_project_terminal() {
-        let mut app = test_app(default_bindings());
-
-        // Point at the project header row.
-        app.selected_left = 0;
-        assert!(
-            app.selected_session().is_none(),
-            "a project row is selected"
-        );
-
-        app.new_companion_terminal()
-            .expect("should spawn a project terminal");
-
-        assert_eq!(app.engine.companion_terminals.len(), 1);
-        let terminal = app.engine.companion_terminals.values().next().unwrap();
-        assert_eq!(
-            terminal.owner,
-            dux_core::model::TerminalOwner::Project("project-1".to_string()),
-            "the terminal must be project-owned, not session-owned"
-        );
-        assert!(app.active_terminal_id.is_some());
-        assert_eq!(app.input_target, InputTarget::Terminal);
-        assert!(app.status.text().contains("project terminal"));
-    }
-
-    #[test]
-    fn show_or_open_first_terminal_on_project_row_reuses_existing_project_terminal() {
-        let mut app = test_app(default_bindings());
-        app.selected_left = 0;
-        app.new_companion_terminal()
-            .expect("spawn project terminal");
-        let first_id = app.active_terminal_id.clone().expect("active terminal");
-        app.active_terminal_id = None;
-
-        app.show_or_open_first_terminal()
-            .expect("open existing project terminal");
-
-        assert_eq!(
-            app.engine.companion_terminals.len(),
-            1,
-            "must reuse the existing project terminal, not spawn another"
-        );
-        assert_eq!(app.active_terminal_id, Some(first_id));
-    }
-
+    // NOTE: project-owned terminal creation from a selected project row was
+    // removed with the flat left pane; project terminals return through the
+    // project chooser (P4). The former tests
+    // `new_companion_terminal_with_project_selected_spawns_project_terminal` and
+    // `show_or_open_first_terminal_on_project_row_reuses_existing_project_terminal`
+    // will be reinstated against the chooser flow there.
     #[test]
     fn new_companion_terminal_spawns_when_session_selected() {
         let mut app = test_app(default_bindings());
@@ -15687,7 +15539,7 @@ cyan = "#00ffff"
     #[test]
     fn toggle_project_auto_reopen_persists_opt_out() {
         let mut app = test_app(default_bindings());
-        app.selected_left = 0;
+        // Flat model: resolves the selected agent's project (projects[0]).
 
         app.execute_command("toggle-project-auto-reopen-agents".to_string())
             .expect("toggle project auto-reopen");
@@ -15899,43 +15751,6 @@ cyan = "#00ffff"
             rendered.contains("dux development"),
             "expected local build version label, got: {rendered}"
         );
-    }
-
-    #[test]
-    fn empty_projects_separator_centers_label_and_empty_projects_use_quiet_style() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::style::Modifier;
-
-        let mut app = test_app(default_bindings());
-        append_empty_projects(&mut app, 4);
-        app.engine.config.ui.empty_project_separator_min_projects = 5;
-        app.rebuild_left_items();
-
-        let backend = TestBackend::new(160, 24);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-
-        let buffer = terminal.backend().buffer();
-        let spacer_row: String = (1u16..31u16).map(|x| buffer[(x, 4)].symbol()).collect();
-        let separator_row: String = (1u16..31u16).map(|x| buffer[(x, 5)].symbol()).collect();
-
-        assert_eq!(spacer_row, "                              ");
-        assert_eq!(separator_row, "── Projects with no agents ───");
-        assert_eq!(buffer[(1, 5)].fg, app.theme.header_separator_fg);
-        assert_eq!(buffer[(5, 5)].fg, app.theme.provider_label_fg);
-        assert!(
-            buffer[(3, 2)].modifier.contains(Modifier::BOLD),
-            "project above the empty-projects separator should stay bold"
-        );
-        assert!(
-            !buffer[(3, 6)].modifier.contains(Modifier::BOLD),
-            "project below the empty-projects separator should render at normal weight"
-        );
-        assert_eq!(buffer[(1, 6)].symbol(), "⧉");
-        assert_eq!(buffer[(1, 6)].fg, app.theme.provider_label_fg);
     }
 
     #[test]

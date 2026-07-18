@@ -1336,9 +1336,9 @@ impl App {
             TerminalOwner::Session(session_id) => self.left_items().iter().position(
                 |item| matches!(item, LeftItem::Session(idx) if self.engine.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())),
             ),
-            TerminalOwner::Project(project_id) => self.left_items().iter().position(
-                |item| matches!(item, LeftItem::Project(idx) if self.engine.projects.get(*idx).map(|p| p.id.as_str()) == Some(project_id.as_str())),
-            ),
+            // The flat agent list has no project rows, so a project terminal has no
+            // left-pane row to move the cursor onto.
+            TerminalOwner::Project(_) => None,
         };
         if let Some(pos) = pos {
             self.selected_left = pos;
@@ -1555,7 +1555,9 @@ impl App {
             session,
             project,
             other_sessions_on_worktree: _,
-            project_still_has_sessions,
+            // No longer needed: the flat list re-clamps the cursor after a delete
+            // instead of falling back to a project header.
+            project_still_has_sessions: _,
         } = outcome;
 
         // View-side cleanup the engine couldn't do.
@@ -1564,16 +1566,12 @@ impl App {
         self.clear_companion_terminals_for_session(session_id);
         self.clear_focused_tab_for_session(session_id);
 
-        // Derived view state.
+        // Derived view state. In the flat list, deleting an agent just shifts the
+        // cursor up one and re-clamps to a selectable row (there is no project
+        // header to fall back onto).
         self.rebuild_left_items();
-        if project_still_has_sessions {
-            self.selected_left = self.selected_left.saturating_sub(1);
-            self.ensure_selectable_left_item();
-        } else if let Some(project_index) = self.left_items().iter().position(|item| {
-            matches!(item, LeftItem::Project(index) if self.engine.projects[*index].id == session.project_id)
-        }) {
-            self.selected_left = project_index;
-        }
+        self.selected_left = self.selected_left.saturating_sub(1);
+        self.ensure_selectable_left_item();
         self.reload_changed_files();
 
         if update_status {
@@ -3030,13 +3028,7 @@ impl App {
                 .sessions
                 .get(*index)
                 .map(|s| s.worktree_path.clone()),
-            Some(LeftItem::Project(index)) => {
-                self.engine.projects.get(*index).map(|p| p.path.clone())
-            }
-            Some(LeftItem::EmptyProjectsSpacer) => None,
-            Some(LeftItem::EmptyProjectsSeparator) => None,
-            Some(LeftItem::OrphanProject(_)) => None,
-            None => None,
+            _ => None,
         };
         match path {
             Some(p) => {
@@ -3794,7 +3786,7 @@ mod tests {
             tick_count: 0,
             start_time: std::time::Instant::now(),
             readonly_nudge_tick: None,
-            collapsed_projects: std::collections::HashSet::new(),
+            inactive_collapsed: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
@@ -5274,63 +5266,6 @@ mod tests {
         assert!(
             worktree_dir.path().exists(),
             "worktree directory must be preserved when the flag is off",
-        );
-    }
-
-    #[test]
-    fn deleting_last_agent_selects_project_after_it_moves_to_empty_list() {
-        let mut project_with_deleted_agent = make_project("project-1", "claude");
-        project_with_deleted_agent.name = "deleted-agent-project".to_string();
-        let mut active_project = make_project("project-2", "codex");
-        active_project.name = "active-project".to_string();
-        let mut already_empty_project = make_project("project-3", "codex");
-        already_empty_project.name = "already-empty-project".to_string();
-
-        let mut deleted_session = make_session("s1", "claude", "/tmp/wt/a");
-        deleted_session.project_id = "project-1".to_string();
-        let mut remaining_session = make_session("s2", "codex", "/tmp/wt/b");
-        remaining_session.project_id = "project-2".to_string();
-
-        let mut app = test_app_with_sessions(
-            vec![deleted_session, remaining_session],
-            vec![
-                project_with_deleted_agent,
-                active_project,
-                already_empty_project,
-            ],
-        );
-        app.engine.config.ui.empty_project_separator_min_projects = 3;
-        app.rebuild_left_items();
-        app.selected_left = app
-            .left_items()
-            .iter()
-            .position(
-                |item| matches!(item, LeftItem::Session(index) if app.engine.sessions[*index].id == "s1"),
-            )
-            .expect("deleted session row");
-
-        app.finish_delete_session("s1", WorktreeRemoval::PreservedOrphan, true)
-            .expect("finish delete");
-
-        let separator_index = app
-            .left_items()
-            .iter()
-            .position(|item| matches!(item, LeftItem::EmptyProjectsSeparator))
-            .expect("empty-project separator should remain");
-        let selected_project = app.selected_project().expect("selected project");
-        assert_eq!(selected_project.id, "project-1");
-        assert!(
-            app.selected_left > separator_index,
-            "project should be selected in the empty-project section"
-        );
-
-        app.create_agent_for_selected_project()
-            .expect("selected empty project should accept new-agent action");
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Busy);
-        assert!(
-            app.status.text().contains("deleted-agent-project"),
-            "new-agent action should target the project that just moved to the empty list, got: {}",
-            app.status.text()
         );
     }
 

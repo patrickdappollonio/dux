@@ -138,7 +138,10 @@ pub struct App {
     /// regardless of how fast the event loop is running.
     pub(crate) start_time: Instant,
     pub(crate) readonly_nudge_tick: Option<u64>,
-    pub(crate) collapsed_projects: HashSet<String>,
+    /// Whether the flat list's "Inactive" tail (detached/exited agents) is
+    /// collapsed. Starts collapsed, matching the web. Replaces the old
+    /// per-project collapse now that there are no project headers.
+    pub(crate) inactive_collapsed: bool,
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
@@ -1640,84 +1643,47 @@ pub(crate) enum LeftSection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LeftItem {
-    Project(usize),
+    /// An agent row (index into `engine.sessions`). The flat model shows the
+    /// project inline on the row rather than under a header.
     Session(usize),
-    /// Header for a group of orphaned sessions whose project record is gone
-    /// (a removed project whose sessions outlived it). Carries a representative
-    /// session index so the renderer can recover the ghost project id and its
-    /// short display name. Non-selectable; its sessions are normal `Session`
-    /// rows the user can still select and delete.
-    OrphanProject(usize),
-    EmptyProjectsSpacer,
-    EmptyProjectsSeparator,
+    /// The collapsible "Inactive · N" toggle separating active agents (above) from
+    /// detached/exited ones (below). Selectable; Enter/Space toggles the tail.
+    InactiveToggle,
 }
 
 impl LeftItem {
     pub(crate) fn is_selectable(self) -> bool {
-        matches!(self, LeftItem::Project(_) | LeftItem::Session(_))
+        matches!(self, LeftItem::Session(_) | LeftItem::InactiveToggle)
     }
 }
 
+/// Build the flat left-pane list: a single globally-ordered agent list with no
+/// project grouping. Active agents come first; detached/exited ("inactive") agents
+/// collapse under an `InactiveToggle` tail (default collapsed). Order within each
+/// section is the caller's `sessions` order (the global `sort_order`); the
+/// active-first float and the sort modes layer on top in the App (see the sort
+/// state). Orphan (removed-project) sessions are plain `Session` rows here; the
+/// renderer marks them inline.
 pub(crate) fn build_left_items(
-    projects: &[Project],
     sessions: &[AgentSession],
-    projects_with_terminals: &HashSet<String>,
-    collapsed_projects: &HashSet<String>,
-    empty_project_separator_min_projects: u16,
+    inactive_collapsed: bool,
 ) -> Vec<LeftItem> {
-    // Grouping, ordering, the agent-less split, and orphan detection are owned by
-    // dux_core::sidebar so the TUI and web render an identical tree. Here we only
-    // translate that core model into the TUI's index-based render items and apply
-    // display state (collapse).
-    let model = dux_core::sidebar::build_sidebar(
-        projects,
-        sessions,
-        projects_with_terminals,
-        empty_project_separator_min_projects,
-    );
-    let project_index: std::collections::HashMap<&str, usize> = projects
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.id.as_str(), i))
-        .collect();
-    let session_index: std::collections::HashMap<&str, usize> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.id.as_str(), i))
-        .collect();
+    let mut active = Vec::new();
+    let mut inactive = Vec::new();
+    for (index, session) in sessions.iter().enumerate() {
+        match session.status {
+            crate::model::SessionStatus::Detached | crate::model::SessionStatus::Exited => {
+                inactive.push(index)
+            }
+            _ => active.push(index),
+        }
+    }
 
-    let mut items = Vec::new();
-    for (group_index, group) in model.groups.iter().enumerate() {
-        if model.agentless_start == Some(group_index) {
-            items.push(LeftItem::EmptyProjectsSpacer);
-            items.push(LeftItem::EmptyProjectsSeparator);
-        }
-        let session_indices: Vec<usize> = group
-            .session_ids
-            .iter()
-            .filter_map(|id| session_index.get(id.as_str()).copied())
-            .collect();
-        if group.orphaned {
-            // Orphan groups always carry at least one session; use the first
-            // index so the renderer can recover the ghost id and short name.
-            let Some(&first) = session_indices.first() else {
-                continue;
-            };
-            items.push(LeftItem::OrphanProject(first));
-        } else if let Some(&index) = project_index.get(group.project_id.as_str()) {
-            items.push(LeftItem::Project(index));
-        } else {
-            continue;
-        }
-        // Orphan groups are never collapsed: their header is non-selectable, so a
-        // stale collapsed-projects entry for a ghost id could otherwise hide their
-        // sessions permanently with no way to re-expand them.
-        if group.path_missing || (!group.orphaned && collapsed_projects.contains(&group.project_id))
-        {
-            continue;
-        }
-        for index in session_indices {
-            items.push(LeftItem::Session(index));
+    let mut items: Vec<LeftItem> = active.into_iter().map(LeftItem::Session).collect();
+    if !inactive.is_empty() {
+        items.push(LeftItem::InactiveToggle);
+        if !inactive_collapsed {
+            items.extend(inactive.into_iter().map(LeftItem::Session));
         }
     }
     items
@@ -1961,7 +1927,7 @@ impl App {
             tick_count: 0,
             start_time: Instant::now(),
             readonly_nudge_tick: None,
-            collapsed_projects: HashSet::new(),
+            inactive_collapsed: true,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
@@ -2551,8 +2517,11 @@ impl App {
             .get(self.selected_left)
             .copied()
             .and_then(|item| match item {
-                LeftItem::Project(idx) => {
-                    let p = self.engine.projects.get(idx)?;
+                // No project rows in the flat list; warn when the selected agent's
+                // own project has a missing path.
+                LeftItem::Session(idx) => {
+                    let s = self.engine.sessions.get(idx)?;
+                    let p = self.engine.projects.iter().find(|p| p.id == s.project_id)?;
                     p.path_missing.then(|| p.path.clone())
                 }
                 _ => None,
@@ -3039,13 +3008,7 @@ impl App {
     }
 
     pub(crate) fn rebuild_left_items(&mut self) {
-        self.left_items_cache = build_left_items(
-            &self.engine.projects,
-            &self.engine.sessions,
-            &self.engine.project_ids_with_terminals(),
-            &self.collapsed_projects,
-            self.engine.config.ui.empty_project_separator_min_projects,
-        );
+        self.left_items_cache = build_left_items(&self.engine.sessions, self.inactive_collapsed);
         self.ensure_selectable_left_item();
     }
 
@@ -3140,33 +3103,27 @@ impl App {
         }
     }
 
+    /// Toggle the flat list's "Inactive" tail open/closed. Bound to the same key
+    /// as the old per-project collapse (Space / `ToggleProject`) and to Enter on
+    /// the `InactiveToggle` row. Keeps the cursor on the toggle row afterward.
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
-        if let Some(project) = self.selected_project() {
-            let id = project.id.clone();
-            let has_sessions = self.engine.sessions.iter().any(|s| s.project_id == id);
-            if !has_sessions {
-                return;
-            }
-            if self.collapsed_projects.contains(&id) {
-                self.collapsed_projects.remove(&id);
-            } else {
-                self.collapsed_projects.insert(id.clone());
-            }
-            self.rebuild_left_items();
-
-            // Move selection to the toggled project so collapsing from a
-            // child session leaves the cursor on the parent header.
-            if let Some(new_index) = self.left_items().iter().position(
-                |item| matches!(item, LeftItem::Project(pi) if self.engine.projects[*pi].id == id),
-            ) {
-                self.selected_left = new_index;
-            }
+        self.inactive_collapsed = !self.inactive_collapsed;
+        self.rebuild_left_items();
+        if let Some(new_index) = self
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::InactiveToggle))
+        {
+            self.selected_left = new_index;
         }
     }
 
+    /// The project of the currently-selected agent row (the flat list has no
+    /// project rows to select). `None` when the selection is not an agent (e.g. the
+    /// Inactive toggle) or the agent's project record is gone (orphan). Reaching an
+    /// agent-less project's actions goes through the project chooser, not selection.
     pub(crate) fn selected_project(&self) -> Option<&Project> {
         match self.left_items().get(self.selected_left) {
-            Some(LeftItem::Project(index)) => self.engine.projects.get(*index),
             Some(LeftItem::Session(index)) => {
                 self.engine.sessions.get(*index).and_then(|session| {
                     self.engine
@@ -3175,11 +3132,7 @@ impl App {
                         .find(|project| project.id == session.project_id)
                 })
             }
-            Some(LeftItem::EmptyProjectsSpacer) => None,
-            Some(LeftItem::EmptyProjectsSeparator) => None,
-            // An orphaned group has no project record to return.
-            Some(LeftItem::OrphanProject(_)) => None,
-            None => None,
+            _ => None,
         }
     }
 
@@ -4205,24 +4158,6 @@ mod tests {
         assert!(!attention_blink_phase(2000 + 650));
     }
 
-    fn test_project(id: &str) -> Project {
-        Project {
-            id: id.to_string(),
-            name: id.to_string(),
-            path: format!("/tmp/{id}"),
-            explicit_default_provider: None,
-            default_provider: ProviderKind::from_str("codex"),
-            leading_branch: Some("main".to_string()),
-            auto_reopen_agents: None,
-            startup_command: None,
-            env: Default::default(),
-            current_branch: "main".to_string(),
-            branch_status: ProjectBranchStatus::Unknown,
-            path_missing: false,
-            created_at: None,
-        }
-    }
-
     fn test_session(id: &str, project_id: &str, created_offset: i64) -> AgentSession {
         let now = Utc::now() + chrono::Duration::seconds(created_offset);
         AgentSession {
@@ -4439,207 +4374,54 @@ mod tests {
     }
 
     #[test]
-    fn build_left_items_does_not_split_below_threshold() {
-        let projects = vec![
-            test_project("project-1"),
-            test_project("project-2"),
-            test_project("project-3"),
-            test_project("project-4"),
-        ];
-        let sessions = vec![test_session("session-1", "project-2", 0)];
+    fn build_left_items_flat_splits_active_and_inactive() {
+        let mut active = test_session("active-1", "p", 0);
+        active.status = SessionStatus::Active;
+        // test_session defaults to Detached, i.e. inactive.
+        let inactive = test_session("gone-1", "p", 0);
+        let sessions = vec![active, inactive];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
-
+        // Collapsed (default): the active row, then a single Inactive toggle; the
+        // inactive session is hidden.
         assert_eq!(
-            items,
-            vec![
-                LeftItem::Project(0),
-                LeftItem::Project(1),
-                LeftItem::Session(0),
-                LeftItem::Project(2),
-                LeftItem::Project(3),
-            ]
+            build_left_items(&sessions, true),
+            vec![LeftItem::Session(0), LeftItem::InactiveToggle],
         );
-    }
 
-    #[test]
-    fn build_left_items_splits_empty_projects_at_threshold() {
-        let projects = vec![
-            test_project("project-1"),
-            test_project("project-2"),
-            test_project("project-3"),
-            test_project("project-4"),
-            test_project("project-5"),
-        ];
-        let sessions = vec![
-            test_session("session-1", "project-2", 0),
-            test_session("session-2", "project-4", 0),
-        ];
-
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
-
+        // Expanded: the inactive session follows the toggle.
         assert_eq!(
-            items,
+            build_left_items(&sessions, false),
             vec![
-                LeftItem::Project(1),
                 LeftItem::Session(0),
-                LeftItem::Project(3),
+                LeftItem::InactiveToggle,
                 LeftItem::Session(1),
-                LeftItem::EmptyProjectsSpacer,
-                LeftItem::EmptyProjectsSeparator,
-                LeftItem::Project(0),
-                LeftItem::Project(2),
-                LeftItem::Project(4),
-            ]
+            ],
         );
     }
 
     #[test]
-    fn build_left_items_moves_project_above_separator_when_session_is_added() {
-        let projects = vec![
-            test_project("project-1"),
-            test_project("project-2"),
-            test_project("project-3"),
-            test_project("project-4"),
-            test_project("project-5"),
-        ];
-        let sessions = vec![
-            test_session("session-1", "project-2", 0),
-            test_session("session-2", "project-4", 0),
-            test_session("session-3", "project-3", 0),
-        ];
+    fn build_left_items_flat_has_no_toggle_without_inactive() {
+        let mut a = test_session("a", "p", 0);
+        a.status = SessionStatus::Active;
+        let mut b = test_session("b", "other", 0);
+        b.status = SessionStatus::Active;
+        let items = build_left_items(&[a, b], true);
+        assert_eq!(items, vec![LeftItem::Session(0), LeftItem::Session(1)]);
+        assert!(!items.contains(&LeftItem::InactiveToggle));
+    }
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
-
+    #[test]
+    fn build_left_items_flat_orphan_sessions_are_plain_rows() {
+        // A session whose project record is gone is a normal Session row (the
+        // renderer marks it inline); there is no separate orphan header, and no
+        // project grouping interleaves the list.
+        let mut real = test_session("real", "p", 0);
+        real.status = SessionStatus::Active;
+        let mut ghost = test_session("ghost", "gone-project", 0);
+        ghost.status = SessionStatus::Active;
         assert_eq!(
-            items,
-            vec![
-                LeftItem::Project(1),
-                LeftItem::Session(0),
-                LeftItem::Project(2),
-                LeftItem::Session(2),
-                LeftItem::Project(3),
-                LeftItem::Session(1),
-                LeftItem::EmptyProjectsSpacer,
-                LeftItem::EmptyProjectsSeparator,
-                LeftItem::Project(0),
-                LeftItem::Project(4),
-            ]
-        );
-    }
-
-    #[test]
-    fn build_left_items_keeps_session_sort_order_within_project_grouping() {
-        let projects = vec![
-            test_project("project-1"),
-            test_project("project-2"),
-            test_project("project-3"),
-            test_project("project-4"),
-            test_project("project-5"),
-        ];
-        let mut sessions = vec![
-            test_session("older", "project-2", 0),
-            test_session("newer", "project-2", 10),
-            test_session("other", "project-4", 5),
-        ];
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
-
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 5);
-
-        assert_eq!(
-            items,
-            vec![
-                LeftItem::Project(1),
-                LeftItem::Session(0),
-                LeftItem::Session(2),
-                LeftItem::Project(3),
-                LeftItem::Session(1),
-                LeftItem::EmptyProjectsSpacer,
-                LeftItem::EmptyProjectsSeparator,
-                LeftItem::Project(0),
-                LeftItem::Project(2),
-                LeftItem::Project(4),
-            ]
-        );
-    }
-
-    #[test]
-    fn build_left_items_can_disable_empty_project_split() {
-        let projects = vec![
-            test_project("project-1"),
-            test_project("project-2"),
-            test_project("project-3"),
-            test_project("project-4"),
-            test_project("project-5"),
-        ];
-        let sessions = vec![test_session("session-1", "project-2", 0)];
-
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), &HashSet::new(), 0);
-
-        assert!(!items.contains(&LeftItem::EmptyProjectsSeparator));
-        assert!(!items.contains(&LeftItem::EmptyProjectsSpacer));
-        assert_eq!(items[0], LeftItem::Project(0));
-    }
-
-    #[test]
-    fn build_left_items_omits_separator_when_no_project_has_sessions() {
-        let projects = vec![
-            test_project("project-1"),
-            test_project("project-2"),
-            test_project("project-3"),
-            test_project("project-4"),
-            test_project("project-5"),
-        ];
-
-        let items = build_left_items(&projects, &[], &HashSet::new(), &HashSet::new(), 5);
-
-        assert_eq!(
-            items,
-            vec![
-                LeftItem::Project(0),
-                LeftItem::Project(1),
-                LeftItem::Project(2),
-                LeftItem::Project(3),
-                LeftItem::Project(4),
-            ]
-        );
-    }
-
-    #[test]
-    fn build_left_items_never_collapses_orphan_groups() {
-        // A real (collapsible) project plus an orphan group — sessions whose
-        // project record is gone. Both ids are in the collapsed set, but an orphan
-        // group must stay expanded: it has no project header the user could click
-        // to re-expand it, so collapsing would strand its sessions out of reach.
-        let projects = vec![test_project("real")];
-        let sessions = vec![
-            test_session("real-s", "real", 0),
-            test_session("ghost-s", "ghost", 0),
-        ];
-        let mut collapsed = HashSet::new();
-        collapsed.insert("real".to_string());
-        collapsed.insert("ghost".to_string());
-
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), &collapsed, 5);
-
-        let session_id = |idx: &usize| sessions[*idx].id.as_str();
-        // The real project is collapsed: header shown, its session hidden.
-        assert!(items.contains(&LeftItem::Project(0)));
-        assert!(
-            !items
-                .iter()
-                .any(|i| matches!(i, LeftItem::Session(idx) if session_id(idx) == "real-s"))
-        );
-        // The orphan group is exempt: its header AND its session stay visible.
-        assert!(
-            items
-                .iter()
-                .any(|i| matches!(i, LeftItem::OrphanProject(_)))
-        );
-        assert!(
-            items
-                .iter()
-                .any(|i| matches!(i, LeftItem::Session(idx) if session_id(idx) == "ghost-s"))
+            build_left_items(&[real, ghost], true),
+            vec![LeftItem::Session(0), LeftItem::Session(1)],
         );
     }
 
