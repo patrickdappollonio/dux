@@ -998,6 +998,8 @@ pub(crate) enum ProjectChooserIntent {
     FromWorktree,
     /// Make the chosen project the target for project-scoped palette commands.
     Manage,
+    /// Spawn a project-owned terminal at the chosen project's repo root.
+    ProjectTerminal,
 }
 
 impl ProjectChooserIntent {
@@ -1008,6 +1010,7 @@ impl ProjectChooserIntent {
             ProjectChooserIntent::FromPr => "New agent from PR",
             ProjectChooserIntent::FromWorktree => "New agent from worktree",
             ProjectChooserIntent::Manage => "Manage project",
+            ProjectChooserIntent::ProjectTerminal => "New terminal in project",
         }
     }
 }
@@ -1819,14 +1822,17 @@ impl AgentSortMode {
 /// The returned `LeftItem::Session(index)` values are indices into `sessions`
 /// (unchanged meaning): this reorders WHICH indices appear in WHICH order for
 /// display, and never mutates `sessions` itself. The active/inactive partition
-/// always preserves incoming order first, then each bucket is ordered by the
-/// display `sort_mode`:
+/// always preserves incoming order first, then the buckets are ordered by the
+/// display `sort_mode`. The ACTIVE (main) bucket is sorted by the comparator in
+/// every mode; the INACTIVE tail is ordered ONLY under `Active` mode and stays
+/// verbatim otherwise, matching the web (which never sorts its dormant tail):
 ///
 /// - `Active`: the active bucket floats `is_hot` indices up (a stable float
 ///   keeping incoming order within each group); the inactive bucket is ordered by
 ///   most recently updated (`Reverse(updated_at)`).
-/// - `Updated` / `Created` / `NameAsc` / `NameDesc`: BOTH buckets sorted by that
-///   comparator. These match the web's comparators exactly.
+/// - `Updated` / `Created` / `NameAsc` / `NameDesc`: the ACTIVE bucket is sorted by
+///   that comparator; the inactive tail stays in verbatim incoming order (the web
+///   leaves its dormant tail unsorted, so sorting it here would diverge).
 /// - `Manual`: both buckets verbatim (the stored global order, the web's
 ///   drag-reorder order). The TUI displays this but never offers it.
 ///
@@ -1903,8 +1909,10 @@ pub(crate) fn build_left_items(
             // Both buckets stay verbatim (incoming order).
         }
         _ => {
+            // Only the ACTIVE bucket sorts by the comparator; the inactive tail
+            // stays verbatim to match the web, which never sorts its dormant
+            // tail. Sorting it here would silently diverge the two surfaces.
             order_bucket(&mut active);
-            order_bucket(&mut inactive);
         }
     }
 
@@ -2920,7 +2928,10 @@ impl App {
             "force-reconnect-agent" => self.force_reconnect_agent(),
             "show-agent" => self.activate_center_agent(true),
             "show-terminal" => self.show_or_open_first_terminal(),
-            "new-terminal" => self.new_companion_terminal(),
+            "new-terminal-for-agent" => self.new_companion_terminal(),
+            "new-terminal-for-project" => {
+                self.open_project_chooser(ProjectChooserIntent::ProjectTerminal)
+            }
             "add-project" => self.open_project_browser(),
             "copy-path" => self.copy_selected_path(),
             "open-worktree" => self.open_selected_worktree_in_default_editor(),
@@ -3156,9 +3167,10 @@ impl App {
         self.engine.config = config;
 
         self.engine.refresh_project_defaults();
-        self.selected_left = self
-            .selected_left
-            .min(self.engine.projects.len().saturating_sub(1));
+        // No project-count clamp here: the flat list indexes agent rows, not
+        // projects, so clamping `selected_left` against `projects.len()` was
+        // meaningless and reset the cursor to the top. `rebuild_left_items`
+        // (below) plus the length check re-clamp against the real list length.
         self.rebuild_left_items();
         if self.selected_left >= self.left_items_cache.len() {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
@@ -3313,6 +3325,28 @@ impl App {
             .collect()
     }
 
+    /// Count the inactive (Detached/Exited) agents that are currently VISIBLE
+    /// under the active search filter. This is what the "Inactive (N)" toggle
+    /// must show: the number of rows actually revealed when the tail is expanded
+    /// under the current filter, not the raw count of every inactive session.
+    /// It intersects the inactive-status predicate with `agent_visibility_mask`,
+    /// consistent with how the pane title's filtered "Agents (M/N)" count works.
+    pub(crate) fn visible_inactive_count(&self) -> usize {
+        let mask = self.agent_visibility_mask();
+        self.engine
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(index, session)| {
+                mask.get(*index).copied().unwrap_or(false)
+                    && matches!(
+                        session.status,
+                        crate::model::SessionStatus::Detached | crate::model::SessionStatus::Exited
+                    )
+            })
+            .count()
+    }
+
     /// Enter agent-list filter mode: seed an empty query and rebuild the list.
     /// While active, printable keys type into the query and the arrows navigate
     /// the filtered rows (mirroring the project browser's type-to-filter).
@@ -3433,6 +3467,21 @@ impl App {
             Some(LeftItem::Session(index)) => self.engine.sessions.get(*index),
             _ => None,
         }
+    }
+
+    /// Resolve the target project for a project-scoped ACTION and consume the
+    /// one-and-done `manage-projects` target. This clones the project that
+    /// `selected_project()` resolves (chooser context first, else the selected
+    /// agent's project) and then clears `project_chooser_context` so the picked
+    /// target applies to exactly ONE action — a second project action falls
+    /// back to the selected agent's project. Do NOT use this in display paths;
+    /// use `selected_project()` there so rendering never clears the target.
+    pub(crate) fn take_selected_project(&mut self) -> Option<Project> {
+        let project = self.selected_project().cloned();
+        if project.is_some() {
+            self.project_chooser_context = None;
+        }
+        project
     }
 
     pub(crate) fn reload_changed_files(&mut self) {
@@ -4828,6 +4877,144 @@ mod tests {
                 LeftItem::Session(2),
             ],
         );
+    }
+
+    #[test]
+    fn build_left_items_nameasc_sorts_active_but_leaves_inactive_verbatim() {
+        // The ACTIVE bucket sorts by name; the inactive tail stays in incoming
+        // order (matching the web, which never sorts its dormant tail).
+        let mk = |id: &str, name: &str, status: SessionStatus| {
+            let mut s = test_session(id, "p", 0);
+            s.status = status;
+            s.branch_name = name.to_string();
+            s.title = None;
+            s
+        };
+        let sessions = vec![
+            mk("a0", "charlie", SessionStatus::Active),
+            mk("a1", "alpha", SessionStatus::Active),
+            mk("i2", "zeta", SessionStatus::Detached),
+            mk("i3", "aardvark", SessionStatus::Detached),
+        ];
+        let items = build_left_items(
+            &sessions,
+            false,
+            AgentSortMode::NameAsc,
+            &|_| false,
+            &|_| true,
+        );
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Session(1), // alpha (active, name-sorted)
+                LeftItem::Session(0), // charlie
+                LeftItem::InactiveToggle,
+                LeftItem::Session(2), // zeta   (inactive, verbatim — NOT sorted)
+                LeftItem::Session(3), // aardvark
+            ],
+            "active bucket name-sorted, inactive tail left in incoming order",
+        );
+    }
+
+    #[test]
+    fn build_left_items_active_mode_orders_inactive_tail_by_recency() {
+        // Under Active mode (the ONLY mode that sorts the tail) the inactive
+        // bucket orders most-recently-updated first, regardless of incoming order.
+        let t0 = Utc::now();
+        let mk = |id: &str, status: SessionStatus, off: i64| {
+            let mut s = test_session(id, "p", 0);
+            s.status = status;
+            s.updated_at = t0 + chrono::Duration::seconds(off);
+            s
+        };
+        let sessions = vec![
+            mk("a0", SessionStatus::Active, 0),
+            mk("i1", SessionStatus::Detached, 5),  // older
+            mk("i2", SessionStatus::Detached, 50), // newer
+        ];
+        let items = build_left_items(&sessions, false, AgentSortMode::Active, &|_| false, &|_| {
+            true
+        });
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Session(0),
+                LeftItem::InactiveToggle,
+                LeftItem::Session(2), // newer updated_at first
+                LeftItem::Session(1),
+            ],
+        );
+    }
+
+    #[test]
+    fn build_left_items_updated_and_created_order_active_by_recency() {
+        // The active bucket orders most-recent first under both Updated and
+        // Created (test_session sets updated_at == created_at == now + offset).
+        let mk = |id: &str, off: i64| {
+            let mut s = test_session(id, "p", off);
+            s.status = SessionStatus::Active;
+            s
+        };
+        let sessions = vec![mk("s0", 0), mk("s1", 100), mk("s2", 50)];
+
+        let updated =
+            build_left_items(&sessions, true, AgentSortMode::Updated, &|_| false, &|_| {
+                true
+            });
+        assert_eq!(
+            updated,
+            vec![
+                LeftItem::Session(1), // newest
+                LeftItem::Session(2),
+                LeftItem::Session(0), // oldest
+            ],
+            "Updated must order the active bucket newest-first",
+        );
+
+        let created =
+            build_left_items(&sessions, true, AgentSortMode::Created, &|_| false, &|_| {
+                true
+            });
+        assert_eq!(
+            created,
+            vec![
+                LeftItem::Session(1),
+                LeftItem::Session(2),
+                LeftItem::Session(0),
+            ],
+            "Created must order the active bucket newest-first",
+        );
+    }
+
+    #[test]
+    fn build_left_items_tie_stability_keeps_incoming_order() {
+        // Two active agents with identical updated_at/created_at AND identical
+        // names must keep incoming order under every comparator mode (the sorts
+        // are stable), so a tie never reshuffles the list.
+        let t = Utc::now();
+        let mk = |id: &str| {
+            let mut s = test_session(id, "p", 0);
+            s.status = SessionStatus::Active;
+            s.branch_name = "same".to_string();
+            s.title = None;
+            s.updated_at = t;
+            s.created_at = t;
+            s
+        };
+        let sessions = vec![mk("s0"), mk("s1")];
+        for mode in [
+            AgentSortMode::Updated,
+            AgentSortMode::Created,
+            AgentSortMode::NameAsc,
+            AgentSortMode::NameDesc,
+        ] {
+            let items = build_left_items(&sessions, true, mode, &|_| false, &|_| true);
+            assert_eq!(
+                items,
+                vec![LeftItem::Session(0), LeftItem::Session(1)],
+                "ties must preserve incoming order under {mode:?}",
+            );
+        }
     }
 
     #[test]

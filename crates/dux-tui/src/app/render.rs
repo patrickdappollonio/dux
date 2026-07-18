@@ -7,6 +7,32 @@ use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use ratatui::buffer::{CellDiffOption, CellWidth};
 use std::path::Path;
 
+/// How an agent row's project tag should be rendered. Decided purely from the
+/// project the session points at, so both the full-width row's inline tag and
+/// the collapsed icon rail agree on when to surface a warning marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectTagKind {
+    /// The project record exists and its path is present: render its name plainly.
+    Healthy,
+    /// The project record exists but its worktree path is missing on disk:
+    /// render a warning marker so the row surfaces the broken project.
+    PathMissing,
+    /// The project record is gone (orphaned session): render a "removed project"
+    /// warning marker.
+    Orphan,
+}
+
+/// Decide the [`ProjectTagKind`] for a session from its resolved project
+/// (`None` when the project record no longer exists). Pure and unit-tested so
+/// the two render paths cannot drift.
+pub(crate) fn project_tag_kind(project: Option<&Project>) -> ProjectTagKind {
+    match project {
+        None => ProjectTagKind::Orphan,
+        Some(project) if project.path_missing => ProjectTagKind::PathMissing,
+        Some(_) => ProjectTagKind::Healthy,
+    }
+}
+
 /// ASCII art logo displayed in the agent pane when no content is active.
 /// Shared with the server status screen (`crate::server_screen`) so the flip's
 /// "server running" view reuses the same wordmark instead of duplicating it.
@@ -539,10 +565,21 @@ impl App {
                                 let (glyph, color) = self.theme.session_dot(&session.status);
                                 (glyph.to_string(), color)
                             };
-                        ListItem::new(Line::from(Span::styled(
-                            dot,
-                            Style::default().fg(dot_color),
-                        )))
+                        // Surface a warning glyph in the narrow rail too, when the
+                        // agent's project has a missing path or its record is gone.
+                        let found = self
+                            .engine
+                            .projects
+                            .iter()
+                            .find(|p| p.id == session.project_id);
+                        let mut spans = vec![Span::styled(dot, Style::default().fg(dot_color))];
+                        if !matches!(project_tag_kind(found), ProjectTagKind::Healthy) {
+                            spans.push(Span::styled(
+                                "⚠",
+                                Style::default().fg(self.theme.project_missing_fg),
+                            ));
+                        }
+                        ListItem::new(Line::from(spans))
                     }
                     LeftItem::InactiveToggle => ListItem::new(Line::from(Span::styled(
                         "─",
@@ -627,18 +664,9 @@ impl App {
             .iter()
             .map(|item| match item {
                 LeftItem::InactiveToggle => {
-                    let count = self
-                        .engine
-                        .sessions
-                        .iter()
-                        .filter(|s| {
-                            matches!(
-                                s.status,
-                                crate::model::SessionStatus::Detached
-                                    | crate::model::SessionStatus::Exited
-                            )
-                        })
-                        .count();
+                    // Count only the inactive rows visible under the current
+                    // filter, so the toggle matches what expanding reveals.
+                    let count = self.visible_inactive_count();
                     let icon = if self.inactive_collapsed {
                         "▸"
                     } else {
@@ -735,18 +763,24 @@ impl App {
                         format!(" ({})", session.provider.as_str())
                     };
                     // Flat model: no tree connector; the project shows inline after
-                    // the name (or an orphan marker when its record is gone).
-                    let project_tag = match self
+                    // the name. A path-missing project renders as "⚠ <name>" in the
+                    // warning tone; an orphan (record gone) renders "⚠ removed
+                    // project". Both branch off the shared `project_tag_kind`.
+                    let found = self
                         .engine
                         .projects
                         .iter()
-                        .find(|p| p.id == session.project_id)
-                    {
-                        Some(project) => Span::styled(
-                            format!("  {}", project.name),
+                        .find(|p| p.id == session.project_id);
+                    let project_tag = match project_tag_kind(found) {
+                        ProjectTagKind::Healthy => Span::styled(
+                            format!("  {}", found.map(|p| p.name.as_str()).unwrap_or("")),
                             Style::default().fg(self.theme.provider_label_fg),
                         ),
-                        None => Span::styled(
+                        ProjectTagKind::PathMissing => Span::styled(
+                            format!("  ⚠ {}", found.map(|p| p.name.as_str()).unwrap_or("")),
+                            Style::default().fg(self.theme.project_missing_fg),
+                        ),
+                        ProjectTagKind::Orphan => Span::styled(
                             "  ⚠ removed project",
                             Style::default().fg(self.theme.project_missing_fg),
                         ),
@@ -8300,6 +8334,77 @@ mod tests {
     use crate::app::test_support::{default_bindings, test_app, wait_for_agent_cursor};
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
+
+    #[test]
+    fn project_tag_kind_classifies_healthy_path_missing_and_orphan() {
+        let app = test_app(default_bindings());
+        let healthy = app.engine.projects[0].clone();
+        assert_eq!(project_tag_kind(Some(&healthy)), ProjectTagKind::Healthy);
+
+        let mut missing = healthy.clone();
+        missing.path_missing = true;
+        assert_eq!(
+            project_tag_kind(Some(&missing)),
+            ProjectTagKind::PathMissing
+        );
+
+        assert_eq!(project_tag_kind(None), ProjectTagKind::Orphan);
+    }
+
+    #[test]
+    fn path_missing_project_renders_warning_tag_in_row() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.engine.projects[0].path_missing = true;
+        // Widen the left pane so the tag is not truncated off the row.
+        app.left_width_pct = 60;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains("⚠ demo"),
+            "a path-missing project must render its tag with a warning marker",
+        );
+    }
+
+    #[test]
+    fn path_missing_project_renders_warning_in_collapsed_rail() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.engine.projects[0].path_missing = true;
+        app.left_collapsed = true;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains('⚠'),
+            "the collapsed icon rail must surface a warning glyph for a path-missing project",
+        );
+    }
 
     #[test]
     fn osc8_forced_width_keeps_following_cells_in_diff() {

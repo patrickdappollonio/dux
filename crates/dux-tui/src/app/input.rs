@@ -799,6 +799,10 @@ impl App {
                 if self.engine.sessions.get(*i).is_some_and(|s| s.id == session_id))
         }) {
             self.selected_left = index;
+            // The cursor moved onto a specific agent by id, so any pending
+            // `manage-projects` target no longer matches the selection; clear
+            // it so a follow-up project action resolves this agent's project.
+            self.project_chooser_context = None;
         }
     }
 
@@ -8518,6 +8522,53 @@ not_a_real_action = ["x"]
         assert_eq!(filtered_branches(&app), vec!["codex-agent".to_string()]);
     }
 
+    /// A filter query that matches ZERO sessions must not panic when the user
+    /// navigates or presses Enter, and must leave a valid selection.
+    #[test]
+    fn agent_filter_zero_matches_navigation_and_enter_do_not_panic() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        let project_id = app.engine.projects[0].id.clone();
+        app.engine.sessions.clear();
+        for branch in ["api", "web"] {
+            app.engine.sessions.push(filter_test_session(
+                &format!("session-{branch}"),
+                branch,
+                &project_id,
+                now,
+            ));
+        }
+        app.rebuild_left_items();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+
+        app.open_agent_filter();
+        for c in "zzzznomatch".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert!(
+            filtered_branches(&app).is_empty(),
+            "the query should match nothing",
+        );
+
+        // Navigation and Enter over the empty filtered list must not panic.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        // The selection is still within bounds of whatever list is now showing.
+        let len = app.left_items().len();
+        assert!(
+            len == 0 || app.selected_left < len,
+            "selection {} must be valid for a list of {len}",
+            app.selected_left,
+        );
+    }
+
     #[test]
     fn esc_exits_filter_mode_and_restores_full_list() {
         let mut app = test_app(default_bindings());
@@ -9754,6 +9805,39 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn fork_uses_source_session_project_not_manage_context() {
+        let mut app = test_app(default_bindings());
+        // A second project the manage-projects target could point at.
+        let mut other = app.engine.projects[0].clone();
+        other.id = "project-2".to_string();
+        other.name = "other".to_string();
+        app.engine.projects.push(other);
+        // Point the manage-projects target at the OTHER project.
+        app.project_chooser_context = Some("project-2".to_string());
+        // Select the seeded session, which belongs to project-1.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::Session(_)))
+            .expect("session row");
+
+        app.fork_selected_session().expect("fork");
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                request: CreateAgentRequest::ForkSession { project, .. },
+                ..
+            } => {
+                assert_eq!(
+                    project.id, "project-1",
+                    "fork must use the source agent's project, not the manage-projects target"
+                );
+            }
+            other => panic!("expected a fork naming prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn copy_path_copies_selected_session_worktree() {
         let mut app = test_app(default_bindings());
         let _worktree_path = app.engine.sessions[0].worktree_path.clone();
@@ -9782,6 +9866,42 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert_eq!(app.status.text(), "Agent's path copied to clipboard.");
+    }
+
+    #[test]
+    fn copy_path_uses_chooser_picked_project_when_no_agent_selected() {
+        let mut app = test_app(default_bindings());
+        app.clipboard = Clipboard::from_fn(clipboard_ok);
+
+        // Add an agent-less project and make it the chooser target.
+        let mut agentless = app.engine.projects[0].clone();
+        agentless.id = "project-empty".to_string();
+        agentless.name = "empty".to_string();
+        agentless.path = "/tmp/agentless-project".to_string();
+        app.engine.projects.push(agentless);
+        app.project_chooser_context = Some("project-empty".to_string());
+
+        // Select a NON-agent row (the InactiveToggle) so the agent branch is
+        // skipped and the chooser project path is copied instead.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::InactiveToggle))
+            .expect("inactive toggle row");
+        assert!(app.selected_session().is_none());
+
+        app.copy_selected_path().unwrap();
+        drain_until(&mut app, |app| {
+            app.status.text() == "Project's path copied to clipboard."
+        });
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
+        assert_eq!(app.status.text(), "Project's path copied to clipboard.");
+        // One-and-done: the chooser target is consumed after the action.
+        assert!(
+            app.project_chooser_context.is_none(),
+            "the manage-projects target must be cleared after the copy action",
+        );
     }
 
     #[test]
@@ -13113,10 +13233,76 @@ cyan = "#00ffff"
             crate::statusline::StatusTone::Warning,
             "should show yellow warning, not red error"
         );
-        assert!(app.status.text().contains("Select an agent or project"));
+        assert!(app.status.text().contains("Select an agent first"));
         assert!(
             app.engine.companion_terminals.is_empty(),
             "no terminal should be spawned"
+        );
+    }
+
+    /// `new_companion_terminal` is agent-scoped: with a NON-agent row (the
+    /// Inactive toggle) selected it warns and spawns nothing, rather than
+    /// guessing a project terminal.
+    #[test]
+    fn new_companion_terminal_warns_on_inactive_toggle_row() {
+        let mut app = test_app(default_bindings());
+        // The seeded session is Detached, so the list has an Inactive toggle row.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::InactiveToggle))
+            .expect("inactive toggle row");
+        assert!(app.selected_session().is_none());
+
+        app.new_companion_terminal()
+            .expect("should not error, just warn");
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+        assert!(app.status.text().contains("Select an agent first"));
+        assert!(
+            app.engine.companion_terminals.is_empty(),
+            "no terminal should be spawned from a non-agent row",
+        );
+    }
+
+    /// `new-terminal-for-project` opens the chooser with the `ProjectTerminal`
+    /// intent even while an agent is selected; confirming a project spawns a
+    /// PROJECT-owned terminal.
+    #[test]
+    fn new_terminal_for_project_opens_chooser_and_spawns_project_terminal() {
+        let mut app = test_app(default_bindings());
+        // An agent is selected (default fixture selects the session row's index).
+        app.selected_left = 1;
+
+        app.execute_command("new-terminal-for-project".to_string())
+            .expect("open project chooser");
+
+        // The chooser is open with the ProjectTerminal intent.
+        match &app.prompt {
+            PromptState::PickProject { intent, .. } => {
+                assert_eq!(*intent, ProjectChooserIntent::ProjectTerminal);
+            }
+            other => panic!("expected PickProject prompt, got {other:?}"),
+        }
+
+        // Select the (only) project and confirm.
+        if let PromptState::PickProject { selected, .. } = &mut app.prompt {
+            *selected = 0;
+        }
+        app.confirm_project_chooser_selection()
+            .expect("confirm spawns project terminal");
+
+        assert_eq!(app.engine.companion_terminals.len(), 1);
+        let owner = app
+            .engine
+            .companion_terminals
+            .values()
+            .next()
+            .map(|t| t.owner.clone())
+            .expect("one terminal");
+        assert!(
+            matches!(owner, dux_core::model::TerminalOwner::Project(_)),
+            "the spawned terminal must be project-owned, got {owner:?}",
         );
     }
 

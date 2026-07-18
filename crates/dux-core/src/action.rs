@@ -114,6 +114,10 @@ pub enum Action {
     /// row. Kept for the same `validate_keys` reason as `EditConfig` above.
     RenameWebInstance,
     NewTerminal,
+    /// Palette-only: open the project chooser to pick a project, then spawn a
+    /// project-owned terminal at that project's repo root. Distinct from
+    /// `NewTerminal`, which is agent-scoped. No default keybinding.
+    NewProjectTerminal,
     RenameSession,
     DeleteProject,
     RemoveProject,
@@ -230,6 +234,7 @@ impl Action {
             Action::EditConfig => "edit_config",
             Action::RenameWebInstance => "rename_web_instance",
             Action::NewTerminal => "new_terminal",
+            Action::NewProjectTerminal => "new_project_terminal",
             Action::RenameSession => "rename_session",
             Action::DeleteProject => "delete_project",
             Action::RemoveProject => "remove_project",
@@ -317,6 +322,7 @@ impl Action {
             Action::SelectTab8 => "Focus tab 8 of the selected agent.",
             Action::SelectTab9 => "Focus tab 9 of the selected agent.",
             Action::NewTerminal => "Spawn a new companion terminal for the selected agent.",
+            Action::NewProjectTerminal => "Open a terminal for a project you pick.",
             Action::ExitInteractive => "Exit interactive mode (stop forwarding keys to agent).",
             Action::OpenMacroBar => "Open the macro command bar to send text macros.",
             Action::OpenCurrentPullRequest => {
@@ -504,6 +510,7 @@ impl Action {
             | Action::EditConfig
             | Action::RenameWebInstance
             | Action::NewTerminal
+            | Action::NewProjectTerminal
             | Action::RenameSession
             | Action::DeleteProject
             | Action::RemoveProject

@@ -274,6 +274,10 @@ impl App {
                 ));
                 Ok(())
             }
+            ProjectChooserIntent::ProjectTerminal => {
+                self.prompt = PromptState::None;
+                self.show_project_terminal(&project)
+            }
         }
     }
 
@@ -361,7 +365,17 @@ impl App {
             self.set_error("Select an agent session first to fork.");
             return Ok(());
         };
-        let Some(project) = self.selected_project().cloned() else {
+        // Fork is agent-scoped: the new worktree belongs to the SAME project as
+        // the agent being forked. Derive it from the source session, not from
+        // `selected_project()`, which can resolve to a `manage-projects` target
+        // pointing at a different project.
+        let Some(project) = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == source_session.project_id)
+            .cloned()
+        else {
             self.set_error("Select an agent session first to fork.");
             return Ok(());
         };
@@ -807,7 +821,7 @@ impl App {
     }
 
     pub(crate) fn checkout_selected_project_default_branch(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -1284,19 +1298,18 @@ impl App {
         Ok(())
     }
 
-    /// Opens the first existing companion terminal for the selected session
-    /// (or, on a project row, the first project terminal for that project), or
-    /// spawns a new one if none exists.
+    /// Opens the first existing companion terminal for the SELECTED AGENT, or
+    /// spawns a new one if none exists. Agent-scoped only: project terminals are
+    /// reached through the explicit `new-terminal-for-project` command (via the
+    /// project chooser), never by guessing from what is selected.
     pub(crate) fn show_or_open_first_terminal(&mut self) -> Result<()> {
-        // A session row wins; a project header row targets the project itself.
-        let owner = if let Some(session) = self.selected_session() {
-            TerminalOwner::Session(session.id.clone())
-        } else if let Some(project) = self.selected_project() {
-            TerminalOwner::Project(project.id.clone())
-        } else {
-            self.set_error("Select an agent or project first.");
+        let Some(session) = self.selected_session() else {
+            self.set_warning(
+                "Select an agent first, or use new-terminal-for-project for a project terminal.",
+            );
             return Ok(());
         };
+        let owner = TerminalOwner::Session(session.id.clone());
 
         let first = self
             .engine
@@ -1318,22 +1331,7 @@ impl App {
             self.set_info(format!("Opened terminal \"{label}\"."));
             return Ok(());
         }
-        match owner {
-            TerminalOwner::Session(_) => self.show_companion_terminal(),
-            TerminalOwner::Project(project_id) => {
-                let Some(project) = self
-                    .engine
-                    .projects
-                    .iter()
-                    .find(|p| p.id == project_id)
-                    .cloned()
-                else {
-                    self.set_error("Select an agent or project first.");
-                    return Ok(());
-                };
-                self.show_project_terminal(&project)
-            }
-        }
+        self.show_companion_terminal()
     }
 
     /// Spawns a new companion terminal for the owner (agent session or
@@ -1408,17 +1406,19 @@ impl App {
         Ok(())
     }
 
-    /// Palette command: always spawns a new companion terminal for the
-    /// selected agent, or a project terminal for the selected project.
-    /// Uses a yellow warning when nothing is selected.
+    /// Palette command (`new-terminal-for-agent`): spawns a new companion
+    /// terminal for the SELECTED AGENT only. Project terminals have their own
+    /// explicit command (`new-terminal-for-project`) that routes through the
+    /// project chooser, so this no longer guesses at a project when no agent is
+    /// selected (which made project terminals unreachable with an agent
+    /// selected). Uses a yellow warning when no agent is selected.
     pub(crate) fn new_companion_terminal(&mut self) -> Result<()> {
         if self.selected_session().is_some() {
             return self.show_companion_terminal();
         }
-        if let Some(project) = self.selected_project().cloned() {
-            return self.show_project_terminal(&project);
-        }
-        self.set_warning("Select an agent or project first to launch a terminal.");
+        self.set_warning(
+            "Select an agent first, or use new-terminal-for-project for a project terminal.",
+        );
         Ok(())
     }
 
@@ -1456,7 +1456,7 @@ impl App {
     }
 
     pub(crate) fn refresh_selected_project(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -1668,11 +1668,14 @@ impl App {
         self.clear_companion_terminals_for_session(session_id);
         self.clear_focused_tab_for_session(session_id);
 
-        // Derived view state. In the flat list, deleting an agent just shifts the
-        // cursor up one and re-clamps to a selectable row (there is no project
-        // header to fall back onto).
+        // Derived view state. In the flat list, the deleted session is already
+        // gone from `engine.sessions`, so the row that slid into the freed slot
+        // now sits at the SAME display index. Keep the cursor where it is and let
+        // `rebuild_left_items` (which calls `ensure_selectable_left_item`)
+        // re-clamp it to a selectable row. The old `saturating_sub(1)` was
+        // leftover nested-model logic that double-adjusted and jumped the cursor
+        // up one row past the survivor.
         self.rebuild_left_items();
-        self.selected_left = self.selected_left.saturating_sub(1);
         self.ensure_selectable_left_item();
         self.reload_changed_files();
 
@@ -1958,7 +1961,7 @@ impl App {
             self.set_error("No providers are configured.");
             return Ok(());
         }
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -2122,7 +2125,7 @@ impl App {
     }
 
     pub(crate) fn toggle_project_auto_reopen_agents(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -2183,7 +2186,7 @@ impl App {
     }
 
     pub(crate) fn open_configure_startup_command(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -2266,7 +2269,7 @@ impl App {
     }
 
     pub(crate) fn open_configure_project_env(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -2747,7 +2750,7 @@ impl App {
     }
 
     pub(crate) fn remove_selected_project(&mut self) -> Result<()> {
-        if let Some(project) = self.selected_project().cloned() {
+        if let Some(project) = self.take_selected_project() {
             // Real project: keep the guard. Removing one that still has agents
             // here would orphan them — use "delete project" to remove agents too.
             let has_sessions = self
@@ -2811,7 +2814,7 @@ impl App {
     }
 
     pub(crate) fn delete_selected_project(&mut self) -> Result<()> {
-        let Some(project) = self.selected_project().cloned() else {
+        let Some(project) = self.take_selected_project() else {
             self.set_error("Select a project first.");
             return Ok(());
         };
@@ -3124,7 +3127,8 @@ impl App {
     }
 
     pub(crate) fn copy_selected_path(&mut self) -> Result<()> {
-        let path = match self.left_items().get(self.selected_left) {
+        // Agent selection wins: copy the selected agent's worktree path.
+        let agent_path = match self.left_items().get(self.selected_left) {
             Some(LeftItem::Session(index)) => self
                 .engine
                 .sessions
@@ -3132,13 +3136,19 @@ impl App {
                 .map(|s| s.worktree_path.clone()),
             _ => None,
         };
+        // Fall back to a chooser-picked project (agent-less projects have no row
+        // to select, so this is how their path is reachable). `take_selected_project`
+        // consumes the one-and-done `manage-projects` target.
+        let (path, label) = match agent_path {
+            Some(p) => (Some(p), "Agent's path copied to clipboard."),
+            None => (
+                self.take_selected_project().map(|p| p.path),
+                "Project's path copied to clipboard.",
+            ),
+        };
         match path {
             Some(p) => {
-                match self.clipboard.copy_text(
-                    &p,
-                    "Agent's path copied to clipboard.",
-                    &self.engine.worker_tx,
-                ) {
+                match self.clipboard.copy_text(&p, label, &self.engine.worker_tx) {
                     Ok(pending) => {
                         self.apply_reaction(dux_core::engine::EventReaction::Status(pending))
                     }
@@ -5071,6 +5081,200 @@ mod tests {
         );
     }
 
+    /// Removing an agent-less project contributes zero rows to the flat list,
+    /// so the cursor must not move. The old `saturating_sub(1)` jostled the
+    /// selection up one even though the removed project had no rows to reclaim.
+    #[test]
+    fn removing_agentless_project_leaves_selection_put() {
+        let p1 = make_project("project-1", "codex");
+        let mut p2 = make_project("project-2", "codex");
+        p2.name = "empty".to_string();
+        let mut sessions = Vec::new();
+        for id in ["s1", "s2", "s3"] {
+            let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
+            s.project_id = "project-1".to_string();
+            s.status = SessionStatus::Active;
+            sessions.push(s);
+        }
+        let mut app = test_app_with_sessions(sessions, vec![p1, p2]);
+        app.rebuild_left_items();
+
+        // Select an agent below the top of the list.
+        app.selected_left = 1;
+        let selected_id = app.selected_session().map(|s| s.id.clone());
+        assert_eq!(selected_id.as_deref(), Some("s2"));
+
+        // Worker removed the agent-less project from engine state.
+        app.engine.projects.retain(|p| p.id != "project-2");
+        app.apply_project_persistence_outcome(ProjectPersistenceOutcome {
+            action: ProjectPersistenceAction::Remove {
+                project_id: "project-2".to_string(),
+                project_name: "empty".to_string(),
+            },
+            view: ProjectPersistenceView::Removed {
+                project_name: "empty".to_string(),
+            },
+            status_op_id: None,
+        });
+
+        assert_eq!(
+            app.selected_left, 1,
+            "removing an agent-less project must not move the cursor",
+        );
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("s2"),
+            "the same agent should still be selected",
+        );
+    }
+
+    /// Reloading config in the flat model must preserve the agent selection.
+    /// The old clamp against `engine.projects.len()` was meaningless (the flat
+    /// list indexes agent rows, not projects) and forced the cursor to the top.
+    #[test]
+    fn config_reload_preserves_agent_selection() {
+        let project = make_project_at("project-1", "codex", "/tmp/project");
+        let mut sessions = Vec::new();
+        for id in ["s1", "s2", "s3"] {
+            let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
+            s.project_id = "project-1".to_string();
+            s.status = SessionStatus::Active;
+            sessions.push(s);
+        }
+        let mut app = test_app_with_sessions(sessions, vec![project.clone()]);
+        // Persist the project so the reload path (which reloads projects from the
+        // store) keeps it instead of wiping it.
+        app.engine
+            .session_store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                name: Some(project.name.clone()),
+                default_provider: None,
+                leading_branch: project.leading_branch.clone(),
+                auto_reopen_agents: project.auto_reopen_agents,
+                startup_command: project.startup_command.clone(),
+                env: project.env.clone(),
+            })
+            .expect("seed project into store");
+        app.rebuild_left_items();
+
+        app.selected_left = 2;
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s3"));
+
+        let config = app.engine.config.clone();
+        app.apply_reloaded_config(config).expect("reload config");
+
+        assert_eq!(
+            app.selected_left, 2,
+            "config reload must not reset the agent selection to the top",
+        );
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s3"),
+            "the same agent must stay selected across a config reload",
+        );
+    }
+
+    /// The "Inactive (N)" toggle count must reflect the active search filter:
+    /// it counts only inactive agents currently visible, not every inactive
+    /// session regardless of the query.
+    #[test]
+    fn inactive_toggle_count_honors_the_active_filter() {
+        let project = make_project_at("project-1", "codex", "/tmp/project");
+        let mut sessions = Vec::new();
+        // One active agent (excluded from the inactive tail regardless).
+        let mut active = make_session("keep-active", "codex", "/tmp/worktree-a");
+        active.project_id = "project-1".to_string();
+        active.status = SessionStatus::Active;
+        sessions.push(active);
+        // Three inactive agents: two match the "keep" query, one does not.
+        for id in ["keep-1", "keep-2", "drop-1"] {
+            let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
+            s.project_id = "project-1".to_string();
+            s.status = SessionStatus::Detached;
+            sessions.push(s);
+        }
+        let mut app = test_app_with_sessions(sessions, vec![project]);
+
+        // No filter: all three inactive agents count.
+        assert_eq!(app.visible_inactive_count(), 3);
+
+        // Filter to "keep": only the two matching inactive agents remain visible.
+        app.agent_filter = Some(TextInput::with_text("keep".to_string()));
+        app.rebuild_left_items();
+        assert_eq!(
+            app.visible_inactive_count(),
+            2,
+            "the toggle count must drop the filtered-out inactive agent",
+        );
+    }
+
+    /// The `manage-projects` target is one-and-done: a project-scoped action
+    /// consumes it, so a second action falls back to the ordinary selection.
+    #[test]
+    fn project_action_consumes_manage_projects_target() {
+        let p1 = make_project("project-1", "codex");
+        let mut p2 = make_project("project-2", "codex");
+        p2.name = "empty".to_string();
+        let mut sessions = Vec::new();
+        for id in ["s1", "s2"] {
+            let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
+            s.project_id = "project-1".to_string();
+            s.status = SessionStatus::Active;
+            sessions.push(s);
+        }
+        let mut app = test_app_with_sessions(sessions, vec![p1, p2]);
+        app.rebuild_left_items();
+        app.selected_left = 0;
+
+        // Point the chooser at the agent-less project and run one project action.
+        app.project_chooser_context = Some("project-2".to_string());
+        app.open_configure_project_env().expect("configure env");
+
+        // The action captured project-2 (proof it resolved the target)…
+        match &app.prompt {
+            PromptState::ConfigureProjectEnv { project_id, .. } => {
+                assert_eq!(project_id, "project-2");
+            }
+            other => panic!("expected ConfigureProjectEnv prompt, got {other:?}"),
+        }
+        // …and the target is now consumed so the next action won't reuse it.
+        assert!(
+            app.project_chooser_context.is_none(),
+            "the manage-projects target must be cleared after one project action",
+        );
+    }
+
+    /// Confirming the project chooser after the picked project vanished from
+    /// `engine.projects` must report an error and close the prompt, not panic.
+    #[test]
+    fn confirm_project_chooser_selection_handles_vanished_project() {
+        let project = make_project("project-1", "codex");
+        let mut app = test_app_with_sessions(vec![], vec![project]);
+        app.prompt = PromptState::PickProject {
+            intent: ProjectChooserIntent::NewAgent,
+            entries: vec![ProjectChooserEntry {
+                id: "ghost".to_string(),
+                name: "ghost".to_string(),
+                path: "/tmp/ghost".to_string(),
+                agent_count: 0,
+                path_missing: false,
+            }],
+            selected: 0,
+        };
+
+        app.confirm_project_chooser_selection()
+            .expect("must not panic when the project is gone");
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the prompt must close",
+        );
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("no longer available"));
+    }
+
     #[test]
     fn detach_finds_conflict_on_same_worktree() {
         let s1 = make_session("s1", "claude", "/tmp/wt/a");
@@ -5252,6 +5456,66 @@ mod tests {
         assert!(
             worktree_dir.path().exists(),
             "worktree directory must be preserved on disk when delete_worktree=false",
+        );
+    }
+
+    /// Deleting the selected agent must land the cursor on the row that slid
+    /// into the freed slot (id-stable reselection), not on the row above it.
+    /// The old `saturating_sub(1)` double-adjusted after the rebuild already
+    /// re-clamped, jumping the cursor up one row.
+    #[test]
+    fn delete_selected_agent_keeps_cursor_on_next_row() {
+        let project = make_project_at("project-1", "codex", "/tmp/project");
+        let mut sessions = Vec::new();
+        for id in ["s1", "s2", "s3"] {
+            let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
+            s.project_id = "project-1".to_string();
+            s.status = SessionStatus::Active;
+            sessions.push(s);
+        }
+        let mut app = test_app_with_sessions(sessions, vec![project]);
+        app.rebuild_left_items();
+
+        // Select the middle session (display index 1 == s2).
+        app.selected_left = 1;
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s2"));
+
+        app.do_delete_session("s2", false).expect("delete s2");
+
+        // The cursor stays at display index 1, which now holds s3 (the row that
+        // slid up), NOT s1 (which a decrement would have selected).
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s3"),
+            "cursor should land on the row that took the deleted row's place",
+        );
+    }
+
+    /// Deleting a row OTHER than the selected one must not drag the selection
+    /// off the still-present selected agent.
+    #[test]
+    fn delete_unselected_agent_leaves_selection_put() {
+        let project = make_project_at("project-1", "codex", "/tmp/project");
+        let mut sessions = Vec::new();
+        for id in ["s1", "s2", "s3"] {
+            let mut s = make_session(id, "codex", &format!("/tmp/worktree-{id}"));
+            s.project_id = "project-1".to_string();
+            s.status = SessionStatus::Active;
+            sessions.push(s);
+        }
+        let mut app = test_app_with_sessions(sessions, vec![project]);
+        app.rebuild_left_items();
+
+        // Select the first session, then delete the middle (unselected) one.
+        app.selected_left = 0;
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s1"));
+
+        app.do_delete_session("s2", false).expect("delete s2");
+
+        assert_eq!(
+            app.selected_session().map(|s| s.id.as_str()),
+            Some("s1"),
+            "deleting a different row must not move the selection",
         );
     }
 

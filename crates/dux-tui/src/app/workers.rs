@@ -978,8 +978,12 @@ impl App {
             }
 
             ProjectPersistenceView::Removed { project_name } => {
+                // An agent-less project contributes zero rows, so removing it
+                // must not move the cursor; a project WITH agents removes many
+                // rows via cascade, which `rebuild_left_items` (via
+                // `ensure_selectable_left_item`) re-clamps. No decrement.
                 self.rebuild_left_items();
-                self.selected_left = self.selected_left.saturating_sub(1);
+                self.ensure_selectable_left_item();
                 // Selection moved to a different item; refresh the right-pane
                 // file lists so they match the new selection instead of the
                 // removed project's stale changes.
@@ -1009,8 +1013,11 @@ impl App {
             }
 
             ProjectPersistenceView::Deleted { project_name } => {
+                // The cascade already removed this project's agent rows from
+                // `engine.sessions`; rebuild + re-clamp handles the selection.
+                // No decrement (it double-adjusted the cursor).
                 self.rebuild_left_items();
-                self.selected_left = self.selected_left.saturating_sub(1);
+                self.ensure_selectable_left_item();
                 self.reload_changed_files();
                 self.update_config_projects_from_runtime();
                 if let Err(err) = self
@@ -1207,6 +1214,11 @@ impl App {
                     .iter()
                     .position(|item| matches!(item, LeftItem::Session(index) if self.engine.sessions.get(*index).map(|candidate| candidate.id.as_str()) == Some(outcome.session.id.as_str())))
                     .unwrap_or(0);
+                // The selection just moved onto the freshly created agent, so a
+                // lingering `manage-projects` target no longer matches what the
+                // cursor points at; clear it so a follow-up project action
+                // resolves the new agent's project, not the stale pick.
+                self.project_chooser_context = None;
                 self.reload_changed_files();
                 self.show_agent_surface();
                 self.input_target = InputTarget::Agent;
@@ -1621,6 +1633,35 @@ mod tests {
         assert!(
             app.status.snapshot().is_empty(),
             "the create View arm must not set any status; the engine emits the keyed final",
+        );
+    }
+
+    /// Creating an agent moves the cursor onto the new agent, so a lingering
+    /// `manage-projects` target must be cleared — otherwise a follow-up project
+    /// action would resolve the stale pick instead of the new agent's project.
+    #[test]
+    fn create_committed_view_clears_manage_projects_target() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session = app.engine.sessions[0].clone();
+
+        // A prior manage-projects pick targeted some other project.
+        app.project_chooser_context = Some("some-other-project".to_string());
+
+        app.apply_agent_launch_ready_view(AgentLaunchReadyOutcome {
+            tab_id: session.id.clone(),
+            session,
+            pty_size: (80, 24),
+            detached_session_id: None,
+            view: AgentLaunchReadyView::CreateCommitted {
+                status_message: "Created agent.".to_string(),
+                startup_result_error: None,
+            },
+        });
+
+        assert!(
+            app.project_chooser_context.is_none(),
+            "creating an agent must clear the manage-projects target",
         );
     }
 

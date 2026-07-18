@@ -1100,6 +1100,15 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        // Palette-only: opens the project chooser to spawn a project terminal.
+        // No default key (like manage-projects).
+        action: Action::NewProjectTerminal,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::RenameSession,
         default_keys: &[key!(e)],
         scopes: &[BindingScope::Left, BindingScope::Center],
@@ -2285,7 +2294,8 @@ mod tests {
             "new-agent-from-pr",
             "new-agent-from-worktree",
             "new-agent-tab",
-            "new-terminal",
+            "new-terminal-for-agent",
+            "new-terminal-for-project",
             "open-current-pr",
             "open-worktree",
             "open-worktree-with",

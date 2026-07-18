@@ -308,9 +308,15 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         action: Action::NewTerminal,
-        name: "new-terminal",
-        description: "Spawn a new companion terminal for the selected agent, or a project terminal for the selected project",
-        // Per-session/per-project: web spawns terminals from the row menus inline.
+        name: "new-terminal-for-agent",
+        description: "Spawn a new companion terminal for the selected agent",
+        // Per-session: web spawns agent terminals from the session row menu inline.
+    },
+    PaletteCommand {
+        action: Action::NewProjectTerminal,
+        name: "new-terminal-for-project",
+        description: "Open a terminal for a project you pick",
+        // Per-project: web spawns project terminals from the project row menu inline.
     },
     PaletteCommand {
         action: Action::RenameSession,
