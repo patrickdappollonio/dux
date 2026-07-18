@@ -789,36 +789,47 @@ impl Engine {
         self.pty_input.insert(tab_id.to_string(), Instant::now());
     }
 
-    /// Returns `true` if the given tab received PTY data within
-    /// [`AGENT_STREAMING_WINDOW`], indicating it is actively streaming output —
-    /// unless the user forwarded keystrokes to it within
-    /// [`AGENT_INPUT_SUPPRESSION_WINDOW`], in which case the recent output is
-    /// assumed to be the echo of that typing and the indicator is voided.
+    /// Returns whether the tab's agent should read as "working". Priority: real
+    /// PTY OUTPUT wins over everything, then the agent's own OSC 9;4 progress
+    /// report, then idle.
+    ///
+    /// - Visible output within [`AGENT_STREAMING_WINDOW`] → working. `pty_activity`
+    ///   is stamped only on VISIBLE grid changes (see `TerminalState::
+    ///   take_visible_change`), so this is genuine agent output, not an OSC status
+    ///   sequence. It overrides the OSC report everywhere: an agent that misreports
+    ///   "idle" (or stopped reporting) while still printing must still read as
+    ///   working. The one exception is output that is the terminal echoing the
+    ///   user's keystrokes within [`AGENT_INPUT_SUPPRESSION_WINDOW`] — the user
+    ///   typing, not the agent.
+    /// - No fresh (non-echo) output → fall back to a fresh OSC 9;4 progress report,
+    ///   if any. A stale report (older than [`PROGRESS_AUTHORITY_WINDOW`]) grants no
+    ///   authority, so a crashed agent that stopped reporting can't stick it on.
+    /// - Otherwise idle.
+    ///
     /// Keyed by TAB id (see `poll_pty_activity`), not session id.
     pub fn is_agent_streaming(&self, tab_id: &str) -> bool {
-        // A fresh OSC 9;4 progress report is authoritative: the agent is stating
-        // its own busy/idle status, which we trust over the output-activity
-        // heuristic (and over typing suppression — a progress report is the
-        // agent's own signal, not a terminal echo of the user's keystrokes). A
-        // stale report is ignored and the heuristic below resumes, so a crashed
-        // agent that stopped reporting can never leave the spinner stuck on.
+        // TEXT WINS: a visible content change is the ground truth that the agent is
+        // producing work, and it overrides the agent's own OSC progress claims.
+        // Discount only output that is the terminal echoing recent keystrokes.
+        let streaming = self
+            .pty_activity
+            .get(tab_id)
+            .is_some_and(|t| t.elapsed() < AGENT_STREAMING_WINDOW);
+        let typing = self
+            .pty_input
+            .get(tab_id)
+            .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW);
+        if streaming && !typing {
+            return true;
+        }
+        // No fresh (non-echo) output: consult the agent's own OSC 9;4 report.
         if let Some(report) = self.pty_progress.get(tab_id)
             && report.at.elapsed() < PROGRESS_AUTHORITY_WINDOW
         {
             return report.working;
         }
-        let streaming = self
-            .pty_activity
-            .get(tab_id)
-            .is_some_and(|t| t.elapsed() < AGENT_STREAMING_WINDOW);
-        if !streaming {
-            return false;
-        }
-        let typing = self
-            .pty_input
-            .get(tab_id)
-            .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW);
-        !typing
+        // No output and no fresh report: assume idle.
+        false
     }
 
     /// The terminal identity dux should apply when launching an agent, resolved
@@ -2930,10 +2941,12 @@ mod tests {
     }
 
     #[test]
-    fn progress_report_overrides_working_false_even_with_activity() {
+    fn visible_output_overrides_a_false_progress_report() {
         let (mut engine, _tmp) = test_engine();
-        // Output activity would read as streaming, but the agent's own progress
-        // report states it is idle — the report wins.
+        // TEXT WINS: real visible output (pty_activity, stamped only on visible grid
+        // changes) means the agent is producing work, even if its own OSC 9;4 report
+        // claims "idle". An agent that misreports or stops reporting while still
+        // printing must still light the indicator.
         engine.pty_activity.insert("s1".to_string(), Instant::now());
         engine.pty_progress.insert(
             "s1".to_string(),
@@ -2943,8 +2956,29 @@ mod tests {
             },
         );
         assert!(
-            !engine.is_agent_streaming("s1"),
-            "a fresh idle progress report must override the activity heuristic"
+            engine.is_agent_streaming("s1"),
+            "live visible output must override a stale-claiming idle progress report"
+        );
+    }
+
+    #[test]
+    fn typing_echo_defers_to_the_progress_report() {
+        let (mut engine, _tmp) = test_engine();
+        // Recent output that is merely the echo of the user's keystrokes is voided,
+        // so the OSC report is consulted as the fallback. A fresh "working" report
+        // then lights it (the agent is thinking about what the user just typed).
+        engine.pty_activity.insert("s1".to_string(), Instant::now());
+        engine.pty_input.insert("s1".to_string(), Instant::now());
+        engine.pty_progress.insert(
+            "s1".to_string(),
+            ProgressReport {
+                working: true,
+                at: Instant::now(),
+            },
+        );
+        assert!(
+            engine.is_agent_streaming("s1"),
+            "with output suppressed as typing echo, a fresh working report wins"
         );
     }
 

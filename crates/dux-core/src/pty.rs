@@ -849,7 +849,16 @@ impl PtyClient {
                     if let Ok(mut terminal) = terminal.lock() {
                         let replies = terminal.process(data);
                         dirty.store(true, Ordering::Release);
-                        received_data.store(true, Ordering::Release);
+                        // Streaming/"working" signal: only a VISIBLE content change
+                        // counts as the agent producing output. OSC status sequences
+                        // (OSC 9;4 progress) and other non-rendering bytes advance the
+                        // parser without changing the grid, so they must not read as
+                        // activity — `is_agent_streaming` consults them only as a
+                        // fallback. The raw `dirty` flag above still fires for
+                        // rendering regardless.
+                        if terminal.take_visible_change() {
+                            received_data.store(true, Ordering::Release);
+                        }
                         // Capture the visibility transition while we still hold the
                         // terminal lock, then release it BEFORE handing the parser's
                         // replies to the writer. Holding `terminal` across the write
@@ -1382,6 +1391,12 @@ struct TerminalState {
     event_proxy: EventProxy,
     rows: u16,
     cols: u16,
+    /// Fingerprint of the visible grid content at the last `take_visible_change`
+    /// call. Drives the streaming/"working" signal: only a change in what is
+    /// actually rendered counts as the agent producing output, so non-rendering
+    /// bytes (OSC status sequences like OSC 9;4 progress, color queries) never
+    /// read as activity. `None` until the first check.
+    last_content_hash: Option<u64>,
 }
 
 impl TerminalState {
@@ -1402,7 +1417,30 @@ impl TerminalState {
             event_proxy,
             rows,
             cols,
+            last_content_hash: None,
         }
+    }
+
+    /// Whether the VISIBLE grid content changed since the last call (real output),
+    /// as opposed to only non-rendering bytes advancing the parser (OSC status
+    /// sequences, color queries, cursor-only moves). Fingerprints the rendered
+    /// characters — deliberately cursor-independent, so a bare cursor blink/move
+    /// or an OSC 9;4 progress report never reads as activity. Drives the
+    /// streaming/"working" signal; the raw snapshot dirty flag is separate.
+    fn take_visible_change(&mut self) -> bool {
+        use std::hash::{Hash, Hasher};
+        // The display iterator walks the viewport in a fixed order, so hashing each
+        // cell's character captures both the content AND its layout: a spinner
+        // cycling a glyph, a new line of text, or a scroll all change the sequence,
+        // while a cursor-only move or an OSC status write leave it identical.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for indexed in self.term.renderable_content().display_iter {
+            indexed.cell.c.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        let changed = self.last_content_hash != Some(hash);
+        self.last_content_hash = Some(hash);
+        changed
     }
 
     fn process(&mut self, data: &[u8]) -> Vec<u8> {
@@ -2359,6 +2397,40 @@ mod tests {
         assert!(
             !client.take_attention(true),
             "an untracked companion must never arm attention"
+        );
+    }
+
+    #[test]
+    fn take_visible_change_fires_on_text_not_on_osc_or_cursor() {
+        let mut terminal = TerminalState::with_scrollback(4, 20, 100);
+
+        // Real printed text is a visible change.
+        terminal.process(b"hello");
+        assert!(
+            terminal.take_visible_change(),
+            "printing text must register a visible change"
+        );
+
+        // Processing bytes that don't alter the grid content is NOT a change:
+        // an OSC 9;4 progress report (the agent's own status signal)...
+        terminal.process(b"\x1b]9;4;1;50\x1b\\");
+        assert!(
+            !terminal.take_visible_change(),
+            "an OSC 9;4 progress report changes no visible content"
+        );
+
+        // ...and a bare cursor move (no cell content written).
+        terminal.process(b"\x1b[2;3H");
+        assert!(
+            !terminal.take_visible_change(),
+            "a cursor move writes no visible content"
+        );
+
+        // Printing more text is a change again.
+        terminal.process(b" world");
+        assert!(
+            terminal.take_visible_change(),
+            "printing more text must register a visible change"
         );
     }
 
