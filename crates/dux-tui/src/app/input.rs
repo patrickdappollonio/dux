@@ -10561,7 +10561,8 @@ not_a_real_action = ["x"]
                 .iter()
                 .rposition(|&i| i == toggle_idx)
                 .expect("toggle row");
-            let y = app.mouse_layout.left_list.y + rel as u16;
+            // The toggle ends with a trailing spacer; its label is one row up.
+            let y = app.mouse_layout.left_list.y + rel.saturating_sub(1) as u16;
             let lx = app.mouse_layout.left_list.x;
             let lw = app.mouse_layout.left_list.width;
             let buf = terminal.backend().buffer();
@@ -10603,6 +10604,63 @@ not_a_real_action = ["x"]
         assert!(
             !toggle_row_has_rule(&mut app),
             "no rule while the toggle is selected",
+        );
+    }
+
+    #[test]
+    fn first_inactive_agent_gets_top_padding_from_the_toggle_spacer() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut inactive = app.engine.sessions[0].clone();
+        inactive.id = "inactive-1".to_string();
+        app.engine.sessions.push(inactive);
+        let active_id = app.engine.sessions[0].id.clone();
+        app.engine
+            .mark_session_status(&active_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status("inactive-1", SessionStatus::Exited);
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        // Expand the Inactive section by hand so the inactive agent renders.
+        app.inactive_collapsed = false;
+        app.inactive_collapse_overridden = true;
+        app.rebuild_left_items();
+        // Select the inactive agent (the Session that sorts after the toggle).
+        let sel = app
+            .left_items()
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| matches!(i, LeftItem::Session(_)))
+            .map(|(idx, _)| idx)
+            .next_back()
+            .expect("inactive agent row");
+        app.selected_left = sel;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let rel_start = app
+            .mouse_layout
+            .left_row_to_item
+            .iter()
+            .position(|&i| i == sel)
+            .expect("inactive agent visible");
+        assert!(rel_start > 0, "inactive agent is not the first row");
+        // The row directly above it is the toggle's trailing spacer, which now
+        // carries the selection's top-half padding block.
+        let y = app.mouse_layout.left_list.y + (rel_start - 1) as u16;
+        let buf = terminal.backend().buffer();
+        let lx = app.mouse_layout.left_list.x;
+        let lw = app.mouse_layout.left_list.width;
+        assert!(
+            (lx..lx + lw).any(|x| buf[(x, y)].symbol() == "▄"),
+            "the first inactive agent pads into the toggle's trailing spacer",
         );
     }
 

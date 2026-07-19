@@ -784,16 +784,15 @@ impl App {
                         buf[(x, y)].set_symbol("▀").set_fg(sel_color);
                     }
                 }
-                // Row above the name -> bottom-half selection. For an interior
-                // agent that is the previous agent's (blank) spacer; for the very
-                // first row it is the reserved top-margin row. Either way it is a
-                // blank boundary row, so a label is never clobbered.
+                // Row above the name -> bottom-half selection. Every item ends
+                // with a trailing spacer, so the row directly above any item's
+                // first row is a blank boundary (the previous agent's or the
+                // toggle's spacer) and is always safe to paint; for the very first
+                // row it is the reserved top-margin instead.
                 if rel_start > 0 {
-                    if matches!(items.get(map[rel_start - 1]), Some(LeftItem::Session(_))) {
-                        let y = row_at(rel_start - 1);
-                        for x in x0..x1 {
-                            buf[(x, y)].set_symbol("▄").set_fg(sel_color);
-                        }
+                    let y = row_at(rel_start - 1);
+                    for x in x0..x1 {
+                        buf[(x, y)].set_symbol("▄").set_fg(sel_color);
                     }
                 } else if let Some(py) = top_pad_y {
                     for x in x0..x1 {
@@ -802,9 +801,10 @@ impl App {
                 }
             }
             LeftItem::InactiveToggle => {
-                // Highlight only the label row (the item's last row); the leading
-                // separator, when present, stays an unhighlighted blank.
-                let y = row_at(rel_end);
+                // Highlight only the label row. The toggle ends with a trailing
+                // spacer, so the label is the second-to-last row; the leading
+                // separator (when present) and the trailing spacer stay blank.
+                let y = row_at(rel_end.saturating_sub(1));
                 for x in x0..x1 {
                     buf[(x, y)].set_style(sel_style);
                 }
@@ -830,7 +830,9 @@ impl App {
         let Some(rel_end) = map.iter().rposition(|&i| i == toggle_idx) else {
             return;
         };
-        let y = list_content.y + rel_end as u16;
+        // The toggle ends with a trailing spacer, so the label sits one row above
+        // the item's last row.
+        let y = list_content.y + rel_end.saturating_sub(1) as u16;
         let x0 = list_content.x;
         let x1 = list_content.x + list_content.width;
         // The label row's rightmost non-blank cell marks where the text ends.
@@ -840,11 +842,12 @@ impl App {
                 text_end = x;
             }
         }
-        // One blank cell of breathing room, then the rule to the right edge.
+        // One blank cell of breathing room, then the rule (in the heading's own
+        // color) to the right edge.
         for x in text_end.saturating_add(2)..x1 {
             buf[(x, y)]
                 .set_symbol("─")
-                .set_fg(self.theme.header_separator_fg);
+                .set_fg(self.theme.provider_label_fg);
         }
     }
 
@@ -999,13 +1002,14 @@ impl App {
                         format!("{icon} Inactive ({count})"),
                         Style::default().fg(self.theme.provider_label_fg),
                     )]);
-                    // The leading blank is a plain unused separator row (never
-                    // highlighted, see `paint_left_selection`); present only when
-                    // active agents sit above.
+                    // Layout: an optional leading separator (a plain unused row,
+                    // never highlighted, present only when active agents sit above),
+                    // the label, then a trailing spacer that serves as the boundary
+                    // row for the first inactive agent's top padding.
                     if has_active {
-                        ListItem::new(vec![Line::from(""), label])
+                        ListItem::new(vec![Line::from(""), label, Line::from("")])
                     } else {
-                        ListItem::new(vec![label])
+                        ListItem::new(vec![label, Line::from("")])
                     }
                 }
                 LeftItem::Session(index) => {
@@ -1020,19 +1024,19 @@ impl App {
             .collect::<Vec<_>>();
         // Each item's rendered height, kept in lockstep with the arms above: an
         // agent row is three lines (name, metadata, trailing spacer) and the
-        // Inactive toggle is two (leading separator + label) when active agents
-        // precede it, else one. Computed here, while `left_items` is still
-        // borrowed and before any mutable `self` access, then consumed after
-        // render to rebuild the click->item map.
+        // Inactive toggle is three (leading separator + label + trailing spacer)
+        // when active agents precede it, else two (label + trailing spacer).
+        // Computed here, while `left_items` is still borrowed and before any
+        // mutable `self` access, then consumed after render to rebuild the map.
         let item_heights: Vec<u16> = left_items
             .iter()
             .map(|it| match it {
                 LeftItem::Session(_) => 3,
                 LeftItem::InactiveToggle => {
                     if has_active {
-                        2
+                        3
                     } else {
-                        1
+                        2
                     }
                 }
             })
@@ -1051,10 +1055,11 @@ impl App {
         } else {
             (None, inner)
         };
-        // Reserve a one-row top margin so the first agent gets the same half-cell
-        // top padding as the rest when selected: that margin becomes its boundary
-        // row (there is no previous agent's spacer above it to paint).
-        let (top_pad_y, list_content) = if list_inner.height >= 4 {
+        // Reserve a one-row top margin so the FIRST active agent gets the same
+        // half-cell top padding as the rest when selected (that margin becomes its
+        // boundary row). Only when active agents lead the list: with only inactive
+        // agents the toggle sits flush at the top, no margin.
+        let (top_pad_y, list_content) = if has_active && list_inner.height >= 4 {
             (
                 Some(list_inner.y),
                 Rect {
