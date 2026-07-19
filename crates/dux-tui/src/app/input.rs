@@ -10357,7 +10357,8 @@ not_a_real_action = ["x"]
         use ratatui::backend::TestBackend;
 
         let mut app = test_app(default_bindings());
-        // Two active agents: two 2-line rows, no Inactive tail, no scroll.
+        // Two active agents: two 3-line rows (name, metadata, spacer), no Inactive
+        // tail, no scroll.
         let mut second = app.engine.sessions[0].clone();
         second.id = "session-2".to_string();
         second.branch_name = "second-branch".to_string();
@@ -10376,12 +10377,14 @@ not_a_real_action = ["x"]
             .draw(|frame| app.render(frame))
             .expect("render frame");
 
-        // Each agent occupies two consecutive rows in the click map.
+        // Each agent occupies three consecutive rows in the click map.
         let map = &app.mouse_layout.left_row_to_item;
         assert_eq!(map.first().copied(), Some(0), "row 0 -> agent 0");
         assert_eq!(map.get(1).copied(), Some(0), "row 1 -> agent 0");
-        assert_eq!(map.get(2).copied(), Some(1), "row 2 -> agent 1");
+        assert_eq!(map.get(2).copied(), Some(0), "row 2 (spacer) -> agent 0");
         assert_eq!(map.get(3).copied(), Some(1), "row 3 -> agent 1");
+        assert_eq!(map.get(4).copied(), Some(1), "row 4 -> agent 1");
+        assert_eq!(map.get(5).copied(), Some(1), "row 5 (spacer) -> agent 1");
 
         // Line one carries the name; line two carries the state word.
         let rendered: String = terminal
@@ -10400,18 +10403,18 @@ not_a_real_action = ["x"]
             "state word renders on line two: {rendered}"
         );
 
-        // A click on EITHER line of the second agent resolves to that agent.
+        // A click on ANY of the second agent's three rows resolves to that agent.
         let x = app.mouse_layout.left_list.x;
         let y0 = app.mouse_layout.left_list.y;
         assert_eq!(
-            app.mouse_target(x, y0 + 2),
-            Some(super::MouseTarget::LeftRow(1)),
-            "click on agent 1's first line",
-        );
-        assert_eq!(
             app.mouse_target(x, y0 + 3),
             Some(super::MouseTarget::LeftRow(1)),
-            "click on agent 1's second line",
+            "click on agent 1's name line",
+        );
+        assert_eq!(
+            app.mouse_target(x, y0 + 5),
+            Some(super::MouseTarget::LeftRow(1)),
+            "click on agent 1's spacer line",
         );
     }
 

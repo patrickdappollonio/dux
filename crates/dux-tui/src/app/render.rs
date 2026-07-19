@@ -670,9 +670,12 @@ impl App {
             .projects
             .iter()
             .find(|p| p.id == session.project_id);
+        // The project is marked with `※` (a folder stand-in) rather than a word,
+        // and the marker sits directly under the agent name (two-space indent, so
+        // the glyph column lines up with the name on line one).
         let project_span = match project_tag_kind(found) {
             ProjectTagKind::Healthy => Span::styled(
-                found.map(|p| p.name.clone()).unwrap_or_default(),
+                format!("※ {}", found.map(|p| p.name.as_str()).unwrap_or("")),
                 Style::default().fg(muted),
             ),
             ProjectTagKind::PathMissing => Span::styled(
@@ -697,7 +700,7 @@ impl App {
         };
         let sep = || Span::styled(" · ", Style::default().fg(muted));
         let mut line2 = vec![
-            Span::raw("   "),
+            Span::raw("  "),
             project_span,
             sep(),
             Span::styled(word.to_string(), Style::default().fg(word_color)),
@@ -724,7 +727,11 @@ impl App {
             ));
         }
 
-        ListItem::new(vec![Line::from(line1), Line::from(line2)])
+        // A trailing blank line gives each agent breathing room: unselected rows
+        // read as separated, and the selection highlight (which covers the whole
+        // item) gains a half-step of padding below the text instead of butting
+        // right up against the next row.
+        ListItem::new(vec![Line::from(line1), Line::from(line2), Line::from("")])
     }
 
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
@@ -869,29 +876,36 @@ impl App {
                     } else {
                         "▾"
                     };
-                    ListItem::new(Line::from(vec![Span::styled(
-                        format!("{icon} Inactive ({count})"),
-                        Style::default().fg(self.theme.provider_label_fg),
-                    )]))
+                    // A leading blank line sets the Inactive section apart from the
+                    // active agents above it.
+                    ListItem::new(vec![
+                        Line::from(""),
+                        Line::from(vec![Span::styled(
+                            format!("{icon} Inactive ({count})"),
+                            Style::default().fg(self.theme.provider_label_fg),
+                        )]),
+                    ])
                 }
                 LeftItem::Session(index) => {
                     let Some(session) = self.engine.sessions.get(*index) else {
-                        // Keep the fallback two lines tall so it matches the
-                        // height the row map assumes for a Session item.
-                        return ListItem::new(vec![Line::from(""), Line::from("")]);
+                        // Keep the fallback the same height the row map assumes for
+                        // a Session item (three lines).
+                        return ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")]);
                     };
                     self.render_agent_row(session)
                 }
             })
             .collect::<Vec<_>>();
-        // Each item's rendered height (Session rows are two lines). Computed here,
-        // while `left_items` is still borrowed and before any mutable `self`
-        // access, then consumed after render to rebuild the click->item map.
+        // Each item's rendered height, kept in lockstep with the arms above: an
+        // agent row is three lines (name, metadata, trailing spacer) and the
+        // Inactive toggle is two (leading spacer, label). Computed here, while
+        // `left_items` is still borrowed and before any mutable `self` access,
+        // then consumed after render to rebuild the click->item map.
         let item_heights: Vec<u16> = left_items
             .iter()
             .map(|it| match it {
-                LeftItem::Session(_) => 2,
-                LeftItem::InactiveToggle => 1,
+                LeftItem::Session(_) => 3,
+                LeftItem::InactiveToggle => 2,
             })
             .collect();
         let block = self.themed_block(&title, projects_focused);
