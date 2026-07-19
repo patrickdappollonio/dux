@@ -1042,25 +1042,80 @@ pub(crate) struct ProjectChooserEntry {
     pub(crate) path_missing: bool,
 }
 
-/// Indices of chooser entries matching `filter` (case-insensitive substring over
-/// project name + path). An empty/whitespace filter matches everything and keeps
-/// the original order. `selected` in the `PickProject` prompt indexes the Vec
-/// this returns, not `entries`.
-pub(crate) fn visible_pick_project_indices(
-    entries: &[ProjectChooserEntry],
-    filter: &str,
-) -> Vec<usize> {
-    let needle = filter.trim().to_lowercase();
-    entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            needle.is_empty()
-                || e.name.to_lowercase().contains(&needle)
-                || e.path.to_lowercase().contains(&needle)
-        })
-        .map(|(i, _)| i)
-        .collect()
+/// Shared search + selection state for filterable list modals (the project
+/// chooser, the kill-running dialog, …). Owns the `/` query, whether search mode
+/// is active, and the selection index INTO THE VISIBLE (filtered) list. Each
+/// modal supplies its own per-item match predicate, so field semantics stay
+/// modal-specific while the fiddly filter/clamp/toggle mechanics live in one
+/// place. `selected` always indexes the visible list, never the full item list.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SearchableList {
+    pub(crate) filter: TextInput,
+    pub(crate) searching: bool,
+    pub(crate) selected: usize,
+}
+
+impl SearchableList {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// True when a search row should be shown: search mode is active, or a query
+    /// has been committed (so the filtered result stays visible).
+    pub(crate) fn is_filtering(&self) -> bool {
+        self.searching || !self.filter.is_empty()
+    }
+
+    /// Indices of `items` matching the current query. `matches(item, needle)` is
+    /// the modal's predicate; `needle` is trimmed and lowercased. An empty query
+    /// matches everything and preserves order.
+    pub(crate) fn visible_indices<T>(
+        &self,
+        items: &[T],
+        matches: impl Fn(&T, &str) -> bool,
+    ) -> Vec<usize> {
+        let needle = self.filter.text.trim().to_lowercase();
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| needle.is_empty() || matches(it, &needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Enter search mode, cursor at the end of any existing query.
+    pub(crate) fn begin_search(&mut self) {
+        self.filter.move_end();
+        self.searching = true;
+    }
+
+    /// Leave search mode, keeping the committed query.
+    pub(crate) fn end_search(&mut self) {
+        self.searching = false;
+    }
+
+    pub(crate) fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub(crate) fn move_down(&mut self, visible_len: usize) {
+        if self.selected + 1 < visible_len {
+            self.selected += 1;
+        }
+    }
+
+    /// Keep `selected` within `[0, visible_len)`. Call after the query changes.
+    pub(crate) fn clamp_selected(&mut self, visible_len: usize) {
+        if self.selected >= visible_len {
+            self.selected = visible_len.saturating_sub(1);
+        }
+    }
+}
+
+/// The project chooser's match predicate: case-insensitive substring over the
+/// project name or its path. `needle` is expected pre-lowercased.
+pub(crate) fn pick_project_matches(entry: &ProjectChooserEntry, needle: &str) -> bool {
+    entry.name.to_lowercase().contains(needle) || entry.path.to_lowercase().contains(needle)
 }
 
 #[derive(Clone, Debug)]
@@ -1184,10 +1239,9 @@ pub(crate) enum PromptState {
     PickProject {
         intent: ProjectChooserIntent,
         entries: Vec<ProjectChooserEntry>,
-        selected: usize,
-        /// `/`-search filter over project name + path (parity with the web).
-        filter: TextInput,
-        searching: bool,
+        /// Search + selection state; `selected` indexes the visible (filtered)
+        /// list. `/`-search over project name + path (parity with the web).
+        list: SearchableList,
     },
     PickProjectWorktree(PickProjectWorktreePrompt),
     KillRunning(KillRunningPrompt),
@@ -4816,7 +4870,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_pick_project_indices_filters_by_name_and_path() {
+    fn pick_project_filter_matches_by_name_and_path() {
         let entry = |id: &str, name: &str, path: &str| ProjectChooserEntry {
             id: id.to_string(),
             name: name.to_string(),
@@ -4829,14 +4883,44 @@ mod tests {
             entry("b", "beta", "/home/me/work/beta"),
             entry("c", "gamma", "/srv/gamma"),
         ];
+        let vis = |query: &str| {
+            let mut list = SearchableList::new();
+            list.filter = TextInput::with_text(query.to_string());
+            list.visible_indices(&entries, pick_project_matches)
+        };
         // Empty filter matches everything in order.
-        assert_eq!(visible_pick_project_indices(&entries, ""), vec![0, 1, 2]);
+        assert_eq!(vis(""), vec![0, 1, 2]);
         // Name match, case-insensitive.
-        assert_eq!(visible_pick_project_indices(&entries, "BETA"), vec![1]);
+        assert_eq!(vis("BETA"), vec![1]);
         // Path match (segment not in any name).
-        assert_eq!(visible_pick_project_indices(&entries, "work"), vec![1]);
+        assert_eq!(vis("work"), vec![1]);
         // No match.
-        assert!(visible_pick_project_indices(&entries, "zzz").is_empty());
+        assert!(vis("zzz").is_empty());
+    }
+
+    #[test]
+    fn searchable_list_clamps_and_toggles() {
+        let mut list = SearchableList::new();
+        assert!(!list.is_filtering());
+        list.begin_search();
+        assert!(list.searching && list.is_filtering());
+        // move_down is bounded by the visible length; move_up saturates at 0.
+        list.selected = 0;
+        list.move_down(2);
+        assert_eq!(list.selected, 1);
+        list.move_down(2); // already at the last visible row
+        assert_eq!(list.selected, 1);
+        list.move_up();
+        list.move_up();
+        assert_eq!(list.selected, 0);
+        // Shrinking the visible set clamps the selection back into range.
+        list.selected = 5;
+        list.clamp_selected(3);
+        assert_eq!(list.selected, 2);
+        list.clamp_selected(0);
+        assert_eq!(list.selected, 0);
+        list.end_search();
+        assert!(!list.searching);
     }
 
     #[test]

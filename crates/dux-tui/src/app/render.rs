@@ -4792,16 +4792,14 @@ impl App {
             PromptState::PickProject {
                 intent,
                 entries,
-                selected,
-                filter,
-                searching,
+                list,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 58, frame.area());
                 self.clear_overlay_area(frame, area);
 
                 // Which entries survive the `/` filter (indices into `entries`).
-                let visible: Vec<usize> = visible_pick_project_indices(entries, &filter.text);
+                let visible: Vec<usize> = list.visible_indices(entries, pick_project_matches);
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -4845,11 +4843,11 @@ impl App {
                 let details_block = self
                     .themed_overlay_block(intent.title())
                     .title_bottom(Line::from(bottom_spans));
-                if *searching || !filter.is_empty() {
+                if list.is_filtering() {
                     Paragraph::new(render_single_line_cursor_input(
                         "/ ",
-                        &filter.text,
-                        filter.cursor,
+                        &list.filter.text,
+                        list.filter.cursor,
                         self.theme.input_cursor_fg,
                         self.theme.input_cursor_bg,
                     ))
@@ -4932,7 +4930,7 @@ impl App {
                     })
                     .collect::<Vec<_>>();
 
-                let mut state = ListState::default().with_selected(Some(*selected));
+                let mut state = ListState::default().with_selected(Some(list.selected));
                 StatefulWidget::render(
                     List::new(items)
                         .block(list_block)

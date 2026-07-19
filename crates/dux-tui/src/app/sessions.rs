@@ -230,9 +230,7 @@ impl App {
         self.prompt = PromptState::PickProject {
             intent,
             entries,
-            selected: 0,
-            filter: TextInput::new(),
-            searching: false,
+            list: SearchableList::new(),
         };
         Ok(())
     }
@@ -245,13 +243,11 @@ impl App {
             PromptState::PickProject {
                 intent,
                 entries,
-                selected,
-                filter,
-                ..
+                list,
             } => {
-                // `selected` indexes the visible list; resolve it to a real entry.
-                let visible = visible_pick_project_indices(entries, &filter.text);
-                match visible.get(*selected).and_then(|i| entries.get(*i)) {
+                // `list.selected` indexes the visible list; resolve to an entry.
+                let visible = list.visible_indices(entries, pick_project_matches);
+                match visible.get(list.selected).and_then(|i| entries.get(*i)) {
                     Some(entry) => (*intent, entry.id.clone()),
                     None => return Ok(()),
                 }
@@ -5270,9 +5266,7 @@ mod tests {
                 agent_count: 0,
                 path_missing: false,
             }],
-            selected: 0,
-            filter: TextInput::new(),
-            searching: false,
+            list: SearchableList::new(),
         };
 
         app.confirm_project_chooser_selection()
