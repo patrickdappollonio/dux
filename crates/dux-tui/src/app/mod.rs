@@ -901,17 +901,27 @@ pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
 /// branch differs from the branch the agent was created on, then the worktree,
 /// creation time, and status. Each line carries its semantic tone so the
 /// renderer never has to substring-match prose. Pure and unit-tested.
-pub(crate) fn agent_info_lines(session: &AgentSession) -> Vec<(String, AgentInfoTone)> {
+pub(crate) fn agent_info_lines(
+    session: &AgentSession,
+    project_default: Option<ProviderKind>,
+) -> Vec<(String, AgentInfoTone)> {
     let name = session
         .title
         .clone()
         .unwrap_or_else(|| session.branch_name.clone());
+    // Mirror the header's "current provider" note: when the agent runs a provider
+    // other than its project's default, spell out the divergence here too.
+    let provider_line = match project_default {
+        Some(default) if default != session.provider => format!(
+            "Provider:     {} (project default: {})",
+            session.provider.as_str(),
+            default.as_str()
+        ),
+        _ => format!("Provider:     {}", session.provider.as_str()),
+    };
     let mut lines = vec![
         (format!("Name:         {name}"), AgentInfoTone::Neutral),
-        (
-            format!("Provider:     {}", session.provider.as_str()),
-            AgentInfoTone::Neutral,
-        ),
+        (provider_line, AgentInfoTone::Neutral),
         (
             format!("Current:      {}", session.branch_name),
             AgentInfoTone::Neutral,
@@ -3694,11 +3704,17 @@ impl App {
                 .title
                 .clone()
                 .unwrap_or_else(|| session.branch_name.clone());
+            let project_default = self
+                .engine
+                .projects
+                .iter()
+                .find(|p| p.id == session.project_id)
+                .map(|p| p.default_provider.clone());
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
                 session_label: label,
-                lines: agent_info_lines(&session),
+                lines: agent_info_lines(&session, project_default),
             });
         } else {
             self.set_error("No agent session selected. Select an agent to see its info.");
@@ -4593,7 +4609,7 @@ mod tests {
         s.initial_branch = "server-mode".into();
         s.source_branch = "main".into();
 
-        let lines = agent_info_lines(&s);
+        let lines = agent_info_lines(&s, None);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
         assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
         assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
@@ -4618,7 +4634,7 @@ mod tests {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
         s.initial_branch = "main".into();
-        let lines = agent_info_lines(&s);
+        let lines = agent_info_lines(&s, None);
         assert!(
             !lines
                 .iter()
@@ -4649,13 +4665,34 @@ mod tests {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
         s.initial_branch = String::new();
-        let lines = agent_info_lines(&s);
+        let lines = agent_info_lines(&s, None);
         assert!(
             !lines
                 .iter()
                 .any(|(l, _)| l.to_lowercase().contains("changed since creation")),
             "an empty initial_branch must not produce a phantom drift line"
         );
+    }
+
+    #[test]
+    fn agent_info_provider_line_notes_a_divergent_project_default() {
+        let s = test_session("s1", "p1", 0); // provider "codex"
+        // Matching default: plain provider line, no annotation.
+        let same = agent_info_lines(&s, Some(ProviderKind::from_str("codex")));
+        let provider_same = same
+            .iter()
+            .find(|(l, _)| l.starts_with("Provider:"))
+            .expect("provider line");
+        assert!(!provider_same.0.contains("project default"));
+
+        // Divergent default: the line spells out the project default too.
+        let diff = agent_info_lines(&s, Some(ProviderKind::from_str("claude")));
+        let provider_diff = diff
+            .iter()
+            .find(|(l, _)| l.starts_with("Provider:"))
+            .expect("provider line");
+        assert!(provider_diff.0.contains("codex"));
+        assert!(provider_diff.0.contains("project default: claude"));
     }
 
     #[test]
