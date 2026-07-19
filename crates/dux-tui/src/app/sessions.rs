@@ -3278,9 +3278,7 @@ impl App {
 
         self.prompt = PromptState::KillRunning(KillRunningPrompt {
             runtimes,
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: HashSet::new(),
             focus: KillRunningFocus::List,
         });
@@ -3438,17 +3436,9 @@ impl App {
     }
 
     pub(crate) fn visible_kill_running_indices(prompt: &KillRunningPrompt) -> Vec<usize> {
-        if prompt.filter.is_empty() {
-            return (0..prompt.runtimes.len()).collect();
-        }
-        let needle = prompt.filter.text.to_lowercase();
         prompt
-            .runtimes
-            .iter()
-            .enumerate()
-            .filter(|(_, runtime)| runtime.search_text.to_lowercase().contains(&needle))
-            .map(|(index, _)| index)
-            .collect()
+            .list
+            .visible_indices(&prompt.runtimes, kill_running_matches)
     }
 
     fn title_case_word(word: &str) -> String {
@@ -3461,11 +3451,7 @@ impl App {
 
     pub(crate) fn clamp_kill_running_prompt(prompt: &mut KillRunningPrompt) {
         let visible_len = Self::visible_kill_running_indices(prompt).len();
-        if visible_len == 0 {
-            prompt.hovered_visible_index = 0;
-        } else if prompt.hovered_visible_index >= visible_len {
-            prompt.hovered_visible_index = visible_len.saturating_sub(1);
-        }
+        prompt.list.clamp_selected(visible_len);
     }
 
     pub(crate) fn open_confirm_kill_running_action(
@@ -3479,7 +3465,7 @@ impl App {
         let visible_indices = Self::visible_kill_running_indices(&prompt);
         let target_ids = match action {
             KillRunningAction::Hovered => visible_indices
-                .get(prompt.hovered_visible_index)
+                .get(prompt.list.selected)
                 .map(|&index| vec![prompt.runtimes[index].id.clone()])
                 .unwrap_or_default(),
             KillRunningAction::Selected => prompt

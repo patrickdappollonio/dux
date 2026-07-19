@@ -5003,10 +5003,11 @@ impl App {
                 };
                 let mut state = ListState::default().with_selected(Some(
                     prompt
-                        .hovered_visible_index
+                        .list
+                        .selected
                         .min(visible_indices.len().saturating_sub(1)),
                 ));
-                let show_top_input = prompt.searching || !prompt.filter.is_empty();
+                let show_top_input = prompt.list.is_filtering();
                 let (top_area, body_area) = if show_top_input {
                     let [input_area, rest] = Layout::default()
                         .direction(Direction::Vertical)
@@ -5032,7 +5033,7 @@ impl App {
                 let next_key = self.bindings.label_for(Action::FocusNext);
                 let prev_key = self.bindings.label_for(Action::FocusPrev);
                 let mut hint_spans = vec![Span::raw(" ")];
-                if prompt.searching {
+                if prompt.list.searching {
                     hint_spans.extend(self.theme.key_badge_default(&confirm_key));
                     hint_spans.push(Span::styled(
                         " done  ",
@@ -5071,7 +5072,7 @@ impl App {
                     ));
                 }
 
-                let title = if prompt.searching {
+                let title = if prompt.list.searching {
                     "Kill Running (searching)"
                 } else {
                     "Kill Running"
@@ -5081,8 +5082,8 @@ impl App {
                     let input_inner = input_block.inner(input_area);
                     Paragraph::new(render_single_line_cursor_input(
                         "/ ",
-                        &prompt.filter.text,
-                        prompt.filter.cursor,
+                        &prompt.list.filter.text,
+                        prompt.list.filter.cursor,
                         self.theme.input_cursor_fg,
                         self.theme.input_cursor_bg,
                     ))

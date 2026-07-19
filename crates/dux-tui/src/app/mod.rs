@@ -775,9 +775,9 @@ pub(crate) enum ChangeAgentProviderMode {
 #[derive(Clone, Debug)]
 pub(crate) struct KillRunningPrompt {
     pub(crate) runtimes: Vec<KillableRuntime>,
-    pub(crate) filter: TextInput,
-    pub(crate) searching: bool,
-    pub(crate) hovered_visible_index: usize,
+    /// Search + hovered-row state. `list.selected` is the hovered visible index;
+    /// multi-select (`selected_ids`) and `focus` stay separate.
+    pub(crate) list: SearchableList,
     pub(crate) selected_ids: HashSet<RuntimeTargetId>,
     pub(crate) focus: KillRunningFocus,
 }
@@ -1116,6 +1116,13 @@ impl SearchableList {
 /// project name or its path. `needle` is expected pre-lowercased.
 pub(crate) fn pick_project_matches(entry: &ProjectChooserEntry, needle: &str) -> bool {
     entry.name.to_lowercase().contains(needle) || entry.path.to_lowercase().contains(needle)
+}
+
+/// The kill-running dialog's match predicate: case-insensitive substring over a
+/// runtime's precomputed `search_text` (agent name + project + provider + noun).
+/// `needle` is expected pre-lowercased.
+pub(crate) fn kill_running_matches(runtime: &KillableRuntime, needle: &str) -> bool {
+    runtime.search_text.to_lowercase().contains(needle)
 }
 
 #[derive(Clone, Debug)]

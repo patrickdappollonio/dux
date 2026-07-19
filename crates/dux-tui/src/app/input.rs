@@ -2260,7 +2260,10 @@ impl App {
             let is_searching = matches!(
                 self.prompt,
                 PromptState::KillRunning(KillRunningPrompt {
-                    searching: true,
+                    list: SearchableList {
+                        searching: true,
+                        ..
+                    },
                     ..
                 })
             );
@@ -2276,10 +2279,10 @@ impl App {
                 Some(Action::CloseOverlay) => {
                     let mut closed = false;
                     if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        if prompt.searching {
-                            prompt.searching = false;
-                        } else if !prompt.filter.is_empty() {
-                            prompt.filter.clear();
+                        if prompt.list.searching {
+                            prompt.list.end_search();
+                        } else if !prompt.list.filter.is_empty() {
+                            prompt.list.filter.clear();
                             Self::clamp_kill_running_prompt(prompt);
                         } else {
                             closed = true;
@@ -2292,8 +2295,7 @@ impl App {
                 }
                 Some(Action::SearchToggle) if !is_searching => {
                     if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        prompt.filter.move_end();
-                        prompt.searching = true;
+                        prompt.list.begin_search();
                         prompt.focus = KillRunningFocus::List;
                     }
                 }
@@ -2302,17 +2304,14 @@ impl App {
                         && matches!(prompt.focus, KillRunningFocus::List)
                     {
                         let count = Self::visible_kill_running_indices(prompt).len();
-                        if prompt.hovered_visible_index + 1 < count {
-                            prompt.hovered_visible_index += 1;
-                        }
+                        prompt.list.move_down(count);
                     }
                 }
                 Some(Action::MoveUp) => {
                     if let PromptState::KillRunning(prompt) = &mut self.prompt
                         && matches!(prompt.focus, KillRunningFocus::List)
-                        && prompt.hovered_visible_index > 0
                     {
-                        prompt.hovered_visible_index -= 1;
+                        prompt.list.move_up();
                     }
                 }
                 Some(Action::FocusNext) => {
@@ -2345,7 +2344,7 @@ impl App {
                 Some(Action::Confirm) => {
                     if is_searching {
                         if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                            prompt.searching = false;
+                            prompt.list.end_search();
                         }
                     } else {
                         let focus = match &self.prompt {
@@ -2362,8 +2361,8 @@ impl App {
                 }
                 _ => {
                     if is_searching && let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        if prompt.filter.handle_key(key) {
-                            prompt.hovered_visible_index = 0;
+                        if prompt.list.filter.handle_key(key) {
+                            prompt.list.selected = 0;
                         }
                         Self::clamp_kill_running_prompt(prompt);
                     }
@@ -4564,10 +4563,10 @@ impl App {
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
             let count = Self::visible_kill_running_indices(prompt).len();
             if count == 0 {
-                prompt.hovered_visible_index = 0;
+                prompt.list.selected = 0;
                 return;
             }
-            prompt.hovered_visible_index = visible_index.min(count.saturating_sub(1));
+            prompt.list.selected = visible_index.min(count.saturating_sub(1));
             prompt.focus = KillRunningFocus::List;
         }
     }
@@ -4580,9 +4579,9 @@ impl App {
             _ => return,
         };
         if let PromptState::KillRunning(prompt) = &mut self.prompt {
-            prompt.filter.cursor =
-                cursor_from_single_line_position(&prompt.filter.text, input_area, 2, column);
-            prompt.searching = true;
+            prompt.list.filter.cursor =
+                cursor_from_single_line_position(&prompt.list.filter.text, input_area, 2, column);
+            prompt.list.searching = true;
             prompt.focus = KillRunningFocus::List;
         }
     }
@@ -4592,7 +4591,7 @@ impl App {
             PromptState::KillRunning(prompt) => {
                 let visible = Self::visible_kill_running_indices(prompt);
                 visible
-                    .get(prompt.hovered_visible_index)
+                    .get(prompt.list.selected)
                     .and_then(|&index| prompt.runtimes.get(index))
                     .map(|runtime| runtime.id.clone())
             }
@@ -7060,7 +7059,7 @@ mod tests {
         NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
         PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry,
         PromptState, PullTarget, ResourceKind, ResourceStats, RightSection, RuntimeTargetId,
-        StartupCommandLogPrompt, TextInput, WorkerEvent,
+        SearchableList, StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
@@ -7440,9 +7439,7 @@ not_a_real_action = ["x"]
                     "agent-branch",
                     "demo / codex / agent-branch",
                 )],
-                filter: TextInput::new(),
-                searching: false,
-                hovered_visible_index: 0,
+                list: SearchableList::new(),
                 selected_ids: std::iter::once(runtime_id.clone()).collect(),
                 focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
             },
@@ -8138,9 +8135,7 @@ not_a_real_action = ["x"]
                 "Codex",
                 "on agent \"agent-branch\" under project \"demo\"",
             )],
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: std::collections::HashSet::new(),
             focus: KillRunningFocus::List,
         });
@@ -8169,9 +8164,7 @@ not_a_real_action = ["x"]
                 "Codex",
                 "on agent \"agent-branch\" under project \"demo\"",
             )],
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: std::collections::HashSet::new(),
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Hovered),
         });
@@ -8209,9 +8202,7 @@ not_a_real_action = ["x"]
                     "demo / alpha-agent",
                 ),
             ],
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: std::iter::once(selected_id.clone()).collect(),
             focus: KillRunningFocus::List,
         });
@@ -8251,9 +8242,11 @@ not_a_real_action = ["x"]
                 "agent-branch",
                 "demo / codex / agent-branch",
             )],
-            filter: TextInput::with_text("agent".to_string()),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList {
+                filter: TextInput::with_text("agent".to_string()),
+                searching: false,
+                selected: 0,
+            },
             selected_ids: std::iter::once(selected_id).collect(),
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
         };
@@ -8268,7 +8261,7 @@ not_a_real_action = ["x"]
 
         match &app.prompt {
             PromptState::KillRunning(prompt) => {
-                assert_eq!(prompt.filter.text, previous.filter.text);
+                assert_eq!(prompt.list.filter.text, previous.list.filter.text);
                 assert_eq!(prompt.selected_ids, previous.selected_ids);
                 assert_eq!(prompt.focus, previous.focus);
             }
@@ -8320,9 +8313,11 @@ not_a_real_action = ["x"]
 
         app.prompt = PromptState::KillRunning(KillRunningPrompt {
             runtimes: app.running_runtime_snapshot(),
-            filter: TextInput::with_text("beta".to_string()),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList {
+                filter: TextInput::with_text("beta".to_string()),
+                searching: false,
+                selected: 0,
+            },
             selected_ids: std::iter::once(RuntimeTargetId::Agent("session-1".to_string()))
                 .collect(),
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Visible),
@@ -8778,9 +8773,7 @@ not_a_real_action = ["x"]
 
         app.prompt = PromptState::KillRunning(KillRunningPrompt {
             runtimes: app.running_runtime_snapshot(),
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: [
                 RuntimeTargetId::Agent("session-1".to_string()),
                 RuntimeTargetId::Terminal("term-1".to_string()),
@@ -8812,9 +8805,7 @@ not_a_real_action = ["x"]
                     "agent-branch",
                     "demo / codex / agent-branch",
                 )],
-                filter: TextInput::new(),
-                searching: false,
-                hovered_visible_index: 0,
+                list: SearchableList::new(),
                 selected_ids: std::iter::once(RuntimeTargetId::Agent("session-1".to_string()))
                     .collect(),
                 focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
@@ -12723,9 +12714,7 @@ cyan = "#00ffff"
                 "agent-branch",
                 "demo / codex / agent-branch",
             )],
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: std::collections::HashSet::new(),
             focus: KillRunningFocus::List,
         });
@@ -12752,9 +12741,7 @@ cyan = "#00ffff"
                 "agent-branch",
                 "demo / codex / agent-branch",
             )],
-            filter: TextInput::new(),
-            searching: false,
-            hovered_visible_index: 0,
+            list: SearchableList::new(),
             selected_ids: std::iter::once(runtime_id).collect(),
             focus: KillRunningFocus::Footer(KillRunningFooterAction::Selected),
         });
