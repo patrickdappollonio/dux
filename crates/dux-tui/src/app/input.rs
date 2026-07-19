@@ -647,6 +647,17 @@ impl App {
         Ok(false)
     }
 
+    /// Move the agents-section selection to `index` and run the side effects
+    /// every agent-row move shares: drop any project-chooser context, close the
+    /// diff overlay, and refresh the right pane for the newly selected agent.
+    fn select_left_agent_item(&mut self, index: usize) {
+        self.selected_left = index;
+        self.project_chooser_context = None;
+        self.close_diff_view();
+        self.reload_changed_files();
+        self.update_missing_project_warning();
+    }
+
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.left_section == LeftSection::Terminals {
             return self.handle_left_terminal_key(key);
@@ -656,27 +667,33 @@ impl App {
             match action {
                 Action::MoveDown => {
                     if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
-                        self.selected_left = next;
-                        self.project_chooser_context = None;
-                        self.close_diff_view();
-                        self.reload_changed_files();
-                        self.update_missing_project_warning();
+                        self.select_left_agent_item(next);
                     } else if self.has_terminal_items() {
                         // Jump to terminals section.
                         self.left_section = LeftSection::Terminals;
                         self.selected_terminal_index = 0;
                         self.close_diff_view();
+                    } else if let Some(first) = self.first_selectable_left_item() {
+                        // Wrap: past the last agent (no terminals below) loops
+                        // back to the top of the list.
+                        self.select_left_agent_item(first);
                     }
                 }
                 Action::MoveUp => {
                     if let Some(prev) =
                         self.previous_selectable_left_item_before(self.selected_left)
                     {
-                        self.selected_left = prev;
-                        self.project_chooser_context = None;
+                        self.select_left_agent_item(prev);
+                    } else if self.has_terminal_items() {
+                        // Wrap: up from the first agent lands on the last terminal.
+                        self.left_section = LeftSection::Terminals;
+                        self.selected_terminal_index =
+                            self.terminal_items().len().saturating_sub(1);
                         self.close_diff_view();
-                        self.reload_changed_files();
-                        self.update_missing_project_warning();
+                    } else if let Some(last) = self.last_selectable_left_item() {
+                        // Wrap: up from the first agent (no terminals) loops to the
+                        // last agent.
+                        self.select_left_agent_item(last);
                     }
                 }
                 Action::FocusAgent => self.activate_selected_left_item(true)?,
@@ -810,25 +827,23 @@ impl App {
         let term_count = self.terminal_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
-                Action::MoveDown if self.selected_terminal_index + 1 < term_count => {
-                    self.selected_terminal_index += 1;
+                Action::MoveDown => {
+                    if self.selected_terminal_index + 1 < term_count {
+                        self.selected_terminal_index += 1;
+                    } else if let Some(first) = self.first_selectable_left_item() {
+                        // Wrap: down from the last terminal loops back to the first
+                        // agent at the top of the list.
+                        self.left_section = LeftSection::Projects;
+                        self.select_left_agent_item(first);
+                    }
                 }
                 Action::MoveUp => {
                     if self.selected_terminal_index > 0 {
                         self.selected_terminal_index -= 1;
-                    } else {
-                        // Jump back to projects section.
+                    } else if let Some(last) = self.last_selectable_left_item() {
+                        // Jump back to projects section, onto the last agent.
                         self.left_section = LeftSection::Projects;
-                        if let Some(last) = self
-                            .left_items()
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
-                        {
-                            self.selected_left = last;
-                            self.close_diff_view();
-                        }
+                        self.select_left_agent_item(last);
                     }
                 }
                 Action::FocusAgent | Action::ExitInteractive => {
@@ -10772,6 +10787,60 @@ not_a_real_action = ["x"]
             row.contains('…'),
             "the overflowing name is ellipsized: {row:?}",
         );
+    }
+
+    fn two_active_agents_app() -> App {
+        use crate::model::SessionStatus;
+        let mut app = test_app(default_bindings());
+        let mut second = app.engine.sessions[0].clone();
+        second.id = "session-2".to_string();
+        second.branch_name = "second-branch".to_string();
+        app.engine.sessions.push(second);
+        for id in app
+            .engine
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+        {
+            app.engine.mark_session_status(&id, SessionStatus::Active);
+        }
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+        app
+    }
+
+    #[test]
+    fn left_nav_wraps_from_last_agent_to_first() {
+        let mut app = two_active_agents_app();
+        assert!(!app.has_terminal_items(), "test assumes no terminals");
+        let first = app.first_selectable_left_item().expect("an agent row");
+        let last = app.last_selectable_left_item().expect("an agent row");
+        assert_ne!(
+            first, last,
+            "need at least two selectable rows to test wrap"
+        );
+        app.selected_left = last;
+        // Down past the last agent (no terminals below) wraps to the top.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.left_section, LeftSection::Projects);
+        assert_eq!(app.selected_left, first);
+    }
+
+    #[test]
+    fn left_nav_wraps_from_first_agent_to_last() {
+        let mut app = two_active_agents_app();
+        assert!(!app.has_terminal_items(), "test assumes no terminals");
+        let first = app.first_selectable_left_item().expect("an agent row");
+        let last = app.last_selectable_left_item().expect("an agent row");
+        app.selected_left = first;
+        // Up from the first agent (no terminals) wraps to the last agent.
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.left_section, LeftSection::Projects);
+        assert_eq!(app.selected_left, last);
     }
 
     #[test]

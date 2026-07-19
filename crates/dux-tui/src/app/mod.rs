@@ -3408,6 +3408,20 @@ impl App {
             .find_map(|(idx, item)| item.is_selectable().then_some(idx))
     }
 
+    pub(crate) fn first_selectable_left_item(&self) -> Option<usize> {
+        self.left_items()
+            .iter()
+            .position(|item| item.is_selectable())
+    }
+
+    pub(crate) fn last_selectable_left_item(&self) -> Option<usize> {
+        self.left_items()
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+    }
+
     pub(crate) fn ensure_selectable_left_item(&mut self) {
         if self.left_items_cache.is_empty() {
             self.selected_left = 0;
