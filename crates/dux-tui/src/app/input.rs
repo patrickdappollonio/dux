@@ -10874,6 +10874,53 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn pr_badge_is_right_aligned_on_the_agent_row() {
+        use crate::model::{PrInfo, PrState, SessionStatus};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let id = app.engine.sessions[0].id.clone();
+        app.engine.mark_session_status(&id, SessionStatus::Active);
+        app.engine.pr_statuses.insert(
+            id.clone(),
+            PrInfo {
+                number: 42,
+                state: PrState::Open,
+                title: "Demo".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+            },
+        );
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+        app.selected_left = app.first_selectable_left_item().expect("agent row");
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let body = app.mouse_layout.left_list; // click surface (pane inner)
+        let name_y = body.y; // the first agent's name row
+        // Text renders inset one gutter from the pane edge, so the last text
+        // column is width-2. The badge is pinned flush there: the 5 cells ending
+        // at that column spell "PR#42".
+        let last = body.x + body.width - 2;
+        let tail: String = (last - 4..=last)
+            .map(|x| buf[(x, name_y)].symbol())
+            .collect();
+        assert_eq!(
+            tail, "PR#42",
+            "PR badge is flush against the right text edge"
+        );
+    }
+
+    #[test]
     fn mouse_double_click_left_pane_empty_space_does_not_activate_selected_row() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);

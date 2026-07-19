@@ -204,6 +204,44 @@ fn ellipsize_spans(spans: Vec<Span<'static>>, max_w: u16) -> Vec<Span<'static>> 
     out
 }
 
+/// Lay a line out with `left` packed to the left and `right` flush to the right
+/// edge of `total_w`, separated by at least `min_gap` blank cells. The left
+/// group is ellipsized to whatever space remains after the right group and the
+/// gap, so a long name yields `long-na…   PR#12` — the badge stays pinned to the
+/// right and the name loses characters instead. Falls back to a single
+/// ellipsized run when there is not even room for the right group plus the gap.
+fn right_align_line(
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    total_w: u16,
+    min_gap: u16,
+) -> Vec<Span<'static>> {
+    let width = |spans: &[Span<'static>]| {
+        spans
+            .iter()
+            .map(|s| s.content.as_ref().cell_width())
+            .fold(0u16, |a, b| a.saturating_add(b))
+    };
+    let right_w = width(&right);
+    // Not enough room to reserve the right group plus a gap: degrade to a single
+    // ellipsized run of the whole line so nothing overflows the pane.
+    if total_w <= right_w + min_gap {
+        let mut all = left;
+        all.extend(right);
+        return ellipsize_spans(all, total_w);
+    }
+    let left_budget = total_w - right_w - min_gap;
+    let mut out = ellipsize_spans(left, left_budget);
+    // Pad the gap so the right group lands flush against the right edge. `pad` is
+    // at least `min_gap` because the left group was capped at `left_budget`.
+    let pad = total_w.saturating_sub(width(&out) + right_w);
+    if pad > 0 {
+        out.push(Span::raw(" ".repeat(pad as usize)));
+    }
+    out.extend(right);
+    out
+}
+
 /// Column budget for the resource monitor table, computed from the inner
 /// content width so every column stays readable instead of colliding on a
 /// hardcoded per-column `Constraint`.
@@ -687,23 +725,20 @@ impl App {
             name_style
         };
 
-        // Line one: glyph + name + PR badge.
-        let mut line1 = vec![
+        // Line one: glyph + name packed left, and (if present) the PR badge
+        // pinned to the right edge with the name ellipsized to fit.
+        let line1_left = vec![
             Span::styled(format!("{dot} "), glyph_style),
             Span::styled(label.clone(), name_style),
         ];
-        if let Some(pr) = self.engine.pr_statuses.get(&session.id) {
+        let pr_badge = self.engine.pr_statuses.get(&session.id).map(|pr| {
             let pr_color = match pr.state {
                 crate::model::PrState::Merged => self.theme.pr_merged_label,
                 crate::model::PrState::Closed => self.theme.pr_closed_label,
                 crate::model::PrState::Open => self.theme.pr_open_label,
             };
-            line1.push(Span::raw("  "));
-            line1.push(Span::styled(
-                format!("PR#{}", pr.number),
-                Style::default().fg(pr_color),
-            ));
-        }
+            Span::styled(format!("PR#{}", pr.number), Style::default().fg(pr_color))
+        });
 
         // Line two: project · state word [· branch] [· tabs]. Dim throughout;
         // only the state word carries a color.
@@ -774,10 +809,14 @@ impl App {
             ));
         }
 
-        // Ellipsize either line that would overflow the pane's text width, so a
-        // long name/PR badge or a long project·state·branch·tabs run ends in `…`
-        // rather than being hard-clipped mid-word at the right edge.
-        let line1 = ellipsize_spans(line1, text_width);
+        // Line one: right-align the PR badge (name ellipsized to the space left
+        // over) when there is one, else just ellipsize the name. Line two always
+        // ellipsizes so a long project·state·branch·tabs run ends in `…` rather
+        // than being hard-clipped mid-word at the right edge.
+        let line1 = match pr_badge {
+            Some(badge) => right_align_line(line1_left, vec![badge], text_width, 2),
+            None => ellipsize_spans(line1_left, text_width),
+        };
         let line2 = ellipsize_spans(line2, text_width);
 
         // A trailing blank line gives each agent breathing room: unselected rows
@@ -10072,6 +10111,59 @@ mod tests {
     fn ellipsize_spans_zero_width_yields_nothing() {
         let spans = vec![Span::raw("anything".to_string())];
         assert!(ellipsize_spans(spans, 0).is_empty());
+    }
+
+    #[test]
+    fn right_align_line_pins_the_right_group_to_the_edge() {
+        let left = vec![Span::raw("● ".to_string()), Span::raw("agent".to_string())];
+        let right = vec![Span::raw("PR#12".to_string())];
+        let out = right_align_line(left, right, 20, 2);
+        // Padded to fill the full width, name on the left, badge flush right.
+        assert_eq!(spans_width(&out), 20);
+        let text = spans_text(&out);
+        assert!(
+            text.starts_with("● agent"),
+            "name stays on the left: {text:?}"
+        );
+        assert!(text.ends_with("PR#12"), "badge is flush right: {text:?}");
+    }
+
+    #[test]
+    fn right_align_line_ellipsizes_the_left_and_keeps_the_badge() {
+        let left = vec![
+            Span::raw("● ".to_string()),
+            Span::raw("a-really-really-long-agent-name".to_string()),
+        ];
+        let right = vec![Span::raw("PR#7".to_string())];
+        let out = right_align_line(left, right, 20, 2);
+        assert!(spans_width(&out) <= 20, "never overflows the width");
+        let text = spans_text(&out);
+        assert!(text.contains('…'), "the name is ellipsized: {text:?}");
+        assert!(text.ends_with("PR#7"), "the badge survives: {text:?}");
+    }
+
+    #[test]
+    fn right_align_line_keeps_at_least_the_gap_between_groups() {
+        let left = vec![Span::raw("ab".to_string())];
+        let right = vec![Span::raw("PR#9".to_string())];
+        let out = right_align_line(left, right, 20, 2);
+        let text = spans_text(&out);
+        // Everything between "ab" and "PR#9" is padding, at least the min gap.
+        let gap = &text[2..text.len() - "PR#9".len()];
+        assert!(gap.chars().all(|c| c == ' '), "gap is blank: {text:?}");
+        assert!(
+            gap.chars().count() >= 2,
+            "gap is at least the minimum: {text:?}"
+        );
+    }
+
+    #[test]
+    fn right_align_line_degrades_when_too_narrow_for_the_badge() {
+        let left = vec![Span::raw("● name".to_string())];
+        let right = vec![Span::raw("PR#123".to_string())];
+        // total (6) <= badge (6) + gap (2): fall back to one ellipsized run.
+        let out = right_align_line(left, right, 6, 2);
+        assert!(spans_width(&out) <= 6, "never overflows even when degraded");
     }
 
     #[test]
