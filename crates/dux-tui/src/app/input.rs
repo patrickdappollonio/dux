@@ -10452,7 +10452,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn selected_agent_gets_half_block_padding() {
+    fn selected_agent_gets_accent_bar() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10474,8 +10474,7 @@ not_a_real_action = ["x"]
         app.focus = FocusPane::Left;
         app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
-        // Select the SECOND agent: its name/meta/spacer land on rows 3/4/5, and
-        // its top padding falls on the first agent's spacer at row 2.
+        // Select the SECOND agent: its name/meta/spacer land on rows 3/4/5.
         app.selected_left = app
             .left_items()
             .iter()
@@ -10489,22 +10488,28 @@ not_a_real_action = ["x"]
             .expect("render frame");
 
         let buf = terminal.backend().buffer();
-        let lx = app.mouse_layout.left_list.x;
-        let lw = app.mouse_layout.left_list.width;
+        let gx = app.mouse_layout.left_list.x; // the reserved bar gutter column
         let y0 = app.mouse_layout.left_list.y;
-        let row_has = |y: u16, sym: &str| (lx..lx + lw).any(|x| buf[(x, y)].symbol() == sym);
-        assert!(
-            row_has(y0 + 5, "▀"),
-            "the selected agent's trailing spacer paints a top-half selection block",
+        // An accent bar sits in the gutter on the two content rows, but not on the
+        // trailing spacer (which keeps the rows separated).
+        assert_eq!(buf[(gx, y0 + 3)].symbol(), "▌", "bar on the name row");
+        assert_eq!(buf[(gx, y0 + 4)].symbol(), "▌", "bar on the metadata row");
+        assert_ne!(
+            buf[(gx, y0 + 5)].symbol(),
+            "▌",
+            "no bar on the trailing spacer",
         );
-        assert!(
-            row_has(y0 + 2, "▄"),
-            "the row above the selection paints a bottom-half selection block",
+        // The rest of the row carries a faint tint background (not the plain app
+        // background), so the text keeps its own colors on top.
+        assert_eq!(
+            buf[(gx + 2, y0 + 3)].bg,
+            app.theme.selection_bar_tint(),
+            "content cells get the faint selection tint",
         );
     }
 
     #[test]
-    fn selection_half_blocks_blend_when_the_body_is_dimmed() {
+    fn selection_blends_when_the_body_is_dimmed() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10540,24 +10545,21 @@ not_a_real_action = ["x"]
             .expect("render frame");
 
         let buf = terminal.backend().buffer();
-        let lx = app.mouse_layout.left_list.x;
-        let lw = app.mouse_layout.left_list.width;
+        let gx = app.mouse_layout.left_list.x;
         let y0 = app.mouse_layout.left_list.y;
-        // With the body dimmed, the selection is not painted, so no half-height
-        // block is left standing as a bright strip.
-        for y in [y0 + 2, y0 + 5] {
-            assert!(
-                !(lx..lx + lw).any(|x| {
-                    let s = buf[(x, y)].symbol();
-                    s == "▀" || s == "▄"
-                }),
-                "no half-block strip survives into the dimmed body at row {y}",
+        // With the body dimmed, the selection is not painted, so no accent bar is
+        // left standing as a bright strip in the gutter.
+        for y in [y0 + 3, y0 + 4] {
+            assert_ne!(
+                buf[(gx, y)].symbol(),
+                "▌",
+                "no accent bar survives into the dimmed body at row {y}",
             );
         }
     }
 
     #[test]
-    fn first_agent_selection_paints_top_margin_padding() {
+    fn first_agent_selection_paints_accent_bar() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10581,13 +10583,14 @@ not_a_real_action = ["x"]
             .expect("render frame");
 
         let buf = terminal.backend().buffer();
-        let lx = app.mouse_layout.left_list.x;
-        let lw = app.mouse_layout.left_list.width;
-        // The reserved top-margin row sits one row above the list content.
-        let pad_y = app.mouse_layout.left_list.y - 1;
-        assert!(
-            (lx..lx + lw).any(|x| buf[(x, pad_y)].symbol() == "▄"),
-            "the first agent's selection pads into the reserved top-margin row",
+        let gx = app.mouse_layout.left_list.x;
+        let y0 = app.mouse_layout.left_list.y;
+        // The first agent sits flush at the top (no reserved margin) and its
+        // selection paints the accent bar on its name row, same as any other.
+        assert_eq!(
+            buf[(gx, y0)].symbol(),
+            "▌",
+            "the first agent gets the accent bar with no special top margin",
         );
     }
 
@@ -10661,7 +10664,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn first_inactive_agent_gets_top_padding_from_the_toggle_spacer() {
+    fn first_inactive_agent_gets_accent_bar() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10705,15 +10708,15 @@ not_a_real_action = ["x"]
             .position(|&i| i == sel)
             .expect("inactive agent visible");
         assert!(rel_start > 0, "inactive agent is not the first row");
-        // The row directly above it is the toggle's trailing spacer, which now
-        // carries the selection's top-half padding block.
-        let y = app.mouse_layout.left_list.y + (rel_start - 1) as u16;
+        // The selected inactive agent gets the accent bar on its name row like any
+        // other agent.
+        let y = app.mouse_layout.left_list.y + rel_start as u16;
         let buf = terminal.backend().buffer();
-        let lx = app.mouse_layout.left_list.x;
-        let lw = app.mouse_layout.left_list.width;
-        assert!(
-            (lx..lx + lw).any(|x| buf[(x, y)].symbol() == "▄"),
-            "the first inactive agent pads into the toggle's trailing spacer",
+        let gx = app.mouse_layout.left_list.x;
+        assert_eq!(
+            buf[(gx, y)].symbol(),
+            "▌",
+            "the first inactive agent gets the accent bar",
         );
     }
 

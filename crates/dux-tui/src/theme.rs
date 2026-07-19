@@ -443,6 +443,20 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
 /// (where "cyan" may not be `#00ffff`), this preserves that behavior. Custom
 /// themes that happen to specify exactly `#00ffff` will also benefit from the
 /// same terminal-palette routing — a deliberate choice for predictability.
+/// Blend `top` over `bottom` at `alpha` (0.0 = all bottom, 1.0 = all top).
+/// Only defined for RGB colors; anything else returns `bottom` unchanged, since
+/// named ANSI colors resolve through the terminal palette and can't be mixed.
+fn blend_over(top: Color, bottom: Color, alpha: f32) -> Color {
+    match (top, bottom) {
+        (Color::Rgb(tr, tg, tb), Color::Rgb(br, bg, bb)) => {
+            let mix =
+                |t: u8, b: u8| (f32::from(t) * alpha + f32::from(b) * (1.0 - alpha)).round() as u8;
+            Color::Rgb(mix(tr, br), mix(tg, bg), mix(tb, bb))
+        }
+        _ => bottom,
+    }
+}
+
 fn into_ratatui(color: OpalineColor) -> Color {
     match (color.r, color.g, color.b) {
         (0, 0, 0) => Color::Black,
@@ -590,6 +604,15 @@ impl Theme {
             .fg(self.selection_fg)
             .bg(self.selection_bg)
             .add_modifier(Modifier::BOLD)
+    }
+
+    /// A faint, theme-derived background for the accent-bar selection: the
+    /// theme's selection color blended a little over the app background, so it
+    /// always tracks whatever accent the active theme uses (no hardcoded tint).
+    /// Falls back to the plain app background when either color is not RGB (a
+    /// named ANSI color can't be blended predictably).
+    pub fn selection_bar_tint(&self) -> Color {
+        blend_over(self.selection_bg, self.app_bg, 0.16)
     }
 
     pub fn status_style(&self, tone: crate::statusline::StatusTone) -> Style {

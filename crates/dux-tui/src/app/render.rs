@@ -735,19 +735,14 @@ impl App {
     }
 
     /// Paint the left-pane selection by hand (the List widget renders with no
-    /// highlight). An agent's two content rows take the full selection style; its
-    /// trailing spacer becomes a `▀` (top-half selection) so the highlight gains a
-    /// half-cell of padding below the text, and the row above the name — only when
-    /// that row is another agent's spacer, never a label — becomes a `▄` (bottom-
-    /// half selection) for matching padding above. The Inactive toggle highlights
-    /// only its label row, leaving its leading separator plain. `left_row_to_item`
-    /// (already rebuilt for this frame) maps screen rows to items.
-    fn paint_left_selection(
-        &self,
-        buf: &mut ratatui::buffer::Buffer,
-        list_inner: Rect,
-        top_pad_y: Option<u16>,
-    ) {
+    /// highlight): an accent block (`▌`, the theme's selection color) in the
+    /// reserved one-column left gutter, plus a faint theme-derived tint across
+    /// the rest of the row. The tint only sets the background, so the row keeps
+    /// its own text colors (state word, PR badge, project) rather than being
+    /// flattened by a full-flood highlight. Agents mark their two content rows;
+    /// the Inactive toggle marks only its label row. `left_row_to_item` (already
+    /// rebuilt for this frame) maps screen rows to items.
+    fn paint_left_selection(&self, buf: &mut ratatui::buffer::Buffer, list_inner: Rect) {
         let map = &self.mouse_layout.left_row_to_item;
         let sel = self.selected_left;
         let Some(rel_start) = map.iter().position(|&i| i == sel) else {
@@ -758,56 +753,38 @@ impl App {
         let Some(item) = items.get(sel).copied() else {
             return;
         };
-        let sel_style = self.theme.selection_style();
-        let sel_color = self.theme.selection_bg;
+        let bar = self.theme.selection_bg;
+        let tint = self.theme.selection_bar_tint();
         let x0 = list_inner.x;
         let x1 = list_inner.x + list_inner.width;
         let row_at = |rel: usize| list_inner.y + rel as u16;
 
+        // Paint one row of the accent-bar selection: an accent block in the
+        // reserved left gutter (column `x0`), then a faint tint across the rest.
+        // The tint only sets the background, so the row's own text colors survive
+        // (unlike a full-flood highlight that would flatten them).
+        let paint_row = |buf: &mut ratatui::buffer::Buffer, rel: usize| {
+            if map.get(rel) != Some(&sel) {
+                return;
+            }
+            let y = row_at(rel);
+            buf[(x0, y)].set_symbol("▌").set_fg(bar).set_bg(tint);
+            for x in (x0 + 1)..x1 {
+                buf[(x, y)].set_bg(tint);
+            }
+        };
+
         match item {
             LeftItem::Session(_) => {
-                // Content rows (name, metadata) take the full selection style.
-                for rel in [rel_start, rel_start + 1] {
-                    if map.get(rel) != Some(&sel) {
-                        continue;
-                    }
-                    let y = row_at(rel);
-                    for x in x0..x1 {
-                        buf[(x, y)].set_style(sel_style);
-                    }
-                }
-                // Trailing spacer -> top-half selection (padding below the text).
-                let spacer_rel = rel_start + 2;
-                if map.get(spacer_rel) == Some(&sel) {
-                    let y = row_at(spacer_rel);
-                    for x in x0..x1 {
-                        buf[(x, y)].set_symbol("▀").set_fg(sel_color);
-                    }
-                }
-                // Row above the name -> bottom-half selection. Every item ends
-                // with a trailing spacer, so the row directly above any item's
-                // first row is a blank boundary (the previous agent's or the
-                // toggle's spacer) and is always safe to paint; for the very first
-                // row it is the reserved top-margin instead.
-                if rel_start > 0 {
-                    let y = row_at(rel_start - 1);
-                    for x in x0..x1 {
-                        buf[(x, y)].set_symbol("▄").set_fg(sel_color);
-                    }
-                } else if let Some(py) = top_pad_y {
-                    for x in x0..x1 {
-                        buf[(x, py)].set_symbol("▄").set_fg(sel_color);
-                    }
-                }
+                // The two content rows (name, metadata); the trailing spacer stays
+                // blank so agents keep breathing room.
+                paint_row(buf, rel_start);
+                paint_row(buf, rel_start + 1);
             }
             LeftItem::InactiveToggle => {
-                // Highlight only the label row. The toggle ends with a trailing
-                // spacer, so the label is the second-to-last row; the leading
-                // separator (when present) and the trailing spacer stay blank.
-                let y = row_at(rel_end.saturating_sub(1));
-                for x in x0..x1 {
-                    buf[(x, y)].set_style(sel_style);
-                }
+                // Only the label row (the toggle ends with a trailing spacer, so
+                // the label is the second-to-last row).
+                paint_row(buf, rel_end.saturating_sub(1));
             }
         }
     }
@@ -1055,21 +1032,14 @@ impl App {
         } else {
             (None, inner)
         };
-        // Reserve a one-row top margin so the FIRST active agent gets the same
-        // half-cell top padding as the rest when selected (that margin becomes its
-        // boundary row). Only when active agents lead the list: with only inactive
-        // agents the toggle sits flush at the top, no margin.
-        let (top_pad_y, list_content) = if has_active && list_inner.height >= 4 {
-            (
-                Some(list_inner.y),
-                Rect {
-                    y: list_inner.y + 1,
-                    height: list_inner.height - 1,
-                    ..list_inner
-                },
-            )
-        } else {
-            (None, list_inner)
+        // The whole inner rect is the click surface, but the list itself renders
+        // one column in from the left: that reserved gutter is where the
+        // accent-bar selection paints its `▌` (see `paint_left_selection`).
+        let list_content = list_inner;
+        let list_body = Rect {
+            x: list_content.x + 1,
+            width: list_content.width.saturating_sub(1),
+            ..list_content
         };
         self.mouse_layout.left_list = list_content;
         block.render(projects_area, frame.buffer_mut());
@@ -1099,15 +1069,11 @@ impl App {
             } else {
                 None
             });
-        // No widget highlight: the selection is painted by hand below so it can
-        // use half-height blocks for padding and leave the Inactive separator row
-        // unhighlighted (neither of which a whole-cell List highlight can do).
-        StatefulWidget::render(
-            List::new(items),
-            list_content,
-            frame.buffer_mut(),
-            &mut state,
-        );
+        // No widget highlight: the selection is painted by hand below (an accent
+        // bar plus a faint tint) so it keeps each row's text colors and leaves the
+        // Inactive separator row untouched — neither of which a whole-cell List
+        // highlight can do. Rendered into the gutter-shifted body.
+        StatefulWidget::render(List::new(items), list_body, frame.buffer_mut(), &mut state);
         // Agent rows are three lines tall, so a click row no longer maps 1:1 to a
         // list item. Rebuild the reverse map from the post-render scroll offset
         // and each item's rendered height (computed above).
@@ -1123,7 +1089,7 @@ impl App {
             || !matches!(self.prompt, PromptState::None)
             || !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
         if self.left_section == LeftSection::Projects && !body_will_dim {
-            self.paint_left_selection(frame.buffer_mut(), list_content, top_pad_y);
+            self.paint_left_selection(frame.buffer_mut(), list_content);
         }
         // A dim rule runs from the end of the "Inactive" label to the right edge,
         // but only while the toggle is not the current selection.
