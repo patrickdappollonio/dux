@@ -58,8 +58,14 @@ ansi_darkgray = "#808080"
 "dux.title_normal"         = "#8c8c8c"
 
 # ── Selection ────────────────────────────────────────────────────────
-"dux.selection_fg"         = "ansi_black"
-"dux.selection_bg"         = "ansi_cyan"
+# Off-canonical RGB on purpose: the exact ANSI values (#000000 / #00ffff) are
+# remapped to the named Color::Black / Color::Cyan (see into_ratatui), which the
+# terminal's own 16-color profile then controls — and bold + named black renders
+# as "bright black" (grey), giving a low-contrast grey-on-teal selection. These
+# literal RGB values render identically on every terminal: near-black text on a
+# bright cyan highlight, matching how the other themes key selection off RGB.
+"dux.selection_fg"         = "#141414"
+"dux.selection_bg"         = "#00e5e5"
 
 # ── Project & session indicators ─────────────────────────────────────
 "dux.project_icon"         = "#6495ed"
