@@ -139,6 +139,11 @@ fn capitalize(s: &str) -> String {
 /// (and the Inactive rule) sit evenly between two matching margins.
 const LEFT_PANE_GUTTER: u16 = 1;
 
+/// Badge glyph marking a pull request on the agent row, standing in for the
+/// letters "PR" to save a column. U+2387 (ALTERNATIVE KEY SYMBOL) renders as a
+/// branch fork in most terminals and is width-1; the `#<number>` follows it.
+const PR_BADGE_GLYPH: &str = "⎇";
+
 /// Truncate `s` to at most `max_w` display columns, measured by real
 /// terminal cell width (unicode-width via `CellWidth`), not byte or char
 /// count. Stops before any character that would push the running width over
@@ -737,7 +742,10 @@ impl App {
                 crate::model::PrState::Closed => self.theme.pr_closed_label,
                 crate::model::PrState::Open => self.theme.pr_open_label,
             };
-            Span::styled(format!("PR#{}", pr.number), Style::default().fg(pr_color))
+            Span::styled(
+                format!("{PR_BADGE_GLYPH}#{}", pr.number),
+                Style::default().fg(pr_color),
+            )
         });
 
         // Line two: project · state word [· branch] [· tabs]. Dim throughout;

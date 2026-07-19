@@ -10908,14 +10908,14 @@ not_a_real_action = ["x"]
         let body = app.mouse_layout.left_list; // click surface (pane inner)
         let name_y = body.y; // the first agent's name row
         // Text renders inset one gutter from the pane edge, so the last text
-        // column is width-2. The badge is pinned flush there: the 5 cells ending
-        // at that column spell "PR#42".
+        // column is width-2. The badge is pinned flush there: the 4 cells ending
+        // at that column spell "⎇#42".
         let last = body.x + body.width - 2;
-        let tail: String = (last - 4..=last)
+        let tail: String = (last - 3..=last)
             .map(|x| buf[(x, name_y)].symbol())
             .collect();
         assert_eq!(
-            tail, "PR#42",
+            tail, "⎇#42",
             "PR badge is flush against the right text edge"
         );
     }
