@@ -10504,6 +10504,59 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn selection_half_blocks_blend_when_the_body_is_dimmed() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut second = app.engine.sessions[0].clone();
+        second.id = "session-2".to_string();
+        app.engine.sessions.push(second);
+        for id in app
+            .engine
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+        {
+            app.engine.mark_session_status(&id, SessionStatus::Active);
+        }
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::Session(idx) if *idx == 1))
+            .expect("second agent row");
+        // Open the help overlay so the body is grayscaled behind it.
+        app.help_scroll = Some(0);
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let lx = app.mouse_layout.left_list.x;
+        let lw = app.mouse_layout.left_list.width;
+        let y0 = app.mouse_layout.left_list.y;
+        // With the body dimmed, the selection is not painted, so no half-height
+        // block is left standing as a bright strip.
+        for y in [y0 + 2, y0 + 5] {
+            assert!(
+                !(lx..lx + lw).any(|x| {
+                    let s = buf[(x, y)].symbol();
+                    s == "▀" || s == "▄"
+                }),
+                "no half-block strip survives into the dimmed body at row {y}",
+            );
+        }
+    }
+
+    #[test]
     fn first_agent_selection_paints_top_margin_padding() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;

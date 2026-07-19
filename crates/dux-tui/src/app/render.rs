@@ -1113,12 +1113,23 @@ impl App {
         // and each item's rendered height (computed above).
         self.mouse_layout.left_row_to_item =
             left_row_to_item(state.offset(), &item_heights, list_content.height);
-        if self.left_section == LeftSection::Projects {
+        // When an overlay is about to grayscale the body (a modal, the help page,
+        // or a fullscreen view), skip the hand-painted selection: its half-height
+        // blocks are drawn in the foreground, so `render_dim_overlay` would leave
+        // them as visible grey strips instead of letting the selection blend into
+        // the dim like every other row. The widget-highlight era got this for free
+        // because the selection was a background that dimmed to the overlay color.
+        let body_will_dim = self.help_scroll.is_some()
+            || !matches!(self.prompt, PromptState::None)
+            || !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
+        if self.left_section == LeftSection::Projects && !body_will_dim {
             self.paint_left_selection(frame.buffer_mut(), list_content, top_pad_y);
         }
         // A dim rule runs from the end of the "Inactive" label to the right edge,
         // but only while the toggle is not the current selection.
-        self.paint_inactive_rule(frame.buffer_mut(), list_content);
+        if !body_will_dim {
+            self.paint_inactive_rule(frame.buffer_mut(), list_content);
+        }
 
         // Render terminals section if any terminals exist.
         if let Some(term_area) = terminals_area {
