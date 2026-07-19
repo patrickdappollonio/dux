@@ -143,6 +143,13 @@ const VARIANTS: &[&str] = &[
     "J · Faint wash + accent name",
     "K · Faint wash + accent glyph",
     "L · Faint wash, name row only",
+    // Page 3 — box-drawing / shape structure.
+    "M · Corner brackets ⌜⌟",
+    "N · Rounded L-frame ╰─",
+    "O · Double frame ╔╝",
+    "P · Capsule pill ▐▌",
+    "Q · Dotted dividers ┈ + rail",
+    "R · Corner ticks ◤◢",
 ];
 
 const PER_PAGE: usize = 6;
@@ -202,10 +209,10 @@ fn draw(f: &mut Frame, page: usize, selected: usize, hovered: usize) {
                     "  page {}/{} — {}",
                     page + 1,
                     pages,
-                    if page == 0 {
-                        "bolder / structural"
-                    } else {
-                        "faint-background (web-hover feel)"
+                    match page {
+                        0 => "bolder / structural",
+                        1 => "faint-background (web-hover feel)",
+                        _ => "box-drawing / shape structure",
                     }
                 ),
                 Style::default().fg(MUTED),
@@ -304,6 +311,12 @@ fn render_variant(
             9 => row_wash(f, x0, y, width, a, st, FAINT_ACCENT, None, true),
             10 => row_wash_accent_glyph(f, x0, y, width, a, st),
             11 => row_wash_name_only(f, x0, y, width, a, st),
+            12 => row_corner_brackets(f, x0, y, width, a, st),
+            13 => row_l_frame(f, x0, y, width, a, st),
+            14 => row_double_frame(f, x0, y, width, a, st, area.y),
+            15 => row_capsule(f, x0, y, width, a, st),
+            16 => row_dotted_dividers(f, x0, y, width, a, st),
+            17 => row_corner_ticks(f, x0, y, width, a, st),
             _ => {}
         }
         y += row_h;
@@ -640,6 +653,211 @@ fn row_wash_name_only(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: 
     match st {
         RowState::Selected => fill_bg(f, x, y, width, FAINT_ACCENT),
         RowState::Hovered => fill_bg(f, x, y, width, HOVER_BG),
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant M: corner brackets ⌜ ⌝ ⌞ ⌟ around the selected row ───────────────
+// Four quotation-corner ticks framing the two content rows, over a faint wash.
+fn row_corner_brackets(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 2,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 2, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            fill_bg(f, x, y, width, FAINT_ACCENT);
+            fill_bg(f, x, y + 1, width, FAINT_ACCENT);
+            let right = x + width - 1;
+            let buf = f.buffer_mut();
+            buf[(x, y)].set_symbol("⌜").set_fg(SEL_BG);
+            buf[(right, y)].set_symbol("⌝").set_fg(SEL_BG);
+            buf[(x, y + 1)].set_symbol("⌞").set_fg(SEL_BG);
+            buf[(right, y + 1)].set_symbol("⌟").set_fg(SEL_BG);
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant N: rounded L-frame ╭ │ ╰─ (left rail + bottom rule) ──────────────
+// A rounded left rail hugging the selected row, running out along the spacer
+// row as a bottom rule — an open "L" rather than a closed box.
+fn row_l_frame(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 2,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 2, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            let buf = f.buffer_mut();
+            buf[(x, y)].set_symbol("╭").set_fg(SEL_BG);
+            buf[(x, y + 1)].set_symbol("│").set_fg(SEL_BG);
+            buf[(x, y + 2)].set_symbol("╰").set_fg(SEL_BG);
+            for xx in x + 1..x + width {
+                buf[(xx, y + 2)].set_symbol("─").set_fg(SEL_BG);
+            }
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant O: double-line frame ╔═╗ ║ ╚═╝ around the selected row ───────────
+// A full double-rule box: top border on the row above (the previous spacer),
+// side rails beside the content, bottom border on this row's spacer.
+fn row_double_frame(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState, top: u16) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 3,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 3, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            let right = x + width - 1;
+            let buf = f.buffer_mut();
+            // Top border: only when the row above is still inside the panel.
+            if y > top {
+                buf[(x, y - 1)].set_symbol("╔").set_fg(SEL_BG);
+                for xx in x + 1..right {
+                    buf[(xx, y - 1)].set_symbol("═").set_fg(SEL_BG);
+                }
+                buf[(right, y - 1)].set_symbol("╗").set_fg(SEL_BG);
+            }
+            for yy in [y, y + 1] {
+                buf[(x, yy)].set_symbol("║").set_fg(SEL_BG);
+                buf[(right, yy)].set_symbol("║").set_fg(SEL_BG);
+            }
+            buf[(x, y + 2)].set_symbol("╚").set_fg(SEL_BG);
+            for xx in x + 1..right {
+                buf[(xx, y + 2)].set_symbol("═").set_fg(SEL_BG);
+            }
+            buf[(right, y + 2)].set_symbol("╝").set_fg(SEL_BG);
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant P: capsule pill with half-block caps ▐ … ▌ ───────────────────────
+// A full-flood selection like variant D, but the row ends taper via half-block
+// caps so the highlight reads as a rounded pill instead of a hard rectangle.
+fn row_capsule(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 2,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 2, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            let right = x + width - 1;
+            let sel = Style::default()
+                .fg(SEL_FG)
+                .bg(SEL_BG)
+                .add_modifier(Modifier::BOLD);
+            set_row_style(f, x + 1, y, width - 2, sel);
+            set_row_style(f, x + 1, y + 1, width - 2, sel);
+            let buf = f.buffer_mut();
+            for yy in [y, y + 1] {
+                buf[(x, yy)].set_symbol("▐").set_fg(SEL_BG).set_bg(APP_BG);
+                buf[(right, yy)]
+                    .set_symbol("▌")
+                    .set_fg(SEL_BG)
+                    .set_bg(APP_BG);
+            }
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant Q: dotted dividers ┈ between agents + heavy rail on selection ────
+// Every agent gets a faint dotted rule on its spacer row, so the list reads as
+// separated entries; the selected row adds a heavy left rail ┃ over a tint.
+fn row_dotted_dividers(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 2,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 2, line2_spans(a, MUTED));
+    {
+        let buf = f.buffer_mut();
+        for xx in x..x + width {
+            buf[(xx, y + 2)].set_symbol("┈").set_fg(BORDER);
+        }
+    }
+    match st {
+        RowState::Selected => {
+            let buf = f.buffer_mut();
+            for yy in [y, y + 1] {
+                buf[(x, yy)].set_symbol("┃").set_fg(SEL_BG);
+                for xx in x + 1..x + width {
+                    buf[(xx, yy)].set_bg(SEL_TINT);
+                }
+            }
+        }
+        RowState::Hovered => {
+            fill_bg(f, x + 1, y, width - 1, HOVER_BG);
+            fill_bg(f, x + 1, y + 1, width - 1, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant R: two-tone corner ticks ◤ ◢ over a faint wash ───────────────────
+// A triangular tick in the top-left and bottom-right corners of the selected
+// row, on a faint accent wash — a diagonal "notched" selection.
+fn row_corner_ticks(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 2,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 2, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            fill_bg(f, x, y, width, FAINT_ACCENT);
+            fill_bg(f, x, y + 1, width, FAINT_ACCENT);
+            let right = x + width - 1;
+            let buf = f.buffer_mut();
+            buf[(x, y)].set_symbol("◤").set_fg(SEL_BG);
+            buf[(right, y + 1)].set_symbol("◢").set_fg(SEL_BG);
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
         RowState::Normal => {}
     }
 }
