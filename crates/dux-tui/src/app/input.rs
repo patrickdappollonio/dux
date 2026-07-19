@@ -10672,6 +10672,32 @@ not_a_real_action = ["x"]
             .position(|i| matches!(i, LeftItem::InactiveToggle))
             .expect("toggle");
 
+        // The rule keeps the right padding: its last column stops a gutter short
+        // of the pane edge, so the rightmost cell of the label row stays blank.
+        fn toggle_rule_right_pad_is_blank(app: &mut App) -> bool {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let toggle_idx = app
+                .left_items()
+                .iter()
+                .position(|i| matches!(i, LeftItem::InactiveToggle))
+                .expect("toggle");
+            let rel = app
+                .mouse_layout
+                .left_row_to_item
+                .iter()
+                .rposition(|&i| i == toggle_idx)
+                .expect("toggle row");
+            let y = app.mouse_layout.left_list.y + rel.saturating_sub(1) as u16;
+            let lx = app.mouse_layout.left_list.x;
+            let lw = app.mouse_layout.left_list.width;
+            let buf = terminal.backend().buffer();
+            buf[(lx + lw - 1, y)].symbol() == " "
+        }
+
         // Selection on the active agent (not the toggle): the rule shows.
         app.selected_left = app
             .left_items()
@@ -10681,6 +10707,10 @@ not_a_real_action = ["x"]
         assert!(
             toggle_row_has_rule(&mut app),
             "the rule shows while the toggle is unselected",
+        );
+        assert!(
+            toggle_rule_right_pad_is_blank(&mut app),
+            "the rule stops a gutter short of the right edge",
         );
 
         // Selecting the toggle hides the rule (it takes the full-width highlight).

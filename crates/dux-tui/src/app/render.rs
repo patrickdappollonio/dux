@@ -134,6 +134,11 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// A one-column pad on each side of the left-pane row text: the left gutter
+/// also hosts the selection frame, and the right gets an equal pad so the text
+/// (and the Inactive rule) sit evenly between two matching margins.
+const LEFT_PANE_GUTTER: u16 = 1;
+
 /// Truncate `s` to at most `max_w` display columns, measured by real
 /// terminal cell width (unicode-width via `CellWidth`), not byte or char
 /// count. Stops before any character that would push the running width over
@@ -859,8 +864,9 @@ impl App {
         }
     }
 
-    /// Draw a dim rule from the end of the "Inactive (N)" label to the right edge
-    /// of the pane, but only while the toggle is not the current selection (a
+    /// Draw a dim rule from the end of the "Inactive (N)" label to the right
+    /// gutter of the pane (stopping a column short of the edge, matching the row
+    /// text padding), but only while the toggle is not the current selection (a
     /// selected toggle takes the full-width highlight instead).
     fn paint_inactive_rule(&self, buf: &mut ratatui::buffer::Buffer, list_content: Rect) {
         let items = self.left_items();
@@ -882,6 +888,9 @@ impl App {
         let y = list_content.y + rel_end.saturating_sub(1) as u16;
         let x0 = list_content.x;
         let x1 = list_content.x + list_content.width;
+        // Stop a gutter short of the right edge so the rule keeps the same right
+        // padding as the row text above it.
+        let x_right = x1.saturating_sub(LEFT_PANE_GUTTER);
         // The label row's rightmost non-blank cell marks where the text ends.
         let mut text_end = x0;
         for x in x0..x1 {
@@ -890,8 +899,8 @@ impl App {
             }
         }
         // One blank cell of breathing room, then the rule (in the heading's own
-        // color) to the right edge.
-        for x in text_end.saturating_add(2)..x1 {
+        // color) to the right gutter.
+        for x in text_end.saturating_add(2)..x_right {
             buf[(x, y)]
                 .set_symbol("─")
                 .set_fg(self.theme.provider_label_fg);
@@ -1033,15 +1042,11 @@ impl App {
         // leading spacer row (separating it from the active agents) when there is
         // something above it; with only inactive agents it sits flush at the top.
         let has_active = matches!(left_items.first(), Some(LeftItem::Session(_)));
-        // A one-column pad on each side of the row text: the left gutter also
-        // hosts the selection frame, and the right gets an equal pad so the text
-        // is centered between two matching margins.
-        const GUTTER: u16 = 1;
         // Build the block up front so the row builder knows the text width left
         // after both gutters are reserved, and can ellipsize overflowing lines.
         let block = self.themed_block(&title, projects_focused);
         let inner = block.inner(projects_area);
-        let row_text_width = inner.width.saturating_sub(GUTTER * 2);
+        let row_text_width = inner.width.saturating_sub(LEFT_PANE_GUTTER * 2);
         let items = left_items
             .iter()
             .map(|item| match item {
@@ -1128,8 +1133,8 @@ impl App {
             ..list_inner
         };
         let list_body = Rect {
-            x: list_content.x + GUTTER,
-            width: list_content.width.saturating_sub(GUTTER * 2),
+            x: list_content.x + LEFT_PANE_GUTTER,
+            width: list_content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
             ..list_content
         };
         self.mouse_layout.left_list = list_content;
