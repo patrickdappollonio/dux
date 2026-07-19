@@ -33,6 +33,11 @@ import { useSidebar } from "@/components/ui/sidebar"
 import { changesCountFor } from "@/lib/agentVitals"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
+import {
+  MAX_SIDEBAR_PX,
+  MIN_SIDEBAR_PX,
+  sidebarResizeRelease,
+} from "@/lib/sidebarResize"
 import { applyPendingOrders } from "@/lib/reorder"
 import {
   openAddProject,
@@ -153,10 +158,8 @@ function CollapsedAgentRail({
 }
 
 // Edge affordance pinned to the sidebar's right edge: drag-to-resize when
-// expanded, click-to-expand when collapsed. Desktop only.
-const MIN_SIDEBAR_PX = 14 * 16
-const MAX_SIDEBAR_PX = 28 * 16
-
+// expanded, click-to-expand when collapsed. Desktop only. The clamp band and the
+// auto-collapse decision live in lib/sidebarResize.ts so they stay unit-testable.
 function SidebarResizeHandle() {
   const { state, isMobile, setOpen } = useSidebar()
   const cleanupRef = useRef<(() => void) | null>(null)
@@ -187,6 +190,10 @@ function SidebarResizeHandle() {
       setSidebarWidth(`${px / 16}rem`)
     }
 
+    // On release, persist the clamped width; if the user dragged below the
+    // auto-collapse threshold, snap to the icon rail (same state the footer
+    // collapse button / Ctrl-b drive), which the edge's click-to-expand undoes.
+
     const cleanup = () => {
       window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
@@ -195,8 +202,11 @@ function SidebarResizeHandle() {
     }
 
     const onUp = (up: PointerEvent) => {
-      const px = Math.min(Math.max(up.clientX, MIN_SIDEBAR_PX), MAX_SIDEBAR_PX)
-      setSidebarWidth(`${px / 16}rem`, true)
+      const { widthRem, collapse } = sidebarResizeRelease(up.clientX)
+      setSidebarWidth(widthRem, true)
+      if (collapse) {
+        setOpen(false)
+      }
       cleanup()
     }
 
@@ -294,12 +304,20 @@ export function AppSidebar() {
         />
       </SidebarContent>
 
-      <SidebarFooter>
-        <div className="flex items-center gap-2 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:justify-center">
+      {/* @container: the footer is a container-query context tracking the
+          sidebar's OWN (user-resizable) width, so the two split buttons stack
+          when the sidebar is too narrow to fit them side by side instead of
+          overflowing into the center pane. */}
+      <SidebarFooter className="@container">
+        {/* Below the @[18rem] container width the row becomes a full-width
+            vertical stack (one on top, one on the bottom); at/above it they sit
+            side by side. Icon-rail mode keeps its own centered column. */}
+        <div className="flex flex-col items-stretch gap-2 @[18rem]:flex-row @[18rem]:items-center group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:justify-center">
           {/* Primary New-agent action (moved here from the list header): a split
               button whose ⋯ offers the from-PR / from-worktree variants, beside the
-              Add-project split button. Both collapse to bare icons in the rail. */}
-          <NewAgentSplitButton className="flex-1 group-data-[collapsible=icon]:hidden" />
+              Add-project split button. Both collapse to bare icons in the rail.
+              Full-width when stacked; grows to share the row when side by side. */}
+          <NewAgentSplitButton className="w-full @[18rem]:w-auto @[18rem]:flex-1 group-data-[collapsible=icon]:hidden" />
           {/* Collapsed rail: New agent as a bare icon. */}
           <Button
             size="sm"
@@ -309,7 +327,7 @@ export function AppSidebar() {
           >
             <Plus />
           </Button>
-          <ButtonGroup className="group-data-[collapsible=icon]:hidden [&>button:last-of-type]:rounded-r-lg">
+          <ButtonGroup className="w-full @[18rem]:w-fit group-data-[collapsible=icon]:hidden [&>button:last-of-type]:rounded-r-lg">
             <Button
               variant="outline"
               size="sm"

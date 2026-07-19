@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import { SidebarProvider } from "@/components/ui/sidebar"
@@ -80,6 +80,7 @@ function installBootStubs() {
 installBootStubs()
 const { AppSidebar } = await import("./Sidebar")
 const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
+const { sidebarResizeRelease } = await import("@/lib/sidebarResize")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
   return {
@@ -586,6 +587,170 @@ describe("AppSidebar resize affordances", () => {
     expect(
       container.querySelector('[data-sidebar="expand-handle"]'),
     ).toBeNull()
+  })
+})
+
+describe("sidebarResizeRelease threshold", () => {
+  // Pure decision: clamp to [14rem, 28rem] and flag collapse below 15rem.
+  it("clamps a normal drag and does not collapse", () => {
+    expect(sidebarResizeRelease(400)).toEqual({
+      widthRem: "25rem",
+      collapse: false,
+    })
+  })
+
+  it("clamps past the max without collapsing", () => {
+    expect(sidebarResizeRelease(9999)).toEqual({
+      widthRem: "28rem",
+      collapse: false,
+    })
+  })
+
+  it("collapses when released below the 15rem threshold", () => {
+    // 232px is inside the clamp band but under 240px (15rem): collapse.
+    expect(sidebarResizeRelease(232)).toEqual({
+      widthRem: "14.5rem",
+      collapse: true,
+    })
+  })
+
+  it("collapses when dragged hard-left (clamped to the 14rem floor)", () => {
+    expect(sidebarResizeRelease(0)).toEqual({
+      widthRem: "14rem",
+      collapse: true,
+    })
+  })
+
+  it("does not collapse exactly at the 15rem threshold", () => {
+    expect(sidebarResizeRelease(240)).toEqual({
+      widthRem: "15rem",
+      collapse: false,
+    })
+  })
+})
+
+describe("AppSidebar auto-collapse on narrow drag", () => {
+  it("collapses to the icon rail when the handle is released below the threshold", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = container.querySelector(
+      '[data-sidebar="resize-handle"]',
+    ) as HTMLElement
+    expect(handle).toBeTruthy()
+    handle.setPointerCapture = () => {}
+
+    // Drag far left and release at x=100 (clamps to 14rem, under the 15rem
+    // auto-collapse threshold): the sidebar snaps to the icon rail, so the drag
+    // handle is replaced by the click-to-expand edge.
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 240 })
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 100 }))
+      window.dispatchEvent(new MouseEvent("pointerup", { clientX: 100 }))
+    })
+
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("14rem")
+    expect(
+      container.querySelector('[data-sidebar="resize-handle"]'),
+    ).toBeNull()
+    expect(
+      container.querySelector('[data-sidebar="expand-handle"]'),
+    ).toBeTruthy()
+  })
+
+  it("does not collapse when released above the threshold", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    const handle = container.querySelector(
+      '[data-sidebar="resize-handle"]',
+    ) as HTMLElement
+    handle.setPointerCapture = () => {}
+
+    fireEvent.pointerDown(handle, { pointerId: 1, clientX: 240 })
+    act(() => {
+      window.dispatchEvent(new MouseEvent("pointerup", { clientX: 320 }))
+    })
+
+    // Stays expanded: the drag handle remains, no expand edge appears.
+    expect(localStorage.getItem("dux:sidebar-width")).toBe("20rem")
+    expect(
+      container.querySelector('[data-sidebar="resize-handle"]'),
+    ).toBeTruthy()
+    expect(
+      container.querySelector('[data-sidebar="expand-handle"]'),
+    ).toBeNull()
+  })
+})
+
+describe("AppSidebar footer responsive stacking", () => {
+  it("makes the footer a container-query context and stacks the split buttons when narrow", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    // The footer is the @container so the query tracks the sidebar's own width.
+    const footer = container.querySelector('[data-sidebar="footer"]')
+    expect(footer).toBeTruthy()
+    expect(footer!.className).toContain("@container")
+
+    // The button row stacks by default (flex-col + items-stretch) and only goes
+    // side by side at/above the @[18rem] container width.
+    const row = footer!.querySelector("div")
+    expect(row).toBeTruthy()
+    expect(row!.className).toContain("flex-col")
+    expect(row!.className).toContain("items-stretch")
+    expect(row!.className).toContain("@[18rem]:flex-row")
+  })
+
+  it("gives each split button a full-width stacked treatment while keeping the ⋯ segment attached", () => {
+    mockState = makeState()
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    // Select each split button by its unique ⋯ trigger (the primary label is
+    // shared with the icon-rail bare buttons), then walk to the enclosing group.
+    const newAgentGroup = screen
+      .getByLabelText("More ways to create an agent")
+      .closest('[data-slot="button-group"]') as HTMLElement
+    expect(newAgentGroup).toBeTruthy()
+    expect(newAgentGroup.className).toContain("w-full")
+    expect(newAgentGroup.className).toContain("@[18rem]:flex-1")
+    // The ⋯ segment stays inside the same group (attached, misclick-safe seam).
+    expect(
+      newAgentGroup.querySelector('[aria-label="More ways to create an agent"]'),
+    ).toBeTruthy()
+
+    // Add-project split button: full width stacked, natural width in the row.
+    const addProjectGroup = screen
+      .getByLabelText("More ways to add a project")
+      .closest('[data-slot="button-group"]') as HTMLElement
+    expect(addProjectGroup).toBeTruthy()
+    expect(addProjectGroup.className).toContain("w-full")
+    expect(addProjectGroup.className).toContain("@[18rem]:w-fit")
+    expect(
+      addProjectGroup.querySelector(
+        '[aria-label="More ways to add a project"]',
+      ),
+    ).toBeTruthy()
+    // The seam-rounding fix that keeps the trigger's outer corner rounded stays.
+    expect(addProjectGroup.className).toContain(
+      "[&>button:last-of-type]:rounded-r-lg",
+    )
   })
 })
 
