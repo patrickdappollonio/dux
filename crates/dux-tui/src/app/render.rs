@@ -734,6 +734,74 @@ impl App {
         ListItem::new(vec![Line::from(line1), Line::from(line2), Line::from("")])
     }
 
+    /// Paint the left-pane selection by hand (the List widget renders with no
+    /// highlight). An agent's two content rows take the full selection style; its
+    /// trailing spacer becomes a `▀` (top-half selection) so the highlight gains a
+    /// half-cell of padding below the text, and the row above the name — only when
+    /// that row is another agent's spacer, never a label — becomes a `▄` (bottom-
+    /// half selection) for matching padding above. The Inactive toggle highlights
+    /// only its label row, leaving its leading separator plain. `left_row_to_item`
+    /// (already rebuilt for this frame) maps screen rows to items.
+    fn paint_left_selection(&self, buf: &mut ratatui::buffer::Buffer, list_inner: Rect) {
+        let map = &self.mouse_layout.left_row_to_item;
+        let sel = self.selected_left;
+        let Some(rel_start) = map.iter().position(|&i| i == sel) else {
+            return;
+        };
+        let rel_end = map.iter().rposition(|&i| i == sel).unwrap_or(rel_start);
+        let items = self.left_items();
+        let Some(item) = items.get(sel).copied() else {
+            return;
+        };
+        let sel_style = self.theme.selection_style();
+        let sel_color = self.theme.selection_bg;
+        let x0 = list_inner.x;
+        let x1 = list_inner.x + list_inner.width;
+        let row_at = |rel: usize| list_inner.y + rel as u16;
+
+        match item {
+            LeftItem::Session(_) => {
+                // Content rows (name, metadata) take the full selection style.
+                for rel in [rel_start, rel_start + 1] {
+                    if map.get(rel) != Some(&sel) {
+                        continue;
+                    }
+                    let y = row_at(rel);
+                    for x in x0..x1 {
+                        buf[(x, y)].set_style(sel_style);
+                    }
+                }
+                // Trailing spacer -> top-half selection (padding below the text).
+                let spacer_rel = rel_start + 2;
+                if map.get(spacer_rel) == Some(&sel) {
+                    let y = row_at(spacer_rel);
+                    for x in x0..x1 {
+                        buf[(x, y)].set_symbol("▀").set_fg(sel_color);
+                    }
+                }
+                // Row above the name -> bottom-half selection, but only when it is
+                // another agent's (blank) spacer, so a toggle label is never
+                // clobbered and the top item never reaches past the list.
+                if rel_start > 0
+                    && matches!(items.get(map[rel_start - 1]), Some(LeftItem::Session(_)))
+                {
+                    let y = row_at(rel_start - 1);
+                    for x in x0..x1 {
+                        buf[(x, y)].set_symbol("▄").set_fg(sel_color);
+                    }
+                }
+            }
+            LeftItem::InactiveToggle => {
+                // Highlight only the label row (the item's last row); the leading
+                // separator, when present, stays an unhighlighted blank.
+                let y = row_at(rel_end);
+                for x in x0..x1 {
+                    buf[(x, y)].set_style(sel_style);
+                }
+            }
+        }
+    }
+
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.focus == FocusPane::Left;
 
@@ -864,6 +932,11 @@ impl App {
         } else {
             format!("Agents ({total_agents})")
         };
+        // Active agents always sort ahead of the Inactive toggle, so the list
+        // leads with a Session iff any agent is active. The toggle only earns a
+        // leading spacer row (separating it from the active agents) when there is
+        // something above it; with only inactive agents it sits flush at the top.
+        let has_active = matches!(left_items.first(), Some(LeftItem::Session(_)));
         let items = left_items
             .iter()
             .map(|item| match item {
@@ -876,15 +949,18 @@ impl App {
                     } else {
                         "▾"
                     };
-                    // A leading blank line sets the Inactive section apart from the
-                    // active agents above it.
-                    ListItem::new(vec![
-                        Line::from(""),
-                        Line::from(vec![Span::styled(
-                            format!("{icon} Inactive ({count})"),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        )]),
-                    ])
+                    let label = Line::from(vec![Span::styled(
+                        format!("{icon} Inactive ({count})"),
+                        Style::default().fg(self.theme.provider_label_fg),
+                    )]);
+                    // The leading blank is a plain unused separator row (never
+                    // highlighted, see `paint_left_selection`); present only when
+                    // active agents sit above.
+                    if has_active {
+                        ListItem::new(vec![Line::from(""), label])
+                    } else {
+                        ListItem::new(vec![label])
+                    }
                 }
                 LeftItem::Session(index) => {
                     let Some(session) = self.engine.sessions.get(*index) else {
@@ -898,14 +974,21 @@ impl App {
             .collect::<Vec<_>>();
         // Each item's rendered height, kept in lockstep with the arms above: an
         // agent row is three lines (name, metadata, trailing spacer) and the
-        // Inactive toggle is two (leading spacer, label). Computed here, while
-        // `left_items` is still borrowed and before any mutable `self` access,
-        // then consumed after render to rebuild the click->item map.
+        // Inactive toggle is two (leading separator + label) when active agents
+        // precede it, else one. Computed here, while `left_items` is still
+        // borrowed and before any mutable `self` access, then consumed after
+        // render to rebuild the click->item map.
         let item_heights: Vec<u16> = left_items
             .iter()
             .map(|it| match it {
                 LeftItem::Session(_) => 3,
-                LeftItem::InactiveToggle => 2,
+                LeftItem::InactiveToggle => {
+                    if has_active {
+                        2
+                    } else {
+                        1
+                    }
+                }
             })
             .collect();
         let block = self.themed_block(&title, projects_focused);
@@ -950,17 +1033,18 @@ impl App {
             } else {
                 None
             });
-        StatefulWidget::render(
-            List::new(items).highlight_style(self.theme.selection_style()),
-            list_inner,
-            frame.buffer_mut(),
-            &mut state,
-        );
-        // Agent rows are two lines tall, so a click row no longer maps 1:1 to a
+        // No widget highlight: the selection is painted by hand below so it can
+        // use half-height blocks for padding and leave the Inactive separator row
+        // unhighlighted (neither of which a whole-cell List highlight can do).
+        StatefulWidget::render(List::new(items), list_inner, frame.buffer_mut(), &mut state);
+        // Agent rows are three lines tall, so a click row no longer maps 1:1 to a
         // list item. Rebuild the reverse map from the post-render scroll offset
         // and each item's rendered height (computed above).
         self.mouse_layout.left_row_to_item =
             left_row_to_item(state.offset(), &item_heights, list_inner.height);
+        if self.left_section == LeftSection::Projects {
+            self.paint_left_selection(frame.buffer_mut(), list_inner);
+        }
 
         // Render terminals section if any terminals exist.
         if let Some(term_area) = terminals_area {

@@ -142,6 +142,11 @@ pub struct App {
     /// collapsed. Starts collapsed, matching the web. Replaces the old
     /// per-project collapse now that there are no project headers.
     pub(crate) inactive_collapsed: bool,
+    /// Once the user toggles the Inactive section by hand, stop auto-managing its
+    /// collapsed state. Until then it auto-expands when every agent is inactive
+    /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
+    /// is active. See `rebuild_left_items`.
+    pub(crate) inactive_collapse_overridden: bool,
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
@@ -2171,6 +2176,7 @@ impl App {
             start_time: Instant::now(),
             readonly_nudge_tick: None,
             inactive_collapsed: true,
+            inactive_collapse_overridden: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
@@ -3258,6 +3264,17 @@ impl App {
     }
 
     pub(crate) fn rebuild_left_items(&mut self) {
+        // Until the user toggles the Inactive section by hand, auto-manage it:
+        // expand when every agent is inactive (don't hide a wholly-dormant
+        // workspace behind a collapsed toggle), collapse once any agent is active.
+        if !self.inactive_collapse_overridden {
+            let has_active = self
+                .engine
+                .sessions
+                .iter()
+                .any(|s| matches!(s.status, crate::model::SessionStatus::Active));
+            self.inactive_collapsed = has_active;
+        }
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         // Precompute the "hot" bit (working || needs-attention) per session so the
         // predicate can borrow this Vec while `build_left_items` borrows
@@ -3430,6 +3447,8 @@ impl App {
     /// as the old per-project collapse (Space / `ToggleProject`) and to Enter on
     /// the `InactiveToggle` row. Keeps the cursor on the toggle row afterward.
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
+        // A manual toggle takes over from the auto-manage in `rebuild_left_items`.
+        self.inactive_collapse_overridden = true;
         self.inactive_collapsed = !self.inactive_collapsed;
         self.rebuild_left_items();
         if let Some(new_index) = self

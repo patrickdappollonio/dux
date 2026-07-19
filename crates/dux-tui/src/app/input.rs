@@ -10419,6 +10419,91 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn inactive_section_auto_expands_when_all_agents_are_inactive() {
+        use crate::model::SessionStatus;
+        let mut app = test_app(default_bindings());
+        // The fixture seeds a single Detached agent and no active ones.
+        app.rebuild_left_items();
+        assert!(
+            !app.inactive_collapsed,
+            "a wholly-inactive workspace expands the Inactive section by default",
+        );
+
+        // Add an active agent: the section auto-collapses again.
+        let mut active = app.engine.sessions[0].clone();
+        active.id = "active-1".to_string();
+        active.status = SessionStatus::Active;
+        app.engine.sessions.push(active);
+        app.rebuild_left_items();
+        assert!(
+            app.inactive_collapsed,
+            "an active agent collapses the Inactive tail",
+        );
+
+        // A manual toggle takes over and sticks across rebuilds.
+        app.toggle_collapse_selected_project();
+        assert!(app.inactive_collapse_overridden);
+        let after = app.inactive_collapsed;
+        app.rebuild_left_items();
+        assert_eq!(
+            app.inactive_collapsed, after,
+            "a manual toggle overrides the auto-manage",
+        );
+    }
+
+    #[test]
+    fn selected_agent_gets_half_block_padding() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut second = app.engine.sessions[0].clone();
+        second.id = "session-2".to_string();
+        second.branch_name = "second-branch".to_string();
+        app.engine.sessions.push(second);
+        for id in app
+            .engine
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+        {
+            app.engine.mark_session_status(&id, SessionStatus::Active);
+        }
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+        // Select the SECOND agent: its name/meta/spacer land on rows 3/4/5, and
+        // its top padding falls on the first agent's spacer at row 2.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::Session(idx) if *idx == 1))
+            .expect("second agent row");
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let lx = app.mouse_layout.left_list.x;
+        let lw = app.mouse_layout.left_list.width;
+        let y0 = app.mouse_layout.left_list.y;
+        let row_has = |y: u16, sym: &str| (lx..lx + lw).any(|x| buf[(x, y)].symbol() == sym);
+        assert!(
+            row_has(y0 + 5, "▀"),
+            "the selected agent's trailing spacer paints a top-half selection block",
+        );
+        assert!(
+            row_has(y0 + 2, "▄"),
+            "the row above the selection paints a bottom-half selection block",
+        );
+    }
+
+    #[test]
     fn mouse_double_click_left_pane_empty_space_does_not_activate_selected_row() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
