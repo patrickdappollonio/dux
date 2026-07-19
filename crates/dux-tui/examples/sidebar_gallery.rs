@@ -35,6 +35,10 @@ const C_EXITED: Color = Color::Rgb(100, 100, 100);
 const C_PR: Color = Color::Rgb(84, 225, 130); // pr open green
 const HOVER_BG: Color = Color::Rgb(34, 34, 34); // faint row tint
 const SEL_TINT: Color = Color::Rgb(6, 46, 46); // faint cyan tint (for bar/caret variants)
+// Fainter selection backgrounds (page 2 explores "web-style faint bg" instead of
+// the full-flood selection): a faint accent tint and a faint neutral tint.
+const FAINT_ACCENT: Color = Color::Rgb(10, 44, 44); // faint teal wash
+const FAINT_NEUTRAL: Color = Color::Rgb(40, 40, 40); // faint grey wash (web hover)
 
 // The spinner + status glyphs used by the app.
 const SPINNER: &str = "⠹";
@@ -125,26 +129,39 @@ fn samples() -> Vec<Agent> {
 }
 
 const VARIANTS: &[&str] = &[
+    // Page 1 — bolder / structural treatments.
     "A · Current (half-block padding)",
     "B · Left accent bar",
     "C · Caret + accent name",
     "D · Clean full-bg, tight",
     "E · Underline selection",
     "F · Rounded card",
+    // Page 2 — faint-background treatments (web-hover feel).
+    "G · Faint accent wash",
+    "H · Faint neutral wash",
+    "I · Faint wash + thin bar",
+    "J · Faint wash + accent name",
+    "K · Faint wash + accent glyph",
+    "L · Faint wash, name row only",
 ];
+
+const PER_PAGE: usize = 6;
 
 fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     let mut selected = 0usize;
     let mut hovered = 2usize;
+    let mut page = 0usize;
+    let pages = VARIANTS.len().div_ceil(PER_PAGE);
     let n = samples().len();
     let res = loop {
-        if let Err(e) = terminal.draw(|f| draw(f, selected, hovered)) {
+        if let Err(e) = terminal.draw(|f| draw(f, page, selected, hovered)) {
             break Err(e);
         }
         match event::read() {
             Ok(Event::Key(k)) => match k.code {
                 KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
+                KeyCode::Tab | KeyCode::Char(' ') => page = (page + 1) % pages,
                 KeyCode::Down | KeyCode::Char('j') => selected = (selected + 1) % n,
                 KeyCode::Up | KeyCode::Char('k') => selected = (selected + n - 1) % n,
                 KeyCode::Right | KeyCode::Char('l') => hovered = (hovered + 1) % n,
@@ -159,7 +176,7 @@ fn main() -> std::io::Result<()> {
     res
 }
 
-fn draw(f: &mut Frame, selected: usize, hovered: usize) {
+fn draw(f: &mut Frame, page: usize, selected: usize, hovered: usize) {
     let area = f.area();
     f.buffer_mut()
         .set_style(area, Style::default().bg(APP_BG).fg(NAME_FG));
@@ -173,6 +190,7 @@ fn draw(f: &mut Frame, selected: usize, hovered: usize) {
         ])
         .areas(area);
 
+    let pages = VARIANTS.len().div_ceil(PER_PAGE);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -180,7 +198,16 @@ fn draw(f: &mut Frame, selected: usize, hovered: usize) {
                 Style::default().fg(SEL_FG).bg(SEL_BG),
             ),
             Span::styled(
-                "  selected row highlighted · hovered row tinted",
+                format!(
+                    "  page {}/{} — {}",
+                    page + 1,
+                    pages,
+                    if page == 0 {
+                        "bolder / structural"
+                    } else {
+                        "faint-background (web-hover feel)"
+                    }
+                ),
                 Style::default().fg(MUTED),
             ),
         ])),
@@ -188,15 +215,15 @@ fn draw(f: &mut Frame, selected: usize, hovered: usize) {
     );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " j/k move selection · h/l move hover · q quit ",
+            " Tab/Space next page · j/k move selection · h/l move hover · q quit ",
             Style::default().fg(MUTED),
         ))),
         footer,
     );
 
-    // Grid: 3 columns x 2 rows of variant panels.
+    // One page = a 3 columns x 2 rows grid of variant panels.
     let cols = 3usize;
-    let rows = VARIANTS.len().div_ceil(cols);
+    let rows = PER_PAGE.div_ceil(cols);
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(vec![Constraint::Ratio(1, rows as u32); rows])
@@ -207,7 +234,7 @@ fn draw(f: &mut Frame, selected: usize, hovered: usize) {
             .constraints(vec![Constraint::Ratio(1, cols as u32); cols])
             .split(*row_area);
         for (c, cell) in col_areas.iter().enumerate() {
-            let idx = r * cols + c;
+            let idx = page * PER_PAGE + r * cols + c;
             if idx < VARIANTS.len() {
                 render_panel(f, *cell, idx, selected, hovered);
             }
@@ -271,6 +298,12 @@ fn render_variant(
             3 => row_tight_fullbg(f, x0, y, width, a, st),
             4 => row_underline(f, x0, y, width, a, st),
             5 => row_card(f, x0, y, width, a, st),
+            6 => row_wash(f, x0, y, width, a, st, FAINT_ACCENT, None, false),
+            7 => row_wash(f, x0, y, width, a, st, FAINT_NEUTRAL, None, false),
+            8 => row_wash(f, x0, y, width, a, st, FAINT_ACCENT, Some("▏"), false),
+            9 => row_wash(f, x0, y, width, a, st, FAINT_ACCENT, None, true),
+            10 => row_wash_accent_glyph(f, x0, y, width, a, st),
+            11 => row_wash_name_only(f, x0, y, width, a, st),
             _ => {}
         }
         y += row_h;
@@ -527,5 +560,85 @@ fn row_card(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) 
             );
             put_line(f, x + 1, y + 1, width - 1, line2_spans(a, MUTED));
         }
+    }
+}
+
+// ── Variant G/H/I/J: faint wash family ───────────────────────────────────────
+// A faint background over the two content rows (text keeps its own colors, like
+// the web hover), optionally with a thin left bar and/or the name in the accent.
+fn row_wash(
+    f: &mut Frame,
+    x: u16,
+    y: u16,
+    width: u16,
+    a: &Agent,
+    st: RowState,
+    wash: Color,
+    bar: Option<&str>,
+    accent_name: bool,
+) {
+    let gutter = if bar.is_some() { 2 } else { 0 };
+    let name_col = if accent_name && st == RowState::Selected {
+        SEL_BG
+    } else {
+        a.name_color
+    };
+    put_line(
+        f,
+        x + gutter,
+        y,
+        width - gutter,
+        line1_spans(a, a.glyph_color, name_col),
+    );
+    put_line(f, x + gutter, y + 1, width - gutter, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            fill_bg(f, x, y, width, wash);
+            fill_bg(f, x, y + 1, width, wash);
+            if let Some(b) = bar {
+                let buf = f.buffer_mut();
+                for yy in [y, y + 1] {
+                    buf[(x, yy)].set_symbol(b).set_fg(SEL_BG);
+                }
+            }
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant K: faint wash + the status glyph recolored to the accent ─────────
+fn row_wash_accent_glyph(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    let glyph_col = if st == RowState::Selected {
+        SEL_BG
+    } else {
+        a.glyph_color
+    };
+    put_line(f, x, y, width, line1_spans(a, glyph_col, a.name_color));
+    put_line(f, x, y + 1, width, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            fill_bg(f, x, y, width, FAINT_ACCENT);
+            fill_bg(f, x, y + 1, width, FAINT_ACCENT);
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant L: faint wash on the name row only ───────────────────────────────
+fn row_wash_name_only(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) {
+    put_line(f, x, y, width, line1_spans(a, a.glyph_color, a.name_color));
+    put_line(f, x, y + 1, width, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => fill_bg(f, x, y, width, FAINT_ACCENT),
+        RowState::Hovered => fill_bg(f, x, y, width, HOVER_BG),
+        RowState::Normal => {}
     }
 }
