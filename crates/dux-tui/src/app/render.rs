@@ -780,10 +780,12 @@ impl App {
         };
         // A half-cell frame edge across the full width: `▄` paints the bottom half
         // (a top edge that sits below the gap above), `▀` the top half (a bottom
-        // edge that sits above the gap below).
+        // edge that sits above the gap below). The painted half is the faint tint,
+        // not the accent, so the edge reads as the selection background extended a
+        // half-cell rather than a bright line a different color from the fill.
         let paint_edge = |buf: &mut ratatui::buffer::Buffer, y: u16, glyph: &str| {
             for x in x0..x1 {
-                buf[(x, y)].set_symbol(glyph).set_fg(accent);
+                buf[(x, y)].set_symbol(glyph).set_fg(tint);
             }
         };
 

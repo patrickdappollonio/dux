@@ -884,11 +884,17 @@ fn row_rounded_frame(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: R
     put_line(f, x + 2, y + 1, width - 3, line2_spans(a, MUTED));
     match st {
         RowState::Selected => {
+            // Wash the whole frame, border rows included, so the background is one
+            // continuous color instead of leaving a gap on the corner rows.
             fill_bg(f, x, y, width, FAINT_ACCENT);
             fill_bg(f, x, y + 1, width, FAINT_ACCENT);
+            fill_bg(f, x, y + 2, width, FAINT_ACCENT);
             let right = x + width - 1;
-            let buf = f.buffer_mut();
             // Top border: only when the row above is still inside the panel.
+            if y > top {
+                fill_bg(f, x, y - 1, width, FAINT_ACCENT);
+            }
+            let buf = f.buffer_mut();
             if y > top {
                 buf[(x, y - 1)].set_symbol("╭").set_fg(SEL_BG);
                 for xx in x + 1..right {

@@ -10497,6 +10497,19 @@ not_a_real_action = ["x"]
         // spacer) and a `▀` bottom edge on this agent's trailing spacer.
         assert_eq!(buf[(gx + 1, y0 + 2)].symbol(), "▄", "top frame edge");
         assert_eq!(buf[(gx + 1, y0 + 5)].symbol(), "▀", "bottom frame edge");
+        // The edge glyphs paint their half in the faint tint (the selection
+        // background extended a half-cell), not the bright accent.
+        let tint = app.theme.selection_bar_tint();
+        assert_eq!(
+            buf[(gx + 1, y0 + 2)].fg,
+            tint,
+            "top edge is the tint, not accent"
+        );
+        assert_eq!(
+            buf[(gx + 1, y0 + 5)].fg,
+            tint,
+            "bottom edge is the tint, not accent"
+        );
         // The content rows carry a faint tint background (not the plain app
         // background), so the text keeps its own colors on top.
         assert_eq!(
