@@ -566,6 +566,7 @@ fn row_card(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState) 
 // ── Variant G/H/I/J: faint wash family ───────────────────────────────────────
 // A faint background over the two content rows (text keeps its own colors, like
 // the web hover), optionally with a thin left bar and/or the name in the accent.
+#[allow(clippy::too_many_arguments)] // a scratch gallery knob, not production API
 fn row_wash(
     f: &mut Frame,
     x: u16,
