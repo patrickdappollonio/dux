@@ -760,7 +760,7 @@ impl App {
         let Some(item) = items.get(sel).copied() else {
             return;
         };
-        let accent = self.theme.selection_bg;
+        let accent = self.theme.selection_bar_accent();
         let tint = self.theme.selection_bar_tint();
         let x0 = list_inner.x;
         let x1 = list_inner.x + list_inner.width;
