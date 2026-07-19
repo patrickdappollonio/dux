@@ -514,6 +514,23 @@ describe("AppSidebar resize affordances", () => {
     ).toBeTruthy()
   })
 
+  it("offers a rail button to expand when collapsed", () => {
+    mockState = makeState()
+    const { container } = render(
+      <SidebarProvider defaultOpen={false}>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+
+    // Collapsed to the icon rail...
+    expect(container.querySelector('[data-collapsible="icon"]')).toBeTruthy()
+    // ...and a dedicated expand control is present, so the sidebar can be
+    // reopened without relying on the edge handle alone.
+    expect(
+      container.querySelector('[aria-label="Expand sidebar"]'),
+    ).toBeTruthy()
+  })
+
   it("dragging the handle resizes and persists the panel width", () => {
     mockState = makeState()
     const { container } = render(

@@ -277,9 +277,16 @@ export function AppSidebar() {
                 </span>
               </div>
             </SidebarMenuButton>
-            {/* Collapse toggle lives up here now; when collapsed it hides and the
-                right-edge handle expands the rail instead. */}
+            {/* Collapse toggle: shown only while expanded. When collapsed it
+                hides (the row is too narrow) and the rail trigger below takes
+                over so the sidebar can still be reopened without the edge handle. */}
             <SidebarTrigger className="shrink-0 group-data-[collapsible=icon]:hidden" />
+          </SidebarMenuItem>
+          {/* Rail-only expand button: visible ONLY when collapsed, centered under
+              the logo, so there is always a discoverable control to reopen the
+              sidebar (the edge handle alone was too easy to miss). */}
+          <SidebarMenuItem className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:justify-center">
+            <SidebarTrigger aria-label="Expand sidebar" className="size-8" />
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
@@ -333,6 +340,7 @@ export function AppSidebar() {
               size="sm"
               aria-label="Add project"
               onClick={openAddProject}
+              className="flex-1"
             >
               <Plus />
               <span>Add project</span>
