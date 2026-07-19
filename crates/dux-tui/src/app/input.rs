@@ -10504,6 +10504,109 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn first_agent_selection_paints_top_margin_padding() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let id = app.engine.sessions[0].id.clone();
+        app.engine.mark_session_status(&id, SessionStatus::Active);
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::Session(_)))
+            .expect("agent row");
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let lx = app.mouse_layout.left_list.x;
+        let lw = app.mouse_layout.left_list.width;
+        // The reserved top-margin row sits one row above the list content.
+        let pad_y = app.mouse_layout.left_list.y - 1;
+        assert!(
+            (lx..lx + lw).any(|x| buf[(x, pad_y)].symbol() == "▄"),
+            "the first agent's selection pads into the reserved top-margin row",
+        );
+    }
+
+    #[test]
+    fn inactive_rule_shows_only_when_the_toggle_is_unselected() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn toggle_row_has_rule(app: &mut App) -> bool {
+            let backend = TestBackend::new(120, 30);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let toggle_idx = app
+                .left_items()
+                .iter()
+                .position(|i| matches!(i, LeftItem::InactiveToggle))
+                .expect("toggle");
+            let rel = app
+                .mouse_layout
+                .left_row_to_item
+                .iter()
+                .rposition(|&i| i == toggle_idx)
+                .expect("toggle row");
+            let y = app.mouse_layout.left_list.y + rel as u16;
+            let lx = app.mouse_layout.left_list.x;
+            let lw = app.mouse_layout.left_list.width;
+            let buf = terminal.backend().buffer();
+            (lx..lx + lw).any(|x| buf[(x, y)].symbol() == "─")
+        }
+
+        let mut app = test_app(default_bindings());
+        // One active agent + one Exited agent, so the list has an Inactive toggle.
+        let mut inactive = app.engine.sessions[0].clone();
+        inactive.id = "inactive-1".to_string();
+        app.engine.sessions.push(inactive);
+        let active_id = app.engine.sessions[0].id.clone();
+        app.engine
+            .mark_session_status(&active_id, SessionStatus::Active);
+        app.engine
+            .mark_session_status("inactive-1", SessionStatus::Exited);
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+        let toggle_idx = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::InactiveToggle))
+            .expect("toggle");
+
+        // Selection on the active agent (not the toggle): the rule shows.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|i| matches!(i, LeftItem::Session(_)))
+            .expect("agent row");
+        assert!(
+            toggle_row_has_rule(&mut app),
+            "the rule shows while the toggle is unselected",
+        );
+
+        // Selecting the toggle hides the rule (it takes the full-width highlight).
+        app.selected_left = toggle_idx;
+        assert!(
+            !toggle_row_has_rule(&mut app),
+            "no rule while the toggle is selected",
+        );
+    }
+
+    #[test]
     fn mouse_double_click_left_pane_empty_space_does_not_activate_selected_row() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);

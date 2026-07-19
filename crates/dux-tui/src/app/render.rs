@@ -742,7 +742,12 @@ impl App {
     /// half selection) for matching padding above. The Inactive toggle highlights
     /// only its label row, leaving its leading separator plain. `left_row_to_item`
     /// (already rebuilt for this frame) maps screen rows to items.
-    fn paint_left_selection(&self, buf: &mut ratatui::buffer::Buffer, list_inner: Rect) {
+    fn paint_left_selection(
+        &self,
+        buf: &mut ratatui::buffer::Buffer,
+        list_inner: Rect,
+        top_pad_y: Option<u16>,
+    ) {
         let map = &self.mouse_layout.left_row_to_item;
         let sel = self.selected_left;
         let Some(rel_start) = map.iter().position(|&i| i == sel) else {
@@ -779,15 +784,20 @@ impl App {
                         buf[(x, y)].set_symbol("▀").set_fg(sel_color);
                     }
                 }
-                // Row above the name -> bottom-half selection, but only when it is
-                // another agent's (blank) spacer, so a toggle label is never
-                // clobbered and the top item never reaches past the list.
-                if rel_start > 0
-                    && matches!(items.get(map[rel_start - 1]), Some(LeftItem::Session(_)))
-                {
-                    let y = row_at(rel_start - 1);
+                // Row above the name -> bottom-half selection. For an interior
+                // agent that is the previous agent's (blank) spacer; for the very
+                // first row it is the reserved top-margin row. Either way it is a
+                // blank boundary row, so a label is never clobbered.
+                if rel_start > 0 {
+                    if matches!(items.get(map[rel_start - 1]), Some(LeftItem::Session(_))) {
+                        let y = row_at(rel_start - 1);
+                        for x in x0..x1 {
+                            buf[(x, y)].set_symbol("▄").set_fg(sel_color);
+                        }
+                    }
+                } else if let Some(py) = top_pad_y {
                     for x in x0..x1 {
-                        buf[(x, y)].set_symbol("▄").set_fg(sel_color);
+                        buf[(x, py)].set_symbol("▄").set_fg(sel_color);
                     }
                 }
             }
@@ -799,6 +809,42 @@ impl App {
                     buf[(x, y)].set_style(sel_style);
                 }
             }
+        }
+    }
+
+    /// Draw a dim rule from the end of the "Inactive (N)" label to the right edge
+    /// of the pane, but only while the toggle is not the current selection (a
+    /// selected toggle takes the full-width highlight instead).
+    fn paint_inactive_rule(&self, buf: &mut ratatui::buffer::Buffer, list_content: Rect) {
+        let items = self.left_items();
+        let Some(toggle_idx) = items
+            .iter()
+            .position(|i| matches!(i, LeftItem::InactiveToggle))
+        else {
+            return;
+        };
+        if self.left_section == LeftSection::Projects && self.selected_left == toggle_idx {
+            return;
+        }
+        let map = &self.mouse_layout.left_row_to_item;
+        let Some(rel_end) = map.iter().rposition(|&i| i == toggle_idx) else {
+            return;
+        };
+        let y = list_content.y + rel_end as u16;
+        let x0 = list_content.x;
+        let x1 = list_content.x + list_content.width;
+        // The label row's rightmost non-blank cell marks where the text ends.
+        let mut text_end = x0;
+        for x in x0..x1 {
+            if buf[(x, y)].symbol() != " " {
+                text_end = x;
+            }
+        }
+        // One blank cell of breathing room, then the rule to the right edge.
+        for x in text_end.saturating_add(2)..x1 {
+            buf[(x, y)]
+                .set_symbol("─")
+                .set_fg(self.theme.header_separator_fg);
         }
     }
 
@@ -1005,7 +1051,22 @@ impl App {
         } else {
             (None, inner)
         };
-        self.mouse_layout.left_list = list_inner;
+        // Reserve a one-row top margin so the first agent gets the same half-cell
+        // top padding as the rest when selected: that margin becomes its boundary
+        // row (there is no previous agent's spacer above it to paint).
+        let (top_pad_y, list_content) = if list_inner.height >= 4 {
+            (
+                Some(list_inner.y),
+                Rect {
+                    y: list_inner.y + 1,
+                    height: list_inner.height - 1,
+                    ..list_inner
+                },
+            )
+        } else {
+            (None, list_inner)
+        };
+        self.mouse_layout.left_list = list_content;
         block.render(projects_area, frame.buffer_mut());
         if let Some(search_area) = search_area {
             let (text, cursor) = self
@@ -1036,15 +1097,23 @@ impl App {
         // No widget highlight: the selection is painted by hand below so it can
         // use half-height blocks for padding and leave the Inactive separator row
         // unhighlighted (neither of which a whole-cell List highlight can do).
-        StatefulWidget::render(List::new(items), list_inner, frame.buffer_mut(), &mut state);
+        StatefulWidget::render(
+            List::new(items),
+            list_content,
+            frame.buffer_mut(),
+            &mut state,
+        );
         // Agent rows are three lines tall, so a click row no longer maps 1:1 to a
         // list item. Rebuild the reverse map from the post-render scroll offset
         // and each item's rendered height (computed above).
         self.mouse_layout.left_row_to_item =
-            left_row_to_item(state.offset(), &item_heights, list_inner.height);
+            left_row_to_item(state.offset(), &item_heights, list_content.height);
         if self.left_section == LeftSection::Projects {
-            self.paint_left_selection(frame.buffer_mut(), list_inner);
+            self.paint_left_selection(frame.buffer_mut(), list_content, top_pad_y);
         }
+        // A dim rule runs from the end of the "Inactive" label to the right edge,
+        // but only while the toggle is not the current selection.
+        self.paint_inactive_rule(frame.buffer_mut(), list_content);
 
         // Render terminals section if any terminals exist.
         if let Some(term_area) = terminals_area {
