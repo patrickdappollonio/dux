@@ -9105,6 +9105,49 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn new_agent_from_chooser_opens_naming_modal_honoring_randomize_config() {
+        // Creating a new agent from the project chooser must always open the
+        // naming modal, and that modal must follow the user's
+        // `enable_randomized_pet_name_by_default` config (never force a pet name).
+        for randomize in [true, false] {
+            let mut app = test_app(default_bindings());
+            app.engine
+                .config
+                .defaults
+                .enable_randomized_pet_name_by_default = randomize;
+            let project = app.engine.projects[0].clone();
+            let inspection = dux_core::worker::CreateAgentBranchInspection {
+                current_branch: "main".to_string(),
+                leading_branch: "main".to_string(),
+            };
+            // This is the branch-inspection completion the chooser's new-agent
+            // path dispatches into; it is what opens the naming prompt.
+            app.continue_create_agent_after_branch_inspection(project, inspection)
+                .expect("open naming prompt");
+            match &app.prompt {
+                PromptState::NameNewAgent {
+                    request,
+                    randomize_name,
+                    input,
+                    ..
+                } => {
+                    assert!(matches!(request, CreateAgentRequest::NewProject { .. }));
+                    assert_eq!(
+                        *randomize_name, randomize,
+                        "the naming modal's randomize toggle must follow config",
+                    );
+                    if randomize {
+                        assert!(!input.text.is_empty(), "a pet name is prefilled when on");
+                    } else {
+                        assert!(input.text.is_empty(), "no pet name is forced when off");
+                    }
+                }
+                other => panic!("expected name-new-agent prompt, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn palette_command_opens_project_worktree_picker() {
         let mut app = test_app(default_bindings());
         // Flat model: new-agent-from-worktree opens the project chooser first;
