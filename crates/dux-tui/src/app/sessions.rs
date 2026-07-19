@@ -231,6 +231,8 @@ impl App {
             intent,
             entries,
             selected: 0,
+            filter: TextInput::new(),
+            searching: false,
         };
         Ok(())
     }
@@ -244,10 +246,16 @@ impl App {
                 intent,
                 entries,
                 selected,
-            } => match entries.get(*selected) {
-                Some(entry) => (*intent, entry.id.clone()),
-                None => return Ok(()),
-            },
+                filter,
+                ..
+            } => {
+                // `selected` indexes the visible list; resolve it to a real entry.
+                let visible = visible_pick_project_indices(entries, &filter.text);
+                match visible.get(*selected).and_then(|i| entries.get(*i)) {
+                    Some(entry) => (*intent, entry.id.clone()),
+                    None => return Ok(()),
+                }
+            }
             _ => return Ok(()),
         };
         let Some(project) = self
@@ -5263,6 +5271,8 @@ mod tests {
                 path_missing: false,
             }],
             selected: 0,
+            filter: TextInput::new(),
+            searching: false,
         };
 
         app.confirm_project_chooser_selection()
@@ -5274,6 +5284,40 @@ mod tests {
         );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
         assert!(app.status.text().contains("no longer available"));
+    }
+
+    #[test]
+    fn project_chooser_search_filters_then_confirms_the_visible_pick() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let press = |app: &mut App, code: KeyCode| {
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+        };
+
+        let mut p1 = make_project("alpha", "codex");
+        p1.name = "alpha".to_string();
+        let mut p2 = make_project("beta", "codex");
+        p2.name = "beta".to_string();
+        let mut p3 = make_project("gamma", "codex");
+        p3.name = "gamma".to_string();
+        let mut app = test_app_with_sessions(vec![], vec![p1, p2, p3]);
+
+        app.open_project_chooser(ProjectChooserIntent::Manage)
+            .unwrap();
+
+        // `/` enters search; typing "beta" narrows the visible list to one row.
+        press(&mut app, KeyCode::Char('/'));
+        for c in "beta".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        // Commit the query (leave search mode), then confirm the sole match.
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+
+        // Manage intent records the picked project as the action target: even
+        // though "beta" is index 1 in `entries`, the visible-index resolution
+        // must land on it, not on `entries[0]`.
+        assert_eq!(app.project_chooser_context.as_deref(), Some("beta"));
     }
 
     #[test]

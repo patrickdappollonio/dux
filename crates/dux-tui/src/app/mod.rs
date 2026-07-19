@@ -1032,6 +1032,27 @@ pub(crate) struct ProjectChooserEntry {
     pub(crate) path_missing: bool,
 }
 
+/// Indices of chooser entries matching `filter` (case-insensitive substring over
+/// project name + path). An empty/whitespace filter matches everything and keeps
+/// the original order. `selected` in the `PickProject` prompt indexes the Vec
+/// this returns, not `entries`.
+pub(crate) fn visible_pick_project_indices(
+    entries: &[ProjectChooserEntry],
+    filter: &str,
+) -> Vec<usize> {
+    let needle = filter.trim().to_lowercase();
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            needle.is_empty()
+                || e.name.to_lowercase().contains(&needle)
+                || e.path.to_lowercase().contains(&needle)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PickProjectWorktreePrompt {
     pub(crate) project: Project,
@@ -1148,11 +1169,15 @@ pub(crate) enum PromptState {
     StartupCommandLogs(StartupCommandLogPrompt),
     /// The project chooser: lists every project (agent-less included) so a
     /// project-scoped action can target one when the flat agent list has no
-    /// project header to select. `selected` indexes `entries`.
+    /// project header to select. `selected` indexes the VISIBLE (filtered) list,
+    /// not `entries`; resolve it through [`visible_pick_project_indices`].
     PickProject {
         intent: ProjectChooserIntent,
         entries: Vec<ProjectChooserEntry>,
         selected: usize,
+        /// `/`-search filter over project name + path (parity with the web).
+        filter: TextInput,
+        searching: bool,
     },
     PickProjectWorktree(PickProjectWorktreePrompt),
     KillRunning(KillRunningPrompt),
@@ -4751,6 +4776,30 @@ mod tests {
             "the warning must say it degraded to loopback: {}",
             warnings[0]
         );
+    }
+
+    #[test]
+    fn visible_pick_project_indices_filters_by_name_and_path() {
+        let entry = |id: &str, name: &str, path: &str| ProjectChooserEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
+            agent_count: 0,
+            path_missing: false,
+        };
+        let entries = vec![
+            entry("a", "alpha", "/home/me/alpha"),
+            entry("b", "beta", "/home/me/work/beta"),
+            entry("c", "gamma", "/srv/gamma"),
+        ];
+        // Empty filter matches everything in order.
+        assert_eq!(visible_pick_project_indices(&entries, ""), vec![0, 1, 2]);
+        // Name match, case-insensitive.
+        assert_eq!(visible_pick_project_indices(&entries, "BETA"), vec![1]);
+        // Path match (segment not in any name).
+        assert_eq!(visible_pick_project_indices(&entries, "work"), vec![1]);
+        // No match.
+        assert!(visible_pick_project_indices(&entries, "zzz").is_empty());
     }
 
     #[test]

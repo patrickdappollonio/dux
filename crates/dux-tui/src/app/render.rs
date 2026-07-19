@@ -2476,6 +2476,9 @@ impl App {
         }
 
         let inner_width = list_area.width as usize;
+        // Reserve a one-column right margin so the stats don't butt against the
+        // border, mirroring the ~1-column left inset from the status prefix.
+        let content_width = inner_width.saturating_sub(1);
         let sel_style = self.theme.selection_style();
         let items = files
             .iter()
@@ -2491,7 +2494,7 @@ impl App {
                 // Status prefix takes 3 chars ("M  ").
                 let prefix_width = 3;
                 // Leave 1 char gap between path and stats.
-                let path_budget = inner_width
+                let path_budget = content_width
                     .saturating_sub(prefix_width)
                     .saturating_sub(stats_width)
                     .saturating_sub(1);
@@ -2503,7 +2506,7 @@ impl App {
                 };
 
                 let path_display_width = path.chars().count();
-                let padding = inner_width
+                let padding = content_width
                     .saturating_sub(prefix_width)
                     .saturating_sub(path_display_width)
                     .saturating_sub(stats_width);
@@ -4790,15 +4793,21 @@ impl App {
                 intent,
                 entries,
                 selected,
+                filter,
+                searching,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(72, 58, frame.area());
                 self.clear_overlay_area(frame, area);
 
+                // Which entries survive the `/` filter (indices into `entries`).
+                let visible: Vec<usize> = visible_pick_project_indices(entries, &filter.text);
+
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
                 let move_down = self.bindings.label_for(Action::MoveDown);
                 let move_up = self.bindings.label_for(Action::MoveUp);
+                let search_key = self.bindings.label_for(Action::SearchToggle);
                 let mut bottom_spans = vec![Span::raw(" ")];
                 bottom_spans.extend(self.theme.key_badge_default(&move_down));
                 bottom_spans.push(Span::styled(
@@ -4808,6 +4817,11 @@ impl App {
                 bottom_spans.extend(self.theme.key_badge_default(&move_up));
                 bottom_spans.push(Span::styled(
                     " up  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
+                bottom_spans.extend(self.theme.key_badge_default(&search_key));
+                bottom_spans.push(Span::styled(
+                    " search  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
@@ -4821,70 +4835,104 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
 
-                let name_col = entries
-                    .iter()
-                    .map(|entry| entry.name.chars().count())
-                    .max()
-                    .unwrap_or(8)
-                    .clamp(8, 28);
-                let items = entries
-                    .iter()
-                    .map(|entry| {
-                        let mut spans: Vec<Span> = Vec::new();
-                        if entry.path_missing {
-                            spans.push(Span::styled(
-                                " ⚠ ",
-                                Style::default().fg(self.theme.warning_fg),
-                            ));
-                        } else {
-                            spans.push(Span::raw("   "));
-                        }
-                        let name = git::ellipsize_middle(&entry.name, name_col);
-                        spans.push(Span::styled(
-                            format!("{:name_col$}", name),
-                            Style::default()
-                                .fg(self.theme.text_fg)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        let count_label = match entry.agent_count {
-                            0 => "  no agents".to_string(),
-                            1 => "  1 agent".to_string(),
-                            n => format!("  {n} agents"),
-                        };
-                        spans.push(Span::styled(
-                            count_label,
-                            Style::default().fg(self.theme.hint_desc_fg),
-                        ));
-                        spans.push(Span::styled(
-                            format!("  {}", entry.path),
-                            Style::default().fg(self.theme.hint_dim_desc_fg),
-                        ));
-                        ListItem::new(Line::from(spans))
-                    })
-                    .collect::<Vec<_>>();
-
                 let [details_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(3), Constraint::Min(4)])
                     .areas(area);
 
-                let detail_lines = vec![Line::from(vec![Span::styled(
-                    format!(" Pick a project to continue ({} available).", entries.len()),
-                    Style::default().fg(self.theme.hint_desc_fg),
-                )])];
-                Paragraph::new(detail_lines)
-                    .block(
-                        self.themed_overlay_block(intent.title())
-                            .title_bottom(Line::from(bottom_spans)),
-                    )
+                // Header row: the `/`-search input while searching (or once a
+                // query has been typed), else a plain count line.
+                let details_block = self
+                    .themed_overlay_block(intent.title())
+                    .title_bottom(Line::from(bottom_spans));
+                if *searching || !filter.is_empty() {
+                    Paragraph::new(render_single_line_cursor_input(
+                        "/ ",
+                        &filter.text,
+                        filter.cursor,
+                        self.theme.input_cursor_fg,
+                        self.theme.input_cursor_bg,
+                    ))
+                    .block(details_block)
                     .render(details_area, frame.buffer_mut());
+                } else {
+                    Paragraph::new(vec![Line::from(vec![Span::styled(
+                        format!(" Pick a project to continue ({} available).", entries.len()),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    )])])
+                    .block(details_block)
+                    .render(details_area, frame.buffer_mut());
+                }
 
-                let mut state = ListState::default().with_selected(Some(*selected));
                 let list_block = Block::default()
                     .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                     .border_style(Style::default().fg(self.theme.overlay_border))
                     .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
+
+                // Column plan, sized to the visible rows and the inner width, with a
+                // symmetric one-space margin inside each border. The warning glyph
+                // is a fixed gutter; the path takes the remaining width and shows
+                // its TAIL (leading dirs elided) so the leaf stays readable.
+                let start_dir = self.engine.config.defaults.start_directory.as_deref();
+                let display_path = |entry: &ProjectChooserEntry| {
+                    git::display_path_relative_to(&entry.path, start_dir)
+                };
+                let name_col = visible
+                    .iter()
+                    .filter_map(|i| entries.get(*i))
+                    .map(|entry| entry.name.chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 28);
+                let count_label = |n: usize| match n {
+                    0 => "no agents".to_string(),
+                    1 => "1 agent".to_string(),
+                    n => format!("{n} agents"),
+                };
+                let count_col = visible
+                    .iter()
+                    .filter_map(|i| entries.get(*i))
+                    .map(|entry| count_label(entry.agent_count).chars().count())
+                    .max()
+                    .unwrap_or(8);
+                // margin(1) warn(1) sp(1) name sp(2) count sp(2) path margin(1)
+                let fixed = 1 + 1 + 1 + name_col + 2 + count_col + 2 + 1;
+                let path_col = (list_inner.width as usize).saturating_sub(fixed);
+
+                let items = visible
+                    .iter()
+                    .filter_map(|i| entries.get(*i))
+                    .map(|entry| {
+                        let warn = if entry.path_missing {
+                            Span::styled("⚠", Style::default().fg(self.theme.warning_fg))
+                        } else {
+                            Span::raw(" ")
+                        };
+                        let name = git::ellipsize_middle(&entry.name, name_col);
+                        let path = git::ellipsize_start(&display_path(entry), path_col);
+                        ListItem::new(Line::from(vec![
+                            Span::raw(" "),
+                            warn,
+                            Span::raw(" "),
+                            Span::styled(
+                                format!("{name:name_col$}"),
+                                Style::default()
+                                    .fg(self.theme.text_fg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("{:count_col$}", count_label(entry.agent_count)),
+                                Style::default().fg(self.theme.hint_desc_fg),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(path, Style::default().fg(self.theme.hint_dim_desc_fg)),
+                        ]))
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut state = ListState::default().with_selected(Some(*selected));
                 StatefulWidget::render(
                     List::new(items)
                         .block(list_block)
@@ -4895,7 +4943,7 @@ impl App {
                 );
                 self.overlay_layout.active = OverlayMouseLayout::PickProject {
                     list: list_inner,
-                    items: entries.len(),
+                    items: visible.len(),
                     offset: state.offset(),
                 };
             }

@@ -940,6 +940,10 @@ pub const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Browser,
             BindingScope::RuntimeKill,
             BindingScope::StartupCommandLogs,
+            // The project chooser (`PickProject`) rides the Palette scope; the
+            // command palette itself ignores plain chars, so `/` only reaches
+            // search-capable list modals here.
+            BindingScope::Palette,
         ],
         help: Some(HelpEntry {
             section: "Overlays",

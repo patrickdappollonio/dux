@@ -1879,6 +1879,56 @@ pub fn ellipsize_middle(input: &str, max_width: usize) -> String {
     format!("{start}...{end}")
 }
 
+/// Truncate `input` to at most `max_width` chars, keeping the END and prefixing
+/// a single `…` when characters are dropped from the front. Used for paths,
+/// where the leaf (the tail) is the informative part and the leading directories
+/// can be elided. Measured in chars, matching [`ellipsize_middle`].
+pub fn ellipsize_start(input: &str, max_width: usize) -> String {
+    let len = input.chars().count();
+    if len <= max_width {
+        return input.to_string();
+    }
+    match max_width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => {
+            let tail: String = input
+                .chars()
+                .rev()
+                .take(max_width - 1)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            format!("…{tail}")
+        }
+    }
+}
+
+/// Shorten `path` for display by stripping a leading `base` directory when
+/// `path` sits under it, returning the remainder relative to `base` (no leading
+/// slash). Matching is boundary-safe: `base = /home/pat` does NOT strip
+/// `/home/patrick/x`. Returns `path` unchanged when `base` is `None`/empty, when
+/// `path` is not under `base`, or when `path` IS exactly `base`.
+pub fn display_path_relative_to(path: &str, base: Option<&str>) -> String {
+    let Some(base) = base else {
+        return path.to_string();
+    };
+    let base = base.trim_end_matches('/');
+    if base.is_empty() {
+        return path.to_string();
+    }
+    if let Some(rest) = path.strip_prefix(base)
+        && let Some(sub) = rest.strip_prefix('/')
+    {
+        let sub = sub.trim_start_matches('/');
+        if !sub.is_empty() {
+            return sub.to_string();
+        }
+    }
+    path.to_string()
+}
+
 /// Upper bound on how long a single `git branch -m` may run before the
 /// rename worker gives up and kills the child. `git branch -m` is normally
 /// instantaneous; a multi-second wait means the process is wedged (a stale
@@ -2158,6 +2208,46 @@ mod tests {
             ellipsize_middle("src/components/app.rs", 12),
             "src/...pp.rs"
         );
+    }
+
+    #[test]
+    fn ellipsize_start_keeps_the_tail() {
+        // Fits: unchanged.
+        assert_eq!(ellipsize_start("proj/app", 12), "proj/app");
+        // Too long: keep the tail, prefix a single ellipsis (result width == max).
+        let out = ellipsize_start("/home/patrick/code/proj", 10);
+        assert_eq!(out.chars().count(), 10);
+        assert!(out.starts_with('…'));
+        assert!(out.ends_with("proj"));
+        // Degenerate widths.
+        assert_eq!(ellipsize_start("abc", 0), "");
+        assert_eq!(ellipsize_start("abc", 1), "…");
+    }
+
+    #[test]
+    fn display_path_relative_strips_the_base_dir() {
+        let base = Some("/home/patrick");
+        assert_eq!(
+            display_path_relative_to("/home/patrick/proj/a", base),
+            "proj/a"
+        );
+        // A trailing slash on the base is tolerated.
+        assert_eq!(
+            display_path_relative_to("/home/patrick/proj", Some("/home/patrick/")),
+            "proj"
+        );
+        // Boundary-safe: a shared prefix that is not a path boundary is not stripped.
+        assert_eq!(
+            display_path_relative_to("/home/patrickson/x", base),
+            "/home/patrickson/x"
+        );
+        // Not under base, exactly the base, or no base: unchanged.
+        assert_eq!(display_path_relative_to("/etc/hosts", base), "/etc/hosts");
+        assert_eq!(
+            display_path_relative_to("/home/patrick", base),
+            "/home/patrick"
+        );
+        assert_eq!(display_path_relative_to("/a/b", None), "/a/b");
     }
 
     #[test]

@@ -2628,26 +2628,62 @@ impl App {
             return Ok(false);
         }
 
-        if let PromptState::PickProject {
-            entries, selected, ..
-        } = &mut self.prompt
-        {
-            match self.bindings.lookup(&key, BindingScope::Palette) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
-                Some(Action::MoveDown) => {
-                    if *selected + 1 < entries.len() {
-                        *selected += 1;
+        if matches!(self.prompt, PromptState::PickProject { .. }) {
+            let action = self.bindings.lookup(&key, BindingScope::Palette);
+            // Confirm-while-picking is the one branch that needs `self`; handle it
+            // after releasing the prompt borrow so the borrow checker is happy.
+            let mut do_confirm = false;
+            if let PromptState::PickProject {
+                entries,
+                selected,
+                filter,
+                searching,
+                ..
+            } = &mut self.prompt
+            {
+                let is_searching = *searching;
+                let vis_len = visible_pick_project_indices(entries, &filter.text).len();
+                match action {
+                    Some(Action::CloseOverlay) => {
+                        if is_searching {
+                            // First Esc leaves search mode (keeps the list open).
+                            *searching = false;
+                        } else {
+                            self.prompt = PromptState::None;
+                        }
+                    }
+                    Some(Action::SearchToggle) if !is_searching => {
+                        filter.move_end();
+                        *searching = true;
+                    }
+                    Some(Action::Confirm) if is_searching => {
+                        // Commit the query and return to list navigation.
+                        *searching = false;
+                    }
+                    Some(Action::Confirm) => do_confirm = true,
+                    Some(Action::MoveDown) if !is_searching => {
+                        if *selected + 1 < vis_len {
+                            *selected += 1;
+                        }
+                    }
+                    Some(Action::MoveUp) if !is_searching => {
+                        if *selected > 0 {
+                            *selected -= 1;
+                        }
+                    }
+                    _ => {
+                        if is_searching && filter.handle_key(key) {
+                            // The filter changed; keep the selection in range.
+                            let new_len = visible_pick_project_indices(entries, &filter.text).len();
+                            if *selected >= new_len {
+                                *selected = new_len.saturating_sub(1);
+                            }
+                        }
                     }
                 }
-                Some(Action::MoveUp) => {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
-                }
-                Some(Action::Confirm) => {
-                    self.confirm_project_chooser_selection()?;
-                }
-                _ => {}
+            }
+            if do_confirm {
+                self.confirm_project_chooser_selection()?;
             }
             return Ok(false);
         }
@@ -5751,11 +5787,18 @@ impl App {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
                 if let PromptState::PickProject {
-                    entries, selected, ..
+                    entries,
+                    selected,
+                    filter,
+                    ..
                 } = &mut self.prompt
-                    && index < entries.len()
                 {
-                    *selected = index;
+                    // `index` is a visible-row index (the list renders filtered
+                    // rows), and `selected` indexes that same visible list.
+                    let vis_len = visible_pick_project_indices(entries, &filter.text).len();
+                    if index < vis_len {
+                        *selected = index;
+                    }
                 }
                 if double_click && let Err(err) = self.confirm_project_chooser_selection() {
                     self.set_error(format!("{err:#}"));
