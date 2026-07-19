@@ -10490,16 +10490,14 @@ not_a_real_action = ["x"]
         let buf = terminal.backend().buffer();
         let gx = app.mouse_layout.left_list.x; // the reserved bar gutter column
         let y0 = app.mouse_layout.left_list.y;
-        // An accent bar sits in the gutter on the two content rows, but not on the
-        // trailing spacer (which keeps the rows separated).
+        // An accent bar sits in the gutter on the two content rows...
         assert_eq!(buf[(gx, y0 + 3)].symbol(), "▌", "bar on the name row");
         assert_eq!(buf[(gx, y0 + 4)].symbol(), "▌", "bar on the metadata row");
-        assert_ne!(
-            buf[(gx, y0 + 5)].symbol(),
-            "▌",
-            "no bar on the trailing spacer",
-        );
-        // The rest of the row carries a faint tint background (not the plain app
+        // ...framed by half-cell edges: a `▄` top edge on the row above (agent 0's
+        // spacer) and a `▀` bottom edge on this agent's trailing spacer.
+        assert_eq!(buf[(gx + 1, y0 + 2)].symbol(), "▄", "top frame edge");
+        assert_eq!(buf[(gx + 1, y0 + 5)].symbol(), "▀", "bottom frame edge");
+        // The content rows carry a faint tint background (not the plain app
         // background), so the text keeps its own colors on top.
         assert_eq!(
             buf[(gx + 2, y0 + 3)].bg,

@@ -735,14 +735,21 @@ impl App {
     }
 
     /// Paint the left-pane selection by hand (the List widget renders with no
-    /// highlight): an accent block (`▌`, the theme's selection color) in the
-    /// reserved one-column left gutter, plus a faint theme-derived tint across
-    /// the rest of the row. The tint only sets the background, so the row keeps
-    /// its own text colors (state word, PR badge, project) rather than being
-    /// flattened by a full-flood highlight. Agents mark their two content rows;
-    /// the Inactive toggle marks only its label row. `left_row_to_item` (already
-    /// rebuilt for this frame) maps screen rows to items.
-    fn paint_left_selection(&self, buf: &mut ratatui::buffer::Buffer, list_inner: Rect) {
+    /// highlight): a half-cell frame in the theme's selection color — a `▄` top
+    /// edge and a `▀` bottom edge on the boundary rows above/below the agent, a
+    /// `▌` accent bar down the reserved left gutter, and a faint theme-derived
+    /// tint filling the two content rows. The tint only sets the background, so
+    /// the row keeps its own text colors (state word, PR badge, project) rather
+    /// than being flattened by a full-flood highlight. The Inactive toggle marks
+    /// only its label row (bar + tint, no frame). `left_row_to_item` (already
+    /// rebuilt for this frame) maps screen rows to items; `top_pad_y` is the
+    /// reserved top-margin row for the very first agent's top edge.
+    fn paint_left_selection(
+        &self,
+        buf: &mut ratatui::buffer::Buffer,
+        list_inner: Rect,
+        top_pad_y: Option<u16>,
+    ) {
         let map = &self.mouse_layout.left_row_to_item;
         let sel = self.selected_left;
         let Some(rel_start) = map.iter().position(|&i| i == sel) else {
@@ -753,38 +760,53 @@ impl App {
         let Some(item) = items.get(sel).copied() else {
             return;
         };
-        let bar = self.theme.selection_bg;
+        let accent = self.theme.selection_bg;
         let tint = self.theme.selection_bar_tint();
         let x0 = list_inner.x;
         let x1 = list_inner.x + list_inner.width;
         let row_at = |rel: usize| list_inner.y + rel as u16;
 
-        // Paint one row of the accent-bar selection: an accent block in the
-        // reserved left gutter (column `x0`), then a faint tint across the rest.
-        // The tint only sets the background, so the row's own text colors survive
-        // (unlike a full-flood highlight that would flatten them).
-        let paint_row = |buf: &mut ratatui::buffer::Buffer, rel: usize| {
+        // A content row: an accent bar in the reserved gutter (column `x0`), then
+        // a faint tint across the rest (background only, so text colors survive).
+        let paint_content = |buf: &mut ratatui::buffer::Buffer, rel: usize| {
             if map.get(rel) != Some(&sel) {
                 return;
             }
             let y = row_at(rel);
-            buf[(x0, y)].set_symbol("▌").set_fg(bar).set_bg(tint);
+            buf[(x0, y)].set_symbol("▌").set_fg(accent).set_bg(tint);
             for x in (x0 + 1)..x1 {
                 buf[(x, y)].set_bg(tint);
+            }
+        };
+        // A half-cell frame edge across the full width: `▄` paints the bottom half
+        // (a top edge that sits below the gap above), `▀` the top half (a bottom
+        // edge that sits above the gap below).
+        let paint_edge = |buf: &mut ratatui::buffer::Buffer, y: u16, glyph: &str| {
+            for x in x0..x1 {
+                buf[(x, y)].set_symbol(glyph).set_fg(accent);
             }
         };
 
         match item {
             LeftItem::Session(_) => {
-                // The two content rows (name, metadata); the trailing spacer stays
-                // blank so agents keep breathing room.
-                paint_row(buf, rel_start);
-                paint_row(buf, rel_start + 1);
+                // Top edge: the previous item's blank spacer, or the reserved
+                // top-margin for the very first agent.
+                if rel_start > 0 {
+                    paint_edge(buf, row_at(rel_start - 1), "▄");
+                } else if let Some(py) = top_pad_y {
+                    paint_edge(buf, py, "▄");
+                }
+                paint_content(buf, rel_start);
+                paint_content(buf, rel_start + 1);
+                // Bottom edge: the agent's own trailing spacer.
+                if map.get(rel_start + 2) == Some(&sel) {
+                    paint_edge(buf, row_at(rel_start + 2), "▀");
+                }
             }
             LeftItem::InactiveToggle => {
                 // Only the label row (the toggle ends with a trailing spacer, so
-                // the label is the second-to-last row).
-                paint_row(buf, rel_end.saturating_sub(1));
+                // the label is the second-to-last row); no frame edges.
+                paint_content(buf, rel_end.saturating_sub(1));
             }
         }
     }
@@ -1032,10 +1054,23 @@ impl App {
         } else {
             (None, inner)
         };
-        // The whole inner rect is the click surface, but the list itself renders
-        // one column in from the left: that reserved gutter is where the
-        // accent-bar selection paints its `▌` (see `paint_left_selection`).
-        let list_content = list_inner;
+        // Two reservations for the framed accent-bar selection:
+        //  - a one-row top margin (only when active agents lead the list) so the
+        //    first agent's `▄` top edge has a row to paint into; and
+        //  - a one-column left gutter for the `▌` accent bar.
+        // `list_content` is the click surface and the origin for the bar/edges;
+        // the list itself renders into `list_body`, inset right by the gutter.
+        let top_margin: u16 = if has_active && list_inner.height >= 4 {
+            1
+        } else {
+            0
+        };
+        let top_pad_y = (top_margin == 1).then_some(list_inner.y);
+        let list_content = Rect {
+            y: list_inner.y + top_margin,
+            height: list_inner.height - top_margin,
+            ..list_inner
+        };
         let list_body = Rect {
             x: list_content.x + 1,
             width: list_content.width.saturating_sub(1),
@@ -1089,7 +1124,7 @@ impl App {
             || !matches!(self.prompt, PromptState::None)
             || !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
         if self.left_section == LeftSection::Projects && !body_will_dim {
-            self.paint_left_selection(frame.buffer_mut(), list_content);
+            self.paint_left_selection(frame.buffer_mut(), list_content, top_pad_y);
         }
         // A dim rule runs from the end of the "Inactive" label to the right edge,
         // but only while the toggle is not the current selection.
