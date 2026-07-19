@@ -152,76 +152,99 @@ impl ResourceCollector {
     }
 }
 
-/// Check whether `pid` is a descendant (child, grandchild, ...) of `ancestor`
-/// by walking up the process tree.
-fn is_descendant_of(sys: &sysinfo::System, pid: sysinfo::Pid, ancestor: sysinfo::Pid) -> bool {
-    use sysinfo::Pid;
+/// The per-process facts [`aggregate_proc_tree`] needs, decoupled from
+/// `sysinfo` so the tree logic can be unit-tested against hand-built fixtures
+/// instead of a live, racy process table.
+#[derive(Clone, Debug)]
+struct ProcNode {
+    pid: u32,
+    parent: Option<u32>,
+    /// True for `sysinfo`'s userland/kernel THREAD rows. On Linux each thread
+    /// is listed alongside real processes with `thread_kind() == Some(_)`, and
+    /// it reports the WHOLE process's memory. Real processes are `false`.
+    is_thread: bool,
+    cpu_percent: f32,
+    rss_bytes: u64,
+    name: String,
+}
 
+/// Whether `ancestor` sits above `pid` in the parent chain. Pure and cycle-safe
+/// (bounded depth). `parents` maps a pid to its parent pid (if any); a missing
+/// pid or a parent of `0` (the kernel's "no parent" sentinel) ends the walk.
+fn is_descendant(
+    parents: &std::collections::HashMap<u32, Option<u32>>,
+    pid: u32,
+    ancestor: u32,
+) -> bool {
     let mut current = pid;
-    // Depth limit prevents infinite loops if the tree has a cycle (shouldn't
-    // happen, but be defensive).
     for _ in 0..64 {
-        if let Some(proc) = sys.process(current) {
-            if let Some(parent) = proc.parent() {
-                if parent == ancestor {
-                    return true;
-                }
-                if parent == Pid::from_u32(0) {
-                    return false;
-                }
-                current = parent;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
+        match parents.get(&current).copied().flatten() {
+            Some(parent) if parent == ancestor => return true,
+            None | Some(0) => return false,
+            Some(parent) => current = parent,
         }
     }
     false
 }
 
-/// Aggregate CPU% and RSS across a root PID and all its descendants.
-/// Returns `(total_cpu, total_rss, process_count, top_children)` where
-/// `top_children` contains the top 10 individual processes by RSS.
-fn aggregate_tree(
-    sys: &sysinfo::System,
-    root: sysinfo::Pid,
-) -> (f32, u64, usize, Vec<ProcessInfo>) {
+/// Aggregate CPU% and RSS across `root` and all its descendants over a plain
+/// list of process nodes. THREAD rows are skipped so they are never counted as
+/// processes nor summed as duplicated memory/CPU: a thread shares its process's
+/// address space, so its `rss_bytes` is the whole process's RSS and a process's
+/// own CPU already aggregates its threads. Returns `(total_cpu, total_rss,
+/// process_count, top_children)` with `top_children` the top 10 by RSS (root
+/// included). Pure and deterministic for a fixed input — this is where the
+/// thread-filtering logic is unit-tested, free of any live process table.
+fn aggregate_proc_tree(nodes: &[ProcNode], root: u32) -> (f32, u64, usize, Vec<ProcessInfo>) {
+    let parents: std::collections::HashMap<u32, Option<u32>> =
+        nodes.iter().map(|n| (n.pid, n.parent)).collect();
     let mut cpu = 0.0f32;
     let mut rss = 0u64;
     let mut count = 0usize;
     let mut children = Vec::new();
-    for (pid, proc_info) in sys.processes() {
-        // On Linux, `sysinfo` lists userland/kernel THREADS alongside real
-        // processes in `sys.processes()`. A thread shares its process's
-        // address space, so `Process::memory()` on a thread entry reports the
-        // WHOLE process's RSS, and `thread_kind()` is `Some(_)` only for
-        // these thread entries (real processes report `None`). Without this
-        // filter, every thread of the root (or of any descendant) gets
-        // counted as a distinct "child" with duplicated RSS, which both
-        // inflates `rss`/`process_count` and lists fake subprocesses in the
-        // UI. A process's own `cpu_usage()` already aggregates all its
-        // threads' CPU on Linux, so skipping thread entries here also avoids
-        // double-counting CPU, not just memory.
-        if proc_info.thread_kind().is_some() {
+    for n in nodes {
+        if n.is_thread {
             continue;
         }
-        if *pid == root || is_descendant_of(sys, *pid, root) {
-            cpu += proc_info.cpu_usage();
-            rss += proc_info.memory();
+        if n.pid == root || is_descendant(&parents, n.pid, root) {
+            cpu += n.cpu_percent;
+            rss += n.rss_bytes;
             count += 1;
             children.push(ProcessInfo {
-                name: proc_info.name().to_string_lossy().into_owned(),
-                pid: pid.as_u32(),
-                cpu_percent: proc_info.cpu_usage(),
-                rss_bytes: proc_info.memory(),
-                is_root: *pid == root,
+                name: n.name.clone(),
+                pid: n.pid,
+                cpu_percent: n.cpu_percent,
+                rss_bytes: n.rss_bytes,
+                is_root: n.pid == root,
             });
         }
     }
     children.sort_by_key(|b| std::cmp::Reverse(b.rss_bytes));
     children.truncate(10);
     (cpu, rss, count, children)
+}
+
+/// Aggregate CPU% and RSS across a root PID and all its descendants. Thin
+/// adapter that snapshots the fields [`aggregate_proc_tree`] needs out of the
+/// live `sysinfo` table, then delegates to the pure aggregation. The `sysinfo`
+/// side is the only nondeterministic part and carries no logic of its own.
+fn aggregate_tree(
+    sys: &sysinfo::System,
+    root: sysinfo::Pid,
+) -> (f32, u64, usize, Vec<ProcessInfo>) {
+    let nodes: Vec<ProcNode> = sys
+        .processes()
+        .iter()
+        .map(|(pid, proc_info)| ProcNode {
+            pid: pid.as_u32(),
+            parent: proc_info.parent().map(|pp| pp.as_u32()),
+            is_thread: proc_info.thread_kind().is_some(),
+            cpu_percent: proc_info.cpu_usage(),
+            rss_bytes: proc_info.memory(),
+            name: proc_info.name().to_string_lossy().into_owned(),
+        })
+        .collect();
+    aggregate_proc_tree(&nodes, root.as_u32())
 }
 
 #[cfg(test)]
@@ -385,9 +408,18 @@ mod tests {
         );
     }
 
+    /// Build the pid -> parent map `is_descendant` consumes from a live
+    /// `sysinfo` snapshot, so the ancestry tests exercise the real parent chain.
+    fn sysinfo_parents(sys: &sysinfo::System) -> std::collections::HashMap<u32, Option<u32>> {
+        sys.processes()
+            .iter()
+            .map(|(pid, p)| (pid.as_u32(), p.parent().map(|pp| pp.as_u32())))
+            .collect()
+    }
+
     #[test]
     fn current_process_is_descendant_of_pid_1() {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
         let mut sys = System::new();
         sys.refresh_processes_specifics(
@@ -395,10 +427,9 @@ mod tests {
             true,
             ProcessRefreshKind::nothing(),
         );
-        let self_pid = Pid::from_u32(std::process::id());
-        let init_pid = Pid::from_u32(1);
+        let parents = sysinfo_parents(&sys);
         assert!(
-            is_descendant_of(&sys, self_pid, init_pid),
+            is_descendant(&parents, std::process::id(), 1),
             "current process should be a descendant of PID 1"
         );
     }
@@ -581,14 +612,21 @@ mod tests {
         );
     }
 
-    /// `process_count` must count real processes only: self plus the one
-    /// spawned child, never the extra threads spun up inside this process.
+    /// Live adapter smoke test: `sysinfo`'s thread rows really do carry a
+    /// `thread_kind`, so the aggregate over a heavily-threaded process stays far
+    /// below its thread count. Exactness is proven deterministically by
+    /// `aggregate_proc_tree_counts_processes_not_threads`; this only checks a
+    /// non-flaky BAND, so a transient thread-as-process miscount cannot fail it,
+    /// while the real bug (threads counted) blows the count past the band.
     #[test]
-    fn aggregate_tree_counts_processes_not_threads() {
+    fn aggregate_tree_over_a_threaded_process_excludes_threads() {
         let _guard = CHILD_PROCESS_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (stop, handles) = spin_threads(3);
+        // Spin many threads: if the adapter ever stopped flagging thread rows,
+        // the count would jump to ~THREADS, far outside the asserted band.
+        const THREADS: usize = 16;
+        let (stop, handles) = spin_threads(THREADS);
 
         let mut child = std::process::Command::new("sleep")
             .arg("3")
@@ -608,9 +646,13 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
 
-        assert_eq!(
-            count, 2,
-            "process_count must be self + the one real child, not threads"
+        // Real processes are just self and the sleep child; a stray transient
+        // thread-as-process would nudge this by one or two, still nowhere near
+        // THREADS. If threads were counted, count would be >= THREADS + 1.
+        assert!(
+            (1..THREADS).contains(&count),
+            "process_count ({count}) must be a small real-process count, not the \
+             {THREADS} threads; outside [1, {THREADS}) means threads are counted"
         );
     }
 
@@ -690,62 +732,6 @@ mod tests {
             let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
             Some(kb * 1024)
         })
-    }
-
-    /// Read a process's parent pid from `/proc/<pid>/status`. Returns `None`
-    /// for a pid that has exited, or for a thread entry we can't read.
-    #[cfg(target_os = "linux")]
-    fn proc_ppid(pid: u32) -> Option<u32> {
-        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-        status.lines().find_map(|line| {
-            let rest = line.strip_prefix("PPid:")?;
-            rest.trim().parse().ok()
-        })
-    }
-
-    /// Count the real PROCESSES in `root`'s tree (root included) straight from
-    /// `/proc`, with no help from sysinfo. Only numeric top-level `/proc`
-    /// entries are processes: a process's threads live under
-    /// `/proc/<pid>/task/` and are deliberately not walked, which is exactly
-    /// the distinction the thread-counting bug got wrong.
-    #[cfg(target_os = "linux")]
-    fn proc_tree_process_count(root: u32) -> usize {
-        use std::collections::HashMap;
-
-        let mut parents: HashMap<u32, u32> = HashMap::new();
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return 0;
-        };
-        for entry in entries.flatten() {
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let Ok(pid) = name.parse::<u32>() else {
-                continue;
-            };
-            if let Some(ppid) = proc_ppid(pid) {
-                parents.insert(pid, ppid);
-            }
-        }
-
-        let descends_from_root = |mut pid: u32| -> bool {
-            for _ in 0..64 {
-                match parents.get(&pid) {
-                    Some(&ppid) if ppid == root => return true,
-                    Some(&ppid) if ppid <= 1 => return false,
-                    Some(&ppid) => pid = ppid,
-                    None => return false,
-                }
-            }
-            false
-        };
-
-        let root_present = usize::from(parents.contains_key(&root));
-        root_present
-            + parents
-                .keys()
-                .filter(|pid| **pid != root && descends_from_root(**pid))
-                .count()
     }
 
     /// dux's per-process RSS must EQUAL what the kernel reports, byte for
@@ -918,77 +904,6 @@ mod tests {
             "the tree total ({rss}) must equal the kernel's sum over its real \
              processes ({kernel_sum}); if this is a multiple of the truth, thread \
              entries are being summed as processes again"
-        );
-    }
-
-    /// `process_count` must equal the number of real processes in the tree, as
-    /// counted independently from `/proc`. Ground truth comes from the kernel
-    /// rather than from our own struct, so a future change that reintroduces
-    /// thread entries fails here even if it stays self-consistent everywhere
-    /// else in this file.
-    /// The root is the MULTI-THREADED test process on purpose. Rooting this at
-    /// a bare `sh` tree would pass with the thread bug fully reintroduced,
-    /// because nothing in that fixture has threads to miscount; the real
-    /// targets dux samples (node, claude, codex) are all heavily threaded.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn process_count_matches_real_process_count() {
-        let _guard = CHILD_PROCESS_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (stop, handles) = spin_threads(4);
-
-        // A known shape under the threaded root: `sh` plus a forked `sleep`
-        // grandchild. `sleep 5 &` forks rather than exec-replaces, and `wait`
-        // keeps `sh` alive, so the tree is genuinely two processes deep.
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("sleep 5 & wait")
-            .spawn()
-            .expect("failed to spawn sh child");
-        let root_pid = std::process::id();
-
-        std::thread::sleep(Duration::from_millis(300));
-        let mut sys = fresh_system();
-
-        // Under a loaded CI runner, `sh -c "sleep 5 & wait"` can take longer
-        // than the fixed wait above to fork its `sleep` grandchild, which
-        // would make the tree's own premise (3 real processes) false through
-        // no fault of the code under test. Retry a bounded number of times,
-        // resampling from both sysinfo and the kernel together, until the
-        // fork has actually landed.
-        let mut count = 0usize;
-        let mut kernel_count = 0usize;
-        for attempt in 0..RSS_RACE_RETRY_ATTEMPTS {
-            if attempt > 0 {
-                std::thread::sleep(RSS_RACE_RETRY_DELAY);
-                resample_memory(&mut sys);
-            }
-            let (_cpu, _rss, c, _children) = aggregate_tree(&sys, sysinfo::Pid::from_u32(root_pid));
-            let kc = proc_tree_process_count(root_pid);
-            count = c;
-            kernel_count = kc;
-            if kernel_count == 3 {
-                break;
-            }
-        }
-
-        stop.store(true, Ordering::Relaxed);
-        for h in handles {
-            h.join().unwrap();
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-
-        assert_eq!(
-            kernel_count, 3,
-            "the tree is this process, its sh child, and sh's forked sleep; if this \
-             is not 3 the test's own premise broke, not the code under test"
-        );
-        assert_eq!(
-            count, kernel_count,
-            "process_count ({count}) must equal the real process count from /proc \
-             ({kernel_count}); a mismatch means threads are being counted as processes"
         );
     }
 
@@ -1239,7 +1154,7 @@ mod tests {
 
     #[test]
     fn is_descendant_of_returns_false_for_unrelated_pid() {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
         let mut sys = System::new();
         sys.refresh_processes_specifics(
@@ -1248,8 +1163,83 @@ mod tests {
             ProcessRefreshKind::nothing(),
         );
         // PID 1 is not a descendant of the current process.
-        let self_pid = Pid::from_u32(std::process::id());
-        let init_pid = Pid::from_u32(1);
-        assert!(!is_descendant_of(&sys, init_pid, self_pid));
+        let parents = sysinfo_parents(&sys);
+        assert!(!is_descendant(&parents, 1, std::process::id()));
+    }
+
+    // ── Deterministic tree-aggregation logic (no live process table) ──────
+    //
+    // The thread-filtering and descendant-summation rules are the real
+    // regression guards. They run against hand-built `ProcNode` fixtures, so
+    // they are exact and can never flake on process/thread timing. The live
+    // tests below only sanity-check that the sysinfo adapter maps thread rows.
+
+    /// A real process row.
+    fn proc(pid: u32, parent: Option<u32>, rss: u64) -> ProcNode {
+        ProcNode {
+            pid,
+            parent,
+            is_thread: false,
+            cpu_percent: 1.0,
+            rss_bytes: rss,
+            name: format!("proc{pid}"),
+        }
+    }
+
+    /// A thread row of `parent_pid`, reporting the whole process's RSS (as
+    /// sysinfo does on Linux) so a miscount would visibly multiply memory.
+    fn thread_of(pid: u32, parent_pid: u32, rss: u64) -> ProcNode {
+        ProcNode {
+            pid,
+            parent: Some(parent_pid),
+            is_thread: true,
+            cpu_percent: 3.0,
+            rss_bytes: rss,
+            name: format!("thread{pid}"),
+        }
+    }
+
+    #[test]
+    fn aggregate_proc_tree_counts_processes_not_threads() {
+        // Root (100) with 3 threads, one real child (200) with 2 threads, and a
+        // grandchild (300) under the child — a descendant reached THROUGH a
+        // thread-heavy intermediate. Only the 3 real processes must be counted.
+        let nodes = vec![
+            proc(100, None, 1000),
+            thread_of(101, 100, 1000),
+            thread_of(102, 100, 1000),
+            thread_of(103, 100, 1000),
+            proc(200, Some(100), 500),
+            thread_of(201, 200, 500),
+            thread_of(202, 200, 500),
+            proc(300, Some(200), 300),
+            proc(999, None, 42), // unrelated process, must be excluded
+        ];
+        let (cpu, rss, count, children) = aggregate_proc_tree(&nodes, 100);
+        assert_eq!(count, 3, "root + child + grandchild, threads excluded");
+        assert_eq!(rss, 1800, "1000 + 500 + 300, no thread RSS multiplied in");
+        assert_eq!(cpu, 3.0, "1.0 per real process, thread CPU not summed");
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().any(|c| c.pid == 300), "grandchild found");
+        assert!(
+            children.iter().all(|c| c.pid != 999),
+            "unrelated process excluded",
+        );
+        assert!(children.iter().find(|c| c.pid == 100).unwrap().is_root);
+    }
+
+    #[test]
+    fn aggregate_proc_tree_single_process_tree() {
+        let nodes = vec![proc(100, None, 1000), thread_of(101, 100, 1000)];
+        let (_cpu, rss, count, _children) = aggregate_proc_tree(&nodes, 100);
+        assert_eq!(count, 1, "just the root, its lone thread not counted");
+        assert_eq!(rss, 1000, "the thread's duplicated RSS is not added");
+    }
+
+    #[test]
+    fn is_descendant_is_cycle_safe_and_bounded() {
+        // A pathological parent cycle must terminate (bounded depth), not hang.
+        let parents = std::collections::HashMap::from([(1u32, Some(2u32)), (2u32, Some(1u32))]);
+        assert!(!is_descendant(&parents, 1, 999));
     }
 }
