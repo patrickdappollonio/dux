@@ -10452,7 +10452,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn selected_agent_gets_accent_bar() {
+    fn selected_agent_gets_tinted_frame() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10488,35 +10488,30 @@ not_a_real_action = ["x"]
             .expect("render frame");
 
         let buf = terminal.backend().buffer();
-        let gx = app.mouse_layout.left_list.x; // the reserved bar gutter column
+        let gx = app.mouse_layout.left_list.x; // the left gutter column
+        let x1 = gx + app.mouse_layout.left_list.width; // one past the right edge
         let y0 = app.mouse_layout.left_list.y;
-        // An accent bar sits in the gutter on the two content rows...
-        assert_eq!(buf[(gx, y0 + 3)].symbol(), "▌", "bar on the name row");
-        assert_eq!(buf[(gx, y0 + 4)].symbol(), "▌", "bar on the metadata row");
+        let tint = app.theme.selection_bar_tint();
+        // No accent bar: the left gutter is now a plain tinted pad, not a `▌`.
+        assert_ne!(buf[(gx, y0 + 3)].symbol(), "▌", "no bar on the name row");
+        assert_ne!(
+            buf[(gx, y0 + 4)].symbol(),
+            "▌",
+            "no bar on the metadata row"
+        );
+        // The tint fills the content rows edge to edge, both gutters included, so
+        // the selection is a clean tinted band with equal left and right padding.
+        for x in [gx, gx + 1, x1 - 2, x1 - 1] {
+            assert_eq!(buf[(x, y0 + 3)].bg, tint, "name row cell {x} is tinted");
+            assert_eq!(buf[(x, y0 + 4)].bg, tint, "metadata row cell {x} is tinted");
+        }
         // ...framed by half-cell edges: a `▄` top edge on the row above (agent 0's
-        // spacer) and a `▀` bottom edge on this agent's trailing spacer.
+        // spacer) and a `▀` bottom edge on this agent's trailing spacer, painted in
+        // the tint (the selection background extended a half-cell), not the accent.
         assert_eq!(buf[(gx + 1, y0 + 2)].symbol(), "▄", "top frame edge");
         assert_eq!(buf[(gx + 1, y0 + 5)].symbol(), "▀", "bottom frame edge");
-        // The edge glyphs paint their half in the faint tint (the selection
-        // background extended a half-cell), not the bright accent.
-        let tint = app.theme.selection_bar_tint();
-        assert_eq!(
-            buf[(gx + 1, y0 + 2)].fg,
-            tint,
-            "top edge is the tint, not accent"
-        );
-        assert_eq!(
-            buf[(gx + 1, y0 + 5)].fg,
-            tint,
-            "bottom edge is the tint, not accent"
-        );
-        // The content rows carry a faint tint background (not the plain app
-        // background), so the text keeps its own colors on top.
-        assert_eq!(
-            buf[(gx + 2, y0 + 3)].bg,
-            app.theme.selection_bar_tint(),
-            "content cells get the faint selection tint",
-        );
+        assert_eq!(buf[(gx + 1, y0 + 2)].fg, tint, "top edge is the tint");
+        assert_eq!(buf[(gx + 1, y0 + 5)].fg, tint, "bottom edge is the tint");
     }
 
     #[test]
@@ -10558,19 +10553,20 @@ not_a_real_action = ["x"]
         let buf = terminal.backend().buffer();
         let gx = app.mouse_layout.left_list.x;
         let y0 = app.mouse_layout.left_list.y;
-        // With the body dimmed, the selection is not painted, so no accent bar is
-        // left standing as a bright strip in the gutter.
+        // With the body dimmed, the selection is not painted, so the content rows
+        // are not left standing with the selection tint behind the dim overlay.
+        let tint = app.theme.selection_bar_tint();
         for y in [y0 + 3, y0 + 4] {
             assert_ne!(
-                buf[(gx, y)].symbol(),
-                "▌",
-                "no accent bar survives into the dimmed body at row {y}",
+                buf[(gx, y)].bg,
+                tint,
+                "no selection tint survives into the dimmed body at row {y}",
             );
         }
     }
 
     #[test]
-    fn first_agent_selection_paints_accent_bar() {
+    fn first_agent_selection_paints_tinted_frame() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10596,12 +10592,18 @@ not_a_real_action = ["x"]
         let buf = terminal.backend().buffer();
         let gx = app.mouse_layout.left_list.x;
         let y0 = app.mouse_layout.left_list.y;
-        // The first agent sits flush at the top (no reserved margin) and its
-        // selection paints the accent bar on its name row, same as any other.
-        assert_eq!(
+        // The first agent's name row lands flush at the top of the click surface
+        // (the reserved margin is folded into `left_list.y`). Its selection is the
+        // tinted band, no accent bar.
+        assert_ne!(
             buf[(gx, y0)].symbol(),
             "▌",
-            "the first agent gets the accent bar with no special top margin",
+            "no accent bar on the first agent"
+        );
+        assert_eq!(
+            buf[(gx, y0)].bg,
+            app.theme.selection_bar_tint(),
+            "the first agent's name row is tinted edge to edge",
         );
     }
 
@@ -10675,7 +10677,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn first_inactive_agent_gets_accent_bar() {
+    fn first_inactive_agent_gets_tinted_frame() {
         use crate::model::SessionStatus;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -10719,15 +10721,56 @@ not_a_real_action = ["x"]
             .position(|&i| i == sel)
             .expect("inactive agent visible");
         assert!(rel_start > 0, "inactive agent is not the first row");
-        // The selected inactive agent gets the accent bar on its name row like any
-        // other agent.
+        // The selected inactive agent gets the tinted selection band on its name
+        // row like any other agent, with no accent bar.
         let y = app.mouse_layout.left_list.y + rel_start as u16;
         let buf = terminal.backend().buffer();
         let gx = app.mouse_layout.left_list.x;
-        assert_eq!(
+        assert_ne!(
             buf[(gx, y)].symbol(),
             "▌",
-            "the first inactive agent gets the accent bar",
+            "no accent bar on the inactive agent"
+        );
+        assert_eq!(
+            buf[(gx, y)].bg,
+            app.theme.selection_bar_tint(),
+            "the first inactive agent's name row is tinted",
+        );
+    }
+
+    #[test]
+    fn long_agent_name_is_ellipsized_to_the_pane_width() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let id = app.engine.sessions[0].id.clone();
+        app.engine.mark_session_status(&id, SessionStatus::Active);
+        // A title far wider than any reasonable left-pane width.
+        app.engine.sessions[0].title =
+            Some("this-is-an-extremely-long-agent-name-that-cannot-possibly-fit".to_string());
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Projects;
+        app.rebuild_left_items();
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let body = app.mouse_layout.left_list; // click surface (full pane inner)
+        // The name row is the first agent's top row. Scan it for an ellipsis and
+        // confirm nothing bled past the pane's right edge.
+        let name_y = body.y;
+        let row: String = (body.x..body.x + body.width)
+            .map(|x| buf[(x, name_y)].symbol())
+            .collect();
+        assert!(
+            row.contains('…'),
+            "the overflowing name is ellipsized: {row:?}",
         );
     }
 

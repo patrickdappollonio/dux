@@ -615,20 +615,6 @@ impl Theme {
         blend_over(self.selection_bg, self.app_bg, 0.16)
     }
 
-    /// The accent-bar color: the theme's selection color pulled a touch toward the
-    /// app background so the bar reads as a slightly softer accent than the raw
-    /// selection highlight. Falls back to the plain selection color when either
-    /// input is not RGB (a named ANSI color can't be blended predictably, and an
-    /// app-background fallback would make the bar vanish).
-    pub fn selection_bar_accent(&self) -> Color {
-        match blend_over(self.selection_bg, self.app_bg, 0.82) {
-            blended if blended == self.app_bg && self.selection_bg != self.app_bg => {
-                self.selection_bg
-            }
-            blended => blended,
-        }
-    }
-
     pub fn status_style(&self, tone: crate::statusline::StatusTone) -> Style {
         match tone {
             crate::statusline::StatusTone::Info => Style::default()
@@ -911,54 +897,6 @@ mod tests {
         assert_field!(help_banner_fg);
         assert_field!(help_banner_bg);
         assert_field!(help_body_fg);
-    }
-
-    /// The accent bar is a softened selection color: pulled toward the app
-    /// background (dimmer than the raw highlight) but never all the way to the
-    /// background itself, so the bar stays visible.
-    #[test]
-    fn selection_bar_accent_is_a_dimmed_selection_color() {
-        let theme = default_dark_archived();
-        let bar = theme.selection_bar_accent();
-        // It moved off the raw selection color toward the app background...
-        assert_ne!(
-            bar, theme.selection_bg,
-            "bar should not be the raw selection color"
-        );
-        assert_ne!(
-            bar, theme.app_bg,
-            "bar should not collapse to the app background"
-        );
-        // ...with every channel landing between the selection color and the app
-        // background (a partial blend toward the background, not past it).
-        match (bar, theme.selection_bg, theme.app_bg) {
-            (Color::Rgb(br, bg, bb), Color::Rgb(sr, sg, sb), Color::Rgb(ar, ag, ab)) => {
-                let between = |v: u8, a: u8, b: u8| v >= a.min(b) && v <= a.max(b);
-                assert!(
-                    between(br, sr, ar),
-                    "red channel between selection and app_bg"
-                );
-                assert!(
-                    between(bg, sg, ag),
-                    "green channel between selection and app_bg"
-                );
-                assert!(
-                    between(bb, sb, ab),
-                    "blue channel between selection and app_bg"
-                );
-            }
-            _ => panic!("expected RGB colors for dux-dark selection"),
-        }
-    }
-
-    /// When the selection color is a named ANSI color, blending is undefined, so
-    /// the accent bar falls back to the plain selection color rather than
-    /// vanishing into the app background.
-    #[test]
-    fn selection_bar_accent_falls_back_to_selection_for_named_colors() {
-        let mut theme = default_dark_archived();
-        theme.selection_bg = Color::Cyan;
-        assert_eq!(theme.selection_bar_accent(), Color::Cyan);
     }
 
     /// The fallback path must always produce a valid Theme — it is what the

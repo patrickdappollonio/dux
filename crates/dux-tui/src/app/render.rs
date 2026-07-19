@@ -157,6 +157,48 @@ fn truncate_to_width(s: &str, max_w: u16) -> String {
     out
 }
 
+/// Truncate a line of styled spans to `max_w` terminal cells, appending a
+/// single-cell ellipsis (`…`) when any content is dropped. Width is measured in
+/// display columns (unicode-width via `CellWidth`), so CJK/emoji count as two.
+/// Each surviving span keeps its own style, and the ellipsis inherits the style
+/// of the span it cut into so it matches the color of the text it replaced.
+/// Returns the spans unchanged when they already fit.
+fn ellipsize_spans(spans: Vec<Span<'static>>, max_w: u16) -> Vec<Span<'static>> {
+    let total = spans
+        .iter()
+        .map(|s| s.content.as_ref().cell_width())
+        .fold(0u16, |a, b| a.saturating_add(b));
+    if total <= max_w {
+        return spans;
+    }
+    if max_w == 0 {
+        return Vec::new();
+    }
+    let budget = max_w - 1; // reserve one cell for the ellipsis
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0u16;
+    let mut ellipsis_style = Style::default();
+    for span in spans {
+        ellipsis_style = span.style;
+        let w = span.content.as_ref().cell_width();
+        if used + w <= budget {
+            used += w;
+            out.push(span);
+        } else {
+            let remaining = budget - used;
+            if remaining > 0 {
+                let head = truncate_to_width(span.content.as_ref(), remaining);
+                if !head.is_empty() {
+                    out.push(Span::styled(head, span.style));
+                }
+            }
+            break;
+        }
+    }
+    out.push(Span::styled("…", ellipsis_style));
+    out
+}
+
 /// Column budget for the resource monitor table, computed from the inner
 /// content width so every column stays readable instead of colliding on a
 /// hardcoded per-column `Constraint`.
@@ -585,7 +627,7 @@ impl App {
     /// line one is the status glyph + name + PR badge; line two is the dim
     /// `project · state word · branch (when it diverges from the name) · tabs`.
     /// The working spinner and attention pulse stay on the line-one glyph.
-    fn render_agent_row(&self, session: &AgentSession) -> ListItem<'static> {
+    fn render_agent_row(&self, session: &AgentSession, text_width: u16) -> ListItem<'static> {
         let label = session
             .title
             .clone()
@@ -727,6 +769,12 @@ impl App {
             ));
         }
 
+        // Ellipsize either line that would overflow the pane's text width, so a
+        // long name/PR badge or a long project·state·branch·tabs run ends in `…`
+        // rather than being hard-clipped mid-word at the right edge.
+        let line1 = ellipsize_spans(line1, text_width);
+        let line2 = ellipsize_spans(line2, text_width);
+
         // A trailing blank line gives each agent breathing room: unselected rows
         // read as separated, and the selection highlight (which covers the whole
         // item) gains a half-step of padding below the text instead of butting
@@ -735,15 +783,15 @@ impl App {
     }
 
     /// Paint the left-pane selection by hand (the List widget renders with no
-    /// highlight): a half-cell frame in the theme's selection color — a `▄` top
-    /// edge and a `▀` bottom edge on the boundary rows above/below the agent, a
-    /// `▌` accent bar down the reserved left gutter, and a faint theme-derived
-    /// tint filling the two content rows. The tint only sets the background, so
-    /// the row keeps its own text colors (state word, PR badge, project) rather
-    /// than being flattened by a full-flood highlight. The Inactive toggle marks
-    /// only its label row (bar + tint, no frame). `left_row_to_item` (already
-    /// rebuilt for this frame) maps screen rows to items; `top_pad_y` is the
-    /// reserved top-margin row for the very first agent's top edge.
+    /// highlight): a half-cell frame in the theme's faint selection tint — a `▄`
+    /// top edge and a `▀` bottom edge on the boundary rows above/below the agent,
+    /// and the same tint filling the two content rows edge to edge (both gutters
+    /// included). The tint only sets the background, so the row keeps its own text
+    /// colors (state word, PR badge, project) rather than being flattened by a
+    /// full-flood highlight. The Inactive toggle marks only its label row (tint,
+    /// no frame). `left_row_to_item` (already rebuilt for this frame) maps screen
+    /// rows to items; `top_pad_y` is the reserved top-margin row for the very
+    /// first agent's top edge.
     fn paint_left_selection(
         &self,
         buf: &mut ratatui::buffer::Buffer,
@@ -760,21 +808,19 @@ impl App {
         let Some(item) = items.get(sel).copied() else {
             return;
         };
-        let accent = self.theme.selection_bar_accent();
         let tint = self.theme.selection_bar_tint();
         let x0 = list_inner.x;
         let x1 = list_inner.x + list_inner.width;
         let row_at = |rel: usize| list_inner.y + rel as u16;
 
-        // A content row: an accent bar in the reserved gutter (column `x0`), then
-        // a faint tint across the rest (background only, so text colors survive).
+        // A content row: a faint tint across the full width, gutters included
+        // (background only, so the row's own text colors survive on top).
         let paint_content = |buf: &mut ratatui::buffer::Buffer, rel: usize| {
             if map.get(rel) != Some(&sel) {
                 return;
             }
             let y = row_at(rel);
-            buf[(x0, y)].set_symbol("▌").set_fg(accent).set_bg(tint);
-            for x in (x0 + 1)..x1 {
+            for x in x0..x1 {
                 buf[(x, y)].set_bg(tint);
             }
         };
@@ -987,6 +1033,15 @@ impl App {
         // leading spacer row (separating it from the active agents) when there is
         // something above it; with only inactive agents it sits flush at the top.
         let has_active = matches!(left_items.first(), Some(LeftItem::Session(_)));
+        // A one-column pad on each side of the row text: the left gutter also
+        // hosts the selection frame, and the right gets an equal pad so the text
+        // is centered between two matching margins.
+        const GUTTER: u16 = 1;
+        // Build the block up front so the row builder knows the text width left
+        // after both gutters are reserved, and can ellipsize overflowing lines.
+        let block = self.themed_block(&title, projects_focused);
+        let inner = block.inner(projects_area);
+        let row_text_width = inner.width.saturating_sub(GUTTER * 2);
         let items = left_items
             .iter()
             .map(|item| match item {
@@ -1019,7 +1074,7 @@ impl App {
                         // a Session item (three lines).
                         return ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")]);
                     };
-                    self.render_agent_row(session)
+                    self.render_agent_row(session, row_text_width)
                 }
             })
             .collect::<Vec<_>>();
@@ -1042,8 +1097,6 @@ impl App {
                 }
             })
             .collect();
-        let block = self.themed_block(&title, projects_focused);
-        let inner = block.inner(projects_area);
         // Reserve a one-line search input at the TOP of the pane while filtering.
         // It carries a `/` affordance plus the live query and a block cursor, and is
         // themed through the same input-cursor tokens as the other pane inputs.
@@ -1056,12 +1109,13 @@ impl App {
         } else {
             (None, inner)
         };
-        // Two reservations for the framed accent-bar selection:
+        // Two reservations for the framed selection:
         //  - a one-row top margin (only when active agents lead the list) so the
         //    first agent's `▄` top edge has a row to paint into; and
-        //  - a one-column left gutter for the `▌` accent bar.
-        // `list_content` is the click surface and the origin for the bar/edges;
-        // the list itself renders into `list_body`, inset right by the gutter.
+        //  - a one-column gutter on each side, so the tinted selection frame has a
+        //    margin and the text sits evenly padded left and right.
+        // `list_content` is the click surface and the origin for the frame edges;
+        // the list itself renders into `list_body`, inset by a gutter on each side.
         let top_margin: u16 = if has_active && list_inner.height >= 4 {
             1
         } else {
@@ -1074,8 +1128,8 @@ impl App {
             ..list_inner
         };
         let list_body = Rect {
-            x: list_content.x + 1,
-            width: list_content.width.saturating_sub(1),
+            x: list_content.x + GUTTER,
+            width: list_content.width.saturating_sub(GUTTER * 2),
             ..list_content
         };
         self.mouse_layout.left_list = list_content;
@@ -9951,6 +10005,68 @@ mod tests {
     #[test]
     fn truncate_status_text_empty_input() {
         assert_eq!(truncate_status_text("", 10), "");
+    }
+
+    fn spans_width(spans: &[Span<'static>]) -> u16 {
+        spans
+            .iter()
+            .map(|s| s.content.as_ref().cell_width())
+            .fold(0u16, |a, b| a.saturating_add(b))
+    }
+
+    fn spans_text(spans: &[Span<'static>]) -> String {
+        spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn ellipsize_spans_leaves_fitting_lines_untouched() {
+        let spans = vec![Span::raw("abc".to_string()), Span::raw(" def".to_string())];
+        let out = ellipsize_spans(spans, 20);
+        assert_eq!(spans_text(&out), "abc def");
+        assert!(!spans_text(&out).contains('…'));
+    }
+
+    #[test]
+    fn ellipsize_spans_truncates_and_appends_one_ellipsis() {
+        let spans = vec![
+            Span::raw("session-".to_string()),
+            Span::raw("one-very-long-branch".to_string()),
+        ];
+        let out = ellipsize_spans(spans, 10);
+        // Never wider than the budget, and ends in a single ellipsis cell.
+        assert!(spans_width(&out) <= 10, "fits within the width");
+        let text = spans_text(&out);
+        assert!(text.ends_with('…'), "ends with an ellipsis: {text:?}");
+        assert_eq!(text.matches('…').count(), 1, "exactly one ellipsis");
+    }
+
+    #[test]
+    fn ellipsize_spans_preserves_span_styles_up_to_the_cut() {
+        let styled = Style::default().fg(Color::Cyan);
+        let spans = vec![
+            Span::styled("keep".to_string(), styled),
+            Span::raw("droppable-tail".to_string()),
+        ];
+        let out = ellipsize_spans(spans, 6);
+        // The surviving prefix keeps its cyan style.
+        assert_eq!(out[0].style, styled);
+        assert!(spans_width(&out) <= 6);
+        assert!(spans_text(&out).ends_with('…'));
+    }
+
+    #[test]
+    fn ellipsize_spans_handles_wide_glyphs_without_overflow() {
+        // CJK characters are two cells wide; the result must respect display width.
+        let spans = vec![Span::raw("项目名称很长".to_string())];
+        let out = ellipsize_spans(spans, 5);
+        assert!(spans_width(&out) <= 5, "wide glyphs counted as two cells");
+        assert!(spans_text(&out).ends_with('…'));
+    }
+
+    #[test]
+    fn ellipsize_spans_zero_width_yields_nothing() {
+        let spans = vec![Span::raw("anything".to_string())];
+        assert!(ellipsize_spans(spans, 0).is_empty());
     }
 
     #[test]
