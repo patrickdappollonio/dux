@@ -2998,37 +2998,6 @@ export function createAgent(
     .catch((e) => toastCreateError(e, "Could not create the agent."))
 }
 
-// The New-agent picker's one-click create: spawn an agent in `projectId` with an
-// auto-generated pet name (empty name), honoring the picker's provider selection.
-// The create endpoint has no provider field (the agent launches on the project
-// default), so a non-default choice is applied as a follow-up PATCH, which the
-// server turns into a pending reconnect onto the chosen provider, the same path
-// the "Change agent provider" menu uses. Focus is armed so the picker's create
-// lands the user on the new agent, matching the name-dialog flow. Copy-changes
-// follows the configured default (the picker has no per-create checkbox; the
-// per-project "New agent…" name dialog remains the place to tune those).
-export function createAgentInProject(projectId: string, provider?: string): void {
-  const project = state.spine?.projects.find((p) => p.id === projectId)
-  const defaultProvider = project?.default_provider
-  armCreateFocus(projectId)
-  if (state.newAgentPickerOpen) setState({ newAgentPickerOpen: false })
-  sessionsApi
-    .create({
-      kind: "new",
-      project_id: projectId,
-      name: "",
-      copy_uncommitted_changes:
-        state.bootstrap?.copy_uncommitted_changes_by_default ?? true,
-    })
-    .then((session) => {
-      if (provider && provider !== defaultProvider && session?.id) {
-        return sessionsApi.patch(session.id, { provider }).then(() => undefined)
-      }
-      return undefined
-    })
-    .catch((e) => toastCreateError(e, "Could not create the agent."))
-}
-
 // Flat-list display controls (shared desktop + mobile), plus the New-agent
 // picker's open/close. All plain state writes.
 // Set the flat-list sort mode and persist it server-side (config.ui.agent_sort).

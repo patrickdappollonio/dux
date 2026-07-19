@@ -18,9 +18,9 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   closeNewAgentPicker,
-  createAgentInProject,
   openAddProject,
   openAttachWorktree,
+  openCreateAgent,
   openCreateAgentFromPr,
   useDux,
 } from "@/lib/store"
@@ -30,10 +30,12 @@ import type { ProjectView } from "@/lib/types"
 // The New-agent picker: the home for agent creation AND every project action now
 // that the flat list has no project headers. A searchable list of ALL projects
 // (agent-less ones included, since this is where their first agent is created),
-// each keeping its full ⋯ menu (ProjectMenuItems verbatim). Selecting a project +
-// a provider + Create spawns the agent through the shared `createAgentInProject`
-// store action; the per-project "New agent…" item in the ⋯ menu remains the path
-// to the richer name dialog (custom branch name, copy-changes, pet-name toggle).
+// each keeping its full menu (ProjectMenuItems verbatim). Clicking a project row
+// in the "new" intent opens the shared create-agent name dialog for that project
+// (honoring the pet-name/copy-changes config, exactly like the TUI and the
+// per-project "New agent" menu item). Provider is no longer chosen at creation on
+// the web: a new agent launches on the project's default_provider and is
+// retargeted afterward via the agent menu's change-provider action.
 export function NewAgentPickerDialog() {
   const { newAgentPickerOpen } = useDux()
   return (
@@ -60,7 +62,7 @@ const INTENT_COPY = {
   new: {
     title: "New agent",
     description:
-      "Pick a project and a provider, then create. Every project action lives in each project's menu.",
+      "Pick a project to create an agent. Every project action lives in each project's menu.",
   },
   from_pr: {
     title: "New agent from PR",
@@ -73,23 +75,14 @@ const INTENT_COPY = {
 } as const
 
 function PickerBody() {
-  const { spine, bootstrap, newAgentPickerIntent } = useDux()
+  const { spine, newAgentPickerIntent } = useDux()
   // Default to "new" so a missing value (older state, a test that only sets
   // newAgentPickerOpen) still renders the standard create flow.
   const intent = newAgentPickerIntent ?? "new"
   const projects = useMemo(() => spine?.projects ?? [], [spine])
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
-  const providers = bootstrap?.available_providers ?? []
 
   const [query, setQuery] = useState("")
-  // Preselect the first project so Create is reachable in one click in the common
-  // single-project case; the provider follows that project's default.
-  const [selectedId, setSelectedId] = useState<string | null>(
-    () => projects[0]?.id ?? null,
-  )
-  const [provider, setProvider] = useState<string | null>(
-    () => projects[0]?.default_provider ?? null,
-  )
 
   // Agent counts per project, derived by cross-referencing sessions (the project
   // record carries no count of its own).
@@ -107,19 +100,10 @@ function PickerBody() {
     return projects.filter((project) => project.name.toLowerCase().includes(q))
   }, [projects, query])
 
-  const selected: ProjectView | null =
-    projects.find((project) => project.id === selectedId) ?? null
-
-  function selectProject(project: ProjectView) {
-    setSelectedId(project.id)
-    // Reset the provider choice to the newly selected project's default so the
-    // chip row always reflects that project's default_provider on switch.
-    setProvider(project.default_provider)
-  }
-
-  // What clicking a project row does, by intent. "new" just selects it (Create
-  // finishes the flow); the from-PR / from-worktree intents close this picker and
-  // hand off to that project's dedicated dialog immediately.
+  // What clicking a project row does, by intent. Every intent closes this picker
+  // and hands off to that project's dedicated dialog: "new" opens the shared
+  // create-agent name dialog (honoring the pet-name/copy-changes config), and the
+  // from-PR / from-worktree intents open their own dialogs.
   function onProjectRow(project: ProjectView) {
     if (intent === "from_pr") {
       closeNewAgentPicker()
@@ -131,12 +115,8 @@ function PickerBody() {
       openAttachWorktree(project.id)
       return
     }
-    selectProject(project)
-  }
-
-  function handleCreate() {
-    if (!selected) return
-    createAgentInProject(selected.id, provider ?? undefined)
+    closeNewAgentPicker()
+    openCreateAgent(project.id)
   }
 
   return (
@@ -157,7 +137,10 @@ function PickerBody() {
           </div>
         </DialogHeader>
 
-        <ScrollArea className="max-h-72 border-t">
+        {/* Fixed height (not max-h) so the modal never grows or shrinks with the
+            result count as the user types; the list scrolls internally and the
+            empty state fills the same space instead of collapsing. */}
+        <ScrollArea className="h-72 border-t">
           <div className="p-2">
             <p className="px-2 pt-1 pb-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
               Choose a project
@@ -169,17 +152,12 @@ function PickerBody() {
             ) : (
               filtered.map((project) => {
                 const count = agentCounts.get(project.id) ?? 0
-                // Only the "new" flow has a persistent selection; the guided
-                // from-PR / from-worktree flows act on click, so no row is "chosen".
-                const isSelected = intent === "new" && project.id === selectedId
                 return (
                   <div
                     key={project.id}
                     className={cn(
                       "flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10",
-                      isSelected
-                        ? "bg-accent text-accent-foreground"
-                        : "hover:bg-accent/60",
+                      "hover:bg-accent/60",
                     )}
                   >
                     <button
@@ -229,42 +207,6 @@ function PickerBody() {
             Add a new project…
           </button>
         </div>
-
-        {intent === "new" ? (
-        <div className="flex flex-wrap items-center gap-2 border-t p-3">
-          {providers.length > 0 ? (
-            <>
-              <span className="text-sm text-muted-foreground">Provider</span>
-              {providers.map((name) => {
-                const active = name === provider
-                return (
-                  <button
-                    key={name}
-                    type="button"
-                    onClick={() => setProvider(name)}
-                    aria-pressed={active}
-                    className={cn(
-                      "rounded-full border px-3 py-1 font-mono text-xs transition-colors max-md:min-h-10",
-                      active
-                        ? "border-foreground bg-foreground text-background"
-                        : "border-border text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {name}
-                  </button>
-                )
-              })}
-            </>
-          ) : null}
-          <Button
-            className="ml-auto max-md:min-h-10"
-            disabled={!selected}
-            onClick={handleCreate}
-          >
-            Create agent
-          </Button>
-        </div>
-        ) : null}
     </>
   )
 }

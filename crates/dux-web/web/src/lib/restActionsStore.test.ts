@@ -204,6 +204,24 @@ describe("store write actions route to REST", () => {
     expect(mod.getSnapshot().createAgentCopyChanges).toBe(false)
   })
 
+  it("openCreateAgent pre-checks the randomize box when the config default is on", async () => {
+    bootstrapExtra = { randomize_agent_names_by_default: true }
+    const mod = await loadStore()
+    mod.openCreateAgent("p1")
+    const snap = mod.getSnapshot()
+    expect(snap.createAgentTarget).toEqual({ kind: "new", projectId: "p1" })
+    expect(snap.createAgentRandomize).toBe(true)
+  })
+
+  it("openCreateAgent leaves the randomize box unchecked when the config default is off", async () => {
+    bootstrapExtra = { randomize_agent_names_by_default: false }
+    const mod = await loadStore()
+    mod.openCreateAgent("p1")
+    const snap = mod.getSnapshot()
+    expect(snap.createAgentTarget).toEqual({ kind: "new", projectId: "p1" })
+    expect(snap.createAgentRandomize).toBe(false)
+  })
+
   it("submitNameDialog carries the copy checkbox in the create body", async () => {
     const mod = await loadStore()
     mod.openCreateAgent("p1")
