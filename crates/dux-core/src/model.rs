@@ -83,7 +83,7 @@ pub enum ProjectBranchStatus {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
     Active,
     Detached,

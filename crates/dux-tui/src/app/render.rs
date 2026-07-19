@@ -33,6 +33,51 @@ pub(crate) fn project_tag_kind(project: Option<&Project>) -> ProjectTagKind {
     }
 }
 
+/// The colored "state word" shown on an agent row's second line, the honest,
+/// field-backed stand-in for an activity string (dux has no such field). It reads
+/// off the same flags that drive the working spinner and the attention pulse, so
+/// the word can never disagree with the motion cue. Mirrors the web's `stateWord`
+/// (`crates/dux-web/web/src/lib/flatList.ts`) exactly. Pure and unit-tested.
+pub(crate) fn agent_state_word(
+    status: crate::model::SessionStatus,
+    working: bool,
+    needs_attention: bool,
+) -> &'static str {
+    use crate::model::SessionStatus;
+    if needs_attention {
+        return "Needs you";
+    }
+    match status {
+        SessionStatus::Active if working => "Working",
+        SessionStatus::Active => "Idle",
+        SessionStatus::Detached => "Detached",
+        SessionStatus::Exited => "Exited",
+    }
+}
+
+/// Build a screen-row -> item-index map for a `List` of variable-height items,
+/// so mouse hit-testing survives the flat list's two-line agent rows (and any
+/// scroll). `offset` is the `ListState` item offset AFTER rendering, `heights`
+/// the rendered height of every item (in lines), and `area_height` the visible
+/// list height. The returned vector has one entry per visible screen row (from
+/// the list's top), each holding the item index that occupies that row. Pure and
+/// unit-tested; ratatui scrolls whole items, so the top item is never clipped.
+pub(crate) fn left_row_to_item(offset: usize, heights: &[u16], area_height: u16) -> Vec<usize> {
+    let cap = area_height as usize;
+    let mut map = Vec::with_capacity(cap);
+    let mut item = offset;
+    while map.len() < cap && item < heights.len() {
+        for _ in 0..heights[item].max(1) {
+            if map.len() >= cap {
+                break;
+            }
+            map.push(item);
+        }
+        item += 1;
+    }
+    map
+}
+
 /// ASCII art logo displayed in the agent pane when no content is active.
 /// Shared with the server status screen (`crate::server_screen`) so the flip's
 /// "server running" view reuses the same wordmark instead of duplicating it.
@@ -536,6 +581,152 @@ impl App {
             .render(area, frame.buffer_mut());
     }
 
+    /// Build the two-line flat agent row, mirroring the web sidebar row:
+    /// line one is the status glyph + name + PR badge; line two is the dim
+    /// `project · state word · branch (when it diverges from the name) · tabs`.
+    /// The working spinner and attention pulse stay on the line-one glyph.
+    fn render_agent_row(&self, session: &AgentSession) -> ListItem<'static> {
+        let label = session
+            .title
+            .clone()
+            .unwrap_or_else(|| session.branch_name.clone());
+        // Attention wins over the working spinner (a flagged agent may still be
+        // streaming its permission prompt). Both cues are rolled up across the
+        // agent's tabs. The attention glyph blinks on wall-clock time.
+        let needs_attention = self.engine.config.ui.attention_indicator
+            && self.engine.session_needs_attention(&session.id);
+        let working = matches!(session.status, crate::model::SessionStatus::Active)
+            && self.engine.session_is_streaming(&session.id);
+        let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
+        let (dot, dot_color) = if needs_attention {
+            let glyph = if self.attention_blink_on() {
+                crate::theme::ATTENTION_GLYPH
+            } else {
+                " "
+            };
+            (glyph.to_string(), self.theme.session_attention)
+        } else if working {
+            let idx = self.spinner_frame_index();
+            (
+                crate::theme::SPINNER_FRAMES[idx].to_string(),
+                self.theme.session_active,
+            )
+        } else {
+            (steady_dot.to_string(), steady_color)
+        };
+        // A background delete dims and italicizes the whole row.
+        let deleting = self.engine.pending_deletions.contains(&session.id);
+        // The name takes the status/attention color, not the PR state; the PR
+        // state rides its own badge (line one), matching the web row. While
+        // blinking for attention, the glyph pulses the accent while the name
+        // stays steady, so it falls back to the plain status-dot color.
+        let name_color = if deleting {
+            self.theme.session_deleting
+        } else if needs_attention {
+            steady_color
+        } else {
+            dot_color
+        };
+        let name_style = if deleting {
+            Style::default()
+                .fg(name_color)
+                .add_modifier(Modifier::ITALIC)
+        } else {
+            Style::default().fg(name_color)
+        };
+        let glyph_style = if needs_attention && !deleting {
+            Style::default().fg(dot_color)
+        } else {
+            name_style
+        };
+
+        // Line one: glyph + name + PR badge.
+        let mut line1 = vec![
+            Span::styled(format!("{dot} "), glyph_style),
+            Span::styled(label.clone(), name_style),
+        ];
+        if let Some(pr) = self.engine.pr_statuses.get(&session.id) {
+            let pr_color = match pr.state {
+                crate::model::PrState::Merged => self.theme.pr_merged_label,
+                crate::model::PrState::Closed => self.theme.pr_closed_label,
+                crate::model::PrState::Open => self.theme.pr_open_label,
+            };
+            line1.push(Span::raw("  "));
+            line1.push(Span::styled(
+                format!("PR#{}", pr.number),
+                Style::default().fg(pr_color),
+            ));
+        }
+
+        // Line two: project · state word [· branch] [· tabs]. Dim throughout;
+        // only the state word carries a color.
+        let muted = if deleting {
+            self.theme.session_deleting
+        } else {
+            self.theme.provider_label_fg
+        };
+        let found = self
+            .engine
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id);
+        let project_span = match project_tag_kind(found) {
+            ProjectTagKind::Healthy => Span::styled(
+                found.map(|p| p.name.clone()).unwrap_or_default(),
+                Style::default().fg(muted),
+            ),
+            ProjectTagKind::PathMissing => Span::styled(
+                format!("⚠ {}", found.map(|p| p.name.as_str()).unwrap_or("")),
+                Style::default().fg(self.theme.project_missing_fg),
+            ),
+            ProjectTagKind::Orphan => Span::styled(
+                "⚠ removed project".to_string(),
+                Style::default().fg(self.theme.project_missing_fg),
+            ),
+        };
+        let word = agent_state_word(session.status, working, needs_attention);
+        let word_color = if deleting {
+            self.theme.session_deleting
+        } else {
+            match word {
+                "Needs you" => self.theme.session_attention,
+                "Working" => self.theme.session_active,
+                "Detached" => steady_color,
+                _ => self.theme.provider_label_fg,
+            }
+        };
+        let sep = || Span::styled(" · ", Style::default().fg(muted));
+        let mut line2 = vec![
+            Span::raw("   "),
+            project_span,
+            sep(),
+            Span::styled(word.to_string(), Style::default().fg(word_color)),
+        ];
+        // Show the branch only when it differs from the displayed name (i.e. a
+        // title is set), so it is not repeated as the name on line one.
+        let branch_diverges = session
+            .title
+            .as_deref()
+            .is_some_and(|t| t != session.branch_name);
+        if branch_diverges {
+            line2.push(sep());
+            line2.push(Span::styled(
+                session.branch_name.clone(),
+                Style::default().fg(muted),
+            ));
+        }
+        let tab_count = self.session_tab_ids(&session.id).len();
+        if tab_count > 1 {
+            line2.push(sep());
+            line2.push(Span::styled(
+                format!("{tab_count} tabs"),
+                Style::default().fg(muted),
+            ));
+        }
+
+        ListItem::new(vec![Line::from(line1), Line::from(line2)])
+    }
+
     fn render_left(&mut self, frame: &mut Frame, area: Rect) {
         let focused = self.focus == FocusPane::Left;
 
@@ -596,6 +787,12 @@ impl App {
                 frame.buffer_mut(),
                 &mut state,
             );
+            // Icon-rail rows are one line each, so the map is a plain per-item
+            // walk from the scroll offset (kept uniform with the expanded path so
+            // hit-testing goes through one code path).
+            let heights = vec![1u16; collapsed_left_items.len()];
+            self.mouse_layout.left_row_to_item =
+                left_row_to_item(state.offset(), &heights, self.mouse_layout.left_list.height);
             return;
         }
 
@@ -679,145 +876,24 @@ impl App {
                 }
                 LeftItem::Session(index) => {
                     let Some(session) = self.engine.sessions.get(*index) else {
-                        return ListItem::new(Line::from(""));
+                        // Keep the fallback two lines tall so it matches the
+                        // height the row map assumes for a Session item.
+                        return ListItem::new(vec![Line::from(""), Line::from("")]);
                     };
-                    let label = session
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| session.branch_name.clone());
-                    // Attention wins over the working spinner (a flagged agent
-                    // may still be streaming its permission prompt). The glyph
-                    // blinks on wall-clock time; in its "off" half it renders as a
-                    // blank so the row visibly pulses. Gated by the config
-                    // preference. Rolled up across the agent's tabs.
-                    let needs_attention = self.engine.config.ui.attention_indicator
-                        && self.engine.session_needs_attention(&session.id);
-                    // The plain per-status dot and its color, derived exactly once
-                    // so the "off" attention-blink dot and the label fallback below
-                    // can reuse it without calling `session_dot` again (which must
-                    // stay in sync).
-                    let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
-                    let (dot, dot_color) = if needs_attention {
-                        let glyph = if self.attention_blink_on() {
-                            crate::theme::ATTENTION_GLYPH
-                        } else {
-                            " "
-                        };
-                        (glyph.to_string(), self.theme.session_attention)
-                    } else if matches!(session.status, crate::model::SessionStatus::Active)
-                        && self.engine.session_is_streaming(&session.id)
-                    {
-                        let idx = self.spinner_frame_index();
-                        (
-                            crate::theme::SPINNER_FRAMES[idx].to_string(),
-                            self.theme.session_active,
-                        )
-                    } else {
-                        (steady_dot.to_string(), steady_color)
-                    };
-                    // While a background delete is in flight for this session,
-                    // dim the row text and italicize it so the user sees the
-                    // transient state. This covers the dot, label, and
-                    // provider suffix; the companion-terminal badge chain is
-                    // excluded because it renders through a separate helper
-                    // and the in-flight window is too brief to justify
-                    // threading a deletion flag through it.
-                    let deleting = self.engine.pending_deletions.contains(&session.id);
-                    // The label follows the dot color, EXCEPT while blinking for
-                    // attention: the glyph pulses the accent color on/off, but the label must
-                    // stay a steady color rather than flicker with it, so it falls
-                    // back to the plain status-dot color in that case.
-                    let label_fallback_color = if needs_attention {
-                        steady_color
-                    } else {
-                        dot_color
-                    };
-                    let label_color = if deleting {
-                        self.theme.session_deleting
-                    } else {
-                        match self.engine.pr_statuses.get(&session.id).map(|pr| &pr.state) {
-                            Some(crate::model::PrState::Merged) => self.theme.pr_merged_label,
-                            Some(crate::model::PrState::Closed) => self.theme.pr_closed_label,
-                            Some(crate::model::PrState::Open) => self.theme.pr_open_label,
-                            None => label_fallback_color,
-                        }
-                    };
-                    let label_style = if deleting {
-                        Style::default()
-                            .fg(label_color)
-                            .add_modifier(Modifier::ITALIC)
-                    } else {
-                        Style::default().fg(label_color)
-                    };
-                    let running_provider = self.engine.running_provider_for(session);
-                    let provider_label = if running_provider != session.provider {
-                        // Swap is pending: agent is still running the old
-                        // provider but will spawn with session.provider on
-                        // next launch. Show both so the sidebar doesn't lie.
-                        format!(
-                            " ({} → {})",
-                            running_provider.as_str(),
-                            session.provider.as_str(),
-                        )
-                    } else {
-                        format!(" ({})", session.provider.as_str())
-                    };
-                    // Flat model: no tree connector; the project shows inline after
-                    // the name. A path-missing project renders as "⚠ <name>" in the
-                    // warning tone; an orphan (record gone) renders "⚠ removed
-                    // project". Both branch off the shared `project_tag_kind`.
-                    let found = self
-                        .engine
-                        .projects
-                        .iter()
-                        .find(|p| p.id == session.project_id);
-                    let project_tag = match project_tag_kind(found) {
-                        ProjectTagKind::Healthy => Span::styled(
-                            format!("  {}", found.map(|p| p.name.as_str()).unwrap_or("")),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        ),
-                        ProjectTagKind::PathMissing => Span::styled(
-                            format!("  ⚠ {}", found.map(|p| p.name.as_str()).unwrap_or("")),
-                            Style::default().fg(self.theme.project_missing_fg),
-                        ),
-                        ProjectTagKind::Orphan => Span::styled(
-                            "  ⚠ removed project",
-                            Style::default().fg(self.theme.project_missing_fg),
-                        ),
-                    };
-                    ListItem::new(Line::from(
-                        vec![
-                            Span::styled(
-                                format!("{dot} "),
-                                if needs_attention && !deleting {
-                                    // The glyph carries the accent attention color;
-                                    // the label stays steady (see label_color).
-                                    Style::default().fg(dot_color)
-                                } else {
-                                    label_style
-                                },
-                            ),
-                            Span::styled(label, label_style),
-                            Span::styled(
-                                provider_label,
-                                if deleting {
-                                    label_style
-                                } else {
-                                    Style::default().fg(self.theme.provider_label_fg)
-                                },
-                            ),
-                            project_tag,
-                        ]
-                        .into_iter()
-                        .chain(companion_terminal_row_badge(
-                            self.companion_terminal_status(&session.id),
-                            &self.theme,
-                        ))
-                        .collect::<Vec<_>>(),
-                    ))
+                    self.render_agent_row(session)
                 }
             })
             .collect::<Vec<_>>();
+        // Each item's rendered height (Session rows are two lines). Computed here,
+        // while `left_items` is still borrowed and before any mutable `self`
+        // access, then consumed after render to rebuild the click->item map.
+        let item_heights: Vec<u16> = left_items
+            .iter()
+            .map(|it| match it {
+                LeftItem::Session(_) => 2,
+                LeftItem::InactiveToggle => 1,
+            })
+            .collect();
         let block = self.themed_block(&title, projects_focused);
         let inner = block.inner(projects_area);
         // Reserve a one-line search input at the TOP of the pane while filtering.
@@ -866,6 +942,11 @@ impl App {
             frame.buffer_mut(),
             &mut state,
         );
+        // Agent rows are two lines tall, so a click row no longer maps 1:1 to a
+        // list item. Rebuild the reverse map from the post-render scroll offset
+        // and each item's rendered height (computed above).
+        self.mouse_layout.left_row_to_item =
+            left_row_to_item(state.offset(), &item_heights, list_inner.height);
 
         // Render terminals section if any terminals exist.
         if let Some(term_area) = terminals_area {
@@ -7927,25 +8008,6 @@ fn companion_terminal_status_color(theme: &Theme, status: CompanionTerminalStatu
     }
 }
 
-fn companion_terminal_row_badge(
-    status: CompanionTerminalStatus,
-    theme: &Theme,
-) -> Vec<Span<'static>> {
-    if matches!(status, CompanionTerminalStatus::NotLaunched) {
-        return Vec::new();
-    }
-    let (icon, label) = companion_terminal_status_meta(status);
-    vec![
-        Span::raw(" "),
-        Span::styled("[", Style::default().fg(theme.provider_label_fg)),
-        Span::styled(
-            format!("{icon} term {label}"),
-            Style::default().fg(companion_terminal_status_color(theme, status)),
-        ),
-        Span::styled("]", Style::default().fg(theme.provider_label_fg)),
-    ]
-}
-
 /// Format additions/deletions as right-aligned colored spans.
 /// Returns an empty vec when both counts are zero for text files.
 pub(crate) fn format_line_stats(
@@ -8349,6 +8411,32 @@ mod tests {
         );
 
         assert_eq!(project_tag_kind(None), ProjectTagKind::Orphan);
+    }
+
+    #[test]
+    fn agent_state_word_mirrors_the_web_states() {
+        use crate::model::SessionStatus::{Active, Detached, Exited};
+        assert_eq!(agent_state_word(Active, true, false), "Working");
+        assert_eq!(agent_state_word(Active, false, false), "Idle");
+        assert_eq!(agent_state_word(Detached, false, false), "Detached");
+        assert_eq!(agent_state_word(Exited, false, false), "Exited");
+        // Needs-attention wins over every other state, including working.
+        assert_eq!(agent_state_word(Active, true, true), "Needs you");
+        assert_eq!(agent_state_word(Detached, false, true), "Needs you");
+    }
+
+    #[test]
+    fn left_row_to_item_maps_two_line_rows_and_scroll() {
+        // Two agents (2 lines each) then the Inactive toggle (1 line).
+        let heights = [2u16, 2, 1];
+        // No scroll: rows 0,1 -> item 0; rows 2,3 -> item 1; row 4 -> item 2.
+        assert_eq!(left_row_to_item(0, &heights, 5), vec![0, 0, 1, 1, 2]);
+        // A shorter area caps the map at the visible height.
+        assert_eq!(left_row_to_item(0, &heights, 3), vec![0, 0, 1]);
+        // Scrolled past the first agent: the window starts at item 1.
+        assert_eq!(left_row_to_item(1, &heights, 5), vec![1, 1, 2]);
+        // No items -> empty map.
+        assert!(left_row_to_item(0, &[], 5).is_empty());
     }
 
     #[test]
@@ -9246,15 +9334,6 @@ mod tests {
             companion_terminal_status_meta(CompanionTerminalStatus::Exited),
             ("◐", "exited")
         );
-    }
-
-    #[test]
-    fn row_badge_hidden_until_terminal_is_launched() {
-        let theme = Theme::default_dark();
-        assert!(
-            companion_terminal_row_badge(CompanionTerminalStatus::NotLaunched, &theme).is_empty()
-        );
-        assert!(!companion_terminal_row_badge(CompanionTerminalStatus::Running, &theme).is_empty());
     }
 
     #[test]

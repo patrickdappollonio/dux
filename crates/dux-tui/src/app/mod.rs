@@ -1466,13 +1466,18 @@ impl TerminalSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct MouseLayoutState {
     pub(crate) body: Rect,
     pub(crate) left: Rect,
     pub(crate) center: Rect,
     pub(crate) right: Rect,
     pub(crate) left_list: Rect,
+    /// Screen-row (relative to `left_list.y`) -> left-item index, rebuilt each
+    /// render. The flat list's agent rows are two lines tall, so a click row no
+    /// longer maps 1:1 to an item; this is the reverse map (see
+    /// `render::left_row_to_item`).
+    pub(crate) left_row_to_item: Vec<usize>,
     pub(crate) terminal_list: Rect,
     pub(crate) agent_term: Option<Rect>,
     pub(crate) unstaged_list: Option<Rect>,
@@ -1488,6 +1493,7 @@ impl MouseLayoutState {
         self.center = center;
         self.right = right;
         self.left_list = Rect::default();
+        self.left_row_to_item.clear();
         self.terminal_list = Rect::default();
         self.agent_term = None;
         self.unstaged_list = None;

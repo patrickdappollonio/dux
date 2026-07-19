@@ -4241,7 +4241,13 @@ impl App {
             if self.left_items().is_empty() {
                 return Some(MouseTarget::LeftPane);
             }
-            let index = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
+            // Agent rows are two lines tall, so map the clicked screen row to an
+            // item through the reverse map rebuilt each render (a click on either
+            // line of an agent selects that agent).
+            let rel = usize::from(row.saturating_sub(self.mouse_layout.left_list.y));
+            let Some(&index) = self.mouse_layout.left_row_to_item.get(rel) else {
+                return Some(MouseTarget::LeftPane);
+            };
             if index < self.left_items().len() {
                 if !self.is_selectable_left_item(index) {
                     return Some(MouseTarget::LeftPane);
@@ -7146,6 +7152,10 @@ mod tests {
             center: Rect::new(20, 0, 57, 20),
             right: Rect::new(77, 0, 23, 20),
             left_list: Rect::new(1, 1, 18, 10),
+            // Synthetic identity map (one row per item) so these plumbing tests
+            // keep their 1:1 row->item expectations; the real two-line mapping is
+            // covered by `left_row_to_item`'s own unit tests and a render test.
+            left_row_to_item: (0..10usize).collect(),
             terminal_list: Rect::default(),
             agent_term: Some(Rect::new(21, 1, 55, 16)),
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
@@ -10295,6 +10305,71 @@ not_a_real_action = ["x"]
         assert_eq!(app.focus, FocusPane::Center);
         assert!(matches!(app.center_mode, CenterMode::Agent));
         assert_eq!(app.selected_left, 1);
+    }
+
+    #[test]
+    fn agent_rows_render_two_lines_and_clicks_map_on_both() {
+        use crate::model::SessionStatus;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        // Two active agents: two 2-line rows, no Inactive tail, no scroll.
+        let mut second = app.engine.sessions[0].clone();
+        second.id = "session-2".to_string();
+        second.branch_name = "second-branch".to_string();
+        second.title = None;
+        app.engine.sessions.push(second);
+        let ids: Vec<String> = app.engine.sessions.iter().map(|s| s.id.clone()).collect();
+        for id in &ids {
+            app.engine.mark_session_status(id, SessionStatus::Active);
+        }
+        app.focus = FocusPane::Left;
+        app.rebuild_left_items();
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        // Each agent occupies two consecutive rows in the click map.
+        let map = &app.mouse_layout.left_row_to_item;
+        assert_eq!(map.first().copied(), Some(0), "row 0 -> agent 0");
+        assert_eq!(map.get(1).copied(), Some(0), "row 1 -> agent 0");
+        assert_eq!(map.get(2).copied(), Some(1), "row 2 -> agent 1");
+        assert_eq!(map.get(3).copied(), Some(1), "row 3 -> agent 1");
+
+        // Line one carries the name; line two carries the state word.
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            rendered.contains("second-branch"),
+            "agent name renders on line one: {rendered}"
+        );
+        assert!(
+            rendered.contains("Idle"),
+            "state word renders on line two: {rendered}"
+        );
+
+        // A click on EITHER line of the second agent resolves to that agent.
+        let x = app.mouse_layout.left_list.x;
+        let y0 = app.mouse_layout.left_list.y;
+        assert_eq!(
+            app.mouse_target(x, y0 + 2),
+            Some(super::MouseTarget::LeftRow(1)),
+            "click on agent 1's first line",
+        );
+        assert_eq!(
+            app.mouse_target(x, y0 + 3),
+            Some(super::MouseTarget::LeftRow(1)),
+            "click on agent 1's second line",
+        );
     }
 
     #[test]
@@ -16786,11 +16861,10 @@ cyan = "#00ffff"
             "pane title should NOT claim Opencode is running yet, got: {rendered}"
         );
 
-        // Sidebar entry should show the running → queued transition.
-        assert!(
-            rendered.contains("(codex → opencode)"),
-            "sidebar should show running provider → next provider, got: {rendered}"
-        );
+        // The flat sidebar row no longer carries a provider suffix (it matches the
+        // web row: name + PR on line one, project + state on line two). The
+        // running provider still surfaces in the center pane title, asserted
+        // above; the swap is otherwise reflected in the agent tab strip.
 
         // Tearing down the PTY clears the pin — the next launch will be opencode.
         app.engine.providers.remove(&session_id);
@@ -16802,27 +16876,9 @@ cyan = "#00ffff"
             "opencode"
         );
 
-        // After the PTY is gone, the sidebar collapses back to a single label.
-        let backend = TestBackend::new(200, 30);
-        let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(
-            rendered.contains("(opencode)"),
-            "sidebar should collapse to plain (opencode) after the PTY exits, got: {rendered}"
-        );
-        assert!(
-            !rendered.contains("→"),
-            "arrow should disappear once no swap is pending, got: {rendered}"
-        );
+        // With the PTY gone, `running_provider_for` reports opencode (the pinned
+        // running provider is cleared); the flat row shows no provider suffix, so
+        // there is no sidebar arrow to collapse.
     }
 
     fn spawn_test_provider(worktree: &std::path::Path) -> PtyClient {

@@ -1343,7 +1343,7 @@ mod tests {
             .sessions
             .iter()
             .find(|s| s.id == "s1")
-            .map(|s| s.status.clone());
+            .map(|s| s.status);
         assert_eq!(
             status,
             Some(SessionStatus::Active),
@@ -1529,7 +1529,7 @@ mod tests {
             .sessions
             .iter()
             .find(|s| s.id == "s1")
-            .map(|s| s.status.clone());
+            .map(|s| s.status);
         assert_eq!(
             status,
             Some(crate::model::SessionStatus::Active),
@@ -1578,7 +1578,7 @@ mod tests {
             .sessions
             .iter()
             .find(|s| s.id == "s1")
-            .map(|s| s.status.clone());
+            .map(|s| s.status);
         assert_eq!(
             status,
             Some(crate::model::SessionStatus::Detached),
