@@ -2797,7 +2797,7 @@ impl App {
         let session_states: &[(&str, Color, &str)] = &[
             ("●", self.theme.session_active, "Active — agent is running"),
             (
-                "◐",
+                "◎",
                 self.theme.session_detached,
                 "Detached — agent process disconnected",
             ),
