@@ -150,6 +150,9 @@ const VARIANTS: &[&str] = &[
     "P · Capsule pill ▐▌",
     "Q · Dotted dividers ┈ + rail",
     "R · Corner ticks ◤◢",
+    // Page 4 — rounded-corner treatments.
+    "S · Rounded frame ╭╮ + wash",
+    "T · Rounded corners only ╭ ╯",
 ];
 
 const PER_PAGE: usize = 6;
@@ -212,7 +215,8 @@ fn draw(f: &mut Frame, page: usize, selected: usize, hovered: usize) {
                     match page {
                         0 => "bolder / structural",
                         1 => "faint-background (web-hover feel)",
-                        _ => "box-drawing / shape structure",
+                        2 => "box-drawing / shape structure",
+                        _ => "rounded-corner treatments",
                     }
                 ),
                 Style::default().fg(MUTED),
@@ -317,6 +321,8 @@ fn render_variant(
             15 => row_capsule(f, x0, y, width, a, st),
             16 => row_dotted_dividers(f, x0, y, width, a, st),
             17 => row_corner_ticks(f, x0, y, width, a, st),
+            18 => row_rounded_frame(f, x0, y, width, a, st, area.y),
+            19 => row_rounded_corners_only(f, x0, y, width, a, st, area.y),
             _ => {}
         }
         y += row_h;
@@ -853,6 +859,94 @@ fn row_corner_ticks(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: Ro
             let buf = f.buffer_mut();
             buf[(x, y)].set_symbol("◤").set_fg(SEL_BG);
             buf[(right, y + 1)].set_symbol("◢").set_fg(SEL_BG);
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant S: hand-drawn rounded frame ╭─╮ │ ╰─╯ over a faint wash ──────────
+// A tidy rounded box hugging just the two content rows: top corners on the row
+// above the name, side rails beside the content, bottom corners on the spacer
+// row — drawn cell by cell (unlike F's Block) over a faint accent wash so the
+// row text keeps its own colors.
+fn row_rounded_frame(f: &mut Frame, x: u16, y: u16, width: u16, a: &Agent, st: RowState, top: u16) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 3,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 3, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            fill_bg(f, x, y, width, FAINT_ACCENT);
+            fill_bg(f, x, y + 1, width, FAINT_ACCENT);
+            let right = x + width - 1;
+            let buf = f.buffer_mut();
+            // Top border: only when the row above is still inside the panel.
+            if y > top {
+                buf[(x, y - 1)].set_symbol("╭").set_fg(SEL_BG);
+                for xx in x + 1..right {
+                    buf[(xx, y - 1)].set_symbol("─").set_fg(SEL_BG);
+                }
+                buf[(right, y - 1)].set_symbol("╮").set_fg(SEL_BG);
+            }
+            for yy in [y, y + 1] {
+                buf[(x, yy)].set_symbol("│").set_fg(SEL_BG);
+                buf[(right, yy)].set_symbol("│").set_fg(SEL_BG);
+            }
+            buf[(x, y + 2)].set_symbol("╰").set_fg(SEL_BG);
+            for xx in x + 1..right {
+                buf[(xx, y + 2)].set_symbol("─").set_fg(SEL_BG);
+            }
+            buf[(right, y + 2)].set_symbol("╯").set_fg(SEL_BG);
+        }
+        RowState::Hovered => {
+            fill_bg(f, x, y, width, HOVER_BG);
+            fill_bg(f, x, y + 1, width, HOVER_BG);
+        }
+        RowState::Normal => {}
+    }
+}
+
+// ── Variant T: rounded corner ticks only ╭ ╮ ╰ ╯, no rails ───────────────────
+// The four rounded corners in the accent color at the frame positions, with no
+// connecting sides — a lighter, airier take on S, over the fainter cyan tint.
+fn row_rounded_corners_only(
+    f: &mut Frame,
+    x: u16,
+    y: u16,
+    width: u16,
+    a: &Agent,
+    st: RowState,
+    top: u16,
+) {
+    put_line(
+        f,
+        x + 2,
+        y,
+        width - 3,
+        line1_spans(a, a.glyph_color, a.name_color),
+    );
+    put_line(f, x + 2, y + 1, width - 3, line2_spans(a, MUTED));
+    match st {
+        RowState::Selected => {
+            fill_bg(f, x, y, width, SEL_TINT);
+            fill_bg(f, x, y + 1, width, SEL_TINT);
+            let right = x + width - 1;
+            let buf = f.buffer_mut();
+            // Top corners: only when the row above is still inside the panel.
+            if y > top {
+                buf[(x, y - 1)].set_symbol("╭").set_fg(SEL_BG);
+                buf[(right, y - 1)].set_symbol("╮").set_fg(SEL_BG);
+            }
+            buf[(x, y + 2)].set_symbol("╰").set_fg(SEL_BG);
+            buf[(right, y + 2)].set_symbol("╯").set_fg(SEL_BG);
         }
         RowState::Hovered => {
             fill_bg(f, x, y, width, HOVER_BG);
