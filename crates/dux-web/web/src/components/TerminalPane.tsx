@@ -527,11 +527,17 @@ export function TerminalPane(props: TerminalPaneProps) {
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(container)
-    // xterm already sets autocorrect/autocapitalize="off" and spellcheck="false"
-    // on its hidden input, but leaves autocomplete unset; turn it off too so the
-    // mobile keyboard never injects autofill/suggestions into the PTY stream.
+    // A virtual keyboard must never autocorrect, autocomplete, autocapitalize, or
+    // spellcheck into the PTY stream: a shell has no editable buffer for those to
+    // fix, so they only inject garbage. xterm is documented to set some of these
+    // on its hidden input, but the defaults are not reliable across xterm versions
+    // and mobile browsers (autocorrect in particular still fires), so set all four
+    // explicitly rather than trusting the library.
     if (term.textarea) {
       term.textarea.setAttribute("autocomplete", "off")
+      term.textarea.setAttribute("autocorrect", "off")
+      term.textarea.setAttribute("autocapitalize", "off")
+      term.textarea.setAttribute("spellcheck", "false")
     }
     fit.fit()
     termRef.current = term
