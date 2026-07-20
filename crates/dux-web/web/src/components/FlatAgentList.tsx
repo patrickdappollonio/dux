@@ -722,7 +722,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
           lives in the bottom bar next to Add project (both surfaces). px-2 matches
           the sidebar header (the logo row's p-2) and the list below, so the search
           box and the agent rows share one inset and none of it hugs the edge. */}
-      <div className="flex flex-col gap-2 px-2 pt-2 pb-1">
+      <div className="flex flex-col gap-2 px-2 pt-2 pb-3">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">Agents</span>
           <span className="text-xs text-muted-foreground">
