@@ -39,6 +39,10 @@ import {
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { isTabGone } from "@/lib/agentTabs"
 import {
+  nextAppliedGeneration,
+  shouldApplyReplay,
+} from "@/lib/replayGeneration"
+import {
   PtySocket,
   agentPtyUrl,
   getActivePtySocket,
@@ -916,19 +920,74 @@ export function TerminalPane(props: TerminalPaneProps) {
     // output). Reset xterm before that first reconnect frame so the replay
     // rebuilds the buffer cleanly. The very FIRST open starts from an empty buffer
     // (a fresh terminal), so it needs no reset — only opens after the first do.
+    //
+    // On mobile the socket reconnects constantly, so two defensive guards keep a
+    // replay from ever stacking (Mechanism A):
+    //  1. Idempotency by generation. The `connected` frame tags each replay with a
+    //     monotonic generation (see ptySocket.ts / replayGeneration.ts). We record
+    //     the last generation applied and DROP any replay whose generation we have
+    //     already applied — a duplicate replay, or a late blob from a torn-down
+    //     forwarder, becomes a no-op instead of a second copy of history.
+    //  2. Drain-gating. Before resetting and replaying we let the PREVIOUS
+    //     connection's xterm write queue fully drain (the empty-write callback fires
+    //     only once queued writes have parsed — the same gate the focus/visibility
+    //     re-assert uses below), so a stale queued byte cannot land after reset()
+    //     and among the replay. Because the empty-write callback is async, any bytes
+    //     that arrive during the drain window are HELD and replayed in order after
+    //     the reset, so nothing is reordered or written ahead of the fresh replay.
     let firstOpen = true
-    let resetBeforeNextFrame = false
-    pty.onBytes((bytes) => {
-      if (resetBeforeNextFrame) {
-        resetBeforeNextFrame = false
-        term.reset()
-      }
+    let awaitingRepaint = false
+    let repaintNeedsReset = false
+    let lastAppliedGen: number | null = null
+    // Set only while draining the previous connection's write queue; incoming bytes
+    // are buffered here (repaint first, then any live bytes) and flushed in order
+    // once the drain completes so nothing is written ahead of the reset+replay.
+    let draining = false
+    let heldChunks: Uint8Array[] = []
+    const writeChunk = (bytes: Uint8Array) => {
       if (!initialResizeDone) {
         // Resize only once xterm has parsed this first frame (the repaint).
         term.write(bytes, sendInitialResize)
       } else {
         term.write(bytes)
       }
+    }
+    pty.onBytes((bytes) => {
+      // Mid-drain: hold everything (the repaint plus any live bytes that raced in)
+      // so it lands in order after reset(), never ahead of the fresh replay.
+      if (draining) {
+        heldChunks.push(bytes)
+        return
+      }
+      if (awaitingRepaint) {
+        awaitingRepaint = false
+        const gen = pty.replayGeneration
+        if (!shouldApplyReplay(gen, lastAppliedGen)) {
+          // A replay we have already applied (duplicate or stale/late blob): drop it
+          // entirely (no reset, no write) so it can never stack a second copy.
+          return
+        }
+        lastAppliedGen = nextAppliedGeneration(gen, lastAppliedGen)
+        if (repaintNeedsReset) {
+          // Reconnect replay: drain the previous connection's queue, then reset and
+          // replay (plus any raced-in live bytes) in order.
+          draining = true
+          heldChunks = [bytes]
+          term.write("", () => {
+            term.reset()
+            const chunks = heldChunks
+            heldChunks = []
+            draining = false
+            for (const c of chunks) writeChunk(c)
+          })
+        } else {
+          // Very first open: the buffer is already empty, so no reset or drain is
+          // needed — write the repaint straight through.
+          writeChunk(bytes)
+        }
+        return
+      }
+      writeChunk(bytes)
     })
     // On every (re)open the server replays a fresh repaint as the first binary
     // frame; re-arm the first-frame resize so a reconnect re-fits and re-asserts
@@ -946,10 +1005,15 @@ export function TerminalPane(props: TerminalPaneProps) {
       myConnIdRef.current = null
       initialResizeDone = false
       setReconnecting(false)
+      // The next binary frame is this open's scrollback replay: arm the repaint
+      // handling (generation-drop + resize). Only opens AFTER the first also reset
+      // the buffer first, since the first open starts from an empty terminal.
+      awaitingRepaint = true
       if (firstOpen) {
         firstOpen = false
+        repaintNeedsReset = false
       } else {
-        resetBeforeNextFrame = true
+        repaintNeedsReset = true
       }
     }
     // The socket dropped and is retrying: surface the non-blocking reconnect state.

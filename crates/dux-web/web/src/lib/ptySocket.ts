@@ -6,9 +6,11 @@
 //
 // Protocol (matches `handle_pty_socket` in `crates/dux-web/src/server.rs`):
 //   - On (re)open the server sends a Text `connected` frame FIRST carrying this
-//     socket's connection id: `{"event":"connected","id":"<connId>"}`.
+//     socket's connection id and the replay generation:
+//     `{"event":"connected","id":"<connId>","gen":<n>}`.
 //   - Then the server sends ONE Binary frame replaying the buffered
-//     scrollback/repaint; feed it straight to xterm like any other byte chunk.
+//     scrollback/repaint; feed it straight to xterm like any other byte chunk. The
+//     `gen` labels this replay so the client can drop one it already applied.
 //   - server→client Binary = raw PTY bytes (write to xterm).
 //   - client→server Binary = PTY stdin (xterm `onData`).
 //   - client→server Text = a resize control frame `{"rows":R,"cols":C}`.
@@ -87,6 +89,14 @@ export class PtySocket extends ReconnectingSocket {
   // (see `ptyOwnership.ts`).
   private connId: string | null = null
 
+  // The generation stamped on the scrollback replay that follows the most recent
+  // `connected` frame (see the reconnect-repaint idempotency guard in
+  // `TerminalPane`). Null until a `connected` frame carrying `gen` arrives, or when
+  // an older server sends none. The pane reads this the instant it applies a replay
+  // and drops any replay whose generation it has already applied, so a duplicate or
+  // late blob can never stack a second copy of the scrollback.
+  private replayGen: number | null = null
+
   // Fired with this socket's connection id each time the `connected` frame lands.
   // Lets the terminal view track which connection id is "us" for the ownership
   // comparison, re-issued on every reconnect.
@@ -127,6 +137,13 @@ export class PtySocket extends ReconnectingSocket {
     return this.connId
   }
 
+  // The generation of the scrollback replay that immediately follows the current
+  // `connected` frame, or null when the server sent none (an older server) or before
+  // the first `connected` frame. Read by the pane at the moment it applies a replay.
+  get replayGeneration(): number | null {
+    return this.replayGen
+  }
+
   // Request arraybuffer framing so server→client Binary frames arrive as
   // `ArrayBuffer` (raw PTY bytes) rather than Blobs.
   protected configureSocket(ws: WebSocket): void {
@@ -148,9 +165,17 @@ export class PtySocket extends ReconnectingSocket {
     }
     if (typeof event.data === "string") {
       try {
-        const frame = JSON.parse(event.data) as { event?: string; id?: string }
+        const frame = JSON.parse(event.data) as {
+          event?: string
+          id?: string
+          gen?: number
+        }
         if (frame.event === "connected" && typeof frame.id === "string") {
           this.connId = frame.id
+          // Record the replay generation for the Binary frame that follows. A frame
+          // without `gen` (older server) leaves it null, which the guard reads as
+          // "always apply" so the change is backward-safe.
+          this.replayGen = typeof frame.gen === "number" ? frame.gen : null
           this.onConnected(frame.id)
         }
       } catch {

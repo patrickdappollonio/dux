@@ -54,6 +54,11 @@ class FakeWS {
     this.onmessage?.({ data: new Uint8Array(bytes).buffer })
   }
 
+  // Deliver a server→client Text frame (the `connected` handshake).
+  text(payload: string): void {
+    this.onmessage?.({ data: payload })
+  }
+
   // Close with a code; default 1006 (abnormal) models a transient transport drop.
   triggerClose(code = 1006): void {
     this.readyState = 3
@@ -126,6 +131,31 @@ describe("PtySocket", () => {
     const ws = last()
     expect(ws.url).toBe("ws://x/ws/sessions/s1/pty")
     expect(ws.binaryType).toBe("arraybuffer")
+  })
+
+  it("records connection id and replay generation from the connected frame", () => {
+    const sock = new PtySocket("ws://x/pty")
+    let connectedId: string | null = null
+    sock.onConnected = (id) => {
+      connectedId = id
+    }
+    sock.connect()
+    last().open()
+    expect(sock.connectionId).toBeNull()
+    expect(sock.replayGeneration).toBeNull()
+    last().text(JSON.stringify({ event: "connected", id: "c-1", gen: 42 }))
+    expect(connectedId).toBe("c-1")
+    expect(sock.connectionId).toBe("c-1")
+    expect(sock.replayGeneration).toBe(42)
+  })
+
+  it("leaves replayGeneration null when the connected frame omits gen", () => {
+    const sock = new PtySocket("ws://x/pty")
+    sock.connect()
+    last().open()
+    last().text(JSON.stringify({ event: "connected", id: "c-2" }))
+    expect(sock.connectionId).toBe("c-2")
+    expect(sock.replayGeneration).toBeNull()
   })
 
   it("fires onOpen on each (re)open", () => {

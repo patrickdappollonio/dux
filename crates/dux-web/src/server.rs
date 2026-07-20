@@ -1366,18 +1366,16 @@ async fn handle_pty_socket(
     // definitive comparison replaces the old timing/echo-counting heuristic and
     // fixes the two-device simultaneous-claim race. A fresh id is allocated per
     // socket open, so a reconnect re-issues one.
-    let _ = send_event(
-        &sink,
-        &WireEvent {
-            event: "connected".to_string(),
-            id: Some(conn_id.to_string()),
-            rev: None,
-            owner: None,
-            epoch: None,
-            device: None,
-        },
-    )
-    .await;
+    // Stamp this (re)open's scrollback replay with a process-monotonic generation
+    // id and hand it to the client on the `connected` handshake, immediately before
+    // the replay Binary frame it labels. The client records the last generation it
+    // applied and drops any replay whose generation it has already applied, so a
+    // duplicate replay or a late blob from a torn-down forwarder can never stack a
+    // second copy of the scrollback on top of the buffer (the mobile
+    // duplicated-text bug). A fresh generation per open makes every legitimate
+    // reconnect strictly newer, so the guard only ever fires on the anomaly.
+    let replay_generation = next_replay_generation();
+    let _ = send_pty_connected(&sink, conn_id, replay_generation).await;
     // Replay the buffered scrollback/repaint before streaming live bytes.
     send_binary(&sink, repaint).await;
     let mut pty_forwarder = spawn_pty_forwarder(Arc::clone(&sink), rx, engine.shutdown_flag());
@@ -1655,6 +1653,50 @@ struct WireEvent {
     /// other event and when the claimer sent no `User-Agent`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     device: Option<String>,
+}
+
+/// Process-monotonic id stamped on every PTY scrollback replay (see the
+/// `connected`-frame send in [`handle_pty_socket`]). Global rather than per-PTY on
+/// purpose: the client only ever compares generations WITHIN one socket's lifetime
+/// (drop a replay whose generation it already applied), and a single global counter
+/// makes each open strictly newer than any earlier one with no per-target
+/// bookkeeping. Starts at 1 so 0 can never be confused with "unset".
+static PTY_REPLAY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Allocate the next replay generation. `Relaxed` is sufficient: the value only has
+/// to be unique and monotonically increasing per allocation, not synchronized with
+/// any other memory.
+fn next_replay_generation() -> u64 {
+    PTY_REPLAY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The opening handshake frame on a PTY socket: `{event:"connected", id, gen}`. A
+/// superset of the events-socket `connected` frame (which is a [`WireEvent`] and
+/// carries no generation): a PTY socket also stamps the scrollback replay that
+/// follows with its `gen` so the client can drop an already-applied replay. Adding
+/// a field is backward-safe (an older client ignores `gen`).
+#[derive(serde::Serialize)]
+struct PtyConnectedFrame {
+    event: &'static str,
+    id: String,
+    /// The generation of the replay Binary frame that follows this handshake.
+    /// Serialized as `gen` on the wire (`gen` is a reserved keyword in the Rust
+    /// 2024 edition, so the field is spelled out and renamed for JSON).
+    #[serde(rename = "gen")]
+    generation: u64,
+}
+
+/// Serialize and send the PTY-socket `connected` handshake carrying this socket's
+/// connection id and the replay generation for the repaint that follows.
+async fn send_pty_connected(sink: &SharedSink, conn_id: u64, generation: u64) -> Result<(), ()> {
+    let frame = PtyConnectedFrame {
+        event: "connected",
+        id: conn_id.to_string(),
+        generation,
+    };
+    let text = serde_json::to_string(&frame).map_err(|_| ())?;
+    let mut guard = sink.lock().await;
+    guard.send(Message::Text(text.into())).await.map_err(|_| ())
 }
 
 /// Outbound `/ws/events` status event: the one event carrying an inline payload
@@ -3582,6 +3624,33 @@ mod tests {
             serde_json::to_string(&ev).unwrap(),
             r#"{"event":"connected","id":"abc-123"}"#
         );
+    }
+
+    /// The PTY-socket `connected` handshake serializes to `{event, id, gen}`, a
+    /// superset of the events-socket frame carrying the replay generation.
+    #[test]
+    fn pty_connected_frame_serializes_with_generation() {
+        let frame = PtyConnectedFrame {
+            event: "connected",
+            id: "abc-123".into(),
+            generation: 7,
+        };
+        assert_eq!(
+            serde_json::to_string(&frame).unwrap(),
+            r#"{"event":"connected","id":"abc-123","gen":7}"#
+        );
+    }
+
+    /// `next_replay_generation` hands out strictly increasing ids, so every
+    /// (re)open's replay is newer than any earlier one and the client's
+    /// already-applied guard only ever drops a duplicate/stale blob.
+    #[test]
+    fn replay_generations_are_strictly_increasing() {
+        let a = next_replay_generation();
+        let b = next_replay_generation();
+        let c = next_replay_generation();
+        assert!(a < b, "second generation must exceed the first");
+        assert!(b < c, "third generation must exceed the second");
     }
 
     /// A `pty.owner` handover from the production `pty_owner_event` helper carries
