@@ -136,6 +136,19 @@ describe("deep-link restore on load", () => {
     })
   })
 
+  it("advances the mobile shell to the terminal spoke on a resolved deep-link", async () => {
+    // Otherwise the hub covers the deep-linked agent on mobile and its PTY never
+    // mounts (desktop renders straight from selectedTarget and is unaffected).
+    const mod = await loadStore("#/agent/s1", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().mobileScreen).toBe("terminal")
+  })
+
+  it("leaves the mobile shell on home when the deep-link session is gone", async () => {
+    const mod = await loadStore("#/agent/missing", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(mod.getSnapshot().mobileScreen).toBe("home")
+  })
+
   it("restores an extra-tab selection from #/agent/<id>/tab/<tabId>", async () => {
     const mod = await loadStore("#/agent/s1/tab/t2", [
       { id: "s1", project_id: "p1", tabs: ["t2"] },

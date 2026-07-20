@@ -1459,16 +1459,27 @@ function restoreDeepLink(spine: Spine): void {
       // A project-terminal link: restore it when it still exists; a vanished
       // terminal falls back to nothing selected (there is no agent to land on).
       applyProjectTerminalDeepLink(spine, link.terminalId, owner.projectId)
-      return
+    } else {
+      const session = spine.sessions.find((s) => s.id === owner.sessionId)
+      // session id gone — ignore the link
+      if (session) applyDeepLinkSelection(session, link)
     }
-    const session = spine.sessions.find((s) => s.id === owner.sessionId)
-    if (!session) return // session id gone, ignore the link
-    applyDeepLinkSelection(session, link)
-    return
+  } else {
+    const session = spine.sessions.find((s) => s.id === link.sessionId)
+    // session id gone — ignore the link
+    if (session) applyDeepLinkSelection(session, link)
   }
-  const session = spine.sessions.find((s) => s.id === link.sessionId)
-  if (!session) return // session id gone — ignore the link
-  applyDeepLinkSelection(session, link)
+  // If the boot deep-link resolved to a selection, advance the mobile shell to
+  // the terminal spoke. Otherwise `mobileScreen` stays "home" and the hub covers
+  // the deep-linked agent — and, because the terminal pane only mounts on the
+  // terminal screen, the PTY never even subscribes/launches. Desktop has no such
+  // screen state and renders the center pane straight from `selectedTarget`, so
+  // it "just works" there. This mirrors a tap's `mobileNavigate("terminal")` and
+  // the popstate derive; `setState` (not `mobileNavigate`) avoids pushing a
+  // spurious history entry at boot.
+  if (state.selectedTarget) {
+    setState({ mobileScreen: "terminal" })
+  }
 }
 
 // Restore a project-terminal deep link against a spine: select the terminal
