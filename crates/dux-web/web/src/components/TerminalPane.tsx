@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { dragScrollLines } from "@/lib/viewport"
+import { firstFrameResizePlan } from "@/lib/firstFrameResize"
 import { copyToClipboard } from "@/lib/clipboard"
 import { isApplePlatform } from "@/lib/platform"
 import {
@@ -890,6 +891,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     // `pty.onOpen` re-arms this guard to re-fit/resize after a reconnect too.
     let initialResizeDone = false
     let jiggleTimer: ReturnType<typeof setTimeout> | undefined
+    // Whether the NEXT first-frame resize should jiggle (very first open) or send
+    // a single plain resize (a reconnect). `onOpen` sets this before the first
+    // frame lands; it defaults to `true` so the very first open still jiggles even
+    // in the pathological case where the fallback timer beats `onOpen`.
+    let firstFrameIsFirstOpen = true
     const sendInitialResize = () => {
       if (initialResizeDone) return
       initialResizeDone = true
@@ -900,19 +906,30 @@ export function TerminalPane(props: TerminalPaneProps) {
       // server broadcasts a `pty.owner` carrying our connection id; the handover
       // handler recognises it as ours by id, so no echo bookkeeping is needed here.
       // A backgrounded observer is not the owner, so the sends below no-op.
-      // Force the agent to FULLY redraw at our size now that the first paint has
-      // landed. A same-size resize is a kernel no-op (no SIGWINCH), so when the
-      // PTY already matches this viewport the agent never repaints and the
-      // reconnect snapshot (which is imperfect for a tall buffer with a
-      // bottom-anchored prompt) stays on screen with the cursor and input box
-      // misplaced. Nudge the width down one column and back: each step is a real
-      // winsize change, so the kernel raises SIGWINCH and the agent redraws its
-      // true UI, ending at the correct size. This automates the manual
-      // divider-nudge that reliably fixed it.
-      sendOwnedResize(term.rows, Math.max(1, term.cols - 1))
-      jiggleTimer = setTimeout(() => {
+      if (firstFrameResizePlan(firstFrameIsFirstOpen) === "jiggle") {
+        // FIRST open only: force the agent to FULLY redraw at our size now that the
+        // first paint has landed. A same-size resize is a kernel no-op (no
+        // SIGWINCH), so when the PTY already matches this viewport the agent never
+        // repaints and the initial snapshot (imperfect for a tall buffer with a
+        // bottom-anchored prompt) stays on screen with the cursor and input box
+        // misplaced. Nudge the width down one column and back: each step is a real
+        // winsize change, so the kernel raises SIGWINCH and the agent redraws its
+        // true UI, ending at the correct size. This automates the manual
+        // divider-nudge that reliably fixed it.
+        sendOwnedResize(term.rows, Math.max(1, term.cols - 1))
+        jiggleTimer = setTimeout(() => {
+          sendOwnedResize(term.rows, term.cols)
+        }, 60)
+      } else {
+        // RECONNECT: the server kept the PTY alive at its prior size and replays a
+        // fresh repaint as this first frame. Jiggling here would force TWO
+        // full-screen agent repaints (at two widths) on EVERY reconnect, and mobile
+        // reconnects constantly. Send a SINGLE resize to our true size instead: it
+        // still re-asserts ownership, it is a kernel no-op (no repaint) when the
+        // size is unchanged, and it raises exactly one natural SIGWINCH (one
+        // repaint) only when the viewport genuinely changed while disconnected.
         sendOwnedResize(term.rows, term.cols)
-      }, 60)
+      }
     }
     // On a RECONNECT the server replays the FULL scrollback as the first binary
     // frame. xterm still holds the buffer from before the drop, so writing the
@@ -1012,8 +1029,13 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (firstOpen) {
         firstOpen = false
         repaintNeedsReset = false
+        firstFrameIsFirstOpen = true
       } else {
         repaintNeedsReset = true
+        // A reconnect must NOT jiggle: an unchanged size would double-repaint the
+        // agent on every mobile reconnect. The first-frame resize sends a single
+        // plain resize instead (see `sendInitialResize`).
+        firstFrameIsFirstOpen = false
       }
     }
     // The socket dropped and is retrying: surface the non-blocking reconnect state.
