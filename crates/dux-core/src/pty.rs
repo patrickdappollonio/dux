@@ -1303,6 +1303,35 @@ impl PtyClient {
     }
 }
 
+/// Whether a batch of bytes written to a PTY should count as the user "typing"
+/// for the Typing-state / working-suppression window (see
+/// [`crate::engine::Engine::note_pty_input`]). Genuine keystrokes and pastes
+/// count; three things do not, because they are the terminal reporting an event
+/// to the child rather than the user entering text:
+///   - an empty frame (a no-op / keepalive write),
+///   - a FOCUS REPORT (`CSI I` focus-in / `CSI O` focus-out), which xterm.js
+///     emits when the viewer gains or loses focus while the child app has focus
+///     tracking (DECSET 1004) on. Selecting a terminal focuses it, so without
+///     this a plain focus change would light "Typing" with nothing typed, and
+///   - a MOUSE REPORT (SGR `CSI < ...` or legacy `CSI M ...`), which the viewer
+///     sends when the child has mouse reporting on and the user clicks or
+///     scrolls. Scrolling and clicking are not typing.
+///
+/// The bytes are still written to the PTY (the child receives its focus/mouse
+/// event); they simply do not stamp the input window. No printable key or cursor
+/// key encodes as one of these sequences, so genuine input is never dropped.
+pub fn write_counts_as_typing(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && !is_focus_report(bytes) && !is_mouse_report(bytes)
+}
+
+fn is_focus_report(bytes: &[u8]) -> bool {
+    bytes == b"\x1b[I" || bytes == b"\x1b[O"
+}
+
+fn is_mouse_report(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x1b[<") || bytes.starts_with(b"\x1b[M")
+}
+
 impl Drop for PtyClient {
     fn drop(&mut self) {
         // Kill the child's whole process group, not just the direct child. The
@@ -2174,6 +2203,25 @@ mod tests {
     use super::*;
     use compact_str::CompactString;
     use portable_pty::CommandBuilder;
+
+    #[test]
+    fn write_counts_as_typing_excludes_empty_focus_and_mouse_reports() {
+        // Genuine input counts.
+        assert!(write_counts_as_typing(b"a"));
+        assert!(write_counts_as_typing(b"hello"));
+        assert!(write_counts_as_typing(b"\r")); // Enter
+        assert!(write_counts_as_typing(b"\x7f")); // Backspace
+        assert!(write_counts_as_typing(b"\x1b[A")); // Up arrow is real input
+        assert!(write_counts_as_typing(b"\x1b[Z")); // Shift-Tab is real input
+
+        // Non-typing writes do not.
+        assert!(!write_counts_as_typing(b"")); // empty frame
+        assert!(!write_counts_as_typing(b"\x1b[I")); // focus in
+        assert!(!write_counts_as_typing(b"\x1b[O")); // focus out
+        assert!(!write_counts_as_typing(b"\x1b[<0;10;5M")); // SGR mouse press
+        assert!(!write_counts_as_typing(b"\x1b[<64;10;5M")); // SGR wheel scroll
+        assert!(!write_counts_as_typing(b"\x1b[M !!")); // legacy mouse
+    }
 
     fn viewport_lines(snapshot: &TerminalSnapshot) -> Vec<String> {
         let mut rows = vec![String::new(); usize::from(snapshot.rows)];

@@ -1750,11 +1750,14 @@ fn handle_request(
             let wrote =
                 pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
             // Record keystrokes that actually reached a PTY (agent tab or
-            // companion terminal, never an empty frame) so the user's own echoed
-            // typing doesn't read as the PTY "working". Tab and terminal ids are
-            // disjoint and both key `pty_input`, so one predicate covers both.
+            // companion terminal) so the user's own echoed typing doesn't read as
+            // the PTY "working". `write_counts_as_typing` excludes empty frames
+            // and the terminal's own focus/mouse reports (which xterm forwards on
+            // select/scroll) so merely selecting a terminal does not light
+            // "Typing". Tab and terminal ids are disjoint and both key
+            // `pty_input`, so one predicate covers both.
             if wrote
-                && !bytes.is_empty()
+                && dux_core::pty::write_counts_as_typing(&bytes)
                 && (engine.providers.contains_key(&id)
                     || engine.companion_terminals.contains_key(&id))
             {
