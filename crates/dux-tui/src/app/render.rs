@@ -38,9 +38,16 @@ pub(crate) fn project_tag_kind(project: Option<&Project>) -> ProjectTagKind {
 /// off the same flags that drive the working spinner and the attention pulse, so
 /// the word can never disagree with the motion cue. Mirrors the web's `stateWord`
 /// (`crates/dux-web/web/src/lib/flatList.ts`) exactly. Pure and unit-tested.
+///
+/// Priority for an Active session (kept in lockstep with the web's `stateWord`
+/// so the two surfaces never disagree): `needs_attention` -> "Needs you", else
+/// `typing` -> "Typing", else `working` -> "Working", else "Idle". Typing and
+/// working never apply to a non-Active session, so Detached/Exited win outright.
+/// When the web phase lands, mirror this exact ordering there.
 pub(crate) fn agent_state_word(
     status: crate::model::SessionStatus,
     working: bool,
+    typing: bool,
     needs_attention: bool,
 ) -> &'static str {
     use crate::model::SessionStatus;
@@ -48,6 +55,7 @@ pub(crate) fn agent_state_word(
         return "Needs you";
     }
     match status {
+        SessionStatus::Active if typing => "Typing",
         SessionStatus::Active if working => "Working",
         SessionStatus::Active => "Idle",
         SessionStatus::Detached => "Detached",
@@ -765,6 +773,11 @@ impl App {
             && self.engine.session_needs_attention(&session.id);
         let working = matches!(session.status, crate::model::SessionStatus::Active)
             && self.engine.session_is_streaming(&session.id);
+        // Typing is an Active-only cue and takes precedence over the working
+        // spinner (typing suppresses streaming in the engine anyway), but sits
+        // below attention. Rolled up across all of the agent's tabs.
+        let typing = matches!(session.status, crate::model::SessionStatus::Active)
+            && self.engine.session_is_typing(&session.id);
         let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
         let (dot, dot_color) = if needs_attention {
             let glyph = if self.attention_blink_on() {
@@ -773,6 +786,11 @@ impl App {
                 " "
             };
             (glyph.to_string(), self.theme.session_attention)
+        } else if typing {
+            (
+                crate::theme::TYPING_GLYPH.to_string(),
+                self.theme.session_typing,
+            )
         } else if working {
             let idx = self.spinner_frame_index();
             (
@@ -859,12 +877,13 @@ impl App {
                     None,
                 ),
             };
-        let word = agent_state_word(session.status, working, needs_attention);
+        let word = agent_state_word(session.status, working, typing, needs_attention);
         let word_color = if deleting {
             self.theme.session_deleting
         } else {
             match word {
                 "Needs you" => self.theme.session_attention,
+                "Typing" => self.theme.session_typing,
                 "Working" => self.theme.session_active,
                 "Detached" => steady_color,
                 _ => self.theme.provider_label_fg,
@@ -1121,9 +1140,9 @@ impl App {
         // Each row carries an owner-derived display name (the agent's branch or
         // the project's name) so a generic engine label like "Terminal 3" is
         // never ambiguous between an agent terminal and a project terminal.
-        let terminal_render_data: Vec<(String, Option<String>, String)> = terminal_items
+        let terminal_render_data: Vec<(String, String, Option<String>, String)> = terminal_items
             .iter()
-            .map(|(_, t)| {
+            .map(|(id, t)| {
                 let owner_name = match &t.owner {
                     TerminalOwner::Session(sid) => self
                         .engine
@@ -1140,7 +1159,12 @@ impl App {
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| pid.clone()),
                 };
-                (t.label.clone(), t.foreground_cmd.clone(), owner_name)
+                (
+                    (*id).clone(),
+                    t.label.clone(),
+                    t.foreground_cmd.clone(),
+                    owner_name,
+                )
             })
             .collect();
 
@@ -1318,47 +1342,40 @@ impl App {
         if let Some(term_area) = terminals_area {
             let terminals_focused = focused && self.left_section == LeftSection::Terminals;
             let term_title = format!("Terminals ({})", terminal_render_data.len());
-            self.mouse_layout.terminal_list = self
+            let term_inner = self
                 .themed_block(&term_title, terminals_focused)
                 .inner(term_area);
+            self.mouse_layout.terminal_list = term_inner;
+            // Two content lines plus a trailing blank spacer, matching the agent
+            // rows above so both lists breathe the same way.
+            let term_text_width = term_inner.width;
+            let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
-                .enumerate()
-                .map(|(i, (label, fg_cmd, owner_name))| {
-                    let color = self.theme.session_active;
-                    let mut spans = vec![Span::styled("● ", Style::default().fg(color))];
-                    if let Some(cmd) = fg_cmd {
-                        // The running app's name is the row's label. Only when
-                        // another terminal runs the same app do we disambiguate
-                        // with the terminal's number ("vim (#1)"), mirroring the
-                        // web terminalTitle rule.
-                        let duplicate = terminal_render_data
-                            .iter()
-                            .enumerate()
-                            .any(|(j, (_, other, _))| j != i && other.as_deref() == Some(cmd));
-                        spans.push(Span::styled(cmd.clone(), Style::default().fg(color)));
-                        let suffix = terminal_dup_suffix(label, duplicate);
-                        if !suffix.is_empty() {
-                            spans.push(Span::styled(
-                                suffix,
-                                Style::default().fg(self.theme.provider_label_fg),
-                            ));
-                        }
-                    } else {
-                        spans.push(Span::styled(label.clone(), Style::default().fg(color)));
-                    }
-                    // The owner name (agent branch/title or project name)
-                    // disambiguates generic labels; skip it when the label
-                    // already names the owner (the TUI's own spawn labels).
-                    if !label.starts_with(owner_name.as_str()) {
-                        spans.push(Span::styled(
-                            format!(" · {owner_name}"),
-                            Style::default().fg(self.theme.provider_label_fg),
-                        ));
-                    }
-                    ListItem::new(Line::from(spans))
+                .map(|(term_id, label, fg_cmd, owner_name)| {
+                    // A terminal is either alive or gone (never detached / needs
+                    // you), so the state reduces to typing -> working -> idle,
+                    // read off the same engine predicates the agent rows use. A
+                    // terminal id (`term-N`) is a valid key for both.
+                    let typing = self.engine.is_typing(term_id);
+                    let working = self.engine.is_agent_streaming(term_id);
+                    let lines = terminal_row_lines(
+                        &self.theme,
+                        typing,
+                        working,
+                        spinner,
+                        label,
+                        fg_cmd.as_deref(),
+                        owner_name,
+                        term_text_width,
+                    );
+                    ListItem::new(lines)
                 })
                 .collect();
+            // Every terminal row is exactly three lines tall; keep the height
+            // vector in lockstep so the post-render mouse map lands on the right
+            // row even after the list scrolls.
+            let term_heights: Vec<u16> = vec![3; terminal_render_data.len()];
             let mut term_state = ListState::default().with_selected(
                 if self.left_section == LeftSection::Terminals {
                     Some(self.selected_terminal_index)
@@ -1374,8 +1391,11 @@ impl App {
                 frame.buffer_mut(),
                 &mut term_state,
             );
+            self.mouse_layout.terminal_row_to_item =
+                left_row_to_item(term_state.offset(), &term_heights, term_inner.height);
         } else {
             self.mouse_layout.terminal_list = Rect::default();
+            self.mouse_layout.terminal_row_to_item.clear();
         }
     }
 
@@ -8381,28 +8401,87 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
     }
 }
 
-/// The trailing counter in a "Terminal N" label, used only to disambiguate two
-/// terminals running the same app (see `terminal_dup_suffix`). `None` for a
-/// label without a trailing number, which the engine never produces but keeps
-/// the helper total.
-fn terminal_number(label: &str) -> Option<u32> {
-    label.rsplit(' ').next()?.parse().ok()
-}
+/// Build a terminal row's three lines (primary label, owner + state word, and a
+/// trailing blank spacer) so a companion-terminal row is structurally identical
+/// to an agent row and the two lists space evenly.
+///
+/// Line one: a state glyph plus the primary label. The glyph follows the same
+/// typing -> working -> idle rule the agent row uses, minus the detached and
+/// attention states a terminal can never be in: `TYPING_GLYPH` in
+/// `session_typing` while typing, the shared spinner in `session_active` while
+/// working, else a steady dot. The primary label is the foreground command when
+/// something is running, otherwise the terminal's shell label.
+///
+/// Line two: an owner marker, the owner's display name (the agent's title or
+/// branch, or the project's name), and the colored state word — reusing
+/// `fit_agent_meta_line` so the marker and word stay fixed while the owner name
+/// truncates char-safely. The state word wording matches the agent row exactly
+/// ("Typing" / "Working" / "Idle").
+#[allow(clippy::too_many_arguments)]
+fn terminal_row_lines(
+    theme: &crate::theme::Theme,
+    typing: bool,
+    working: bool,
+    spinner: char,
+    label: &str,
+    fg_cmd: Option<&str>,
+    owner_name: &str,
+    text_width: u16,
+) -> Vec<Line<'static>> {
+    let (glyph, glyph_color) = if typing {
+        (crate::theme::TYPING_GLYPH.to_string(), theme.session_typing)
+    } else if working {
+        (spinner.to_string(), theme.session_active)
+    } else {
+        (crate::theme::DOT_GLYPH.to_string(), theme.session_active)
+    };
+    // Something running (a non-empty foreground command) names the row; an idle
+    // terminal falls back to its shell label.
+    let primary = match fg_cmd {
+        Some(cmd) if !cmd.is_empty() => cmd,
+        _ => label,
+    };
+    let line1 = ellipsize_spans(
+        vec![
+            Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
+            Span::styled(primary.to_string(), Style::default().fg(glyph_color)),
+        ],
+        text_width,
+    );
 
-/// The suffix appended after a running terminal's command in the left pane.
-/// Empty when the command is unique among the terminals shown together;
-/// otherwise " (#N)" using the terminal's counter so two terminals running the
-/// same app stay distinct ("vim (#1)", "vim (#2)"), falling back to the label
-/// in parentheses if it carries no number. Mirrors the web `terminalTitle`
-/// rule (crates/dux-web/web/src/lib/terminals.ts).
-fn terminal_dup_suffix(label: &str, duplicate: bool) -> String {
-    if !duplicate {
-        return String::new();
-    }
-    match terminal_number(label) {
-        Some(n) => format!(" (#{n})"),
-        None => format!(" ({label})"),
-    }
+    let muted = theme.provider_label_fg;
+    // Wording and priority mirror `agent_state_word`, minus the states a live
+    // terminal cannot be in.
+    let word = if typing {
+        "Typing"
+    } else if working {
+        "Working"
+    } else {
+        "Idle"
+    };
+    let word_color = if typing {
+        theme.session_typing
+    } else if working {
+        theme.session_active
+    } else {
+        muted
+    };
+    // A two-space indent plus a return arrow aligns the owner marker under the
+    // label column, echoing the agent row's "  ※ " project marker.
+    let line2 = fit_agent_meta_line(
+        text_width,
+        Span::styled("  ↳ ".to_string(), Style::default().fg(muted)),
+        Some(Span::styled(
+            owner_name.to_string(),
+            Style::default().fg(muted),
+        )),
+        Span::styled(word.to_string(), Style::default().fg(word_color)),
+        None,
+        None,
+        Style::default().fg(muted),
+    );
+
+    vec![Line::from(line1), Line::from(line2), Line::from("")]
 }
 
 fn companion_terminal_status_meta(status: CompanionTerminalStatus) -> (&'static str, &'static str) {
@@ -8829,13 +8908,88 @@ mod tests {
     #[test]
     fn agent_state_word_mirrors_the_web_states() {
         use crate::model::SessionStatus::{Active, Detached, Exited};
-        assert_eq!(agent_state_word(Active, true, false), "Working");
-        assert_eq!(agent_state_word(Active, false, false), "Idle");
-        assert_eq!(agent_state_word(Detached, false, false), "Detached");
-        assert_eq!(agent_state_word(Exited, false, false), "Exited");
+        // Args are (status, working, typing, needs_attention).
+        assert_eq!(agent_state_word(Active, true, false, false), "Working");
+        assert_eq!(agent_state_word(Active, false, false, false), "Idle");
+        assert_eq!(agent_state_word(Detached, false, false, false), "Detached");
+        assert_eq!(agent_state_word(Exited, false, false, false), "Exited");
         // Needs-attention wins over every other state, including working.
-        assert_eq!(agent_state_word(Active, true, true), "Needs you");
-        assert_eq!(agent_state_word(Detached, false, true), "Needs you");
+        assert_eq!(agent_state_word(Active, true, false, true), "Needs you");
+        assert_eq!(agent_state_word(Detached, false, false, true), "Needs you");
+    }
+
+    #[test]
+    fn terminal_row_lines_render_two_content_lines_and_a_spacer() {
+        let theme = crate::theme::Theme::default_dark();
+        let width = 40;
+        let line_text = |line: &Line| -> String {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let word_span = |line: &Line, word: &str| {
+            line.spans
+                .iter()
+                .find(|s| s.content.as_ref() == word)
+                .unwrap_or_else(|| panic!("expected a `{word}` span"))
+                .style
+                .fg
+        };
+
+        // Idle terminal: a steady dot, the shell label, and a muted "Idle" word.
+        let idle = terminal_row_lines(&theme, false, false, '⠋', "zsh", None, "my-branch", width);
+        assert_eq!(idle.len(), 3, "two content lines plus a trailing spacer");
+        assert!(
+            line_text(&idle[2]).trim().is_empty(),
+            "third line is a blank spacer"
+        );
+        assert!(line_text(&idle[0]).contains(crate::theme::DOT_GLYPH));
+        assert!(line_text(&idle[0]).contains("zsh"));
+        assert!(line_text(&idle[1]).contains("my-branch"));
+        assert_eq!(word_span(&idle[1], "Idle"), Some(theme.provider_label_fg));
+
+        // Working terminal: the foreground command replaces the label, the
+        // spinner glyph shows, and the "Working" word takes the active color.
+        let working = terminal_row_lines(
+            &theme,
+            false,
+            true,
+            '⠙',
+            "zsh",
+            Some("cargo test"),
+            "proj",
+            width,
+        );
+        assert!(line_text(&working[0]).contains("cargo test"));
+        assert!(!line_text(&working[0]).contains("zsh"));
+        assert!(line_text(&working[0]).contains('⠙'));
+        assert_eq!(
+            word_span(&working[1], "Working"),
+            Some(theme.session_active)
+        );
+
+        // Typing wins over working: the typing glyph and word, both in the
+        // session_typing color, and the foreground command as the label.
+        let typing = terminal_row_lines(&theme, true, true, '⠹', "zsh", Some("vim"), "proj", width);
+        assert!(line_text(&typing[0]).contains(crate::theme::TYPING_GLYPH));
+        assert!(line_text(&typing[0]).contains("vim"));
+        assert_eq!(typing[0].spans[0].style.fg, Some(theme.session_typing));
+        assert_eq!(word_span(&typing[1], "Typing"), Some(theme.session_typing));
+    }
+
+    #[test]
+    fn agent_state_word_typing_sits_below_attention_and_above_working() {
+        use crate::model::SessionStatus::{Active, Detached, Exited};
+        // Typing is surfaced for an Active, typing session.
+        assert_eq!(agent_state_word(Active, false, true, false), "Typing");
+        // Attention still wins over typing.
+        assert_eq!(agent_state_word(Active, false, true, true), "Needs you");
+        // Typing wins over working when both are set.
+        assert_eq!(agent_state_word(Active, true, true, false), "Typing");
+        // Typing never applies to a non-Active session.
+        assert_eq!(agent_state_word(Detached, false, true, false), "Detached");
+        assert_eq!(agent_state_word(Exited, false, true, false), "Exited");
     }
 
     #[test]
@@ -10093,35 +10247,6 @@ mod tests {
             !idle.contains("will be killed"),
             "idle overlay should not warn about killing a process: {idle:?}"
         );
-    }
-
-    #[test]
-    fn terminal_number_parses_trailing_counter() {
-        assert_eq!(terminal_number("Terminal 1"), Some(1));
-        assert_eq!(terminal_number("Terminal 12"), Some(12));
-    }
-
-    #[test]
-    fn terminal_number_is_none_without_a_trailing_number() {
-        assert_eq!(terminal_number("Terminal"), None);
-        assert_eq!(terminal_number("scratch"), None);
-    }
-
-    #[test]
-    fn terminal_dup_suffix_is_empty_for_a_unique_command() {
-        assert_eq!(terminal_dup_suffix("Terminal 1", false), "");
-    }
-
-    #[test]
-    fn terminal_dup_suffix_uses_the_counter_on_collision() {
-        // Two terminals running the same app are disambiguated by their number.
-        assert_eq!(terminal_dup_suffix("Terminal 1", true), " (#1)");
-        assert_eq!(terminal_dup_suffix("Terminal 2", true), " (#2)");
-    }
-
-    #[test]
-    fn terminal_dup_suffix_falls_back_to_the_label_without_a_number() {
-        assert_eq!(terminal_dup_suffix("scratch", true), " (scratch)");
     }
 
     #[test]

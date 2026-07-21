@@ -1580,6 +1580,11 @@ pub(crate) struct MouseLayoutState {
     /// `render::left_row_to_item`).
     pub(crate) left_row_to_item: Vec<usize>,
     pub(crate) terminal_list: Rect,
+    /// Screen-row (relative to `terminal_list.y`) -> terminal-item index, rebuilt
+    /// each render. Terminal rows are now three lines tall (matching the agent
+    /// rows), so a click row no longer maps 1:1 to a terminal; this is the
+    /// reverse map (see `render::left_row_to_item`, reused for both lists).
+    pub(crate) terminal_row_to_item: Vec<usize>,
     pub(crate) agent_term: Option<Rect>,
     pub(crate) unstaged_list: Option<Rect>,
     pub(crate) staged_list: Option<Rect>,
@@ -1596,6 +1601,7 @@ impl MouseLayoutState {
         self.left_list = Rect::default();
         self.left_row_to_item.clear();
         self.terminal_list = Rect::default();
+        self.terminal_row_to_item.clear();
         self.agent_term = None;
         self.unstaged_list = None;
         self.staged_list = None;

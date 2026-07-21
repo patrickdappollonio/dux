@@ -4302,9 +4302,14 @@ impl App {
         {
             let tl = self.mouse_layout.terminal_list;
             if tl.width > 0 && tl.height > 0 && contains_point(tl, column, row) {
-                let index = usize::from(row.saturating_sub(tl.y));
+                // Terminal rows are three lines tall, so a click row maps to an
+                // item through the reverse map rebuilt each render (see
+                // `render::left_row_to_item`), not 1:1.
+                let screen_row = usize::from(row.saturating_sub(tl.y));
                 let term_count = self.terminal_items().len();
-                if index < term_count {
+                if let Some(&index) = self.mouse_layout.terminal_row_to_item.get(screen_row)
+                    && index < term_count
+                {
                     return Some(MouseTarget::TerminalRow(index));
                 }
                 return Some(MouseTarget::TerminalPane);
@@ -7200,6 +7205,7 @@ mod tests {
             // covered by `left_row_to_item`'s own unit tests and a render test.
             left_row_to_item: (0..10usize).collect(),
             terminal_list: Rect::default(),
+            terminal_row_to_item: Vec::new(),
             agent_term: Some(Rect::new(21, 1, 55, 16)),
             unstaged_list: Some(Rect::new(78, 1, 21, 8)),
             staged_list: Some(Rect::new(78, 9, 21, 5)),

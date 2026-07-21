@@ -27,6 +27,13 @@ pub const DOT_GLYPH: &str = "●";
 /// "needs you", not a distinct shape.
 pub const ATTENTION_GLYPH: &str = DOT_GLYPH;
 
+/// Glyph shown (in the `session_typing` color) on an agent or terminal row while
+/// the user is actively typing into that PTY. A slim left-half block reads as a
+/// text caret, visually distinct from the round status/attention dots and the
+/// braille spinner, so "Typing" never gets confused with "Working" or "Needs
+/// you". Themed via `Theme::session_typing`, never a hardcoded color.
+pub const TYPING_GLYPH: &str = "▍";
+
 /// The bundled `dux_dark` theme TOML, embedded at compile time so the default
 /// path never depends on a file on disk.
 const DUX_DARK_TOML: &str = include_str!("../../../assets/themes/dux_dark.toml");
@@ -80,6 +87,13 @@ pub struct Theme {
     /// detached/warning states, and so a custom theme that sets
     /// `dux.session_attention` explicitly still overrides this default.
     pub session_attention: Color,
+    /// Foreground for the "Typing" state cue (a slim caret glyph on line one and
+    /// the "Typing" state word on line two) shown on an agent or terminal row
+    /// while the user is forwarding keystrokes to that PTY. A dedicated slot so
+    /// themes can keep it visually distinct from the working (`session_active`),
+    /// detached (`session_detached`), and attention (`session_attention`) colors.
+    /// Defaults to the theme's secondary accent for generic Opaline themes.
+    pub session_typing: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,
     pub status_busy_fg: Color,
@@ -349,6 +363,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.session_exited", text_dim);
     theme.register_default_token("dux.session_deleting", text_dim);
     theme.register_default_token("dux.session_attention", accent_primary);
+    theme.register_default_token("dux.session_typing", accent_secondary);
 
     // Status line
     theme.register_default_token("dux.status_info_fg", text_muted);
@@ -500,6 +515,7 @@ impl Theme {
             session_exited: pick("dux.session_exited"),
             session_deleting: pick("dux.session_deleting"),
             session_attention: pick("dux.session_attention"),
+            session_typing: pick("dux.session_typing"),
             status_info_fg: pick("dux.status_info_fg"),
             status_info_bg: pick("dux.status_info_bg"),
             status_busy_fg: pick("dux.status_busy_fg"),
@@ -734,6 +750,10 @@ mod tests {
             // Maps to `accent.primary`, so the bundled dux-dark theme resolves
             // it to the same cyan as `title_focused`/`border_focused`.
             session_attention: Color::Cyan,
+            // Typing cue: a soft violet, deliberately distinct from the working
+            // (whitish `session_active`), detached (yellow), and attention
+            // (cyan) colors so the three live states never blur together.
+            session_typing: Color::Rgb(0xc5, 0x86, 0xe0),
             status_info_fg: Color::Rgb(100, 100, 100),
             status_info_bg: Color::Rgb(25, 25, 25),
             status_busy_fg: Color::Yellow,
@@ -837,6 +857,7 @@ mod tests {
         assert_field!(session_exited);
         assert_field!(session_deleting);
         assert_field!(session_attention);
+        assert_field!(session_typing);
         assert_field!(status_info_fg);
         assert_field!(status_info_bg);
         assert_field!(status_busy_fg);
@@ -1023,6 +1044,25 @@ variant = "dark"
         let theme = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
         assert_eq!(theme.session_attention, theme.title_focused);
         assert_ne!(theme.session_attention, theme.warning_fg);
+    }
+
+    /// The bundled dux-dark theme's typing color must be present and visually
+    /// distinct from the other live-state colors (working/active, detached, and
+    /// attention). A generic Opaline built-in must also derive a non-fallback
+    /// typing color from its secondary accent rather than collapsing to gray.
+    #[test]
+    fn session_typing_is_present_and_distinct_on_every_theme() {
+        let dux_dark = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
+        assert_eq!(dux_dark.session_typing, Color::Rgb(0xc5, 0x86, 0xe0));
+        assert_ne!(dux_dark.session_typing, dux_dark.session_active);
+        assert_ne!(dux_dark.session_typing, dux_dark.session_detached);
+        assert_ne!(dux_dark.session_typing, dux_dark.session_attention);
+
+        let mut nord = opaline::load_by_name("nord").expect("nord built-in must exist");
+        register_dux_defaults(&mut nord);
+        let nord = Theme::from_opaline(&nord);
+        // Derived from Nord's accent.secondary, not the FALLBACK gray.
+        assert_ne!(nord.session_typing, Color::Rgb(128, 128, 128));
     }
 
     /// A generic Opaline built-in (no `dux.*` tokens defined) should derive
