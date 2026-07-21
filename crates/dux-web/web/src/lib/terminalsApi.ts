@@ -31,18 +31,24 @@ export interface CreatedTerminal {
   label: string
 }
 
-async function request<T>(method: string, path: string): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
   const headers: Record<string, string> = {}
   // Scope any resulting status toasts back to this client. Omitted only while the
   // `connected` frame has not set the id yet.
   const id = getConnectionId()
   if (id) headers["x-connection-id"] = id
+  if (body !== undefined) headers["content-type"] = "application/json"
   let resp: Response
   try {
     resp = await fetch(path, {
       method,
       credentials: "same-origin",
       headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
     })
   } catch {
     throw new TerminalsApiError("Could not reach the server.", 0)
@@ -88,4 +94,13 @@ export const terminalsApi = {
       "DELETE",
       `/api/v1/projects/${encodeURIComponent(projectId)}/terminals/${encodeURIComponent(terminalId)}`,
     ),
+  // Reorder the flat Terminals section as one global list (mirrors
+  // `sessionsApi.reorderGlobal`). `terminalIds` must be the COMPLETE set of every
+  // current terminal id (any owner), in the desired order; the server validates it
+  // as a strict permutation and rejects a partial/stale set. Terminal order is
+  // runtime-only (no SQLite), so this resets to creation order on restart.
+  reorder: (terminalIds: string[]) =>
+    request<void>("POST", "/api/v1/terminals/reorder", {
+      terminal_ids: terminalIds,
+    }),
 }

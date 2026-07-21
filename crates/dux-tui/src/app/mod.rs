@@ -4028,10 +4028,73 @@ impl App {
     }
 
     /// Returns all running companion terminals as (terminal_id, terminal) pairs,
-    /// sorted by creation order (terminal_id encodes the counter).
+    /// ordered by the shared active sort mode (`config.ui.agent_sort`), mirroring
+    /// the agent comparators in [`build_left_items`].
+    ///
+    /// The terminal comparators are kept in LOCKSTEP with the web surface's
+    /// `sortFlatTerminals` (`crates/dux-web/web/src/lib/flatTerminals.ts`); the two
+    /// are duplicated per surface by necessity, so any change here must change there
+    /// too. The comparators:
+    /// - `Manual`: base order (by `sort_order` ascending, i.e. creation order).
+    /// - `Created`: newest first (`Reverse(created_at)`).
+    /// - `Updated`: newest first, by the same PTY-activity-derived timestamp the
+    ///   viewmodel exposes as `TerminalView::updated_at` (last activity, else spawn).
+    /// - `NameAsc` / `NameDesc`: by the terminal's DISPLAYED primary label
+    ///   (`foreground_cmd` when present and non-empty, else `label`), lowercased, so
+    ///   name-sort is WYSIWYG.
+    /// - `Active` (default): working-or-typing terminals float to the top (a stable
+    ///   float keeping base order within each group); terminals have no attention.
+    ///
+    /// The base sort by `sort_order` runs first in every mode: `sort_by_key` is
+    /// stable, so equal keys (and the `Active` float) keep the manual base order,
+    /// matching the agents' tie-stability.
     pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
+        let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         let mut items: Vec<_> = self.engine.companion_terminals.iter().collect();
-        items.sort_by_key(|(id, _)| (*id).clone());
+        // Base order: manual `sort_order` ascending (creation order). Every mode
+        // builds on top of this stable base.
+        items.sort_by_key(|(_, t)| t.sort_order);
+
+        // Displayed primary label, lowercased: the WYSIWYG name-sort key.
+        let name_key = |t: &CompanionTerminal| -> String {
+            t.foreground_cmd
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&t.label)
+                .to_lowercase()
+        };
+        // The updated-at instant the viewmodel projects: last PTY activity mapped
+        // onto wall clock, falling back to spawn time when there is none yet.
+        let updated_at = |id: &str, t: &CompanionTerminal| -> chrono::DateTime<chrono::Utc> {
+            self.engine
+                .pty_activity
+                .get(id)
+                .map(|last| {
+                    let ago = chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
+                    chrono::Utc::now() - ago
+                })
+                .unwrap_or(t.created_at)
+        };
+
+        match mode {
+            // Base order already applied.
+            AgentSortMode::Manual => {}
+            AgentSortMode::Created => items.sort_by_key(|(_, t)| std::cmp::Reverse(t.created_at)),
+            AgentSortMode::Updated => {
+                items.sort_by_key(|(id, t)| std::cmp::Reverse(updated_at(id, t)))
+            }
+            AgentSortMode::NameAsc => items.sort_by_key(|(_, t)| name_key(t)),
+            AgentSortMode::NameDesc => items.sort_by_key(|(_, t)| std::cmp::Reverse(name_key(t))),
+            AgentSortMode::Active => {
+                // Stable float: working-or-typing terminals rise above the rest,
+                // each group keeping base order. Matches the web `activeFirst`.
+                let (hot, rest): (Vec<_>, Vec<_>) = items.into_iter().partition(|(id, _)| {
+                    self.engine.is_agent_streaming(id) || self.engine.is_typing(id)
+                });
+                items = hot;
+                items.extend(rest);
+            }
+        }
         items
     }
 

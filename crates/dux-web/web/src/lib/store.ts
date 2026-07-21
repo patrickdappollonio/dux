@@ -365,6 +365,10 @@ export interface DuxState {
   // Optimistic overlay for the flat model's GLOBAL agent order: the complete list
   // of session ids in the just-dragged order, cleared once the spine confirms it.
   pendingAgentOrder: string[] | null
+  // Optimistic overlay for the flat Terminals section's GLOBAL order: the complete
+  // list of terminal ids (any owner) in the just-dragged order, cleared once the
+  // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
+  pendingTerminalOrder: string[] | null
   // While an agent-create THIS client initiated is in flight, holds the session
   // ids that already existed when we submitted, plus the project the new agent
   // will land in. Agent creation is an async server job whose only completion
@@ -553,6 +557,7 @@ let state: DuxState = {
   pendingSessionOrder: null,
   pendingProjectOrder: null,
   pendingAgentOrder: null,
+  pendingTerminalOrder: null,
   pendingCreateFocus: null,
   projectOpen: {},
   agentSort: null,
@@ -954,6 +959,7 @@ function applySpine(rawSpine: Spine, seq: number): void {
     pendingSessionOrder: reconcilePendingSessionOrder(spine, state.pendingSessionOrder),
     pendingProjectOrder: reconcilePendingProjectOrder(spine, state.pendingProjectOrder),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
+    pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
   })
   // Restore a boot-time deep-link before focus/prune: it selects only a session
   // present in this spine (so prune leaves it alone), and it is a one-shot that
@@ -1032,6 +1038,27 @@ function reconcilePendingAgentOrder(
 ): string[] | null {
   if (!pending) return null
   const serverIds = spine.sessions.map((s) => s.id)
+  return ordersMatch(serverIds, pending) ? null : pending
+}
+
+// Mirror of `reconcilePendingAgentOrder` for the flat Terminals section. Terminals
+// are split across `sessions[].terminals` and `projects[].terminals` in the spine,
+// so the authoritative flat order is EVERY terminal (any owner) sorted by its
+// global `sort_order` (which a reorder restamps to the dragged order). The overlay
+// clears once that server order matches what we optimistically applied.
+function reconcilePendingTerminalOrder(
+  spine: Spine,
+  pending: string[] | null,
+): string[] | null {
+  if (!pending) return null
+  const all = [
+    ...spine.sessions.flatMap((s) => s.terminals),
+    ...spine.projects.flatMap((p) => p.terminals),
+  ]
+  const serverIds = all
+    .slice()
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .map((t) => t.id)
   return ordersMatch(serverIds, pending) ? null : pending
 }
 
@@ -3107,6 +3134,23 @@ export function reorderAgents(orderedIds: string[]): void {
     // then surface the failure.
     setState({ pendingAgentOrder: null })
     toast.error(e instanceof Error ? e.message : "Could not reorder the agents.")
+  })
+}
+
+// Flat model: reorder every terminal as one global list (the twin of
+// `reorderAgents`). `orderedIds` MUST be the complete set of ALL terminal ids (any
+// owner) in the desired order. The server validates it as a strict permutation and
+// rejects a partial/stale set. The optimistic `pendingTerminalOrder` overlay clears
+// when the next spine confirms the order (or on error). Terminal order is
+// runtime-only, so this resets to creation order on restart.
+export function reorderTerminals(orderedIds: string[]): void {
+  setState({ pendingTerminalOrder: orderedIds })
+  terminalsApi.reorder(orderedIds).catch((e) => {
+    // A rejected reorder is never reconciled by a spine, so the overlay would
+    // linger forever. Clear it so the UI snaps back to the authoritative order,
+    // then surface the failure.
+    setState({ pendingTerminalOrder: null })
+    toast.error(e instanceof Error ? e.message : "Could not reorder the terminals.")
   })
 }
 

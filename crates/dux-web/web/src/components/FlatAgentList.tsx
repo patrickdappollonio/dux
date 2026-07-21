@@ -78,6 +78,7 @@ import {
 } from "@/lib/flatList"
 import {
   assembleFlatTerminals,
+  sortFlatTerminals,
   terminalStateWord,
   type FlatTerminal,
 } from "@/lib/flatTerminals"
@@ -100,6 +101,7 @@ import {
   openRename,
   openStartupLogs,
   reorderAgents,
+  reorderTerminals,
   rerunStartupCommand,
   setAgentSearch,
   setAgentSort,
@@ -479,6 +481,7 @@ function TerminalFlatRow({
   ownerLabel,
   active,
   onSelect,
+  sortable,
 }: {
   terminal: TerminalView
   siblings: readonly TerminalView[]
@@ -486,14 +489,33 @@ function TerminalFlatRow({
   ownerLabel: string
   active: boolean
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
+  sortable: boolean
 }) {
   const title = terminalTitle(terminal, siblings)
   const word = terminalStateWord(terminal)
   // Same working cue as the agent row: the name shimmers while streaming, and only
   // while streaming and NOT typing (typing owns the caret) so the two read apart.
   const shimmer = terminal.working && !terminal.typing
+
+  // Whole-row drag, exactly like AgentFlatRow: `useSortable` supplies the drag
+  // listeners spread onto the select button (the PointerSensor's 6px activation
+  // distance keeps a plain click as a select), and the wrapper carries the
+  // Y-locked transform so a row never flies out of the column.
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: terminal.id })
+  const style: CSSProperties = {
+    transform: transform
+      ? `translate3d(0, ${Math.round(transform.y)}px, 0)`
+      : undefined,
+    transition,
+    opacity: isDragging ? 0.6 : undefined,
+  }
+  const dragProps = sortable ? { ...attributes, ...listeners } : {}
+
   return (
     <div
+      ref={setNodeRef}
+      style={style}
       className={cn(
         "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -501,6 +523,7 @@ function TerminalFlatRow({
       )}
     >
       <button
+        {...dragProps}
         type="button"
         onClick={() => onSelect(terminal.id, owner)}
         className="flex min-w-0 flex-1 touch-manipulation items-start gap-2.5 py-2 pl-2 text-left max-md:min-h-10"
@@ -582,10 +605,14 @@ function TerminalsSection({
   terminals,
   selectedTarget,
   onSelect,
+  sensors,
+  onDragEnd,
 }: {
   terminals: FlatTerminal[]
   selectedTarget: SelectedTarget | null
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
+  sensors: ReturnType<typeof useSensors>
+  onDragEnd: (event: DragEndEvent) => void
 }) {
   if (terminals.length === 0) return null
   return (
@@ -597,22 +624,40 @@ function TerminalsSection({
           {terminals.length}
         </span>
       </div>
-      <div className="mt-1 flex flex-col gap-1">
-        {terminals.map((ft) => (
-          <TerminalFlatRow
-            key={ft.terminal.id}
-            terminal={ft.terminal}
-            siblings={ft.siblings}
-            owner={ft.owner}
-            ownerLabel={ft.ownerLabel}
-            active={
-              selectedTarget?.kind === "terminal" &&
-              selectedTarget.terminalId === ft.terminal.id
-            }
-            onSelect={onSelect}
-          />
-        ))}
-      </div>
+      {/* A SEPARATE DndContext + SortableContext from the agents one above: its
+          items are ONLY terminal ids, so dnd-kit can never pick an agent row as a
+          drop target for a terminal (or vice versa). This enforces the intended
+          within-group rule (a terminal reorders only among terminals) purely
+          through the two contexts holding disjoint id sets. A drag flips the shared
+          sort to manual, exactly like the agent drag. */}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={onDragEnd}
+      >
+        <SortableContext
+          items={terminals.map((ft) => ft.terminal.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div className="mt-1 flex flex-col gap-1">
+            {terminals.map((ft) => (
+              <TerminalFlatRow
+                key={ft.terminal.id}
+                terminal={ft.terminal}
+                siblings={ft.siblings}
+                owner={ft.owner}
+                ownerLabel={ft.ownerLabel}
+                active={
+                  selectedTarget?.kind === "terminal" &&
+                  selectedTarget.terminalId === ft.terminal.id
+                }
+                onSelect={onSelect}
+                sortable
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
     </div>
   )
 }
@@ -710,6 +755,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     selectedTarget,
     agentSearch: rawAgentSearch,
     pendingAgentOrder,
+    pendingTerminalOrder,
   } = dux
   const agentSort = agentSortValue(dux)
   const agentSearch = rawAgentSearch ?? ""
@@ -747,17 +793,36 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   )
 
   // The flat Terminals section: EVERY terminal, companion (session-owned) and
-  // project-owned alike, in one list at the bottom. Session terminals first (in
-  // session order), then project terminals (in project display order), each
-  // carrying its owner label. Not draggable in this phase (spine order only).
+  // project-owned alike, in one list at the bottom, each carrying its owner label.
+  // Ordering mirrors the agent list: a GLOBAL base order (every terminal sorted by
+  // its `sort_order`, since a drag restamps `sort_order` across all owners), then
+  // the optimistic drag overlay, then the shared active sort mode applied on top.
   const orderedProjects = [...withAgents, ...withoutAgents]
     .map((id) => rawProjects.find((p) => p.id === id))
     .filter((p): p is (typeof rawProjects)[number] => p !== undefined)
-  const flatTerminals = assembleFlatTerminals(
+  // Assemble (owner-grouped, for the owner labels) then re-sort into the global
+  // `sort_order` base (the terminal twin of `spine.sessions` already being in
+  // global order for agents).
+  const assembledTerminals = assembleFlatTerminals(
     coreSessions,
     orderedProjects,
     projectName,
-  ).filter((ft) =>
+  )
+  const baseTerminals = assembledTerminals
+    .slice()
+    .sort((a, b) => a.terminal.sort_order - b.terminal.sort_order)
+  // The optimistic overlay reorders the base by terminal id (reusing `reorderById`,
+  // which keys off `.id`, via a thin `{ id, ft }` wrapper). This is the terminal
+  // twin of `coreSessions = reorderById(rawSessions, pendingAgentOrder)`.
+  const overlaidTerminals: FlatTerminal[] = pendingTerminalOrder
+    ? reorderById(
+        baseTerminals.map((ft) => ({ id: ft.terminal.id, ft })),
+        pendingTerminalOrder,
+      ).map((w) => w.ft)
+    : baseTerminals
+  // Apply the shared sort mode (manual is verbatim, so the overlay survives it),
+  // then the search filter (after the sort, matching the agent pipeline).
+  const flatTerminals = sortFlatTerminals(overlaidTerminals, agentSort).filter((ft) =>
     matchesTerminalQuery(ft.terminal, ft.ownerLabel, ft.projectName, query),
   )
 
@@ -765,6 +830,20 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   )
+
+  // The terminal drag's twin of `handleDragEnd`: move the dragged terminal to the
+  // drop target's slot in the COMPLETE base terminal id order (any owner), and if
+  // that changed the order, flip the shared sort to manual (so the dropped position
+  // sticks instead of being re-sorted away) and persist via `reorderTerminals`.
+  function handleTerminalDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const fullOrder = overlaidTerminals.map((ft) => ft.terminal.id)
+    const next = moveItem(fullOrder, String(active.id), String(over.id))
+    if (ordersMatch(fullOrder, next)) return
+    if (!manual) setAgentSort("manual")
+    reorderTerminals(next)
+  }
 
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
@@ -877,6 +956,8 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
               terminals={flatTerminals}
               selectedTarget={selectedTarget}
               onSelect={handlers.onSelectTerminal}
+              sensors={sensors}
+              onDragEnd={handleTerminalDragEnd}
             />
           </>
         )}

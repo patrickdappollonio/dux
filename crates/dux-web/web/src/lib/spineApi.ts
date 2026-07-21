@@ -125,9 +125,19 @@ export async function fetchSpine(): Promise<Spine> {
 // fields above are coerced (downstream consumers treat `typing`/`working` as
 // required).
 type RawTab = Omit<AgentTabView, "typing"> & { typing?: boolean }
-type RawTerminal = Omit<TerminalView, "working" | "typing"> & {
+// The sort keys (`sort_order`/`created_at`/`updated_at`) are newer than the
+// terminal view too, added for the terminal-sort/drag parity work; an older
+// server omits them, so coerce each to a safe default at this same boundary
+// (`sort_order` to 0, the timestamps to "", which the pure sort treats as epoch 0).
+type RawTerminal = Omit<
+  TerminalView,
+  "working" | "typing" | "sort_order" | "created_at" | "updated_at"
+> & {
   working?: boolean
   typing?: boolean
+  sort_order?: number
+  created_at?: string
+  updated_at?: string
 }
 
 function normalizeTab(t: RawTab): AgentTabView {
@@ -135,5 +145,12 @@ function normalizeTab(t: RawTab): AgentTabView {
 }
 
 function normalizeTerminal(t: RawTerminal): TerminalView {
-  return { ...t, working: t.working ?? false, typing: t.typing ?? false }
+  return {
+    ...t,
+    working: t.working ?? false,
+    typing: t.typing ?? false,
+    sort_order: t.sort_order ?? 0,
+    created_at: t.created_at ?? "",
+    updated_at: t.updated_at ?? "",
+  }
 }

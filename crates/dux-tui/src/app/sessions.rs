@@ -6236,4 +6236,164 @@ mod tests {
             app.status.message()
         );
     }
+
+    // ---- terminal_items sort-mode coverage (Phase 4b) --------------------------
+    //
+    // These mirror the agent-list sort tests above but over the flat Terminals
+    // section, and must stay in lockstep with the web `sortFlatTerminals` tests.
+
+    /// Insert a companion terminal with fully controlled sort keys. Spawns a cheap
+    /// throwaway PTY (`echo`) for `client`; `terminal_items` never reads it.
+    fn insert_test_terminal(
+        app: &mut App,
+        id: &str,
+        sort_order: u64,
+        created_at: chrono::DateTime<Utc>,
+        label: &str,
+        foreground_cmd: Option<&str>,
+    ) {
+        let client =
+            crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
+                .expect("spawn echo for test terminal");
+        app.engine.companion_terminals.insert(
+            id.to_string(),
+            CompanionTerminal {
+                owner: TerminalOwner::Session("s1".to_string()),
+                label: label.to_string(),
+                foreground_cmd: foreground_cmd.map(|s| s.to_string()),
+                client,
+                sort_order,
+                created_at,
+            },
+        );
+    }
+
+    fn app_with_one_session() -> App {
+        let session = make_session("s1", "claude", "/tmp/wt/a");
+        let project = make_project("project-1", "claude");
+        test_app_with_sessions(vec![session], vec![project])
+    }
+
+    fn terminal_order(app: &App) -> Vec<String> {
+        app.terminal_items()
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn terminal_items_manual_orders_by_sort_order() {
+        let mut app = app_with_one_session();
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        let now = Utc::now();
+        // Insert out of order; sort_order is the sole tiebreaker.
+        insert_test_terminal(&mut app, "term-c", 2, now, "zzz", None);
+        insert_test_terminal(&mut app, "term-a", 0, now, "mmm", None);
+        insert_test_terminal(&mut app, "term-b", 1, now, "aaa", None);
+
+        assert_eq!(terminal_order(&app), vec!["term-a", "term-b", "term-c"]);
+    }
+
+    #[test]
+    fn terminal_items_created_orders_newest_first() {
+        let mut app = app_with_one_session();
+        app.engine.config.ui.agent_sort = "created".to_string();
+        let t0 = Utc::now();
+        insert_test_terminal(&mut app, "term-a", 0, t0, "a", None);
+        insert_test_terminal(
+            &mut app,
+            "term-b",
+            1,
+            t0 + chrono::Duration::seconds(10),
+            "b",
+            None,
+        );
+        insert_test_terminal(
+            &mut app,
+            "term-c",
+            2,
+            t0 + chrono::Duration::seconds(20),
+            "c",
+            None,
+        );
+
+        // Newest created first.
+        assert_eq!(terminal_order(&app), vec!["term-c", "term-b", "term-a"]);
+    }
+
+    #[test]
+    fn terminal_items_updated_orders_by_recent_pty_activity() {
+        let mut app = app_with_one_session();
+        app.engine.config.ui.agent_sort = "updated".to_string();
+        let now = Utc::now();
+        // Identical created_at so ONLY pty_activity distinguishes them.
+        insert_test_terminal(&mut app, "term-a", 0, now, "a", None);
+        insert_test_terminal(&mut app, "term-b", 1, now, "b", None);
+        insert_test_terminal(&mut app, "term-c", 2, now, "c", None);
+
+        // term-b activity is the most recent (smallest elapsed), term-a the oldest.
+        app.engine.pty_activity.insert(
+            "term-a".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(30),
+        );
+        app.engine.pty_activity.insert(
+            "term-c".to_string(),
+            std::time::Instant::now() - std::time::Duration::from_secs(15),
+        );
+        app.engine
+            .pty_activity
+            .insert("term-b".to_string(), std::time::Instant::now());
+
+        assert_eq!(terminal_order(&app), vec!["term-b", "term-c", "term-a"]);
+    }
+
+    #[test]
+    fn terminal_items_name_uses_displayed_label_and_reverses() {
+        let mut app = app_with_one_session();
+        let now = Utc::now();
+        // Displayed name = foreground_cmd when present/non-empty, else label. The
+        // sort_order is deliberately anti-alphabetical to prove name wins.
+        insert_test_terminal(&mut app, "term-vim", 0, now, "shell", Some("vim"));
+        insert_test_terminal(&mut app, "term-bash", 1, now, "bash", None);
+        insert_test_terminal(&mut app, "term-htop", 2, now, "shell", Some("htop"));
+
+        app.engine.config.ui.agent_sort = "name".to_string();
+        // bash < htop < vim
+        assert_eq!(
+            terminal_order(&app),
+            vec!["term-bash", "term-htop", "term-vim"]
+        );
+
+        app.engine.config.ui.agent_sort = "name_desc".to_string();
+        assert_eq!(
+            terminal_order(&app),
+            vec!["term-vim", "term-htop", "term-bash"]
+        );
+    }
+
+    #[test]
+    fn terminal_items_active_floats_working_or_typing_to_top() {
+        let mut app = app_with_one_session();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        let now = Utc::now();
+        insert_test_terminal(&mut app, "term-a", 0, now, "a", None);
+        insert_test_terminal(&mut app, "term-b", 1, now, "b", None);
+        insert_test_terminal(&mut app, "term-c", 2, now, "c", None);
+        insert_test_terminal(&mut app, "term-d", 3, now, "d", None);
+
+        // term-c is working (fresh pty_activity, no input); term-b is typing.
+        app.engine
+            .pty_activity
+            .insert("term-c".to_string(), std::time::Instant::now());
+        app.engine
+            .pty_input
+            .insert("term-b".to_string(), std::time::Instant::now());
+
+        // Hot terminals float up keeping base sort_order order (b before c), then
+        // the idle rest in base order (a, d).
+        assert_eq!(
+            terminal_order(&app),
+            vec!["term-b", "term-c", "term-a", "term-d"]
+        );
+    }
 }

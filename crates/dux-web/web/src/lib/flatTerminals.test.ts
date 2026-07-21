@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { assembleFlatTerminals, terminalStateWord } from "@/lib/flatTerminals"
+import {
+  assembleFlatTerminals,
+  sortFlatTerminals,
+  terminalStateWord,
+  type FlatTerminal,
+} from "@/lib/flatTerminals"
 import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
 
 function term(over: Partial<TerminalView> & { id: string }): TerminalView {
@@ -10,7 +15,22 @@ function term(over: Partial<TerminalView> & { id: string }): TerminalView {
     working: false,
     typing: false,
     foreground_cmd: null,
+    sort_order: 0,
+    created_at: "2026-07-17T12:00:00Z",
+    updated_at: "2026-07-17T12:00:00Z",
     ...over,
+  }
+}
+
+// Wrap a bare terminal into a FlatTerminal for the sort tests; only `.terminal`
+// matters to `sortFlatTerminals`, so the owner metadata is a stable stub.
+function flat(t: TerminalView): FlatTerminal {
+  return {
+    terminal: t,
+    owner: { kind: "session", sessionId: "s1" },
+    ownerLabel: "Agent",
+    projectName: "Web App",
+    siblings: [t],
   }
 }
 
@@ -137,5 +157,74 @@ describe("assembleFlatTerminals", () => {
 
   it("returns an empty list when nothing owns a terminal", () => {
     expect(assembleFlatTerminals([], [], projectName)).toEqual([])
+  })
+})
+
+describe("sortFlatTerminals", () => {
+  // The caller passes the list already in global `sort_order` base order; these
+  // fixtures follow that convention (ids ascend with sort_order).
+  const base = () => [
+    flat(term({ id: "a", sort_order: 0, foreground_cmd: "vim" })),
+    flat(term({ id: "b", sort_order: 1, foreground_cmd: "bash" })),
+    flat(term({ id: "c", sort_order: 2, foreground_cmd: "htop" })),
+  ]
+  const ids = (list: FlatTerminal[]) => list.map((f) => f.terminal.id)
+
+  it("manual keeps the base order verbatim (the drag order)", () => {
+    expect(ids(sortFlatTerminals(base(), "manual"))).toEqual(["a", "b", "c"])
+  })
+
+  it("active floats working-or-typing terminals to the top, keeping base order", () => {
+    const list = [
+      flat(term({ id: "a", sort_order: 0 })),
+      flat(term({ id: "b", sort_order: 1, typing: true })),
+      flat(term({ id: "c", sort_order: 2, working: true })),
+      flat(term({ id: "d", sort_order: 3 })),
+    ]
+    // Hot (b typing, c working) first in base order, then the idle rest (a, d).
+    expect(ids(sortFlatTerminals(list, "active"))).toEqual(["b", "c", "a", "d"])
+  })
+
+  it("created orders newest created_at first", () => {
+    const list = [
+      flat(term({ id: "a", sort_order: 0, created_at: "2026-07-17T12:00:00Z" })),
+      flat(term({ id: "b", sort_order: 1, created_at: "2026-07-17T12:00:20Z" })),
+      flat(term({ id: "c", sort_order: 2, created_at: "2026-07-17T12:00:10Z" })),
+    ]
+    expect(ids(sortFlatTerminals(list, "created"))).toEqual(["b", "c", "a"])
+  })
+
+  it("updated orders newest updated_at first", () => {
+    const list = [
+      flat(term({ id: "a", sort_order: 0, updated_at: "2026-07-17T12:00:00Z" })),
+      flat(term({ id: "b", sort_order: 1, updated_at: "2026-07-17T12:00:30Z" })),
+      flat(term({ id: "c", sort_order: 2, updated_at: "2026-07-17T12:00:15Z" })),
+    ]
+    expect(ids(sortFlatTerminals(list, "updated"))).toEqual(["b", "c", "a"])
+  })
+
+  it("name sorts by the DISPLAYED label (foreground_cmd, else label), A to Z", () => {
+    // Displayed names: a=vim, b=bash, c=htop -> bash, htop, vim.
+    expect(ids(sortFlatTerminals(base(), "name"))).toEqual(["b", "c", "a"])
+  })
+
+  it("name falls back to the label when foreground_cmd is empty", () => {
+    const list = [
+      flat(term({ id: "a", sort_order: 0, foreground_cmd: null, label: "zzz" })),
+      flat(term({ id: "b", sort_order: 1, foreground_cmd: "", label: "aaa" })),
+    ]
+    // b's empty foreground_cmd falls back to label "aaa" < "zzz".
+    expect(ids(sortFlatTerminals(list, "name"))).toEqual(["b", "a"])
+  })
+
+  it("name_desc is the exact reverse of name", () => {
+    expect(ids(sortFlatTerminals(base(), "name_desc"))).toEqual(["a", "c", "b"])
+  })
+
+  it("does not mutate the caller's array", () => {
+    const list = base()
+    const before = ids(list)
+    sortFlatTerminals(list, "name")
+    expect(ids(list)).toEqual(before)
   })
 })

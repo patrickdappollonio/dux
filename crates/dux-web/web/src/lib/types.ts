@@ -101,6 +101,21 @@ export interface TerminalView {
    * terminal title follows this when present, falling back to `label` (see
    * `terminalTitle`). */
   foreground_cmd: string | null
+  /** The terminal's manual (drag) display position within the flat Terminals
+   * section, ascending. Stamped at spawn from a monotonic counter so the default
+   * equals creation order, and rewritten only by a reorder. RUNTIME ONLY: it is
+   * never persisted and resets to creation order on restart. An older server omits
+   * it; `applySpine` normalizes a missing value to `0`. */
+  sort_order: number
+  /** RFC 3339 spawn time, immutable after spawn. Same representation as
+   * `SessionView`'s timestamps so the terminal sort can compute the same
+   * "recently created" order as the agent sort. An older server omits it;
+   * `applySpine` normalizes a missing value to "". */
+  created_at: string
+  /** RFC 3339 timestamp of the terminal's last PTY activity (falling back to the
+   * spawn time when there has been none). Drives the "recently updated" sort. An
+   * older server omits it; `applySpine` normalizes a missing value to "". */
+  updated_at: string
 }
 
 export interface SessionView {

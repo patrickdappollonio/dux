@@ -44,10 +44,21 @@ let spineBody: unknown = {
 
 // Every fetch call, as [url, init], for assertions.
 let calls: [string, RequestInit | undefined][] = []
+// When set, the terminals reorder POST responds 400 so the overlay-clear-on-error
+// path can be exercised.
+let reorderFail = false
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
   calls.push([u, init])
+  if (u === "/api/v1/terminals/reorder") {
+    return {
+      ok: !reorderFail,
+      status: reorderFail ? 400 : 204,
+      text: async () => (reorderFail ? "nope" : ""),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
   if (u.includes("/api/v1/bootstrap")) {
     return {
       ok: true,
@@ -110,6 +121,7 @@ class FakeWebSocket {
 
 beforeEach(() => {
   calls = []
+  reorderFail = false
   spineBody = {
     projects: [{ id: "p1", name: "Repo" }],
     sessions: [
@@ -257,5 +269,87 @@ describe("store companion-terminal lifecycle", () => {
     )
     expect(sessionDel).toBeDefined()
     expect(projectDel).toBeDefined()
+  })
+})
+
+describe("store terminal reorder overlay", () => {
+  it("reorderTerminals sets the optimistic overlay and POSTs the full id order", async () => {
+    const mod = await loadStore()
+    mod.reorderTerminals(["t3", "t1", "t2"])
+    // The overlay is applied synchronously so the UI reflects the drop instantly.
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t3", "t1", "t2"])
+    await tick()
+    const post = find(
+      (u, init) => u === "/api/v1/terminals/reorder" && init?.method === "POST",
+    )
+    expect(post).toBeDefined()
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({
+      terminal_ids: ["t3", "t1", "t2"],
+    })
+  })
+
+  it("clears the overlay once a spine confirms the order (reconcile)", async () => {
+    const mod = await loadStore()
+    mod.reorderTerminals(["t2", "t1"])
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
+    await tick()
+    // A spine whose terminals' global sort_order matches the dragged order: t2
+    // before t1. The reconcile sorts every terminal by sort_order and clears the
+    // overlay when that matches what we optimistically applied.
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          terminals: [
+            { id: "t1", label: "Terminal 1", sort_order: 1 },
+            { id: "t2", label: "Terminal 2", sort_order: 0 },
+          ],
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTerminalOrder).toBeNull()
+    })
+  })
+
+  it("keeps the overlay when the spine order does not yet match", async () => {
+    const mod = await loadStore()
+    mod.reorderTerminals(["t2", "t1"])
+    await tick()
+    // Spine still reflects the OLD order (t1 before t2): overlay must persist.
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          terminals: [
+            { id: "t1", label: "Terminal 1", sort_order: 0 },
+            { id: "t2", label: "Terminal 2", sort_order: 1 },
+          ],
+        },
+      ],
+      sidebar: { groups: [] },
+    }
+    mod.eventsSocket.onEvent({ event: "sessions.changed" })
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().spine?.sessions[0].terminals).toHaveLength(2)
+    })
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
+  })
+
+  it("clears the overlay and does not throw when the reorder POST fails", async () => {
+    reorderFail = true
+    const mod = await loadStore()
+    mod.reorderTerminals(["t2", "t1"])
+    expect(mod.getSnapshot().pendingTerminalOrder).toEqual(["t2", "t1"])
+    // The rejected POST clears the overlay so the UI snaps back to server order.
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTerminalOrder).toBeNull()
+    })
   })
 })
