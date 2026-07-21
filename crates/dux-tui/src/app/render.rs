@@ -1177,7 +1177,7 @@ impl App {
         // Each row carries an owner-derived display name (the agent's branch or
         // the project's name) so a generic engine label like "Terminal 3" is
         // never ambiguous between an agent terminal and a project terminal.
-        let terminal_render_data: Vec<(String, String, Option<String>, String)> = terminal_items
+        let terminal_render_data: Vec<(String, Option<String>, String)> = terminal_items
             .iter()
             .map(|(id, t)| {
                 let owner_name = match &t.owner {
@@ -1196,12 +1196,7 @@ impl App {
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| pid.clone()),
                 };
-                (
-                    (*id).clone(),
-                    t.label.clone(),
-                    t.foreground_cmd.clone(),
-                    owner_name,
-                )
+                ((*id).clone(), t.foreground_cmd.clone(), owner_name)
             })
             .collect();
 
@@ -1414,7 +1409,7 @@ impl App {
             let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
-                .map(|(term_id, label, fg_cmd, owner_name)| {
+                .map(|(term_id, fg_cmd, owner_name)| {
                     // A terminal is either alive or gone (never detached / needs
                     // you), so the state reduces to typing -> working -> idle. It
                     // is Working when streaming output OR running a foreground app
@@ -1427,7 +1422,6 @@ impl App {
                         typing,
                         working,
                         spinner,
-                        label,
                         fg_cmd.as_deref(),
                         owner_name,
                         term_text_width,
@@ -8489,7 +8483,7 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 /// attention states a terminal can never be in: `TYPING_GLYPH` in
 /// `session_typing` while typing, the shared spinner in `session_working` while
 /// working, else a steady dot in `session_active`. The primary label is the foreground command when
-/// something is running, otherwise the terminal's shell label.
+/// something is running, otherwise a plain "Terminal".
 ///
 /// Line two: an owner marker, the owner's display name (the agent's title or
 /// branch, or the project's name), and the colored state word — reusing
@@ -8502,7 +8496,6 @@ fn terminal_row_lines(
     typing: bool,
     working: bool,
     spinner: char,
-    label: &str,
     fg_cmd: Option<&str>,
     owner_name: &str,
     text_width: u16,
@@ -8515,10 +8508,12 @@ fn terminal_row_lines(
         (crate::theme::DOT_GLYPH.to_string(), theme.session_active)
     };
     // Something running (a non-empty foreground command) names the row; an idle
-    // terminal falls back to its shell label.
+    // terminal reads a plain "Terminal" (the owner on line two and row order
+    // distinguish several idle terminals, so the "Terminal N" number is not
+    // surfaced here).
     let primary = match fg_cmd {
         Some(cmd) if !cmd.is_empty() => cmd,
-        _ => label,
+        _ => "Terminal",
     };
     let line1 = ellipsize_spans(
         vec![
@@ -9018,28 +9013,21 @@ mod tests {
                 .fg
         };
 
-        // Idle terminal: a steady dot, the shell label, and a muted "Idle" word.
-        // `terminal_row_lines` now returns the two content lines; the trailing
-        // spacer is added by `framed_row_item` (asserted separately below).
+        // Idle terminal: a steady dot, a plain "Terminal" (not the shell label),
+        // and a muted "Idle" word. `terminal_row_lines` now returns the two
+        // content lines; the trailing spacer is added by `framed_row_item`.
         let (idle0, idle1) =
-            terminal_row_lines(&theme, false, false, '⠋', "zsh", None, "my-branch", width);
+            terminal_row_lines(&theme, false, false, '⠋', None, "my-branch", width);
         assert!(line_text(&idle0).contains(crate::theme::DOT_GLYPH));
-        assert!(line_text(&idle0).contains("zsh"));
+        assert!(line_text(&idle0).contains("Terminal"));
+        assert!(!line_text(&idle0).contains("zsh"));
         assert!(line_text(&idle1).contains("my-branch"));
         assert_eq!(word_span(&idle1, "Idle"), Some(theme.provider_label_fg));
 
         // Working terminal: the foreground command replaces the label, the
         // spinner glyph shows, and the "Working" word takes the active color.
-        let (working0, working1) = terminal_row_lines(
-            &theme,
-            false,
-            true,
-            '⠙',
-            "zsh",
-            Some("cargo test"),
-            "proj",
-            width,
-        );
+        let (working0, working1) =
+            terminal_row_lines(&theme, false, true, '⠙', Some("cargo test"), "proj", width);
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
         assert!(line_text(&working0).contains('⠙'));
@@ -9048,7 +9036,7 @@ mod tests {
         // Typing wins over working: the typing glyph and word, both in the
         // session_typing color, and the foreground command as the label.
         let (typing0, typing1) =
-            terminal_row_lines(&theme, true, true, '⠹', "zsh", Some("vim"), "proj", width);
+            terminal_row_lines(&theme, true, true, '⠹', Some("vim"), "proj", width);
         assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
         assert!(line_text(&typing0).contains("vim"));
         assert_eq!(typing0.spans[0].style.fg, Some(theme.session_typing));

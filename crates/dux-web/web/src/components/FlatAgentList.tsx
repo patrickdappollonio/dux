@@ -108,7 +108,7 @@ import {
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
-import { terminalTitle } from "@/lib/terminals"
+import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { SessionView, TerminalView } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -491,7 +491,15 @@ function TerminalFlatRow({
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
   sortable: boolean
 }) {
-  const title = terminalTitle(terminal, siblings)
+  // In the sidebar row an idle terminal reads a plain "Terminal" (the owner on
+  // line two and row order distinguish several), while a running one shows its
+  // foreground app via `terminalTitle`. The identifying "Terminal N" label still
+  // drives the tooltip and the other surfaces (breadcrumb, task manager) that
+  // call `terminalTitle` directly. Mirrors the TUI terminal row.
+  const title =
+    terminalForeground(terminal) === null
+      ? "Terminal"
+      : terminalTitle(terminal, siblings)
   const word = terminalStateWord(terminal)
   // Same working cue as the agent row: the name shimmers while streaming, and only
   // while streaming and NOT typing (typing owns the caret) so the two read apart.

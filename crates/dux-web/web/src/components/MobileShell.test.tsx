@@ -211,7 +211,10 @@ describe("MobileShell project terminals", () => {
       bootstrap: { title: "dux", dux_version: "v1" },
     })
     render(<MobileShell />)
-    expect(screen.getByText("Terminal 2")).toBeTruthy()
+    // Idle in the sidebar reads a plain "Terminal" (the "Terminal N" label still
+    // identifies it in the tooltip and the task manager); the row rendering on
+    // the hub is what this guards.
+    expect(screen.getByText("Terminal")).toBeTruthy()
   })
 
   it("offers 'New project terminal' in the project ⋯ menu", () => {
