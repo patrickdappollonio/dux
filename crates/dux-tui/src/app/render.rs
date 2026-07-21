@@ -1416,11 +1416,12 @@ impl App {
                 .iter()
                 .map(|(term_id, label, fg_cmd, owner_name)| {
                     // A terminal is either alive or gone (never detached / needs
-                    // you), so the state reduces to typing -> working -> idle,
-                    // read off the same engine predicates the agent rows use. A
-                    // terminal id (`term-N`) is a valid key for both.
+                    // you), so the state reduces to typing -> working -> idle. It
+                    // is Working when streaming output OR running a foreground app
+                    // (busy while quiet), via the shared `terminal_is_working`; a
+                    // terminal id (`term-N`) keys both engine predicates.
                     let typing = self.engine.is_typing(term_id);
-                    let working = self.engine.is_agent_streaming(term_id);
+                    let working = self.engine.terminal_is_working(term_id);
                     let (line1, line2) = terminal_row_lines(
                         &self.theme,
                         typing,

@@ -211,6 +211,68 @@ mod tests {
     }
 
     #[test]
+    fn terminal_is_working_tracks_a_running_foreground_app() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let (id, _) = engine.create_companion_terminal("s1").expect("terminal");
+
+        // Idle shell prompt: no foreground app, no streaming, no typing -> idle.
+        engine
+            .companion_terminals
+            .get_mut(&id)
+            .unwrap()
+            .foreground_cmd = None;
+        assert!(
+            !engine.terminal_is_working(&id),
+            "an idle terminal at the shell prompt is not working"
+        );
+
+        // A foreground app is running (the name changed): busy even with no output.
+        engine
+            .companion_terminals
+            .get_mut(&id)
+            .unwrap()
+            .foreground_cmd = Some("vim".to_string());
+        assert!(
+            engine.terminal_is_working(&id),
+            "a running foreground app reads as working even while quiet"
+        );
+
+        // Typing into the terminal takes precedence over the running app.
+        engine.note_pty_input(&id);
+        assert!(
+            !engine.terminal_is_working(&id),
+            "typing suppresses the working cue"
+        );
+        engine.pty_input.remove(&id);
+
+        // An empty foreground_cmd is treated as no app.
+        engine
+            .companion_terminals
+            .get_mut(&id)
+            .unwrap()
+            .foreground_cmd = Some(String::new());
+        assert!(
+            !engine.terminal_is_working(&id),
+            "an empty foreground_cmd is not a running app"
+        );
+
+        // An unknown terminal id is never working.
+        assert!(!engine.terminal_is_working("term-nope"));
+    }
+
+    #[test]
     fn create_companion_terminal_unknown_session_errors() {
         let (mut engine, _tmp) = test_engine();
         engine.config.terminal.command = "cat".to_string();

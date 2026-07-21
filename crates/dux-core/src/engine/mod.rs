@@ -854,6 +854,28 @@ impl Engine {
             .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW)
     }
 
+    /// Whether a companion terminal is "busy" (its Working cue). Unlike an agent,
+    /// a terminal is busy in two cases: it is streaming output right now
+    /// (`is_agent_streaming`), OR a foreground app is running in it even while
+    /// quiet. `PtyClient::foreground_process_name` returns `None` when the shell
+    /// itself owns the terminal foreground (an idle prompt) and `Some(app)` once a
+    /// real command runs, so a set `foreground_cmd` means an app is running. Typing
+    /// takes precedence: while the user is typing into the terminal it reads as
+    /// Typing, not Working, matching how `is_agent_streaming` voids streaming
+    /// during input. Returns false for an unknown id.
+    pub fn terminal_is_working(&self, terminal_id: &str) -> bool {
+        if self.is_typing(terminal_id) {
+            return false;
+        }
+        if self.is_agent_streaming(terminal_id) {
+            return true;
+        }
+        self.companion_terminals
+            .get(terminal_id)
+            .and_then(|t| t.foreground_cmd.as_deref())
+            .is_some_and(|cmd| !cmd.is_empty())
+    }
+
     /// The terminal identity dux should apply when launching an agent, resolved
     /// from the configured mode, the owning surface, and the inherited-env probe.
     /// Companion terminals reuse it too so a plain shell sees the same identity.

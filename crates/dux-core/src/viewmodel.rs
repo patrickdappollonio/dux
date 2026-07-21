@@ -279,11 +279,12 @@ pub struct TerminalView {
     pub label: String,
     /// Whether the terminal's PTY has emitted any output yet.
     pub has_output: bool,
-    /// Whether this terminal is actively streaming output right now. Reuses the
-    /// agent streaming predicate ([`crate::engine::Engine::is_agent_streaming`]):
-    /// terminals never emit OSC progress, so it reduces to fresh PTY output that
-    /// is not the echo of the user's own typing. Terminals have no detached or
-    /// needs-attention notion, so those fields are deliberately absent here.
+    /// Whether this terminal is busy ([`crate::engine::Engine::terminal_is_working`]):
+    /// it is streaming output right now, OR a foreground app is running in it even
+    /// while quiet (a set `foreground_cmd`, i.e. the shell no longer owns the
+    /// terminal foreground). Typing takes precedence, so this excludes the echo of
+    /// the user's own typing. Terminals have no detached or needs-attention notion,
+    /// so those fields are deliberately absent here.
     pub working: bool,
     /// Whether the user is currently typing into this terminal (a keystroke
     /// landed within [`crate::engine::AGENT_INPUT_SUPPRESSION_WINDOW`]). Disjoint
@@ -592,8 +593,9 @@ impl Engine {
             id: id.to_string(),
             label: t.label.clone(),
             has_output: t.client.has_output(),
-            // Terminals reuse the agent streaming predicate (see TerminalView).
-            working: self.is_agent_streaming(id),
+            // A terminal is Working when it is streaming output OR a foreground app
+            // is running in it (see `terminal_is_working`); typing takes precedence.
+            working: self.terminal_is_working(id),
             typing: self.is_typing(id),
             foreground_cmd: t.foreground_cmd.clone(),
             sort_order: t.sort_order,
