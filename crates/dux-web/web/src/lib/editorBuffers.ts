@@ -1,3 +1,82 @@
+import type { FileDiffContents } from "./fileApi"
+
+// One tab's Monaco buffer + diff cache, keyed by TAB ID in `EditorBody`'s
+// `buffers` map. `path` is the path this entry was fetched FOR: every read
+// must check it against the tab's CURRENT path via `isBufferStale` before
+// trusting `loaded`/`draft`/diff fields, because `openFile` rule 2 (preview-
+// replace) reuses a tab's id while swapping its path out from under it. A
+// stale entry is treated as unloaded and re-fetched, never rendered.
+export interface TabBuffer {
+  path: string
+  // The path whose content is actually held in `loaded`/`draft`, or null
+  // while a fetch for `path` is in flight / has never completed.
+  loadedPath: string | null
+  // Means exactly one thing: a `fileApi.read` for this buffer's `path` is in
+  // flight. ONLY `loadFileBuffer` issues that read, so ONLY a file-load seed
+  // (`fileLoadSeedBuffer`) starts `loading: true`; it clears the moment the
+  // read settles (success OR error). The neutral `emptyBuffer` seed is
+  // `loading: false` -- a buffer the diff path seeds to hold a just-fetched
+  // diff (a tab opened straight into diff mode) has no file read in flight, so
+  // it must NOT report `loading`, or `shouldSkipFileLoad` reads that phantom
+  // flag and never fires the file read when the user switches to code mode,
+  // leaving the pane spinning forever.
+  //
+  // The flag also dedups within the file path itself: `loadFileBuffer` seeds a
+  // buffer synchronously (so a stale buffer never renders even for one frame)
+  // before its async read resolves, and that synchronous `setState` flips
+  // `loadedPath` (undefined -> null), re-triggering the load effect on the next
+  // render. Without `loading`, the effect's "already loaded?" check
+  // (`loadedPath === path`) sees `null` both before AND during the in-flight
+  // fetch and can't tell them apart, firing a second redundant `fileApi.read`.
+  loading: boolean
+  loaded: string
+  draft: string
+  binary: boolean
+  readOnly: boolean
+  diff: FileDiffContents | null
+  diffLoadedPath: string | null
+  diffLoadedSignal: string
+  fileError: string | null
+  diffError: string | null
+  // The path a load last settled with an ERROR for, or null. Mirrors
+  // `loadedPath` (which records a successful load's path) so the load effect
+  // can tell "never fetched" apart from "fetched and failed" via
+  // `shouldSkipFileLoad`: without this, a failed read left `loadedPath: null`
+  // and `loading: false` forever, so the effect refired `fileApi.read` on
+  // every render for as long as the tab stayed active (a delete/rename race,
+  // or a plain 404, would retry-loop). A settled error is "don't
+  // auto-retry"; the error pane offers a manual Retry action instead.
+  errorPath: string | null
+}
+
+// The neutral seed: a buffer that holds no content and has NO file read in
+// flight (`loading: false`). Used as the base for the diff path (which spreads
+// a fetched diff on top) and as the spread base of `fileLoadSeedBuffer`.
+export function emptyBuffer(path: string): TabBuffer {
+  return {
+    path,
+    loadedPath: null,
+    loading: false,
+    loaded: "",
+    draft: "",
+    binary: false,
+    readOnly: false,
+    diff: null,
+    diffLoadedPath: null,
+    diffLoadedSignal: "",
+    fileError: null,
+    diffError: null,
+    errorPath: null,
+  }
+}
+
+// The seed `loadFileBuffer` installs the instant it issues a `fileApi.read`:
+// the neutral buffer plus `loading: true`, the one place that flag is set. See
+// the `loading` field doc for why only the file path may claim it.
+export function fileLoadSeedBuffer(path: string): TabBuffer {
+  return { ...emptyBuffer(path), loading: true }
+}
+
 // Pure helper for `EditorBody`'s per-tab Monaco buffer cache (keyed by tab id).
 // Kept free of React/Monaco so the load-bearing invariant is unit-testable
 // without mounting Monaco (which cannot mount under vitest, see

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+  emptyBuffer,
+  fileLoadSeedBuffer,
   isBufferStale,
   pruneByIds,
   pruneSetByIds,
@@ -167,5 +169,40 @@ describe("shouldSkipFileLoad", () => {
     expect(
       shouldSkipFileLoad(buffer({ path: "b.ts", errorPath: "b.ts" }), "c.ts"),
     ).toBe(false)
+  })
+})
+
+// The seed constructors carry the one invariant `shouldSkipFileLoad` leans on:
+// `loading` is true ONLY while a `fileApi.read` is in flight. A changed file
+// opened straight into DIFF mode never runs `loadFileBuffer`; its buffer is
+// seeded by the diff path from `emptyBuffer`, so if that seed reported
+// `loading: true` the later switch to code mode would be skipped forever and
+// the pane would spin. These lock the seeds so that regression can't return.
+describe("buffer seeds and the diff-then-code switch", () => {
+  it("emptyBuffer is not loading and holds no content path (no read in flight)", () => {
+    const b = emptyBuffer("a.ts")
+    expect(b.loading).toBe(false)
+    expect(b.loadedPath).toBeNull()
+    expect(b.errorPath).toBeNull()
+  })
+
+  it("fileLoadSeedBuffer is the ONLY seed that reports loading", () => {
+    const b = fileLoadSeedBuffer("a.ts")
+    expect(b.loading).toBe(true)
+    expect(b.loadedPath).toBeNull()
+  })
+
+  it("a diff-seeded buffer does NOT block the switch to code mode", () => {
+    // Reproduces the infinite-spinner bug: the tab opened in diff mode, so its
+    // buffer was seeded by the diff path (emptyBuffer + a fetched diff spread on
+    // top) and no file read ever ran. Switching to code mode must fire the file
+    // read, i.e. shouldSkipFileLoad must be false. When emptyBuffer seeded
+    // `loading: true`, this returned true and the file never loaded.
+    const diffSeeded = {
+      ...emptyBuffer("a.ts"),
+      diff: { original: "", modified: "" } as never,
+      diffLoadedPath: "a.ts",
+    }
+    expect(shouldSkipFileLoad(diffSeeded, "a.ts")).toBe(false)
   })
 })

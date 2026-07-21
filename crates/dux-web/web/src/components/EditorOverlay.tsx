@@ -17,15 +17,17 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { fileApi } from "@/lib/fileApi"
-import type { FileDiffContents } from "@/lib/fileApi"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import {
+  emptyBuffer,
+  fileLoadSeedBuffer,
   isBufferStale,
   pruneByIds,
   pruneSetByIds,
   shouldSkipFileLoad,
   unionRevalidateBatch,
 } from "@/lib/editorBuffers"
+import type { TabBuffer } from "@/lib/editorBuffers"
 import {
   dirtyCloseMessage,
   hasDirtyUnderPath,
@@ -134,69 +136,6 @@ export function EditorOverlay() {
       </DialogContent>
     </Dialog>
   )
-}
-
-// One tab's Monaco buffer + diff cache, keyed by TAB ID in `EditorBody`'s
-// `buffers` map. `path` is the path this entry was fetched FOR: every read
-// must check it against the tab's CURRENT path via `isBufferStale` before
-// trusting `loaded`/`draft`/diff fields, because `openFile` rule 2 (preview-
-// replace) reuses a tab's id while swapping its path out from under it. A
-// stale entry is treated as unloaded and re-fetched, never rendered.
-interface TabBuffer {
-  path: string
-  // The path whose content is actually held in `loaded`/`draft`, or null
-  // while a fetch for `path` is in flight / has never completed.
-  loadedPath: string | null
-  // True from the moment `loadFileBuffer` seeds this entry until its fetch
-  // settles (success OR error). `loadFileBuffer` seeds a fresh buffer
-  // synchronously before its async read resolves (so a stale buffer never
-  // renders even for one frame), and that synchronous `setState` changes
-  // `activeBuffer?.loadedPath` (undefined -> null), which re-triggers the
-  // load effect on the very next render. Without this flag the effect's
-  // "already loaded?" check (`loadedPath === path`) sees `null` both before
-  // AND during the in-flight fetch and can't tell them apart, so it fires a
-  // SECOND `fileApi.read` for the same tab+path. This is harmless for
-  // correctness (the request-token check discards the first response), but
-  // it doubles the read cost on every fresh open. `loading` is the marker
-  // that lets the effect distinguish "already fetching, don't refetch" from
-  // "settled with an error, retry on next visit."
-  loading: boolean
-  loaded: string
-  draft: string
-  binary: boolean
-  readOnly: boolean
-  diff: FileDiffContents | null
-  diffLoadedPath: string | null
-  diffLoadedSignal: string
-  fileError: string | null
-  diffError: string | null
-  // The path a load last settled with an ERROR for, or null. Mirrors
-  // `loadedPath` (which records a successful load's path) so the load effect
-  // can tell "never fetched" apart from "fetched and failed" via
-  // `shouldSkipFileLoad`: without this, a failed read left `loadedPath: null`
-  // and `loading: false` forever, so the effect refired `fileApi.read` on
-  // every render for as long as the tab stayed active (a delete/rename race,
-  // or a plain 404, would retry-loop). A settled error is "don't
-  // auto-retry"; the error pane below offers a manual Retry action instead.
-  errorPath: string | null
-}
-
-function emptyBuffer(path: string): TabBuffer {
-  return {
-    path,
-    loadedPath: null,
-    loading: true,
-    loaded: "",
-    draft: "",
-    binary: false,
-    readOnly: false,
-    diff: null,
-    diffLoadedPath: null,
-    diffLoadedSignal: "",
-    fileError: null,
-    diffError: null,
-    errorPath: null,
-  }
 }
 
 interface EditorBodyProps {
@@ -444,13 +383,13 @@ function EditorBody({ sessionId, closeReqRef }: EditorBodyProps) {
   function loadFileBuffer(tabId: string, path: string): void {
     const token = (fileRequestTokenRef.current.get(tabId) ?? 0) + 1
     fileRequestTokenRef.current.set(tabId, token)
-    // Seed/replace this tab's buffer for the new path. This is the re-key
-    // step the preview-replace fix depends on: without it, a stale buffer
-    // entry for the tab's OLD path could still render while the new fetch
-    // is pending.
+    // Seed/replace this tab's buffer for the new path, marking it `loading`
+    // since a read is now in flight. This is the re-key step the preview-
+    // replace fix depends on: without it, a stale buffer entry for the tab's
+    // OLD path could still render while the new fetch is pending.
     setBuffers((prev) => {
       const next = new Map(prev)
-      next.set(tabId, emptyBuffer(path))
+      next.set(tabId, fileLoadSeedBuffer(path))
       return next
     })
     fileApi
