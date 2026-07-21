@@ -247,6 +247,84 @@ fn right_align_line(
     out
 }
 
+/// Assemble the agent row's second line (`<marker> project · State [· branch]
+/// [· tabs]`) so it matches the web sidebar: the marker, the state word, and the
+/// tab count are FIXED and stay fully visible, while the project name and the
+/// branch truncate (each ending in `…`) to share whatever width is left. This
+/// mirrors the web's per-field flex-shrink instead of ellipsizing the whole line
+/// from the right, which would drop the tab count first. `marker` already
+/// includes the leading indent (e.g. `"  ※ "`); `sep_style` styles the `" · "`
+/// separators.
+fn fit_agent_meta_line(
+    total_w: u16,
+    marker: Span<'static>,
+    name: Option<Span<'static>>,
+    word: Span<'static>,
+    branch: Option<Span<'static>>,
+    tabs: Option<Span<'static>>,
+    sep_style: Style,
+) -> Vec<Span<'static>> {
+    let width = |s: &Span<'static>| s.content.as_ref().cell_width();
+    let sep = || Span::styled(" · ", sep_style);
+    const SEP_W: u16 = 3; // " · "
+
+    // Everything except the two truncatable fields is fixed: the marker, the
+    // name->word separator + word, the separator before the branch (its text is
+    // flexible, its separator is not), and the separator + tab count.
+    let mut fixed = width(&marker)
+        .saturating_add(SEP_W)
+        .saturating_add(width(&word));
+    if branch.is_some() {
+        fixed = fixed.saturating_add(SEP_W);
+    }
+    if let Some(t) = &tabs {
+        fixed = fixed.saturating_add(SEP_W).saturating_add(width(t));
+    }
+
+    let budget = total_w.saturating_sub(fixed);
+    let name_nat = name.as_ref().map(width).unwrap_or(0);
+    let branch_nat = branch.as_ref().map(width).unwrap_or(0);
+
+    // Share the flexible budget between the name and the branch, proportional to
+    // their natural widths (flex-shrink). No truncation when they already fit.
+    let (name_alloc, branch_alloc) = if name_nat + branch_nat <= budget {
+        (name_nat, branch_nat)
+    } else if budget == 0 {
+        (0, 0)
+    } else {
+        let total_nat = u32::from(name_nat + branch_nat).max(1);
+        let mut n = (u32::from(budget) * u32::from(name_nat) / total_nat) as u16;
+        // Keep at least one cell for a present field when the other can spare it.
+        if name_nat > 0 && n == 0 && budget > 1 {
+            n = 1;
+        }
+        let mut b = budget.saturating_sub(n);
+        if branch_nat > 0 && b == 0 && n > 1 {
+            n = budget - 1;
+            b = 1;
+        }
+        (n, b)
+    };
+
+    let mut out: Vec<Span<'static>> = vec![marker];
+    if let Some(name) = name {
+        out.extend(ellipsize_spans(vec![name], name_alloc));
+    }
+    out.push(sep());
+    out.push(word);
+    if let Some(branch) = branch {
+        out.push(sep());
+        out.extend(ellipsize_spans(vec![branch], branch_alloc));
+    }
+    if let Some(tabs) = tabs {
+        out.push(sep());
+        out.push(tabs);
+    }
+    // Safety net: when even the fixed parts overflow a very narrow pane, ellipsize
+    // the whole line so nothing hard-clips mid-glyph at the right edge.
+    ellipsize_spans(out, total_w)
+}
+
 /// Column budget for the resource monitor table, computed from the inner
 /// content width so every column stays readable instead of colliding on a
 /// hardcoded per-column `Constraint`.
@@ -762,21 +840,25 @@ impl App {
             .find(|p| p.id == session.project_id);
         // The project is marked with `※` (a folder stand-in) rather than a word,
         // and the marker sits directly under the agent name (two-space indent, so
-        // the glyph column lines up with the name on line one).
-        let project_span = match project_tag_kind(found) {
-            ProjectTagKind::Healthy => Span::styled(
-                format!("※ {}", found.map(|p| p.name.as_str()).unwrap_or("")),
-                Style::default().fg(muted),
-            ),
-            ProjectTagKind::PathMissing => Span::styled(
-                format!("⚠ {}", found.map(|p| p.name.as_str()).unwrap_or("")),
-                Style::default().fg(self.theme.project_missing_fg),
-            ),
-            ProjectTagKind::Orphan => Span::styled(
-                "⚠ removed project".to_string(),
-                Style::default().fg(self.theme.project_missing_fg),
-            ),
-        };
+        // the glyph column lines up with the name on line one). The marker span
+        // includes that indent; the project NAME is a separate, truncatable span.
+        let missing_fg = self.theme.project_missing_fg;
+        let project_name = found.map(|p| p.name.clone()).unwrap_or_default();
+        let (marker, name_span): (Span<'static>, Option<Span<'static>>) =
+            match project_tag_kind(found) {
+                ProjectTagKind::Healthy => (
+                    Span::styled("  ※ ", Style::default().fg(muted)),
+                    Some(Span::styled(project_name, Style::default().fg(muted))),
+                ),
+                ProjectTagKind::PathMissing => (
+                    Span::styled("  ⚠ ", Style::default().fg(missing_fg)),
+                    Some(Span::styled(project_name, Style::default().fg(missing_fg))),
+                ),
+                ProjectTagKind::Orphan => (
+                    Span::styled("  ⚠ removed project", Style::default().fg(missing_fg)),
+                    None,
+                ),
+            };
         let word = agent_state_word(session.status, working, needs_attention);
         let word_color = if deleting {
             self.theme.session_deleting
@@ -788,44 +870,36 @@ impl App {
                 _ => self.theme.provider_label_fg,
             }
         };
-        let sep = || Span::styled(" · ", Style::default().fg(muted));
-        let mut line2 = vec![
-            Span::raw("  "),
-            project_span,
-            sep(),
-            Span::styled(word.to_string(), Style::default().fg(word_color)),
-        ];
         // Show the branch only when it differs from the displayed name (i.e. a
         // title is set), so it is not repeated as the name on line one.
         let branch_diverges = session
             .title
             .as_deref()
             .is_some_and(|t| t != session.branch_name);
-        if branch_diverges {
-            line2.push(sep());
-            line2.push(Span::styled(
-                session.branch_name.clone(),
-                Style::default().fg(muted),
-            ));
-        }
+        let branch_span = branch_diverges
+            .then(|| Span::styled(session.branch_name.clone(), Style::default().fg(muted)));
         let tab_count = self.session_tab_ids(&session.id).len();
-        if tab_count > 1 {
-            line2.push(sep());
-            line2.push(Span::styled(
-                format!("{tab_count} tabs"),
-                Style::default().fg(muted),
-            ));
-        }
+        let tabs_span = (tab_count > 1)
+            .then(|| Span::styled(format!("{tab_count} tabs"), Style::default().fg(muted)));
 
         // Line one: right-align the PR badge (name ellipsized to the space left
-        // over) when there is one, else just ellipsize the name. Line two always
-        // ellipsizes so a long project·state·branch·tabs run ends in `…` rather
-        // than being hard-clipped mid-word at the right edge.
+        // over) when there is one, else just ellipsize the name. Line two keeps
+        // the marker, state word, and tab count fully visible and truncates the
+        // project name and branch to fit (matching the web's per-field shrink),
+        // rather than ellipsizing the whole run and dropping the tab count first.
         let line1 = match pr_badge {
             Some(badge) => right_align_line(line1_left, vec![badge], text_width, 2),
             None => ellipsize_spans(line1_left, text_width),
         };
-        let line2 = ellipsize_spans(line2, text_width);
+        let line2 = fit_agent_meta_line(
+            text_width,
+            marker,
+            name_span,
+            Span::styled(word.to_string(), Style::default().fg(word_color)),
+            branch_span,
+            tabs_span,
+            Style::default().fg(muted),
+        );
 
         // A trailing blank line gives each agent breathing room: unselected rows
         // read as separated, and the selection highlight (which covers the whole
@@ -10219,6 +10293,60 @@ mod tests {
         // total (6) <= badge (6) + gap (2): fall back to one ellipsized run.
         let out = right_align_line(left, right, 6, 2);
         assert!(spans_width(&out) <= 6, "never overflows even when degraded");
+    }
+
+    #[test]
+    fn fit_agent_meta_line_fits_without_truncation() {
+        let out = fit_agent_meta_line(
+            80,
+            Span::raw("  ※ ".to_string()),
+            Some(Span::raw("proj".to_string())),
+            Span::raw("Idle".to_string()),
+            None,
+            None,
+            Style::default(),
+        );
+        assert_eq!(spans_text(&out), "  ※ proj · Idle");
+        assert!(!spans_text(&out).contains('…'));
+    }
+
+    #[test]
+    fn fit_agent_meta_line_truncates_name_keeps_state_and_tabs() {
+        let out = fit_agent_meta_line(
+            30,
+            Span::raw("  ※ ".to_string()),
+            Some(Span::raw("a-very-long-project-name".to_string())),
+            Span::raw("Idle".to_string()),
+            None,
+            Some(Span::raw("3 tabs".to_string())),
+            Style::default(),
+        );
+        assert!(spans_width(&out) <= 30, "never overflows the width");
+        let text = spans_text(&out);
+        assert!(text.starts_with("  ※ "), "marker stays: {text:?}");
+        assert!(text.contains("Idle"), "state word stays fixed: {text:?}");
+        assert!(text.contains("3 tabs"), "tab count stays fixed: {text:?}");
+        assert!(
+            text.contains('…'),
+            "the project name is what truncates: {text:?}"
+        );
+    }
+
+    #[test]
+    fn fit_agent_meta_line_shares_budget_between_name_and_branch() {
+        let out = fit_agent_meta_line(
+            34,
+            Span::raw("  ※ ".to_string()),
+            Some(Span::raw("longproject".to_string())),
+            Span::raw("Working".to_string()),
+            Some(Span::raw("feature/some-long-branch".to_string())),
+            None,
+            Style::default(),
+        );
+        assert!(spans_width(&out) <= 34);
+        let text = spans_text(&out);
+        assert!(text.contains("Working"), "state word stays fixed: {text:?}");
+        assert!(text.contains('…'), "a flexible field truncated: {text:?}");
     }
 
     #[test]
