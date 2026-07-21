@@ -606,9 +606,11 @@ function TerminalFlatRow({
 }
 
 // The flat Terminals section: every terminal (companion + project), each a
-// two-line TerminalFlatRow, under a labeled divider matching the Quiet tail's
-// header. Always visible (terminals are runtime-only live PTYs, so a listed one is
-// running and worth surfacing); it renders nothing when there are no terminals.
+// two-line TerminalFlatRow, under a collapsible labeled divider that matches the
+// Quiet tail's header and toggle exactly (a chevron, no leading icon). Defaults
+// OPEN, unlike the Quiet tail: a listed terminal is a live PTY worth surfacing,
+// so it is shown by default but can be collapsed to reclaim space. Renders
+// nothing when there are no terminals.
 function TerminalsSection({
   terminals,
   selectedTarget,
@@ -622,50 +624,60 @@ function TerminalsSection({
   sensors: ReturnType<typeof useSensors>
   onDragEnd: (event: DragEndEvent) => void
 }) {
+  const [open, setOpen] = useState(true)
   if (terminals.length === 0) return null
   return (
     <div className="mt-2 border-t border-border/50 pt-2">
-      <div className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-muted-foreground">
-        <SquareTerminal className="size-3 shrink-0" />
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
+      >
+        <ChevronRight
+          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+        />
         <span>Terminals</span>
         <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
           {terminals.length}
         </span>
-      </div>
-      {/* A SEPARATE DndContext + SortableContext from the agents one above: its
-          items are ONLY terminal ids, so dnd-kit can never pick an agent row as a
-          drop target for a terminal (or vice versa). This enforces the intended
-          within-group rule (a terminal reorders only among terminals) purely
-          through the two contexts holding disjoint id sets. A drag flips the shared
-          sort to manual, exactly like the agent drag. */}
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={onDragEnd}
-      >
-        <SortableContext
-          items={terminals.map((ft) => ft.terminal.id)}
-          strategy={verticalListSortingStrategy}
+      </button>
+      {open ? (
+        // A SEPARATE DndContext + SortableContext from the agents one above: its
+        // items are ONLY terminal ids, so dnd-kit can never pick an agent row as
+        // a drop target for a terminal (or vice versa). This enforces the
+        // within-group rule (a terminal reorders only among terminals) purely
+        // through the two contexts holding disjoint id sets. A drag flips the
+        // shared sort to manual, exactly like the agent drag.
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={onDragEnd}
         >
-          <div className="mt-1 flex flex-col gap-1">
-            {terminals.map((ft) => (
-              <TerminalFlatRow
-                key={ft.terminal.id}
-                terminal={ft.terminal}
-                siblings={ft.siblings}
-                owner={ft.owner}
-                ownerLabel={ft.ownerLabel}
-                active={
-                  selectedTarget?.kind === "terminal" &&
-                  selectedTarget.terminalId === ft.terminal.id
-                }
-                onSelect={onSelect}
-                sortable
-              />
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
+          <SortableContext
+            items={terminals.map((ft) => ft.terminal.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <div className="mt-1 flex flex-col gap-1">
+              {terminals.map((ft) => (
+                <TerminalFlatRow
+                  key={ft.terminal.id}
+                  terminal={ft.terminal}
+                  siblings={ft.siblings}
+                  owner={ft.owner}
+                  ownerLabel={ft.ownerLabel}
+                  active={
+                    selectedTarget?.kind === "terminal" &&
+                    selectedTarget.terminalId === ft.terminal.id
+                  }
+                  onSelect={onSelect}
+                  sortable
+                />
+              ))}
+            </div>
+          </SortableContext>
+        </DndContext>
+      ) : null}
     </div>
   )
 }
