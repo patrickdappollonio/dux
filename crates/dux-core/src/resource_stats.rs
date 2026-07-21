@@ -43,6 +43,20 @@ impl Default for ResourceCollector {
     }
 }
 
+/// Whether [`ResourceCollector::sample`] must re-establish its CPU baseline:
+/// there was no prior refresh, or the gap since the last one exceeded
+/// [`STALE_BASELINE`]. A back-to-back sample (a small gap) must NOT re-baseline:
+/// re-baselining resets sysinfo's delta window and can yield a near-zero
+/// short-window reading, so the collector would effectively fabricate a zero for
+/// a process that was busy a moment ago. Pure (takes `now` explicitly) so the
+/// decision is unit-tested deterministically, without a live process walk.
+fn needs_baseline(last_refresh: Option<Instant>, now: Instant) -> bool {
+    match last_refresh {
+        None => true,
+        Some(at) => now.duration_since(at) > STALE_BASELINE,
+    }
+}
+
 impl ResourceCollector {
     /// Build a collector with no baseline. Construction is cheap: no process walk
     /// happens until the first [`sample`](Self::sample).
@@ -85,10 +99,7 @@ impl ResourceCollector {
     pub fn sample(&mut self, targets: Vec<ResourceTarget>) -> (Vec<ResourceStats>, bool) {
         use sysinfo::Pid;
 
-        let needs_baseline = match self.last_refresh {
-            None => true,
-            Some(at) => at.elapsed() > STALE_BASELINE,
-        };
+        let needs_baseline = needs_baseline(self.last_refresh, Instant::now());
         if needs_baseline {
             // Establish the "before" side of the delta, then let enough time pass
             // for sysinfo to compute a meaningful one.
@@ -380,32 +391,36 @@ mod tests {
         );
     }
 
-    /// Re-sampling immediately (inside `MINIMUM_CPU_UPDATE_INTERVAL`) must not
-    /// zero the reading: sysinfo keeps the previous delta rather than
-    /// recomputing, and the collector must not fabricate a zero either.
+    /// A back-to-back sample (a small gap) must NOT re-establish the CPU
+    /// baseline: re-baselining resets sysinfo's delta window and can yield a
+    /// near-zero short-window reading, so the collector would effectively
+    /// fabricate a zero for a process that was busy a moment ago. This is the
+    /// pure decision behind the "back-to-back must not zero the reading"
+    /// guarantee, tested deterministically without any live CPU sampling (the
+    /// old live test asserted `cpu > 0.0` against a burn thread and flaked on
+    /// loaded CI when the thread was not scheduled enough for a nonzero delta).
+    /// The live back-to-back path is still exercised, non-flakily, by
+    /// `sample_reports_was_baseline_accurately` (which asserts the returned
+    /// `was_baseline` bool, not a live CPU value).
     #[test]
-    fn back_to_back_samples_do_not_zero_cpu() {
-        let (stop, handle) = burn_a_core();
-
-        let mut collector = ResourceCollector::new();
-        let _ = collector.sample(Vec::new());
-        std::thread::sleep(Duration::from_millis(300));
-        let _ = collector.sample(Vec::new());
-        // Immediately again, with no sleep at all.
-        let (rows, _) = collector.sample(Vec::new());
-        let cpu = rows
-            .iter()
-            .find(|r| r.label == "dux (this process)")
-            .expect("the dux row is always present")
-            .cpu_percent;
-
-        stop.store(true, Ordering::Relaxed);
-        handle.join().unwrap();
-
-        assert!(
-            cpu > 0.0,
-            "a back-to-back sample must retain the last real reading, got {cpu}"
-        );
+    fn a_back_to_back_sample_does_not_re_baseline() {
+        let now = Instant::now();
+        // No prior refresh -> must baseline.
+        assert!(needs_baseline(None, now));
+        // Back-to-back (same instant, or a few ms later) -> retain, do NOT
+        // re-baseline, so the prior reading is kept rather than zeroed.
+        assert!(!needs_baseline(Some(now), now));
+        assert!(!needs_baseline(Some(now - Duration::from_millis(5)), now));
+        // Recent but still within the stale window -> retain.
+        assert!(!needs_baseline(
+            Some(now - (STALE_BASELINE - Duration::from_millis(1))),
+            now,
+        ));
+        // A gap longer than the stale window -> re-baseline.
+        assert!(needs_baseline(
+            Some(now - (STALE_BASELINE + Duration::from_millis(1))),
+            now,
+        ));
     }
 
     /// Build the pid -> parent map `is_descendant` consumes from a live
