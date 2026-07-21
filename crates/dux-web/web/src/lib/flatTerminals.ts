@@ -30,10 +30,11 @@ export interface FlatTerminal {
 
 // Assemble every terminal into one flat list in stable spine order: each session's
 // companion terminals (in session order) first, then each project's terminals (in
-// the given project display order). Session terminals are labeled with the agent's
-// display name (title, or branch name when untitled); project terminals with the
-// project name. `projects` must already be in display order; `projectName` resolves
-// a project id to its display name (with the orphan fallback).
+// the given project display order). A companion terminal is labeled `agent@project`
+// (the agent's display name -- title, or branch name when untitled -- at its
+// project); a project terminal with just the project name (it has no agent).
+// `projects` must already be in display order; `projectName` resolves a project id
+// to its display name (with the orphan fallback).
 export function assembleFlatTerminals(
   sessions: readonly SessionView[],
   projects: readonly ProjectView[],
@@ -41,7 +42,9 @@ export function assembleFlatTerminals(
 ): FlatTerminal[] {
   const out: FlatTerminal[] = []
   for (const session of sessions) {
-    const ownerLabel = session.title || session.branch_name
+    const agentName = session.title || session.branch_name
+    const proj = projectName(session.project_id)
+    const ownerLabel = `${agentName}@${proj}`
     // Defensive `?? []`: the spine normalizes `terminals` at ingestion, but this
     // helper is also fed directly in tests and stays total if a caller omits it.
     const terminals = session.terminals ?? []
@@ -50,7 +53,7 @@ export function assembleFlatTerminals(
         terminal,
         owner: { kind: "session", sessionId: session.id },
         ownerLabel,
-        projectName: projectName(session.project_id),
+        projectName: proj,
         siblings: terminals,
       })
     }
@@ -70,14 +73,15 @@ export function assembleFlatTerminals(
   return out
 }
 
-// A terminal's colored state word, mirroring the agent row's `stateWord` but with
-// only the three states a terminal can have (no detached/exited/attention):
-// typing outranks working outranks idle, matching the TUI's priority. Colors reuse
-// the exact tokens the agent word uses so the two never drift: the soft-violet
-// typing token, the active-green working color, muted for idle.
+// A terminal's colored state word, mirroring the agent row's `stateWord` priority
+// but with only the three states a terminal can have (no detached/exited/attention):
+// typing outranks running outranks idle. The busy word is "Running" (a terminal
+// runs a process; agents say "Working"), but the colors reuse the exact tokens the
+// agent word uses so the two never drift: the soft-violet typing token, the
+// active-green busy color, muted for idle.
 export function terminalStateWord(terminal: TerminalView): StateWord {
   if (terminal.typing) return { label: "Typing", className: "text-dux-typing" }
-  if (terminal.working) return { label: "Working", className: "text-green-500" }
+  if (terminal.working) return { label: "Running", className: "text-green-500" }
   return { label: "Idle", className: "text-muted-foreground" }
 }
 

@@ -1180,13 +1180,22 @@ impl App {
         let terminal_render_data: Vec<(String, Option<String>, String)> = terminal_items
             .iter()
             .map(|(id, t)| {
+                // A companion terminal shows `agent@project`; a project terminal
+                // shows just the project name (it has no agent).
                 let owner_name = match &t.owner {
                     TerminalOwner::Session(sid) => self
                         .engine
                         .sessions
                         .iter()
                         .find(|s| &s.id == sid)
-                        .map(|s| s.title.clone().unwrap_or_else(|| s.branch_name.clone()))
+                        .map(|s| {
+                            let agent =
+                                s.title.clone().unwrap_or_else(|| s.branch_name.clone());
+                            match self.engine.projects.iter().find(|p| p.id == s.project_id) {
+                                Some(p) => format!("{agent}@{}", p.name),
+                                None => agent,
+                            }
+                        })
                         .unwrap_or_else(|| sid.clone()),
                     TerminalOwner::Project(pid) => self
                         .engine
@@ -8524,12 +8533,13 @@ fn terminal_row_lines(
     );
 
     let muted = theme.provider_label_fg;
-    // Wording and priority mirror `agent_state_word`, minus the states a live
-    // terminal cannot be in.
+    // Priority mirrors `agent_state_word`, minus the states a live terminal cannot
+    // be in. The busy word is "Running" (a terminal runs a process; it does not
+    // "work" like an agent); agents keep "Working".
     let word = if typing {
         "Typing"
     } else if working {
-        "Working"
+        "Running"
     } else {
         "Idle"
     };
@@ -9024,14 +9034,14 @@ mod tests {
         assert!(line_text(&idle1).contains("my-branch"));
         assert_eq!(word_span(&idle1, "Idle"), Some(theme.provider_label_fg));
 
-        // Working terminal: the foreground command replaces the label, the
-        // spinner glyph shows, and the "Working" word takes the active color.
+        // Busy terminal: the foreground command replaces the label, the spinner
+        // glyph shows, and the word is "Running" (not "Working") in the busy color.
         let (working0, working1) =
             terminal_row_lines(&theme, false, true, '⠙', Some("cargo test"), "proj", width);
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
         assert!(line_text(&working0).contains('⠙'));
-        assert_eq!(word_span(&working1, "Working"), Some(theme.session_working));
+        assert_eq!(word_span(&working1, "Running"), Some(theme.session_working));
 
         // Typing wins over working: the typing glyph and word, both in the
         // session_typing color, and the foreground command as the label.

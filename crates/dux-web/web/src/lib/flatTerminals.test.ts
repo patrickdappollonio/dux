@@ -85,9 +85,9 @@ describe("terminalStateWord", () => {
     expect(word.className).toBe("text-dux-typing")
   })
 
-  it("maps working to the active-green word", () => {
+  it("maps a busy terminal to the active-green 'Running' word", () => {
     const word = terminalStateWord(term({ id: "t", working: true }))
-    expect(word.label).toBe("Working")
+    expect(word.label).toBe("Running")
     expect(word.className).toBe("text-green-500")
   })
 
@@ -125,15 +125,15 @@ describe("assembleFlatTerminals", () => {
     ])
   })
 
-  it("labels a session terminal with the agent title (or branch when untitled)", () => {
+  it("labels a session terminal 'agent@project' (branch when the agent is untitled)", () => {
     const sessions = [
       session({ id: "s1", title: "Login flow", terminals: [term({ id: "a" })] }),
       session({ id: "s2", title: null, terminals: [term({ id: "b" })] }),
     ]
     const flat = assembleFlatTerminals(sessions, [], projectName)
-    expect(flat[0].ownerLabel).toBe("Login flow")
-    // Untitled agent falls back to its branch name.
-    expect(flat[1].ownerLabel).toBe("s2-branch")
+    expect(flat[0].ownerLabel).toBe("Login flow@Web App")
+    // Untitled agent falls back to its branch name, still at its project.
+    expect(flat[1].ownerLabel).toBe("s2-branch@Web App")
   })
 
   it("labels a project terminal with the project name and carries owner refs + siblings", () => {
