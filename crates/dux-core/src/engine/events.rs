@@ -1056,6 +1056,18 @@ impl Engine {
         self.clear_in_flight(&InFlightKey::AgentLaunch(tab_id.to_string()));
     }
 
+    /// Drop the activity/input runtime entries for a companion terminal being
+    /// torn down. Terminals share `pty_activity`/`pty_input` with agent tabs
+    /// (keyed by the disjoint `term-N` id), so a removed terminal must clear both
+    /// or a later recycled `term-N` id could inherit stale activity and read as
+    /// working/typing before it has emitted a byte. The terminal analogue of
+    /// [`Engine::clear_tab_runtime`]; call it wherever a terminal leaves
+    /// `companion_terminals`.
+    pub fn clear_terminal_runtime(&mut self, terminal_id: &str) {
+        self.pty_activity.remove(terminal_id);
+        self.pty_input.remove(terminal_id);
+    }
+
     pub fn finish_delete_session(
         &mut self,
         session_id: &str,
@@ -1110,9 +1122,16 @@ impl Engine {
         // those; this cleans up the remaining pin/activity/input/in-flight entries.
         self.clear_session_tab_runtime(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
-        self.companion_terminals.retain(
-            |_, t| !matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == session.id),
-        );
+        let removed_terminals: Vec<String> = self
+            .companion_terminals
+            .iter()
+            .filter(|(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == session.id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for terminal_id in &removed_terminals {
+            self.companion_terminals.remove(terminal_id);
+            self.clear_terminal_runtime(terminal_id);
+        }
         self.agent_tabs.retain(|_, t| t.session_id != session.id);
         self.update_branch_sync_sessions();
 
@@ -1215,9 +1234,16 @@ impl Engine {
             for tab_id in self.tab_ids_for_session(session_id) {
                 self.providers.remove(&tab_id);
             }
-            self.companion_terminals.retain(
-                |_, t| !matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if sid == session_id),
-            );
+            let removed_terminals: Vec<String> = self
+                .companion_terminals
+                .iter()
+                .filter(|(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if sid == session_id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for terminal_id in &removed_terminals {
+                self.companion_terminals.remove(terminal_id);
+                self.clear_terminal_runtime(terminal_id);
+            }
             let project = project
                 .as_ref()
                 .expect("should_remove_worktree implies a project");

@@ -244,6 +244,12 @@ pub struct SessionView {
     /// a stable `working: true` until a transition (idle→working or
     /// working→idle) occurs.
     pub working: bool,
+    /// Whether the user is currently typing into any of this agent's tabs (a
+    /// keystroke landed within [`crate::engine::AGENT_INPUT_SUPPRESSION_WINDOW`]).
+    /// Rolled up any-tab like `working`, and deliberately disjoint from it:
+    /// `working` already excludes typing (via [`crate::engine::Engine::is_agent_streaming`]),
+    /// so a tab is at most one of typing/working at a time.
+    pub typing: bool,
     /// Whether any of this agent's tabs currently needs attention (a permission
     /// prompt, a finished turn) that the user has not yet looked at. Rolled up
     /// any-tab, mirroring `working`. Memory-only runtime state; the web surfaces
@@ -273,6 +279,16 @@ pub struct TerminalView {
     pub label: String,
     /// Whether the terminal's PTY has emitted any output yet.
     pub has_output: bool,
+    /// Whether this terminal is actively streaming output right now. Reuses the
+    /// agent streaming predicate ([`crate::engine::Engine::is_agent_streaming`]):
+    /// terminals never emit OSC progress, so it reduces to fresh PTY output that
+    /// is not the echo of the user's own typing. Terminals have no detached or
+    /// needs-attention notion, so those fields are deliberately absent here.
+    pub working: bool,
+    /// Whether the user is currently typing into this terminal (a keystroke
+    /// landed within [`crate::engine::AGENT_INPUT_SUPPRESSION_WINDOW`]). Disjoint
+    /// from `working`, which excludes typing.
+    pub typing: bool,
     /// The command currently running in the foreground of this terminal, or
     /// `None` when the shell itself is idle in the foreground. Projected verbatim
     /// from [`crate::model::CompanionTerminal::foreground_cmd`], which the engine
@@ -299,6 +315,10 @@ pub struct AgentTabView {
     pub order: u32,
     /// Whether this tab's PTY is actively streaming (per-tab hysteresis boolean).
     pub working: bool,
+    /// Whether the user is currently typing into this tab (a keystroke landed
+    /// within [`crate::engine::AGENT_INPUT_SUPPRESSION_WINDOW`]). Disjoint from
+    /// `working`, which excludes typing.
+    pub typing: bool,
     /// Whether this specific tab needs attention (unacknowledged). The tab strip
     /// marks the flagged tab's pill; the sidebar rolls this up across tabs.
     pub needs_attention: bool,
@@ -449,6 +469,7 @@ impl SessionView {
         tabs: Vec<AgentTabView>,
         has_output: bool,
         working: bool,
+        typing: bool,
         needs_attention: bool,
     ) -> Self {
         Self {
@@ -467,6 +488,7 @@ impl SessionView {
             tabs,
             has_output,
             working,
+            typing,
             needs_attention,
             created_at: s.created_at.to_rfc3339(),
             updated_at: s.updated_at.to_rfc3339(),
@@ -558,6 +580,9 @@ impl Engine {
                 id: id.clone(),
                 label: t.label.clone(),
                 has_output: t.client.has_output(),
+                // Terminals reuse the agent streaming predicate (see TerminalView).
+                working: self.is_agent_streaming(id),
+                typing: self.is_typing(id),
                 foreground_cmd: t.foreground_cmd.clone(),
             })
             .collect();
@@ -597,6 +622,9 @@ impl Engine {
                 id: id.clone(),
                 label: t.label.clone(),
                 has_output: t.client.has_output(),
+                // Terminals reuse the agent streaming predicate (see TerminalView).
+                working: self.is_agent_streaming(id),
+                typing: self.is_typing(id),
                 foreground_cmd: t.foreground_cmd.clone(),
             })
             .collect();
@@ -618,6 +646,10 @@ impl Engine {
         let working = std::iter::once(s.id.as_str())
             .chain(support_tabs.iter().map(|t| t.id.as_str()))
             .any(|id| self.is_agent_streaming(id));
+        // Typing rolls up any-tab too, and is disjoint from `working` (which
+        // excludes typing). Uses the shared any-tab rollup so the sidebar row and
+        // the per-session read agree.
+        let typing = self.session_is_typing(&s.id);
         // Attention rolls up any-tab, exactly like `working`: the sidebar row
         // marks the agent if any of its tabs (session-slot or extra) is flagged.
         let needs_attention = std::iter::once(s.id.as_str())
@@ -646,6 +678,7 @@ impl Engine {
             tabs,
             has_output,
             working,
+            typing,
             needs_attention,
         )
     }
@@ -658,6 +691,7 @@ impl Engine {
             provider: provider.as_str().to_string(),
             order,
             working: self.is_agent_streaming(id),
+            typing: self.is_typing(id),
             needs_attention: self.tab_needs_attention(id),
             has_output: self
                 .providers

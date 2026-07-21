@@ -260,6 +260,7 @@ impl Engine {
                 .get(&terminal_id)
                 .map(|t| t.owner.clone());
             self.companion_terminals.remove(&terminal_id);
+            self.clear_terminal_runtime(&terminal_id);
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Terminal,
                 id: terminal_id,
@@ -287,6 +288,7 @@ impl Engine {
     /// or `None` if it was not found.
     pub fn begin_close_companion_terminal(&mut self, terminal_id: &str) -> Option<String> {
         let term = self.companion_terminals.remove(terminal_id)?;
+        self.clear_terminal_runtime(terminal_id);
         let label = term.label.clone();
         term.client.terminate();
         let deadline = Instant::now() + self.individual_close_grace();
@@ -1223,6 +1225,87 @@ mod tests {
             assert!(Instant::now() < deadline, "terminal was never reaped");
             sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn poll_pty_activity_stamps_a_terminals_activity() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        // `cat` echoes stdin as a visible grid change, which sets `received_data`.
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (tid, _) = engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+
+        // The reader loop suppresses the post-resize redraw burst for 500ms, so
+        // let that window lapse and drain any pre-window activity before relying
+        // on the write below to be the stamping change.
+        sleep(Duration::from_millis(600));
+        engine.poll_pty_activity();
+        engine.pty_activity.remove(&tid);
+
+        engine
+            .companion_terminals
+            .get(&tid)
+            .expect("terminal is live")
+            .client
+            .write_bytes(b"hello\n")
+            .expect("write to terminal");
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            engine.poll_pty_activity();
+            if engine.pty_activity.contains_key(&tid) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "poll_pty_activity never stamped the terminal's activity"
+            );
+            sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn closing_a_terminal_clears_its_activity_and_input_entries() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (tid, _) = engine
+            .create_companion_terminal("s1")
+            .expect("create companion terminal");
+
+        // A recycled `term-N` id must not inherit stale activity/typing, so both
+        // entries must be gone once the terminal leaves the live map.
+        engine.pty_activity.insert(tid.clone(), Instant::now());
+        engine.pty_input.insert(tid.clone(), Instant::now());
+
+        engine.begin_close_companion_terminal(&tid);
+
+        assert!(
+            !engine.pty_activity.contains_key(&tid),
+            "teardown must clear the terminal's activity entry"
+        );
+        assert!(
+            !engine.pty_input.contains_key(&tid),
+            "teardown must clear the terminal's input entry"
+        );
     }
 
     #[test]

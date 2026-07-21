@@ -743,6 +743,16 @@ impl Engine {
                 self.pty_activity.insert(tab_id.clone(), now);
             }
         }
+        // Companion terminals share the same activity map, keyed by their
+        // terminal id (`term-N`), which is disjoint from tab ids. Their PtyClient
+        // sets `received_data` on visible grid change exactly like an agent's, so
+        // the same consuming read drives a terminal's "working" indicator through
+        // `is_agent_streaming`.
+        for (terminal_id, terminal) in &self.companion_terminals {
+            if terminal.client.take_received_data() {
+                self.pty_activity.insert(terminal_id.clone(), now);
+            }
+        }
     }
 
     /// Refresh the `foreground_cmd` of every companion terminal by probing its
@@ -830,6 +840,18 @@ impl Engine {
         }
         // No output and no fresh report: assume idle.
         false
+    }
+
+    /// Whether the user has forwarded keystrokes to this PTY within
+    /// [`AGENT_INPUT_SUPPRESSION_WINDOW`], i.e. it is currently "typing". This is
+    /// the sole source of the Typing state and works for both tab ids and
+    /// terminal ids (both stamp `pty_input` via [`Engine::note_pty_input`]).
+    /// It is exactly the suppression predicate `is_agent_streaming` uses to void
+    /// streaming, surfaced so the ViewModel can render a distinct Typing cue.
+    pub fn is_typing(&self, id: &str) -> bool {
+        self.pty_input
+            .get(id)
+            .is_some_and(|t| t.elapsed() < AGENT_INPUT_SUPPRESSION_WINDOW)
     }
 
     /// The terminal identity dux should apply when launching an agent, resolved
@@ -1018,6 +1040,19 @@ impl Engine {
         self.agent_tabs
             .values()
             .any(|t| t.session_id == session_id && self.is_agent_streaming(&t.id))
+    }
+
+    /// Whether ANY tab of the session (session-slot or extra) is currently being
+    /// typed into. The any-tab rollup mirroring `session_is_streaming`, so the
+    /// sidebar row can show a Typing cue whenever the user is typing into any of
+    /// the agent's tabs.
+    pub fn session_is_typing(&self, session_id: &str) -> bool {
+        if self.is_typing(session_id) {
+            return true;
+        }
+        self.agent_tabs
+            .values()
+            .any(|t| t.session_id == session_id && self.is_typing(&t.id))
     }
 
     /// True if the given key is currently marked in-flight.
@@ -2896,6 +2931,85 @@ mod tests {
         assert!(
             engine.session_is_streaming("s1"),
             "the any-tab rollup must see the streaming extra tab"
+        );
+    }
+
+    #[test]
+    fn is_typing_honors_the_input_window_and_is_per_id() {
+        let (mut engine, _tmp) = test_engine();
+
+        // Fresh keystroke → typing.
+        engine.pty_input.insert("a".to_string(), Instant::now());
+        assert!(engine.is_typing("a"));
+
+        // Older than the suppression window → not typing.
+        engine.pty_input.insert(
+            "b".to_string(),
+            Instant::now() - (AGENT_INPUT_SUPPRESSION_WINDOW + Duration::from_millis(50)),
+        );
+        assert!(!engine.is_typing("b"));
+
+        // No entry → not typing, and each id is independent of the others.
+        assert!(!engine.is_typing("c"));
+        assert!(
+            engine.is_typing("a"),
+            "one id aging out must not affect another id's typing state"
+        );
+    }
+
+    #[test]
+    fn session_is_typing_rolls_up_any_tab() {
+        let (mut engine, _tmp) = test_engine();
+        engine.agent_tabs.insert(
+            "s1-x".to_string(),
+            AgentTab {
+                id: "s1-x".to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+
+        // Only the extra tab is being typed into; the session-slot tab is idle.
+        engine.pty_input.insert("s1-x".to_string(), Instant::now());
+        assert!(
+            !engine.is_typing("s1"),
+            "the session-slot tab itself is not being typed into"
+        );
+        assert!(
+            engine.session_is_typing("s1"),
+            "the any-tab rollup must see the typed extra tab"
+        );
+
+        // Typing into the session-slot tab alone also rolls up.
+        engine.pty_input.remove("s1-x");
+        engine.pty_input.insert("s1".to_string(), Instant::now());
+        assert!(engine.session_is_typing("s1"));
+    }
+
+    #[test]
+    fn a_terminal_id_reads_as_working_or_typing_via_the_shared_predicates() {
+        let (mut engine, _tmp) = test_engine();
+        let tid = "term-1";
+
+        // Fresh output and no input: the terminal is working. Terminals never
+        // emit OSC progress, so is_agent_streaming reduces to fresh, non-echo
+        // output — no terminal special-casing is needed.
+        engine.pty_activity.insert(tid.to_string(), Instant::now());
+        assert!(
+            engine.is_agent_streaming(tid),
+            "fresh terminal output reads as working"
+        );
+        assert!(!engine.is_typing(tid));
+
+        // A keystroke within the window flips it to typing and voids working: the
+        // echo of the user's own typing must not read as the terminal working.
+        engine.note_pty_input(tid);
+        assert!(engine.is_typing(tid), "a fresh keystroke reads as typing");
+        assert!(
+            !engine.is_agent_streaming(tid),
+            "the typing echo must not read as the terminal working"
         );
     }
 

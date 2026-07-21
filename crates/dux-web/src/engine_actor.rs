@@ -1749,10 +1749,15 @@ fn handle_request(
         EngineRequest::WritePty(id, bytes) => {
             let wrote =
                 pty_for(engine, &id).is_some_and(|client| client.write_bytes(&bytes).is_ok());
-            // Record keystrokes that actually reached an agent PTY (not a
-            // companion terminal, not an empty frame) so the user's own echoed
-            // typing doesn't read as the agent "working".
-            if wrote && !bytes.is_empty() && engine.providers.contains_key(&id) {
+            // Record keystrokes that actually reached a PTY (agent tab or
+            // companion terminal, never an empty frame) so the user's own echoed
+            // typing doesn't read as the PTY "working". Tab and terminal ids are
+            // disjoint and both key `pty_input`, so one predicate covers both.
+            if wrote
+                && !bytes.is_empty()
+                && (engine.providers.contains_key(&id)
+                    || engine.companion_terminals.contains_key(&id))
+            {
                 engine.note_pty_input(&id);
             }
         }

@@ -2015,18 +2015,30 @@ impl App {
             self.terminal_selection = None;
         }
 
-        // Record input that actually reached the focused agent's PTY so its
-        // terminal echo isn't mistaken for the agent "working". See
-        // [`Engine::note_pty_input`].
-        if forwarded_to_pty
-            && matches!(self.input_target, InputTarget::Agent)
-            && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
-        {
-            // Stamp the FOCUSED tab (where the bytes actually went), not the
-            // session/Main id — otherwise typing into an extra tab bumps the
-            // wrong tab's suppression window.
-            let tab_id = self.focused_tab_id(&session_id);
-            self.engine.note_pty_input(&tab_id);
+        // Record input that actually reached the focused PTY so its terminal echo
+        // isn't mistaken for the PTY "working". See [`Engine::note_pty_input`].
+        // Tab and terminal ids are disjoint and both key `pty_input`.
+        if forwarded_to_pty {
+            match self.input_target {
+                InputTarget::Agent => {
+                    if let Some(session_id) = self.selected_session().map(|s| s.id.clone()) {
+                        // Stamp the FOCUSED tab (where the bytes actually went),
+                        // not the session/Main id — otherwise typing into an extra
+                        // tab bumps the wrong tab's suppression window.
+                        let tab_id = self.focused_tab_id(&session_id);
+                        self.engine.note_pty_input(&tab_id);
+                    }
+                }
+                InputTarget::Terminal => {
+                    // A terminal keystroke stamps under the terminal id, exactly
+                    // as an agent keystroke does, so its echo isn't read as the
+                    // terminal "working".
+                    if let Some(terminal_id) = self.active_terminal_id.clone() {
+                        self.engine.note_pty_input(&terminal_id);
+                    }
+                }
+                _ => {}
+            }
         }
 
         Ok(false)
@@ -15267,16 +15279,18 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn typing_into_companion_terminal_does_not_record_agent_input() {
-        // Companion-terminal output never feeds the agent's working state, so
-        // typing into a terminal must not suppress the agent indicator.
+    fn typing_into_companion_terminal_records_input_under_the_terminal_id() {
+        // A terminal keystroke stamps pty_input under the TERMINAL id so the
+        // terminal's own echo isn't mistaken for the terminal working. It must
+        // stamp the terminal id, never the owning agent's id (terminal output
+        // never feeds the agent's working state).
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         let args = vec!["-c".to_string(), "sleep 5".to_string()];
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             crate::app::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session(session_id),
+                owner: dux_core::model::TerminalOwner::Session(session_id.clone()),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)
@@ -15289,8 +15303,12 @@ cyan = "#00ffff"
 
         app.process_raw_input_bytes(b"x").unwrap();
         assert!(
-            app.engine.pty_input.is_empty(),
-            "typing into a companion terminal must not suppress the agent indicator"
+            app.engine.pty_input.contains_key("term-1"),
+            "typing into a companion terminal must record input under the terminal id"
+        );
+        assert!(
+            !app.engine.pty_input.contains_key(&session_id),
+            "a terminal keystroke must never stamp the owning agent's id"
         );
     }
 
