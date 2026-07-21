@@ -86,6 +86,14 @@ pub(crate) fn left_row_to_item(offset: usize, heights: &[u16], area_height: u16)
     map
 }
 
+/// Wrap two content lines into the standard left-pane row item: the two lines
+/// plus a trailing blank spacer. Both agent rows and terminal rows funnel
+/// through here so their three-line structure (and thus the framed-selection
+/// geometry that `paint_framed_row_selection` relies on) can never drift apart.
+fn framed_row_item(line1: Line<'static>, line2: Line<'static>) -> ListItem<'static> {
+    ListItem::new(vec![line1, line2, Line::from("")])
+}
+
 /// ASCII art logo displayed in the agent pane when no content is active.
 /// Shared with the server status screen (`crate::server_screen`) so the flip's
 /// "server running" view reuses the same wordmark instead of duplicating it.
@@ -923,8 +931,9 @@ impl App {
         // A trailing blank line gives each agent breathing room: unselected rows
         // read as separated, and the selection highlight (which covers the whole
         // item) gains a half-step of padding below the text instead of butting
-        // right up against the next row.
-        ListItem::new(vec![Line::from(line1), Line::from(line2), Line::from("")])
+        // right up against the next row. Shared with the terminal rows via
+        // `framed_row_item` so both lists have the same three-line shape.
+        framed_row_item(Line::from(line1), Line::from(line2))
     }
 
     /// Paint the left-pane selection by hand (the List widget renders with no
@@ -945,23 +954,60 @@ impl App {
     ) {
         let map = &self.mouse_layout.left_row_to_item;
         let sel = self.selected_left;
-        let Some(rel_start) = map.iter().position(|&i| i == sel) else {
-            return;
-        };
-        let rel_end = map.iter().rposition(|&i| i == sel).unwrap_or(rel_start);
         let items = self.left_items();
         let Some(item) = items.get(sel).copied() else {
             return;
         };
+        match item {
+            LeftItem::Session(_) => {
+                // The three-line framed selection, shared with terminal rows.
+                self.paint_framed_row_selection(buf, list_inner, map, sel, top_pad_y);
+            }
+            LeftItem::InactiveToggle => {
+                // Only the label row (the toggle ends with a trailing spacer, so
+                // the label is the second-to-last row); no frame edges.
+                let Some(rel_end) = map.iter().rposition(|&i| i == sel) else {
+                    return;
+                };
+                let rel = rel_end.saturating_sub(1);
+                if map.get(rel) == Some(&sel) {
+                    let tint = self.theme.selection_bar_tint();
+                    let y = list_inner.y + rel as u16;
+                    for x in list_inner.x..list_inner.x + list_inner.width {
+                        buf[(x, y)].set_bg(tint);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paint the shared three-line framed selection over `area`: a `▄` top edge
+    /// on the boundary row above the selected item (the previous item's spacer,
+    /// or `top_pad_y` for the first item), the faint tint filling the two content
+    /// rows edge to edge (both gutters included, background only so the row keeps
+    /// its own text colors), and a `▀` bottom edge on the item's own trailing
+    /// spacer. `map` is the row-to-item map for `area`, `selected` the item index.
+    /// Used identically by agent rows and terminal rows so both frame the same.
+    fn paint_framed_row_selection(
+        &self,
+        buf: &mut ratatui::buffer::Buffer,
+        area: Rect,
+        map: &[usize],
+        selected: usize,
+        top_pad_y: Option<u16>,
+    ) {
+        let Some(rel_start) = map.iter().position(|&i| i == selected) else {
+            return;
+        };
         let tint = self.theme.selection_bar_tint();
-        let x0 = list_inner.x;
-        let x1 = list_inner.x + list_inner.width;
-        let row_at = |rel: usize| list_inner.y + rel as u16;
+        let x0 = area.x;
+        let x1 = area.x + area.width;
+        let row_at = |rel: usize| area.y + rel as u16;
 
         // A content row: a faint tint across the full width, gutters included
         // (background only, so the row's own text colors survive on top).
         let paint_content = |buf: &mut ratatui::buffer::Buffer, rel: usize| {
-            if map.get(rel) != Some(&sel) {
+            if map.get(rel) != Some(&selected) {
                 return;
             }
             let y = row_at(rel);
@@ -980,27 +1026,18 @@ impl App {
             }
         };
 
-        match item {
-            LeftItem::Session(_) => {
-                // Top edge: the previous item's blank spacer, or the reserved
-                // top-margin for the very first agent.
-                if rel_start > 0 {
-                    paint_edge(buf, row_at(rel_start - 1), "▄");
-                } else if let Some(py) = top_pad_y {
-                    paint_edge(buf, py, "▄");
-                }
-                paint_content(buf, rel_start);
-                paint_content(buf, rel_start + 1);
-                // Bottom edge: the agent's own trailing spacer.
-                if map.get(rel_start + 2) == Some(&sel) {
-                    paint_edge(buf, row_at(rel_start + 2), "▀");
-                }
-            }
-            LeftItem::InactiveToggle => {
-                // Only the label row (the toggle ends with a trailing spacer, so
-                // the label is the second-to-last row); no frame edges.
-                paint_content(buf, rel_end.saturating_sub(1));
-            }
+        // Top edge: the previous item's blank spacer, or the reserved top-margin
+        // for the very first item.
+        if rel_start > 0 {
+            paint_edge(buf, row_at(rel_start - 1), "▄");
+        } else if let Some(py) = top_pad_y {
+            paint_edge(buf, py, "▄");
+        }
+        paint_content(buf, rel_start);
+        paint_content(buf, rel_start + 1);
+        // Bottom edge: the item's own trailing spacer.
+        if map.get(rel_start + 2) == Some(&selected) {
+            paint_edge(buf, row_at(rel_start + 2), "▀");
         }
     }
 
@@ -1338,17 +1375,42 @@ impl App {
             self.paint_inactive_rule(frame.buffer_mut(), list_content);
         }
 
-        // Render terminals section if any terminals exist.
+        // Render terminals section if any terminals exist. This mirrors the agent
+        // path above exactly: the block draws the border, and the list renders
+        // into a gutter-inset body offset by a one-row top margin, with the
+        // framed selection hand-painted (no widget highlight) so a terminal row
+        // and an agent row are pixel-identical in framing, spacing, and selection.
         if let Some(term_area) = terminals_area {
             let terminals_focused = focused && self.left_section == LeftSection::Terminals;
             let term_title = format!("Terminals ({})", terminal_render_data.len());
-            let term_inner = self
-                .themed_block(&term_title, terminals_focused)
-                .inner(term_area);
-            self.mouse_layout.terminal_list = term_inner;
-            // Two content lines plus a trailing blank spacer, matching the agent
-            // rows above so both lists breathe the same way.
-            let term_text_width = term_inner.width;
+            let term_count = terminal_render_data.len();
+            let term_block = self.themed_block(&term_title, terminals_focused);
+            let term_inner = term_block.inner(term_area);
+            // Two reservations for the framed selection, matching the agent path:
+            //  - a one-row top margin (only with room and at least one terminal)
+            //    so the first terminal's `▄` top edge has a row to paint into; and
+            //  - a one-column gutter on each side, so the tinted frame has a margin
+            //    and the text sits evenly padded left and right.
+            // `term_content` is the click surface and the origin for the frame
+            // edges; the list itself renders into `term_body`, inset by a gutter.
+            let term_top_margin: u16 = if term_count > 0 && term_inner.height >= 4 {
+                1
+            } else {
+                0
+            };
+            let term_top_pad_y = (term_top_margin == 1).then_some(term_inner.y);
+            let term_content = Rect {
+                y: term_inner.y + term_top_margin,
+                height: term_inner.height - term_top_margin,
+                ..term_inner
+            };
+            let term_body = Rect {
+                x: term_content.x + LEFT_PANE_GUTTER,
+                width: term_content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
+                ..term_content
+            };
+            self.mouse_layout.terminal_list = term_content;
+            let term_text_width = term_body.width;
             let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
             let term_items: Vec<ListItem> = terminal_render_data
                 .iter()
@@ -1359,7 +1421,7 @@ impl App {
                     // terminal id (`term-N`) is a valid key for both.
                     let typing = self.engine.is_typing(term_id);
                     let working = self.engine.is_agent_streaming(term_id);
-                    let lines = terminal_row_lines(
+                    let (line1, line2) = terminal_row_lines(
                         &self.theme,
                         typing,
                         working,
@@ -1369,13 +1431,17 @@ impl App {
                         owner_name,
                         term_text_width,
                     );
-                    ListItem::new(lines)
+                    // Same three-line row shape as the agents (see `framed_row_item`).
+                    framed_row_item(line1, line2)
                 })
                 .collect();
             // Every terminal row is exactly three lines tall; keep the height
             // vector in lockstep so the post-render mouse map lands on the right
             // row even after the list scrolls.
-            let term_heights: Vec<u16> = vec![3; terminal_render_data.len()];
+            let term_heights: Vec<u16> = vec![3; term_count];
+            // No widget highlight: the selection is hand-painted below. The widget
+            // selection is still set (when focused) purely so the list scrolls to
+            // keep the selected terminal visible, exactly as the agent list does.
             let mut term_state = ListState::default().with_selected(
                 if self.left_section == LeftSection::Terminals {
                     Some(self.selected_terminal_index)
@@ -1383,16 +1449,28 @@ impl App {
                     None
                 },
             );
+            term_block.render(term_area, frame.buffer_mut());
             StatefulWidget::render(
-                List::new(term_items)
-                    .block(self.themed_block(&term_title, terminals_focused))
-                    .highlight_style(self.theme.selection_style()),
-                term_area,
+                List::new(term_items),
+                term_body,
                 frame.buffer_mut(),
                 &mut term_state,
             );
+            // Rebuild the reverse map from the post-render scroll offset, the
+            // three-tall heights, and the content height (mirrors the agent path).
             self.mouse_layout.terminal_row_to_item =
-                left_row_to_item(term_state.offset(), &term_heights, term_inner.height);
+                left_row_to_item(term_state.offset(), &term_heights, term_content.height);
+            // Hand-paint the framed selection into the content surface, reusing the
+            // same `body_will_dim` gate the agent path computed above.
+            if self.left_section == LeftSection::Terminals && !body_will_dim {
+                self.paint_framed_row_selection(
+                    frame.buffer_mut(),
+                    term_content,
+                    &self.mouse_layout.terminal_row_to_item,
+                    self.selected_terminal_index,
+                    term_top_pad_y,
+                );
+            }
         } else {
             self.mouse_layout.terminal_list = Rect::default();
             self.mouse_layout.terminal_row_to_item.clear();
@@ -8427,7 +8505,7 @@ fn terminal_row_lines(
     fg_cmd: Option<&str>,
     owner_name: &str,
     text_width: u16,
-) -> Vec<Line<'static>> {
+) -> (Line<'static>, Line<'static>) {
     let (glyph, glyph_color) = if typing {
         (crate::theme::TYPING_GLYPH.to_string(), theme.session_typing)
     } else if working {
@@ -8481,7 +8559,9 @@ fn terminal_row_lines(
         Style::default().fg(muted),
     );
 
-    vec![Line::from(line1), Line::from(line2), Line::from("")]
+    // The two content lines; the trailing blank spacer is added by
+    // `framed_row_item` at the call site so the shape stays shared with agents.
+    (Line::from(line1), Line::from(line2))
 }
 
 fn companion_terminal_status_meta(status: CompanionTerminalStatus) -> (&'static str, &'static str) {
@@ -8938,20 +9018,18 @@ mod tests {
         };
 
         // Idle terminal: a steady dot, the shell label, and a muted "Idle" word.
-        let idle = terminal_row_lines(&theme, false, false, '⠋', "zsh", None, "my-branch", width);
-        assert_eq!(idle.len(), 3, "two content lines plus a trailing spacer");
-        assert!(
-            line_text(&idle[2]).trim().is_empty(),
-            "third line is a blank spacer"
-        );
-        assert!(line_text(&idle[0]).contains(crate::theme::DOT_GLYPH));
-        assert!(line_text(&idle[0]).contains("zsh"));
-        assert!(line_text(&idle[1]).contains("my-branch"));
-        assert_eq!(word_span(&idle[1], "Idle"), Some(theme.provider_label_fg));
+        // `terminal_row_lines` now returns the two content lines; the trailing
+        // spacer is added by `framed_row_item` (asserted separately below).
+        let (idle0, idle1) =
+            terminal_row_lines(&theme, false, false, '⠋', "zsh", None, "my-branch", width);
+        assert!(line_text(&idle0).contains(crate::theme::DOT_GLYPH));
+        assert!(line_text(&idle0).contains("zsh"));
+        assert!(line_text(&idle1).contains("my-branch"));
+        assert_eq!(word_span(&idle1, "Idle"), Some(theme.provider_label_fg));
 
         // Working terminal: the foreground command replaces the label, the
         // spinner glyph shows, and the "Working" word takes the active color.
-        let working = terminal_row_lines(
+        let (working0, working1) = terminal_row_lines(
             &theme,
             false,
             true,
@@ -8961,21 +9039,163 @@ mod tests {
             "proj",
             width,
         );
-        assert!(line_text(&working[0]).contains("cargo test"));
-        assert!(!line_text(&working[0]).contains("zsh"));
-        assert!(line_text(&working[0]).contains('⠙'));
-        assert_eq!(
-            word_span(&working[1], "Working"),
-            Some(theme.session_active)
-        );
+        assert!(line_text(&working0).contains("cargo test"));
+        assert!(!line_text(&working0).contains("zsh"));
+        assert!(line_text(&working0).contains('⠙'));
+        assert_eq!(word_span(&working1, "Working"), Some(theme.session_active));
 
         // Typing wins over working: the typing glyph and word, both in the
         // session_typing color, and the foreground command as the label.
-        let typing = terminal_row_lines(&theme, true, true, '⠹', "zsh", Some("vim"), "proj", width);
-        assert!(line_text(&typing[0]).contains(crate::theme::TYPING_GLYPH));
-        assert!(line_text(&typing[0]).contains("vim"));
-        assert_eq!(typing[0].spans[0].style.fg, Some(theme.session_typing));
-        assert_eq!(word_span(&typing[1], "Typing"), Some(theme.session_typing));
+        let (typing0, typing1) =
+            terminal_row_lines(&theme, true, true, '⠹', "zsh", Some("vim"), "proj", width);
+        assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
+        assert!(line_text(&typing0).contains("vim"));
+        assert_eq!(typing0.spans[0].style.fg, Some(theme.session_typing));
+        assert_eq!(word_span(&typing1, "Typing"), Some(theme.session_typing));
+    }
+
+    #[test]
+    fn framed_row_item_wraps_two_lines_with_a_trailing_spacer() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::List;
+
+        // The shared row component always produces a three-line item: the two
+        // content lines verbatim plus a blank spacer, so agent rows and terminal
+        // rows keep the identical shape the framed selection geometry assumes.
+        // ListItem exposes no lines accessor, so render it and read the buffer.
+        let item = framed_row_item(Line::from("primary"), Line::from("meta"));
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                ratatui::widgets::Widget::render(
+                    List::new(vec![item]),
+                    frame.area(),
+                    frame.buffer_mut(),
+                );
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let row_text =
+            |y: u16| -> String { (0..10).map(|x| buf[(x, y)].symbol()).collect::<String>() };
+        assert!(
+            row_text(0).starts_with("primary"),
+            "line one is the primary text"
+        );
+        assert!(row_text(1).starts_with("meta"), "line two is the meta text");
+        assert!(
+            row_text(2).trim().is_empty(),
+            "third line is a blank spacer"
+        );
+    }
+
+    /// Spawn two idle companion terminals owned by the first session so the left
+    /// pane renders a two-row Terminals list. Returns the rendered terminal and
+    /// the app so callers can inspect the post-render mouse map and buffer.
+    fn app_with_two_terminals() -> App {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        for (i, term_id) in ["term-1", "term-2"].iter().enumerate() {
+            let client = PtyClient::spawn(
+                "/bin/sh",
+                &["-c".to_string(), "sleep 30".to_string()],
+                std::path::Path::new("."),
+                24,
+                80,
+                100,
+            )
+            .expect("spawn pty");
+            app.engine.companion_terminals.insert(
+                (*term_id).to_string(),
+                CompanionTerminal {
+                    owner: dux_core::model::TerminalOwner::Session(session_id.clone()),
+                    label: format!("shell {i}"),
+                    foreground_cmd: None,
+                    client,
+                    sort_order: i as u64,
+                    created_at: chrono::Utc::now(),
+                },
+            );
+        }
+        app
+    }
+
+    #[test]
+    fn terminal_mouse_map_accounts_for_top_margin_and_gutter() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app_with_two_terminals();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        // Give the terminals pane plenty of height so the top margin is reserved.
+        app.terminal_pane_height_pct = 50;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        // The click surface is recorded (the content area after the margin), and
+        // it is offset one row below the block's inner top (the reserved margin).
+        let term_content = app.mouse_layout.terminal_list;
+        assert!(
+            term_content.height >= 6 && term_content.width > 0,
+            "terminal content surface should be recorded with room for two rows"
+        );
+        // Each terminal row is three lines tall, so the first three content rows
+        // map to item 0 and the next three to item 1, even with the top margin
+        // and the side gutters in play.
+        let map = &app.mouse_layout.terminal_row_to_item;
+        assert!(
+            map.len() >= 6,
+            "map should cover both three-line rows, got {}",
+            map.len()
+        );
+        assert_eq!(&map[0..6], &[0, 0, 0, 1, 1, 1], "3-tall rows in order");
+    }
+
+    #[test]
+    fn selected_terminal_gets_tinted_frame() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = app_with_two_terminals();
+        app.focus = FocusPane::Left;
+        app.left_section = LeftSection::Terminals;
+        app.selected_terminal_index = 0;
+        app.terminal_pane_height_pct = 50;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        // The content surface origin; the first terminal's two content rows sit at
+        // y0 and y0+1, its trailing spacer at y0+2, and the reserved top-margin
+        // row (its `▄` top edge) at y0-1.
+        let content = app.mouse_layout.terminal_list;
+        let gx = content.x;
+        let x1 = content.x + content.width;
+        let y0 = content.y;
+        let tint = app.theme.selection_bar_tint();
+
+        // The tint fills the two content rows edge to edge, both gutters included,
+        // exactly like an agent row (background only, no full-cell flood).
+        for x in [gx, gx + 1, x1 - 2, x1 - 1] {
+            assert_eq!(buf[(x, y0)].bg, tint, "name row cell {x} is tinted");
+            assert_eq!(buf[(x, y0 + 1)].bg, tint, "meta row cell {x} is tinted");
+        }
+        // Framed by half-cell edges in the tint: a `▄` top edge on the reserved
+        // margin row above, a `▀` bottom edge on the trailing spacer below.
+        assert_eq!(buf[(gx + 1, y0 - 1)].symbol(), "▄", "top frame edge");
+        assert_eq!(buf[(gx + 1, y0 + 2)].symbol(), "▀", "bottom frame edge");
+        assert_eq!(buf[(gx + 1, y0 - 1)].fg, tint, "top edge is the tint");
+        assert_eq!(buf[(gx + 1, y0 + 2)].fg, tint, "bottom edge is the tint");
     }
 
     #[test]
