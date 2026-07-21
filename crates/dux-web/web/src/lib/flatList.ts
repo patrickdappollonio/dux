@@ -100,7 +100,14 @@ export interface StateWord {
 }
 
 export function stateWord(session: SessionView): StateWord {
+  // Mirrors the TUI's canonical state-word priority EXACTLY: needs-attention
+  // wins; then for an active agent typing outranks working, working outranks
+  // idle; then the non-active detached/exited words.
   if (session.needs_attention) return { label: "Needs you", className: "text-cyan-100" }
+  if (session.status === "active" && session.typing) {
+    // The soft-violet typing token, matching the TUI's `#c586e0` typing hue.
+    return { label: "Typing", className: "text-dux-typing" }
+  }
   if (session.status === "active" && session.working) {
     // Match the app's active status color (agentRow.ts STATUS_DOT_COLOR),
     // not a new palette hue.

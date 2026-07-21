@@ -250,6 +250,85 @@ describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
   })
 })
 
+describe("AppSidebar flat Terminals section", () => {
+  // A session that owns a companion terminal which is currently "typing": it must
+  // render in the flat Terminals section (not nested under the agent), under the
+  // "Terminals" header, showing the running command, the owner (agent) label, and
+  // the violet "Typing" state word.
+  function typingTerminalSpine(): DuxState["spine"] {
+    return {
+      projects: [
+        {
+          id: "p1",
+          name: "Repo",
+          path: "/tmp/p1",
+          path_missing: false,
+          default_provider: "claude",
+          current_branch: "main",
+          branch_status: "leading",
+          terminals: [],
+        },
+      ],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          title: "Login flow",
+          provider: "claude",
+          branch_name: "feature/login",
+          worktree_path: "/tmp/p1",
+          status: "active",
+          auto_reopen_enabled: false,
+          tabs: [],
+          has_output: false,
+          working: false,
+          typing: false,
+          terminals: [
+            {
+              id: "ct-1",
+              label: "Terminal 1",
+              has_output: true,
+              working: false,
+              typing: true,
+              foreground_cmd: "vim",
+            },
+          ],
+        },
+      ],
+      sidebar: {
+        groups: [
+          { project_id: "p1", name: "Repo", orphaned: false, session_ids: ["s1"] },
+        ],
+        agentless_start: null,
+      },
+    } as unknown as DuxState["spine"]
+  }
+
+  it("renders a companion terminal in the flat Terminals section with owner label and Typing state", () => {
+    mockState = makeState({
+      spine: typingTerminalSpine(),
+      bootstrap: { title: "dux", dux_version: "v1" },
+    })
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    // The section header.
+    expect(screen.getByText("Terminals")).toBeTruthy()
+    // Row 1 primary label = the running foreground command.
+    expect(screen.getByText("vim")).toBeTruthy()
+    // Row 2: the owner label repeats the agent name (the agent row plus the
+    // terminal's ↳ owner tag, and the vitals tooltips), so it appears more than
+    // once, proving the terminal carries its owner label.
+    expect(screen.getAllByText("Login flow").length).toBeGreaterThan(1)
+    // The terminal's Typing word (the agent row shows Idle since the session
+    // itself is not typing), styled through the violet typing token.
+    const word = screen.getByText("Typing")
+    expect(word.className).toContain("text-dux-typing")
+  })
+})
+
 describe("AppSidebar project terminals", () => {
   // A spine whose project owns a live project terminal (and has no sessions):
   // the row must render under the project header (T14; before this, a project

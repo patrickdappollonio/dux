@@ -65,10 +65,11 @@ function CollapsedAgentIcon({
   selected: boolean
 }) {
   const label = session.title || session.branch_name
-  const { shimmer, dimmed, attention } = agentRowVisual(
+  const { shimmer, dimmed, attention, typing } = agentRowVisual(
     session.status,
     session.working,
     session.needs_attention,
+    session.typing,
   )
   const { changes } = useDux()
   const changesCount = changesCountFor(changes, session.id)
@@ -92,12 +93,18 @@ function CollapsedAgentIcon({
           className={cn("touch-manipulation", dimmed && "opacity-70")}
         >
           <span
-            aria-label={attention ? "Needs attention" : undefined}
+            aria-label={
+              attention ? "Needs attention" : typing ? "Typing" : undefined
+            }
             className={cn(
               "inline-flex shrink-0",
               attention
                 ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
-                : "text-sidebar-accent-foreground",
+                : // Typing tints the rail icon violet (no bob) so the icon-only
+                  // rail still distinguishes typing from working.
+                  typing
+                  ? "text-dux-typing"
+                  : "text-sidebar-accent-foreground",
             )}
           >
             <Bot

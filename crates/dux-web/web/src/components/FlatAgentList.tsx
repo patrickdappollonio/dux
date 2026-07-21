@@ -76,6 +76,11 @@ import {
   stateWord,
   type FlatSortKey,
 } from "@/lib/flatList"
+import {
+  assembleFlatTerminals,
+  terminalStateWord,
+  type FlatTerminal,
+} from "@/lib/flatTerminals"
 import { prIconClass, prIconHoverClass, prStateLabel } from "@/lib/pr"
 import { partitionProjects } from "@/lib/projects"
 import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
@@ -249,6 +254,19 @@ function Dot({ className }: { className: string }) {
   return <span className={cn("size-1 shrink-0 rounded-full bg-current opacity-50", className)} />
 }
 
+// The typing cue: a thin blinking caret in the soft-violet typing token, shared by
+// the agent and terminal rows so the two surfaces (and the two row kinds) never
+// drift. Distinct from the working bob/shimmer so "typing" and "working" read
+// differently. Motion-reduce drops the blink and rests the caret fully opaque.
+function TypingCaret() {
+  return (
+    <span
+      aria-hidden
+      className="inline-block h-3.5 w-0.5 shrink-0 rounded-full bg-dux-typing align-middle motion-safe:animate-typing-caret motion-reduce:opacity-100"
+    />
+  )
+}
+
 // The two-line agent row: line one is the Bot (with the verbatim working bob +
 // attention pulse + name shimmer cues) + name + PR link + relative time; line two
 // is the clickable project tag, a colored state word, and (when they diverge) the
@@ -269,10 +287,11 @@ function AgentFlatRow({
   const label = session.title || session.branch_name
   const agentSelected =
     selectedTarget?.kind === "agent" && selectedTarget.sessionId === session.id
-  const { shimmer, dimmed, attention } = agentRowVisual(
+  const { shimmer, dimmed, attention, typing } = agentRowVisual(
     session.status,
     session.working,
     session.needs_attention,
+    session.typing,
   )
   const word = stateWord(session)
   const branchDiverges = session.branch_name !== label
@@ -356,6 +375,9 @@ function AgentFlatRow({
                 >
                   {label}
                 </span>
+                {/* Typing cue: the violet caret next to the name (working's bob +
+                    shimmer are suppressed while typing, so this is the sole cue). */}
+                {typing ? <TypingCaret /> : null}
                 {session.pr ? (
                   <SimpleTooltip
                     content={`#${session.pr.number} · ${session.pr.title} (${prStateLabel(session.pr.state)})`}
@@ -440,50 +462,36 @@ function AgentFlatRow({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-
-      {/* Companion terminals for this agent, as their own inline rows. */}
-      {session.terminals.map((terminal) => (
-        <TerminalFlatRow
-          key={terminal.id}
-          terminal={terminal}
-          siblings={session.terminals}
-          owner={{ kind: "session", sessionId: session.id }}
-          ownerLabel={label}
-          projectName={projectName}
-          active={
-            selectedTarget?.kind === "terminal" &&
-            selectedTarget.terminalId === terminal.id
-          }
-          onSelect={handlers.onSelectTerminal}
-        />
-      ))}
     </div>
   )
 }
 
-// A one-line terminal row (its second line is the muted owner tag). Terminals are
-// runtime-only, so a listed terminal is a live PTY: it shows a green running dot.
-// There is no per-terminal timestamp field, so no relative time is shown (a
-// deliberate, field-backed omission). Owner label is the agent name (session
-// terminal) or the project (project terminal), each tagged on the second line.
+// The two-line terminal row, mirroring the agent row's shape. Line one: the
+// terminal icon + primary label (the foreground command when something is running,
+// via `terminalTitle`, else the shell label), with the working shimmer / typing
+// caret cues. Line two: `↳ {ownerLabel} · {stateWord}`, the owner being the agent
+// name (session terminal) or the project name (project terminal), and the state
+// word one of Typing / Working / Idle (terminals have no detached/exited/attention).
 function TerminalFlatRow({
   terminal,
   siblings,
   owner,
   ownerLabel,
-  projectName,
   active,
   onSelect,
 }: {
   terminal: TerminalView
   siblings: readonly TerminalView[]
   owner: TerminalOwnerRef
-  ownerLabel: string | null
-  projectName: string
+  ownerLabel: string
   active: boolean
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
 }) {
   const title = terminalTitle(terminal, siblings)
+  const word = terminalStateWord(terminal)
+  // Same working cue as the agent row: the name shimmers while streaming, and only
+  // while streaming and NOT typing (typing owns the caret) so the two read apart.
+  const shimmer = terminal.working && !terminal.typing
   return (
     <div
       className={cn(
@@ -504,15 +512,33 @@ function TerminalFlatRow({
               content={title !== terminal.label ? terminal.label : null}
               side="right"
             >
-              <span className="min-w-0 flex-1 truncate text-sm">{title}</span>
+              <span
+                className={cn(
+                  "min-w-0 flex-1 truncate text-sm agent-name-shimmer",
+                  shimmer && "agent-name-shimmer--on",
+                )}
+              >
+                {title}
+              </span>
             </SimpleTooltip>
-            <Dot className="text-green-500 opacity-100" />
+            {terminal.typing ? <TypingCaret /> : null}
           </span>
           <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <ProjectTag name={projectName} />
+            {/* The ↳ owner tag mirrors the agent row's project tag: which owner
+                this terminal belongs to, then its colored state word. */}
+            <span className="flex min-w-0 shrink items-center gap-1">
+              <span aria-hidden>↳</span>
+              <span className="min-w-0 truncate">{ownerLabel}</span>
+            </span>
             <Dot className="text-muted-foreground" />
-            <span className="min-w-0 truncate">
-              {ownerLabel ? `${ownerLabel} · terminal` : "terminal"}
+            <span
+              key={word.label}
+              className={cn(
+                "shrink-0 font-medium motion-safe:animate-state-word",
+                word.className,
+              )}
+            >
+              {word.label}
             </span>
           </span>
         </span>
@@ -544,6 +570,49 @@ function TerminalFlatRow({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    </div>
+  )
+}
+
+// The flat Terminals section: every terminal (companion + project), each a
+// two-line TerminalFlatRow, under a labeled divider matching the Quiet tail's
+// header. Always visible (terminals are runtime-only live PTYs, so a listed one is
+// running and worth surfacing); it renders nothing when there are no terminals.
+function TerminalsSection({
+  terminals,
+  selectedTarget,
+  onSelect,
+}: {
+  terminals: FlatTerminal[]
+  selectedTarget: SelectedTarget | null
+  onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
+}) {
+  if (terminals.length === 0) return null
+  return (
+    <div className="mt-2 border-t border-border/50 pt-2">
+      <div className="flex w-full items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-muted-foreground">
+        <SquareTerminal className="size-3 shrink-0" />
+        <span>Terminals</span>
+        <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
+          {terminals.length}
+        </span>
+      </div>
+      <div className="mt-1 flex flex-col gap-1">
+        {terminals.map((ft) => (
+          <TerminalFlatRow
+            key={ft.terminal.id}
+            terminal={ft.terminal}
+            siblings={ft.siblings}
+            owner={ft.owner}
+            ownerLabel={ft.ownerLabel}
+            active={
+              selectedTarget?.kind === "terminal" &&
+              selectedTarget.terminalId === ft.terminal.id
+            }
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
     </div>
   )
 }
@@ -677,15 +746,20 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     matchesSessionQuery(s, projectName(s.project_id), query),
   )
 
-  // Project terminals (owned by a project, not an agent), including those of
-  // agent-less projects, otherwise a running project shell would render nowhere
-  // in the flat list. Shown after the agent list, each tagged with its project.
-  const projectTerminals = [...withAgents, ...withoutAgents].flatMap((id) => {
-    const terms = rawProjects.find((p) => p.id === id)?.terminals ?? []
-    return terms
-      .filter((t) => matchesTerminalQuery(t, projectName(id), projectName(id), query))
-      .map((terminal) => ({ terminal, projectId: id, siblings: terms }))
-  })
+  // The flat Terminals section: EVERY terminal, companion (session-owned) and
+  // project-owned alike, in one list at the bottom. Session terminals first (in
+  // session order), then project terminals (in project display order), each
+  // carrying its owner label. Not draggable in this phase (spine order only).
+  const orderedProjects = [...withAgents, ...withoutAgents]
+    .map((id) => rawProjects.find((p) => p.id === id))
+    .filter((p): p is (typeof rawProjects)[number] => p !== undefined)
+  const flatTerminals = assembleFlatTerminals(
+    coreSessions,
+    orderedProjects,
+    projectName,
+  ).filter((ft) =>
+    matchesTerminalQuery(ft.terminal, ft.ownerLabel, ft.projectName, query),
+  )
 
   const manual = agentSort === "manual"
   const sensors = useSensors(
@@ -711,13 +785,13 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
 
   const nothing =
     coreSessions.length === 0 &&
-    projectTerminals.length === 0 &&
+    flatTerminals.length === 0 &&
     quiet.length === 0
   const nothingMatches =
     query.trim() !== "" &&
     visibleMain.length === 0 &&
     visibleQuiet.length === 0 &&
-    projectTerminals.length === 0
+    flatTerminals.length === 0
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -792,27 +866,17 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
               </SortableContext>
             </DndContext>
 
-            {projectTerminals.map(({ terminal, projectId, siblings }) => (
-              <TerminalFlatRow
-                key={terminal.id}
-                terminal={terminal}
-                siblings={siblings}
-                owner={{ kind: "project", projectId }}
-                ownerLabel={null}
-                projectName={projectName(projectId)}
-                active={
-                  selectedTarget?.kind === "terminal" &&
-                  selectedTarget.terminalId === terminal.id
-                }
-                onSelect={handlers.onSelectTerminal}
-              />
-            ))}
-
             <QuietTail
               sessions={visibleQuiet}
               projectName={projectName}
               selectedTarget={selectedTarget}
               handlers={handlers}
+            />
+
+            <TerminalsSection
+              terminals={flatTerminals}
+              selectedTarget={selectedTarget}
+              onSelect={handlers.onSelectTerminal}
             />
           </>
         )}

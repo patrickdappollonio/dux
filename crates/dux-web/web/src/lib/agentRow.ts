@@ -17,16 +17,28 @@ import type { SessionStatus } from "@/lib/types"
  *    a finished turn) the user has not looked at → a cyan dot on the row. The
  *    server tears the flag down when the tab exits, so it is effectively only
  *    ever set on a live (active) agent; it is orthogonal to shimmer/dimmed (a
- *    flagged agent may still be streaming its prompt). */
+ *    flagged agent may still be streaming its prompt).
+ *
+ *  - `typing`: the agent is streaming keystroke-level input (a finer cue than
+ *    `working`). It shows the row's typing caret + violet "Typing" word. It is
+ *    kept visually DISTINCT from working: the bob + name-shimmer (`shimmer`) fire
+ *    only while working and NOT typing, so a typing agent shows the caret alone,
+ *    a working agent shows the bob/shimmer alone. `typing` requires `active`. */
 export function agentRowVisual(
   status: SessionStatus,
   working: boolean,
   needsAttention = false,
-): { shimmer: boolean; dimmed: boolean; attention: boolean } {
+  typing = false,
+): { shimmer: boolean; dimmed: boolean; attention: boolean; typing: boolean } {
+  const active = status === "active"
+  const isTyping = active && typing
   return {
-    shimmer: status === "active" && working,
-    dimmed: status !== "active",
+    // Working cue is suppressed during typing so the two states never fire at
+    // once; the caret carries "typing", the bob/shimmer carry "working".
+    shimmer: active && working && !isTyping,
+    dimmed: !active,
     attention: needsAttention,
+    typing: isTyping,
   }
 }
 

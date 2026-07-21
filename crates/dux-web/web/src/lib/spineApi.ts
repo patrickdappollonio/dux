@@ -68,16 +68,26 @@ export async function fetchSpine(): Promise<Spine> {
   // becomes `[]` and the two branch fields become `""` (falsy, so the
   // "Unknown"/no-drift fallbacks in the info dialog and header still apply).
   const raw = (await resp.json()) as Omit<Spine, "sessions" | "projects"> & {
-    projects: Array<Omit<ProjectView, "terminals"> & { terminals?: TerminalView[] }>
+    projects: Array<
+      Omit<ProjectView, "terminals"> & { terminals?: RawTerminal[] }
+    >
     sessions: Array<
       Omit<
         SessionView,
-        "tabs" | "initial_branch" | "source_branch" | "needs_attention" | "last_focused_tab"
+        | "tabs"
+        | "terminals"
+        | "initial_branch"
+        | "source_branch"
+        | "needs_attention"
+        | "typing"
+        | "last_focused_tab"
       > & {
-        tabs?: AgentTabView[]
+        tabs?: RawTab[]
+        terminals?: RawTerminal[]
         initial_branch?: string
         source_branch?: string
         needs_attention?: boolean
+        typing?: boolean
         last_focused_tab?: string | null
       }
     >
@@ -88,19 +98,42 @@ export async function fetchSpine(): Promise<Spine> {
     // downstream consumer treats it as required, so normalize to `[]` here.
     projects: raw.projects.map((p) => ({
       ...p,
-      terminals: p.terminals ?? [],
+      terminals: (p.terminals ?? []).map(normalizeTerminal),
     })),
     sessions: raw.sessions.map((s) => ({
       ...s,
-      tabs: s.tabs ?? [],
+      tabs: (s.tabs ?? []).map(normalizeTab),
+      terminals: (s.terminals ?? []).map(normalizeTerminal),
       initial_branch: s.initial_branch ?? "",
       source_branch: s.source_branch ?? "",
       // An older server that predates attention omits the field; treat missing
       // as "no attention" so the dot/count/favicon stay quiet.
       needs_attention: s.needs_attention ?? false,
+      // An older server that predates the finer "typing" cue omits it; treat
+      // missing as "not typing" so the row stays on the working/idle words.
+      typing: s.typing ?? false,
       // An older server that predates tab-focus memory omits the field; treat
       // missing the same as an explicit null ("no memory recorded").
       last_focused_tab: s.last_focused_tab ?? null,
     })),
   }
+}
+
+// The `typing` cue is newer than the tab/terminal views themselves, so an older
+// server omits it on nested tabs and terminals. Normalize each to a required
+// `false` at this single ingestion boundary, matching how the session-level
+// fields above are coerced (downstream consumers treat `typing`/`working` as
+// required).
+type RawTab = Omit<AgentTabView, "typing"> & { typing?: boolean }
+type RawTerminal = Omit<TerminalView, "working" | "typing"> & {
+  working?: boolean
+  typing?: boolean
+}
+
+function normalizeTab(t: RawTab): AgentTabView {
+  return { ...t, typing: t.typing ?? false }
+}
+
+function normalizeTerminal(t: RawTerminal): TerminalView {
+  return { ...t, working: t.working ?? false, typing: t.typing ?? false }
 }

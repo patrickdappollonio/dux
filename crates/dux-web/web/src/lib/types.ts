@@ -70,6 +70,11 @@ export interface AgentTabView {
   provider: string
   order: number
   working: boolean
+  /** This specific tab is streaming keystroke-level input (the provider is
+   * "typing"), a finer-grained cue than `working`. Rolled up any-tab into
+   * `SessionView.typing`. An older server omits it; `applySpine` normalizes a
+   * missing value to `false`. */
+  typing: boolean
   /** This specific tab needs attention (a permission prompt, a finished turn)
    * the user has not yet looked at. The tab strip marks the flagged pill; the
    * sidebar rolls this up across tabs into `SessionView.needs_attention`. */
@@ -82,6 +87,15 @@ export interface TerminalView {
   id: string
   label: string
   has_output: boolean
+  /** The terminal emitted PTY output within the last second (hysteresis boolean,
+   * mirroring `SessionView.working`). Drives the terminal row's "Working" state
+   * word and its working cue. An older server omits it; `applySpine` normalizes
+   * a missing value to `false`. */
+  working: boolean
+  /** The terminal is streaming keystroke-level input ("typing"), a finer cue than
+   * `working`. Drives the terminal row's "Typing" state word and typing caret. An
+   * older server omits it; `applySpine` normalizes a missing value to `false`. */
+  typing: boolean
   /** The command running in the terminal's foreground, or null when the shell
    * itself is idle. Refreshed by the engine at most every ~2s. The displayed
    * terminal title follows this when present, falling back to `label` (see
@@ -117,6 +131,11 @@ export interface SessionView {
   /** Hysteresis boolean: the agent emitted PTY output within the last second.
    * Drives the "working" ping-ring animation on the active status badge. */
   working: boolean
+  /** Any of the agent's tabs is streaming keystroke-level input ("typing"), a
+   * finer-grained cue than `working`, rolled up any-tab. Drives the row's
+   * "Typing" state word and typing caret. An older server omits it; `applySpine`
+   * normalizes a missing value to `false`. */
+  typing: boolean
   /** Any of the agent's tabs needs attention (a permission prompt, a finished
    * turn) the user has not yet looked at. Rolled up any-tab, mirroring `working`.
    * Drives the sidebar dot, the browser-tab count, and the favicon dot. An older

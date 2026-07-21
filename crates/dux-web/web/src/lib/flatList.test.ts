@@ -24,6 +24,7 @@ function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
     tabs: [],
     has_output: false,
     working: false,
+    typing: false,
     needs_attention: false,
     created_at: "2026-07-17T12:00:00Z",
     updated_at: "2026-07-17T12:00:00Z",
@@ -109,16 +110,36 @@ describe("FLAT_SORT_LABELS", () => {
 })
 
 describe("stateWord", () => {
-  it("prefers needs-you over working", () => {
-    expect(stateWord(makeSession({ id: "a", working: true, needs_attention: true })).label).toBe(
-      "Needs you",
-    )
+  it("prefers needs-you over typing and working", () => {
+    expect(
+      stateWord(
+        makeSession({ id: "a", working: true, typing: true, needs_attention: true }),
+      ).label,
+    ).toBe("Needs you")
   })
 
-  it("maps each flag combination to its word", () => {
+  it("prefers typing over working for an active agent", () => {
+    const word = stateWord(makeSession({ id: "a", working: true, typing: true }))
+    expect(word.label).toBe("Typing")
+    // Styled through the soft-violet typing token, never a hardcoded hue.
+    expect(word.className).toBe("text-dux-typing")
+  })
+
+  it("maps each flag combination to its word in TUI priority order", () => {
+    expect(stateWord(makeSession({ id: "a", typing: true })).label).toBe("Typing")
     expect(stateWord(makeSession({ id: "a", working: true })).label).toBe("Working")
     expect(stateWord(makeSession({ id: "a" })).label).toBe("Idle")
     expect(stateWord(makeSession({ id: "a", status: "detached" })).label).toBe("Detached")
     expect(stateWord(makeSession({ id: "a", status: "exited" })).label).toBe("Exited")
+  })
+
+  it("ignores typing/working for a non-active agent (detached/exited unaffected)", () => {
+    expect(
+      stateWord(makeSession({ id: "a", status: "detached", typing: true })).label,
+    ).toBe("Detached")
+    expect(
+      stateWord(makeSession({ id: "a", status: "exited", typing: true, working: true }))
+        .label,
+    ).toBe("Exited")
   })
 })

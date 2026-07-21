@@ -8,6 +8,7 @@ describe("agentRowVisual", () => {
       shimmer: true,
       dimmed: false,
       attention: false,
+      typing: false,
     })
   })
 
@@ -16,6 +17,7 @@ describe("agentRowVisual", () => {
       shimmer: false,
       dimmed: false,
       attention: false,
+      typing: false,
     })
   })
 
@@ -24,6 +26,7 @@ describe("agentRowVisual", () => {
       shimmer: false,
       dimmed: true,
       attention: false,
+      typing: false,
     })
     // Even if a non-active agent somehow reports working, it stays dimmed and
     // unshimmered — shimmer is gated on the active status.
@@ -31,6 +34,7 @@ describe("agentRowVisual", () => {
       shimmer: false,
       dimmed: true,
       attention: false,
+      typing: false,
     })
   })
 
@@ -39,6 +43,7 @@ describe("agentRowVisual", () => {
       shimmer: false,
       dimmed: true,
       attention: false,
+      typing: false,
     })
   })
 
@@ -48,13 +53,49 @@ describe("agentRowVisual", () => {
       shimmer: true,
       dimmed: false,
       attention: true,
+      typing: false,
     })
     // Attention without streaming.
     expect(agentRowVisual("active", false, true)).toEqual({
       shimmer: false,
       dimmed: false,
       attention: true,
+      typing: false,
     })
+  })
+
+  it("exposes typing for an active typing agent and keeps the working cue OFF", () => {
+    // Typing alone: caret cue (typing=true), no bob/shimmer (shimmer=false).
+    expect(agentRowVisual("active", false, false, true)).toEqual({
+      shimmer: false,
+      dimmed: false,
+      attention: false,
+      typing: true,
+    })
+  })
+
+  it("suppresses the working cue while typing so the two states stay distinct", () => {
+    // Both flags set: typing wins the visual, shimmer is suppressed.
+    expect(agentRowVisual("active", true, false, true)).toEqual({
+      shimmer: false,
+      dimmed: false,
+      attention: false,
+      typing: true,
+    })
+  })
+
+  it("keeps the working cue ON when working but not typing", () => {
+    expect(agentRowVisual("active", true, false, false)).toEqual({
+      shimmer: true,
+      dimmed: false,
+      attention: false,
+      typing: false,
+    })
+  })
+
+  it("never reports typing for a non-active agent", () => {
+    expect(agentRowVisual("detached", false, false, true).typing).toBe(false)
+    expect(agentRowVisual("exited", false, false, true).typing).toBe(false)
   })
 })
 

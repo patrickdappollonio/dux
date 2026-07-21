@@ -45,6 +45,10 @@ describe("fetchSpine", () => {
           id: "s1",
           project_id: "p1",
           tabs: [],
+          // A session that omits `terminals`/`typing` (an older server) is coerced
+          // to `terminals: []` and `typing: false`.
+          terminals: [],
+          typing: false,
           initial_branch: "",
           source_branch: "",
           needs_attention: false,
