@@ -915,8 +915,8 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
           <input
             value={agentSearch}
             onChange={(event) => setAgentSearch(event.target.value)}
-            placeholder="Search agents"
-            aria-label="Search agents"
+            placeholder="Search agents and terminals"
+            aria-label="Search agents and terminals"
             className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
