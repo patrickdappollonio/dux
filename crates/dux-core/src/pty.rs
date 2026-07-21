@@ -1239,18 +1239,17 @@ impl PtyClient {
         self.child.process_id()
     }
 
-    /// Politely ask the child's whole process group to exit (SIGTERM), so the
-    /// CLI and any helpers it spawned can flush state before the hard group
-    /// `kill()` in `Drop` (or process teardown) reaps stragglers. Signals the
-    /// group rather than just the direct child for the same reason `Drop` does:
-    /// the child is a process-group leader (portable-pty calls `setsid`), so a
-    /// SIGTERM aimed at the lone PID would leave its descendants running.
+    /// Politely ask the child to exit (SIGTERM), so the CLI or the app running in
+    /// a terminal can flush state before the hard group `kill()` in `Drop` (or
+    /// process teardown) reaps stragglers. Signals the child's whole process group
+    /// (the child is a process-group leader -- portable-pty calls `setsid` -- so a
+    /// SIGTERM aimed at the lone PID would leave its descendants running) AND the
+    /// foreground process group when a job-controlled app owns a different one:
+    /// an interactive shell (a terminal) puts each foreground command in its own
+    /// pgroup, so signaling only the shell's group would never reach the running
+    /// app. See [`Self::signal_process_groups`].
     pub fn terminate(&self) {
-        if let Some(pid) = self.child_process_id()
-            && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
-        {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
-        }
+        let _ = self.signal_process_groups(rustix::process::Signal::TERM);
     }
 
     /// Hard-kill the child's whole process group (SIGKILL) — the forceful
@@ -1267,16 +1266,60 @@ impl PtyClient {
     /// while `shutdown_ptys` reports it force-closed, so it must leave a trace
     /// (mirrors the `Drop` breadcrumb, louder because the context is explicit).
     pub fn force_terminate(&self) {
-        if let Some(pid) = self.child_process_id()
-            && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
-            && let Err(err) =
-                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
+        if let Err(err) = self.signal_process_groups(rustix::process::Signal::KILL)
             && err != rustix::io::Errno::SRCH
         {
             logger::warn(&format!(
                 "PtyClient::force_terminate: kill_process_group failed: {err}"
             ));
         }
+    }
+
+    /// Send `sig` to the child's own process group AND, when a job-controlled app
+    /// is running in a DIFFERENT foreground process group, to that group too.
+    ///
+    /// An interactive shell (which is what a companion terminal runs) enables job
+    /// control and places each foreground command in its own process group, then
+    /// hands it the terminal foreground. So a running app (an editor, a dev
+    /// server, a REPL) does NOT share the shell's process group, and signaling
+    /// only the shell's group -- which is what a plain `kill_process_group(child)`
+    /// does -- never reaches the app. On close/shutdown that left the app running
+    /// until the grace period's SIGKILL; here we also signal the foreground group
+    /// so the app itself is asked to exit (SIGTERM) or reaped (SIGKILL) directly.
+    /// When the shell owns the foreground (idle) the foreground pgid equals the
+    /// child pid and the extra signal is skipped. Returns the first error (ESRCH,
+    /// "group already gone", is benign).
+    fn signal_process_groups(
+        &self,
+        sig: rustix::process::Signal,
+    ) -> Result<(), rustix::io::Errno> {
+        let Some(child) = self.child_process_id() else {
+            return Ok(());
+        };
+        let Some(child_group) = rustix::process::Pid::from_raw(child as i32) else {
+            return Ok(());
+        };
+        let child_res = rustix::process::kill_process_group(child_group, sig);
+        let fg_res = match self.foreground_pgid() {
+            Some(fg) if fg != child => rustix::process::Pid::from_raw(fg as i32)
+                .map(|group| rustix::process::kill_process_group(group, sig))
+                .unwrap_or(Ok(())),
+            _ => Ok(()),
+        };
+        child_res.and(fg_res)
+    }
+
+    /// The PTY's foreground process group id (via `tcgetpgrp` on the master), or
+    /// `None` if it cannot be read. Equals the child's own pid when the shell owns
+    /// the foreground (an idle prompt); differs when a job-controlled app runs in
+    /// its own group.
+    fn foreground_pgid(&self) -> Option<u32> {
+        use std::os::unix::io::BorrowedFd;
+        let raw_fd = self.master.as_raw_fd()?;
+        // SAFETY: the master fd is valid for the lifetime of PtyClient.
+        let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        let fg = rustix::termios::tcgetpgrp(fd).ok()?;
+        Some(fg.as_raw_nonzero().get() as u32)
     }
 
     /// Returns the name of the foreground process running in this PTY, or
@@ -1342,28 +1385,27 @@ impl Drop for PtyClient {
         // kernel's SIGHUP (or escapes it) would keep the slave open, the master
         // read would never see EOF, and the `join` below would block the
         // dropping thread (the UI thread) indefinitely. SIGKILL to the group
-        // reaps those descendants so the slave is released. (A descendant that
-        // has left this process group — a double-forked daemon, or a
-        // job-control background job under an interactive-shell provider — is
-        // out of reach here. A well-behaved daemon redirects its inherited
+        // reaps those descendants so the slave is released. A job-control
+        // FOREGROUND app (in its own group under an interactive shell) is also
+        // reached, via the foreground-group signal in `signal_process_groups`.
+        // (A descendant that has left both groups — a double-forked daemon, or a
+        // job-control BACKGROUND job — is still out of reach here. A well-behaved
+        // daemon redirects its inherited
         // terminal fds away before detaching so it will not hold the slave
         // open; a misbehaving one that keeps the slave open could still stall
         // the join, though that has not been observed with the supported
         // providers.)
-        if let Some(pid) = self.child.process_id()
-            && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+        // SIGKILL the child's group AND the foreground group when a job-controlled
+        // app owns a different one (see `signal_process_groups`). ESRCH just means
+        // a group already exited (benign). Anything else (e.g. EPERM) means a kill
+        // did not happen, so the reader join below could stall — leave a
+        // breadcrumb in the log.
+        if let Err(err) = self.signal_process_groups(rustix::process::Signal::KILL)
+            && err != rustix::io::Errno::SRCH
         {
-            // ESRCH just means the group already exited (benign). Anything else
-            // (e.g. EPERM) means the group kill did not happen, so the reader
-            // join below could stall — leave a breadcrumb in the log.
-            if let Err(err) =
-                rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
-                && err != rustix::io::Errno::SRCH
-            {
-                logger::debug(&format!(
-                    "PtyClient::drop: kill_process_group failed: {err}"
-                ));
-            }
+            logger::debug(&format!(
+                "PtyClient::drop: kill_process_group failed: {err}"
+            ));
         }
         // Reap the direct child so it does not linger as a zombie. After the
         // group kill the child is already dead, so this `kill` returns at once;
@@ -3042,6 +3084,61 @@ mod tests {
             reader_exited.load(Ordering::Acquire),
             "after drop, the reader thread must have exited (Drop must join it)"
         );
+    }
+
+    #[test]
+    fn terminate_reaches_a_job_controlled_foreground_app() {
+        // A companion terminal runs an interactive shell, which enables job
+        // control and places each foreground command in its OWN process group.
+        // `terminate()` must signal that foreground group, not only the shell's,
+        // or a running app never receives SIGTERM on close/shutdown (the user's
+        // "waiting the 30s and the app never got asked to exit" report).
+        //
+        // Proof: run a foreground `sleep` (which lands in its own group),
+        // `terminate()`, and watch the terminal foreground return to the shell.
+        // That return happens ONLY if sleep's own group was signaled: an
+        // interactive shell ignores SIGTERM, so signaling just the shell's group
+        // (the pre-fix behavior) would leave sleep running with the foreground
+        // pinned to it, and the assertion below would time out.
+        let args = vec!["--norc".to_string(), "--noprofile".to_string(), "-i".to_string()];
+        let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
+            Ok(c) => c,
+            Err(_) => return, // bash unavailable on this host; skip.
+        };
+        let Some(child) = client.child_process_id() else {
+            return;
+        };
+
+        client.write_bytes(b"sleep 30\n").expect("write to the shell");
+
+        // Wait until job control moves the foreground onto sleep's own group.
+        let deadline = Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            match client.foreground_pgid() {
+                Some(fg) if fg != child => break, // sleep owns the foreground group
+                _ if Instant::now() >= deadline => return, // job control never engaged; skip
+                _ => thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+
+        client.terminate();
+
+        // sleep dies from the foreground-group SIGTERM and the shell (which ignores
+        // SIGTERM) reclaims the terminal foreground, so the foreground pgid returns
+        // to the shell's own pid. `is_exited` is a safety valve so the test never
+        // hangs if the whole thing tore down instead.
+        let deadline = Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            if client.is_exited() || client.foreground_pgid() == Some(child) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "terminate() did not reach the foreground app's process group: the \
+                 foreground sleep is still running after SIGTERM"
+            );
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
