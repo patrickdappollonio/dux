@@ -389,6 +389,14 @@ pub enum WireCommand {
     ReorderProjects {
         project_ids: Vec<String>,
     },
+    /// Persist a GLOBAL runtime order for every companion terminal (session- and
+    /// project-owned alike; the web renders one flat Terminals section).
+    /// `terminal_ids` must list exactly the current set of terminals, in the
+    /// desired order (the engine validates strictly). Runtime-only: terminals
+    /// have no SQLite row, so this order resets to creation order on restart.
+    ReorderTerminals {
+        terminal_ids: Vec<String>,
+    },
     /// Swap which CLI a session uses, mirroring the TUI palette's
     /// `change-agent-provider`. `provider` is validated server-side against the
     /// engine's configured provider list (the same source as the ViewModel's
@@ -3710,6 +3718,9 @@ impl Engine {
             }
             WireCommand::ReorderProjects { project_ids } => {
                 Command::ReorderProjects { project_ids }
+            }
+            WireCommand::ReorderTerminals { terminal_ids } => {
+                Command::ReorderTerminals { terminal_ids }
             }
             WireCommand::RunMacro { target_id, name } => Command::RunMacro { target_id, name },
             WireCommand::UpdateMacros { entries } => {

@@ -5052,6 +5052,8 @@ mod resource_monitor_targets_tests {
                 label: "dev server".to_string(),
                 foreground_cmd: Some("npm".to_string()),
                 client: spawn_cat(worktree.path()),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
 

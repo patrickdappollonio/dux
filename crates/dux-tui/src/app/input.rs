@@ -8084,6 +8084,8 @@ not_a_real_action = ["x"]
                 foreground_cmd: Some("python".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
                     .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
 
@@ -8132,6 +8134,8 @@ not_a_real_action = ["x"]
                 foreground_cmd: Some("TERM sleep".to_string()),
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
                     .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
 
@@ -8782,6 +8786,8 @@ not_a_real_action = ["x"]
                 foreground_cmd: None,
                 client: PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000)
                     .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         app.active_terminal_id = Some("term-1".to_string());
@@ -13016,6 +13022,8 @@ cyan = "#00ffff"
                 label: "test".to_string(),
                 foreground_cmd: None,
                 client: term_client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
 
@@ -13747,6 +13755,8 @@ cyan = "#00ffff"
                 label: "test".to_string(),
                 foreground_cmd: None,
                 client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
 
@@ -15301,6 +15311,8 @@ cyan = "#00ffff"
                 foreground_cmd: None,
                 client: PtyClient::spawn("sh", &args, std::path::Path::new("."), 24, 80, 100)
                     .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         app.active_terminal_id = Some("term-1".to_string());

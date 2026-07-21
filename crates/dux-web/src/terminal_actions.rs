@@ -19,6 +19,9 @@
 //!   with the same ownership enforcement: a terminal owned by a session (or by a
 //!   different project) is a 404 on this route, and a project terminal is a 404
 //!   on the session-nested route.
+//! - `POST   /api/v1/terminals/reorder`            reorders every companion
+//!   terminal (both owners) as one flat, global list; the body is the complete
+//!   set of terminal ids in the desired order. Runtime-only (no persistence).
 
 use axum::{
     Json, Router,
@@ -27,7 +30,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use dux_core::model::TerminalOwner;
 use dux_core::wire::WireCommand;
@@ -55,6 +58,7 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/projects/{id}/terminals/{tid}",
             delete(delete_project_terminal),
         )
+        .route("/api/v1/terminals/reorder", post(reorder_terminals))
 }
 
 /// 201 body for a terminal create: the new terminal's id (used to open the nested
@@ -159,6 +163,37 @@ async fn delete_project_terminal(
         _ => return unknown_terminal(),
     }
     dispatch_delete(&state, tid, &headers).await
+}
+
+/// Body for the global terminal reorder: the complete set of terminal ids in the
+/// desired order. Mirrors the sessions `reorder-global` shape.
+#[derive(Deserialize)]
+struct ReorderTerminalsBody {
+    terminal_ids: Vec<String>,
+}
+
+/// `POST /api/v1/terminals/reorder`. The flat model's drag for terminals: reorder
+/// every companion terminal (session- and project-owned) as one global list.
+/// `terminal_ids` must be the complete terminal set; the engine validates strictly
+/// and stamps each terminal's runtime `sort_order`. Runtime-only, so no persistence.
+async fn reorder_terminals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReorderTerminalsBody>,
+) -> Response {
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::ReorderTerminals {
+                terminal_ids: body.terminal_ids,
+            },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
 }
 
 /// The shared delete dispatch: `WireCommand::DeleteTerminal` is id-keyed and

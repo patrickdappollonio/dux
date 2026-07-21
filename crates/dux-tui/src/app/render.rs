@@ -9739,6 +9739,8 @@ mod tests {
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         app.active_terminal_id = Some(terminal_id);

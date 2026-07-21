@@ -297,6 +297,23 @@ pub struct TerminalView {
     /// slowly and the coarse `sessions.changed` signal stays calm. The web UI
     /// shows this as the terminal's title when present, falling back to `label`.
     pub foreground_cmd: Option<String>,
+    /// The terminal's manual (drag) position within the flat Terminals section,
+    /// ascending. Projected verbatim from
+    /// [`crate::model::CompanionTerminal::sort_order`]; the base order both
+    /// surfaces render before applying the active sort mode on top. Stamped at
+    /// spawn from a monotonic counter (so it defaults to creation order) and
+    /// rewritten only by a reorder. Runtime-only, like the terminal itself.
+    pub sort_order: u64,
+    /// Terminal spawn time as an RFC 3339 / ISO 8601 string. Same representation
+    /// as [`SessionView::created_at`], so both surfaces can compute the same
+    /// "recently created" order across terminals and agents. Immutable.
+    pub created_at: String,
+    /// Terminal last-activity time as an RFC 3339 / ISO 8601 string: the wall
+    /// clock of the terminal's most recent PTY activity
+    /// ([`crate::engine::Engine::pty_activity`]), falling back to `created_at`
+    /// when the terminal has not emitted or received anything yet. Backs the
+    /// shared "recently updated" display sort; mirror of [`SessionView::updated_at`].
+    pub updated_at: String,
 }
 
 /// One provider tab of an agent, projected for the tab strip. `order == 0` is
@@ -567,8 +584,38 @@ impl Engine {
         }
     }
 
-    /// The project-owned terminals of `project_id` as [`TerminalView`]s, sorted
-    /// by id for stability (mirrors the session-terminal projection below).
+    /// Project one companion terminal into its [`TerminalView`]. Shared by both
+    /// build sites so their field set (and the `updated_at` derivation) can never
+    /// drift.
+    fn terminal_view(&self, id: &str, t: &crate::model::CompanionTerminal) -> TerminalView {
+        TerminalView {
+            id: id.to_string(),
+            label: t.label.clone(),
+            has_output: t.client.has_output(),
+            // Terminals reuse the agent streaming predicate (see TerminalView).
+            working: self.is_agent_streaming(id),
+            typing: self.is_typing(id),
+            foreground_cmd: t.foreground_cmd.clone(),
+            sort_order: t.sort_order,
+            created_at: t.created_at.to_rfc3339(),
+            // `pty_activity` records the last activity as a monotonic `Instant`;
+            // map it back onto wall clock (now minus how long ago it fired) to
+            // match `created_at`'s RFC 3339 representation. No activity yet →
+            // fall back to the spawn time.
+            updated_at: self
+                .pty_activity
+                .get(id)
+                .map(|last| {
+                    let ago = chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
+                    (chrono::Utc::now() - ago).to_rfc3339()
+                })
+                .unwrap_or_else(|| t.created_at.to_rfc3339()),
+        }
+    }
+
+    /// The project-owned terminals of `project_id` as [`TerminalView`]s, ordered
+    /// by their manual `sort_order` (the base order; each surface applies the
+    /// active sort mode on top in Phase 4b).
     fn project_terminal_views(&self, project_id: &str) -> Vec<TerminalView> {
         let mut terminals: Vec<TerminalView> = self
             .companion_terminals
@@ -576,17 +623,9 @@ impl Engine {
             .filter(
                 |(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Project(pid) if pid == project_id),
             )
-            .map(|(id, t)| TerminalView {
-                id: id.clone(),
-                label: t.label.clone(),
-                has_output: t.client.has_output(),
-                // Terminals reuse the agent streaming predicate (see TerminalView).
-                working: self.is_agent_streaming(id),
-                typing: self.is_typing(id),
-                foreground_cmd: t.foreground_cmd.clone(),
-            })
+            .map(|(id, t)| self.terminal_view(id, t))
             .collect();
-        terminals.sort_by(|a, b| a.id.cmp(&b.id));
+        terminals.sort_by_key(|a| a.sort_order);
         terminals
     }
 
@@ -618,17 +657,9 @@ impl Engine {
             .filter(
                 |(_, t)| matches!(&t.owner, crate::model::TerminalOwner::Session(sid) if *sid == s.id),
             )
-            .map(|(id, t)| TerminalView {
-                id: id.clone(),
-                label: t.label.clone(),
-                has_output: t.client.has_output(),
-                // Terminals reuse the agent streaming predicate (see TerminalView).
-                working: self.is_agent_streaming(id),
-                typing: self.is_typing(id),
-                foreground_cmd: t.foreground_cmd.clone(),
-            })
+            .map(|(id, t)| self.terminal_view(id, t))
             .collect();
-        terminals.sort_by(|a, b| a.id.cmp(&b.id));
+        terminals.sort_by_key(|a| a.sort_order);
         // The sidebar-facing status reflects ANY live tab: the agent is "active"
         // when any of its tabs (session-slot or extra) has a live PTY. (The
         // persisted `desired_running` auto-reopen intent stays agent-level and is
@@ -1011,6 +1042,86 @@ mod tests {
 
         assert_eq!(vm.sessions[0].created_at, created.to_rfc3339());
         assert_eq!(vm.sessions[0].updated_at, updated.to_rfc3339());
+    }
+
+    /// Stand up a session `s1` whose worktree exists on disk and whose terminal
+    /// command is `cat`, so `create_companion_terminal` can spawn real terminals.
+    /// Returns the engine and the tempdir (kept alive by the caller).
+    fn engine_with_spawnable_terminals() -> (Engine, tempfile::TempDir) {
+        let (mut engine, _cfg) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        (engine, worktree)
+    }
+
+    #[test]
+    fn terminals_are_ordered_by_sort_order_and_reflect_a_reorder() {
+        let (mut engine, _worktree) = engine_with_spawnable_terminals();
+
+        let (t1, _) = engine.create_companion_terminal("s1").expect("term 1");
+        let (t2, _) = engine.create_companion_terminal("s1").expect("term 2");
+        let (t3, _) = engine.create_companion_terminal("s1").expect("term 3");
+
+        // Base order is creation order (ascending sort_order stamped at spawn).
+        let order: Vec<String> = engine.spine().sessions[0]
+            .terminals
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(order, vec![t1.clone(), t2.clone(), t3.clone()]);
+
+        // A reorder rewrites the base order the viewmodel emits.
+        engine
+            .apply(crate::engine::Command::ReorderTerminals {
+                terminal_ids: vec![t3.clone(), t1.clone(), t2.clone()],
+            })
+            .expect("reorder");
+
+        let reordered: Vec<String> = engine.spine().sessions[0]
+            .terminals
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        assert_eq!(reordered, vec![t3, t1, t2]);
+    }
+
+    #[test]
+    fn terminal_updated_at_reflects_pty_activity_else_created_at() {
+        use std::time::Instant;
+
+        let (mut engine, _worktree) = engine_with_spawnable_terminals();
+        let (tid, _) = engine.create_companion_terminal("s1").expect("term");
+
+        // No activity yet: updated_at falls back to created_at exactly.
+        let view = engine.spine().sessions[0].terminals[0].clone();
+        assert_eq!(view.id, tid);
+        assert_eq!(
+            view.updated_at, view.created_at,
+            "with no PTY activity, updated_at mirrors created_at"
+        );
+
+        // Stamp fresh activity: updated_at now tracks the activity, at or after
+        // the spawn time.
+        engine.pty_activity.insert(tid.clone(), Instant::now());
+        let after = engine.spine().sessions[0].terminals[0].clone();
+        assert_ne!(
+            after.updated_at, after.created_at,
+            "fresh PTY activity moves updated_at off created_at"
+        );
+        let created = chrono::DateTime::parse_from_rfc3339(&after.created_at).unwrap();
+        let updated = chrono::DateTime::parse_from_rfc3339(&after.updated_at).unwrap();
+        assert!(
+            updated >= created,
+            "updated_at ({updated}) must be at or after created_at ({created})"
+        );
     }
 
     #[test]

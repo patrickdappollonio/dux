@@ -1207,6 +1207,8 @@ impl App {
                 label,
                 foreground_cmd: None,
                 client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         self.active_terminal_id = Some(terminal_id);
@@ -1286,6 +1288,8 @@ impl App {
                 label,
                 foreground_cmd: None,
                 client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         self.active_terminal_id = Some(terminal_id);
@@ -1397,6 +1401,8 @@ impl App {
                 label,
                 foreground_cmd: None,
                 client,
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         self.active_terminal_id = Some(terminal_id);

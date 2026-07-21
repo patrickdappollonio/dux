@@ -226,6 +226,14 @@ pub enum Command {
     /// `EventReaction::Nothing`.
     ReorderProjects { project_ids: Vec<String> },
 
+    /// Persist a GLOBAL runtime order for every companion terminal (session- and
+    /// project-owned alike, since the web renders one flat Terminals section).
+    /// `terminal_ids` must be EXACTLY the full set of current terminal ids. On
+    /// success it stamps each terminal's runtime `sort_order` to match; there is
+    /// NO storage write (terminals are runtime-only). Returns
+    /// `EventReaction::Nothing` (silent; the refreshed view is the feedback).
+    ReorderTerminals { terminal_ids: Vec<String> },
+
     /// Run a configured text macro against a live PTY target. `target_id` names
     /// either an agent session (surface `Agent`) or a companion terminal
     /// (surface `Terminal`); the engine resolves which via the same
@@ -987,6 +995,11 @@ impl Engine {
                 Ok(EventReaction::Nothing)
             }
 
+            Command::ReorderTerminals { terminal_ids } => {
+                self.reorder_terminals(&terminal_ids)?;
+                Ok(EventReaction::Nothing)
+            }
+
             Command::RunMacro { target_id, name } => self.run_macro(&target_id, &name),
 
             Command::UpdateMacros { macros } => {
@@ -1132,6 +1145,26 @@ impl Engine {
             .map(|(i, id)| (id.as_str(), i))
             .collect();
         reorder_in_place(&mut self.sessions, |s| new_pos.get(s.id.as_str()).copied());
+        Ok(())
+    }
+
+    /// Validate and apply a new GLOBAL order for every companion terminal (both
+    /// session- and project-owned). `terminal_ids` must be EXACTLY the full set of
+    /// current terminal ids; on success each terminal's runtime `sort_order` is
+    /// stamped to its index in `terminal_ids`. Mirrors [`reorder_agents`] but with
+    /// NO storage call: terminals are runtime-only (no SQLite row), so the new
+    /// order lives only in memory and resets to creation order on restart. This is
+    /// a pure permutation of the `sort_order` field; it does NOT touch
+    /// `pty_activity`/`updated_at` (reordering is not activity).
+    fn reorder_terminals(&mut self, terminal_ids: &[String]) -> anyhow::Result<()> {
+        let current: Vec<String> = self.companion_terminals.keys().cloned().collect();
+        validate_reorder(&current, terminal_ids, "terminal")?;
+
+        for (index, id) in terminal_ids.iter().enumerate() {
+            if let Some(terminal) = self.companion_terminals.get_mut(id) {
+                terminal.sort_order = index as u64;
+            }
+        }
         Ok(())
     }
 
@@ -1772,6 +1805,66 @@ mod tests {
         );
     }
 
+    /// Register a companion terminal directly in the map for reorder tests, with a
+    /// deliberately scrambled `sort_order` so a passing test proves the reorder
+    /// (not the insertion order) set the field.
+    fn insert_terminal(engine: &mut Engine, id: &str, sort_order: u64) {
+        use crate::model::{CompanionTerminal, TerminalOwner};
+        engine.companion_terminals.insert(
+            id.to_string(),
+            CompanionTerminal {
+                owner: TerminalOwner::Session("s1".to_string()),
+                label: id.to_string(),
+                foreground_cmd: None,
+                client: spawn_cat_v_pty(),
+                sort_order,
+                created_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    #[test]
+    fn reorder_terminals_stamps_sort_order_to_full_set_order() {
+        let (mut engine, _tmp) = test_engine();
+        // Three terminals whose stored sort_order does not match the requested one.
+        insert_terminal(&mut engine, "term-1", 99);
+        insert_terminal(&mut engine, "term-2", 5);
+        insert_terminal(&mut engine, "term-3", 42);
+
+        engine
+            .apply(Command::ReorderTerminals {
+                terminal_ids: vec!["term-3".into(), "term-1".into(), "term-2".into()],
+            })
+            .expect("apply");
+
+        // Each terminal's sort_order is now its index in the requested order.
+        assert_eq!(engine.companion_terminals["term-3"].sort_order, 0);
+        assert_eq!(engine.companion_terminals["term-1"].sort_order, 1);
+        assert_eq!(engine.companion_terminals["term-2"].sort_order, 2);
+    }
+
+    #[test]
+    fn reorder_terminals_rejects_incomplete_set() {
+        let (mut engine, _tmp) = test_engine();
+        insert_terminal(&mut engine, "term-1", 0);
+        insert_terminal(&mut engine, "term-2", 1);
+
+        // Only one of the two terminals, not the complete set.
+        let err = engine
+            .apply(Command::ReorderTerminals {
+                terminal_ids: vec!["term-1".into()],
+            })
+            .map(|_| ())
+            .expect_err("incomplete set must error");
+        assert!(
+            err.to_string().contains("exactly the current"),
+            "err: {err}"
+        );
+        // The rejected reorder left the stored order untouched.
+        assert_eq!(engine.companion_terminals["term-1"].sort_order, 0);
+        assert_eq!(engine.companion_terminals["term-2"].sort_order, 1);
+    }
+
     #[test]
     fn run_macro_writes_to_agent_provider_pty() {
         let (mut engine, _tmp) = test_engine();
@@ -1818,6 +1911,8 @@ mod tests {
                 label: "term".to_string(),
                 foreground_cmd: None,
                 client: spawn_cat_v_pty(),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
             },
         );
         insert_macro(&mut engine, "ls", "ls -la", MacroSurface::Terminal);

@@ -120,6 +120,10 @@ impl Engine {
                 label: label.clone(),
                 foreground_cmd: None,
                 client,
+                // Reuse the monotonic terminal counter so the default drag order
+                // equals creation order; reorders rewrite this later.
+                sort_order: self.terminal_counter as u64,
+                created_at: chrono::Utc::now(),
             },
         );
 
@@ -165,6 +169,45 @@ mod tests {
         assert_eq!(terminal.owner, TerminalOwner::Session("s1".to_string()));
         assert_eq!(terminal.label, "Terminal 1");
         assert!(terminal.foreground_cmd.is_none());
+    }
+
+    #[test]
+    fn companion_terminals_spawn_with_monotonic_sort_order_and_created_at() {
+        let (mut engine, _tmp) = test_engine();
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feature");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        let before = chrono::Utc::now();
+        let (first, _) = engine
+            .create_companion_terminal("s1")
+            .expect("first terminal");
+        let (second, _) = engine
+            .create_companion_terminal("s1")
+            .expect("second terminal");
+        let after = chrono::Utc::now();
+
+        let t1 = &engine.companion_terminals[&first];
+        let t2 = &engine.companion_terminals[&second];
+
+        // Default order equals creation order: the counter-derived sort_order is
+        // strictly increasing across spawns.
+        assert_eq!(t1.sort_order, 1);
+        assert_eq!(t2.sort_order, 2);
+        assert!(t1.sort_order < t2.sort_order);
+
+        // created_at is stamped at spawn, within the observed window.
+        assert!(t1.created_at >= before && t1.created_at <= after);
+        assert!(t2.created_at >= t1.created_at && t2.created_at <= after);
     }
 
     #[test]

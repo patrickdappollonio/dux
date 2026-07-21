@@ -236,6 +236,18 @@ pub struct CompanionTerminal {
     pub label: String,
     pub foreground_cmd: Option<String>,
     pub client: PtyClient,
+    /// The manual (drag) display position of this terminal within the flat
+    /// Terminals section, ascending. Stamped at spawn from a monotonic engine
+    /// counter so the default order equals creation order, and rewritten only by
+    /// [`crate::engine::Engine::reorder_terminals`]. RUNTIME ONLY: terminals have
+    /// no SQLite row, so this is never persisted and resets to creation order on
+    /// restart.
+    pub sort_order: u64,
+    /// Wall-clock spawn time of this terminal. Immutable after spawn. Same type
+    /// and representation as [`AgentSession::created_at`], so both surfaces can
+    /// compute the same "recently created" order over terminals and agents.
+    /// RUNTIME ONLY (memory-only, like the terminal itself).
+    pub created_at: DateTime<Utc>,
 }
 
 #[cfg(test)]
