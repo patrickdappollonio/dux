@@ -803,7 +803,7 @@ impl App {
             let idx = self.spinner_frame_index();
             (
                 crate::theme::SPINNER_FRAMES[idx].to_string(),
-                self.theme.session_active,
+                self.theme.session_working,
             )
         } else {
             (steady_dot.to_string(), steady_color)
@@ -892,7 +892,7 @@ impl App {
             match word {
                 "Needs you" => self.theme.session_attention,
                 "Typing" => self.theme.session_typing,
-                "Working" => self.theme.session_active,
+                "Working" => self.theme.session_working,
                 "Detached" => steady_color,
                 _ => self.theme.provider_label_fg,
             }
@@ -8486,8 +8486,8 @@ fn quit_process_description(agents: usize, terminals: usize) -> String {
 /// Line one: a state glyph plus the primary label. The glyph follows the same
 /// typing -> working -> idle rule the agent row uses, minus the detached and
 /// attention states a terminal can never be in: `TYPING_GLYPH` in
-/// `session_typing` while typing, the shared spinner in `session_active` while
-/// working, else a steady dot. The primary label is the foreground command when
+/// `session_typing` while typing, the shared spinner in `session_working` while
+/// working, else a steady dot in `session_active`. The primary label is the foreground command when
 /// something is running, otherwise the terminal's shell label.
 ///
 /// Line two: an owner marker, the owner's display name (the agent's title or
@@ -8509,7 +8509,7 @@ fn terminal_row_lines(
     let (glyph, glyph_color) = if typing {
         (crate::theme::TYPING_GLYPH.to_string(), theme.session_typing)
     } else if working {
-        (spinner.to_string(), theme.session_active)
+        (spinner.to_string(), theme.session_working)
     } else {
         (crate::theme::DOT_GLYPH.to_string(), theme.session_active)
     };
@@ -8540,7 +8540,7 @@ fn terminal_row_lines(
     let word_color = if typing {
         theme.session_typing
     } else if working {
-        theme.session_active
+        theme.session_working
     } else {
         muted
     };
@@ -9042,7 +9042,7 @@ mod tests {
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
         assert!(line_text(&working0).contains('⠙'));
-        assert_eq!(word_span(&working1, "Working"), Some(theme.session_active));
+        assert_eq!(word_span(&working1, "Working"), Some(theme.session_working));
 
         // Typing wins over working: the typing glyph and word, both in the
         // session_typing color, and the foreground command as the label.

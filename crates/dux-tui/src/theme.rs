@@ -94,6 +94,13 @@ pub struct Theme {
     /// detached (`session_detached`), and attention (`session_attention`) colors.
     /// Defaults to the theme's secondary accent for generic Opaline themes.
     pub session_typing: Color,
+    /// Foreground for the "Working" state cue (the animated spinner glyph on line
+    /// one and the "Working" state word on line two) shown on an agent or terminal
+    /// row while its PTY is streaming output. A dedicated slot, distinct from the
+    /// plain `session_active` shade, so a working row reads as green (matching the
+    /// web's `text-green-500`) while an idle-active row keeps the neutral active
+    /// color. Defaults to the theme's own success/green token.
+    pub session_working: Color,
     pub status_info_fg: Color,
     pub status_info_bg: Color,
     pub status_busy_fg: Color,
@@ -364,6 +371,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.session_deleting", text_dim);
     theme.register_default_token("dux.session_attention", accent_primary);
     theme.register_default_token("dux.session_typing", accent_secondary);
+    theme.register_default_token("dux.session_working", success);
 
     // Status line
     theme.register_default_token("dux.status_info_fg", text_muted);
@@ -516,6 +524,7 @@ impl Theme {
             session_deleting: pick("dux.session_deleting"),
             session_attention: pick("dux.session_attention"),
             session_typing: pick("dux.session_typing"),
+            session_working: pick("dux.session_working"),
             status_info_fg: pick("dux.status_info_fg"),
             status_info_bg: pick("dux.status_info_bg"),
             status_busy_fg: pick("dux.status_busy_fg"),
@@ -751,9 +760,13 @@ mod tests {
             // it to the same cyan as `title_focused`/`border_focused`.
             session_attention: Color::Cyan,
             // Typing cue: a soft violet, deliberately distinct from the working
-            // (whitish `session_active`), detached (yellow), and attention
-            // (cyan) colors so the three live states never blur together.
+            // (green `session_working`), detached (yellow), and attention
+            // (cyan) colors so the live states never blur together.
             session_typing: Color::Rgb(0xc5, 0x86, 0xe0),
+            // Working cue: green, matching the web's `text-green-500`, distinct
+            // from the neutral `session_active` so a streaming row reads as green
+            // while an idle-active row stays neutral.
+            session_working: Color::Rgb(0x22, 0xc5, 0x5e),
             status_info_fg: Color::Rgb(100, 100, 100),
             status_info_bg: Color::Rgb(25, 25, 25),
             status_busy_fg: Color::Yellow,
@@ -858,6 +871,7 @@ mod tests {
         assert_field!(session_deleting);
         assert_field!(session_attention);
         assert_field!(session_typing);
+        assert_field!(session_working);
         assert_field!(status_info_fg);
         assert_field!(status_info_bg);
         assert_field!(status_busy_fg);
@@ -1057,6 +1071,14 @@ variant = "dark"
         assert_ne!(dux_dark.session_typing, dux_dark.session_active);
         assert_ne!(dux_dark.session_typing, dux_dark.session_detached);
         assert_ne!(dux_dark.session_typing, dux_dark.session_attention);
+
+        // The working cue is green and distinct from the neutral active color and
+        // from the other live-state colors, so a streaming row stands out.
+        assert_eq!(dux_dark.session_working, Color::Rgb(0x22, 0xc5, 0x5e));
+        assert_ne!(dux_dark.session_working, dux_dark.session_active);
+        assert_ne!(dux_dark.session_working, dux_dark.session_detached);
+        assert_ne!(dux_dark.session_working, dux_dark.session_typing);
+        assert_ne!(dux_dark.session_working, dux_dark.session_attention);
 
         let mut nord = opaline::load_by_name("nord").expect("nord built-in must exist");
         register_dux_defaults(&mut nord);
