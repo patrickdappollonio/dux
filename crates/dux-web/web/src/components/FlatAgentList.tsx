@@ -367,7 +367,7 @@ function AgentFlatRow({
                       rel="noopener noreferrer"
                       aria-label={`PR #${session.pr.number} (${prStateLabel(session.pr.state)})`}
                       className={cn(
-                        "inline-flex shrink-0 items-center rounded p-0.5 transition-colors",
+                        "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 transition-colors",
                         prIconClass(session.pr.state),
                         prIconHoverClass(session.pr.state),
                       )}
@@ -377,6 +377,9 @@ function AgentFlatRow({
                       }}
                     >
                       <GitPullRequest className="size-3.5" />
+                      <span className="text-xs font-medium tabular-nums">
+                        #{session.pr.number}
+                      </span>
                     </a>
                   </SimpleTooltip>
                 ) : null}
