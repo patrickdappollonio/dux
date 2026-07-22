@@ -2804,6 +2804,19 @@ impl App {
             self.set_info("Closed startup command log.");
             return true;
         }
+        // The NON-interactive agent fullscreen (e.g. the dormant-tab relaunch
+        // screen left up after a tab's CLI exited) dismisses like any other
+        // overlay. Interactive mode never reaches this path — its keys go
+        // through the raw-input passthrough, which has its own exit handling.
+        if matches!(self.fullscreen_overlay, FullscreenOverlay::Agent) {
+            self.fullscreen_overlay = FullscreenOverlay::None;
+            self.input_target = InputTarget::None;
+            let key = self.bindings.label_for(Action::FocusAgent);
+            self.set_info(format!(
+                "Minimized the agent pane. Press \"{key}\" to reopen it."
+            ));
+            return true;
+        }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
             self.set_info("Dismissed dialog. Resume your work in the current pane.");

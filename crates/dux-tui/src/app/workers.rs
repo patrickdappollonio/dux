@@ -209,6 +209,27 @@ impl App {
                 if let Some(provider) = support_provider {
                     self.set_info(format!("Tab ({provider}) exited."));
                 }
+                // If the user was interactive ON this tab when its CLI exited,
+                // drop interactive input right now. Leaving `input_target` on
+                // Agent keeps the raw-input path engaged against the pruned
+                // provider for another tick and then surfaces a misleading
+                // "Agent disconnected." error — and until that tick, every
+                // escape key is swallowed by the passthrough. The fullscreen
+                // overlay deliberately stays up: the dormant-tab relaunch
+                // screen is the desired post-exit view, and Esc/Tab/Ctrl-g/a
+                // click outside all dismiss it from here.
+                if self.input_target == InputTarget::Agent
+                    && self.session_surface == SessionSurface::Agent
+                    && self.selected_session().map(|s| s.id.clone()) == Some(session_id.clone())
+                    && &self.focused_tab_id(&session_id) == tab_id
+                {
+                    self.input_target = InputTarget::None;
+                    self.terminal_selection = None;
+                    self.in_bracket_paste = false;
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    self.loading_input_buf.clear();
+                }
             }
         }
         if !exited.is_empty() {
@@ -1589,6 +1610,78 @@ mod tests {
             updated_at: Utc::now(),
             last_focused_tab: None,
         }
+    }
+
+    /// When the FOCUSED extra tab's CLI exits (the user typed /exit in it)
+    /// while the pane is interactive on that tab, the quiet tab-scoped exit
+    /// path must drop interactive input immediately. Leaving `input_target`
+    /// on Agent keeps the raw-input path engaged against a pruned provider
+    /// for a tick and then surfaces a misleading "Agent disconnected." error.
+    /// The fullscreen overlay deliberately stays up: its dormant-tab screen
+    /// (the relaunch indicator) is the desired post-exit view.
+    #[test]
+    fn focused_extra_tab_exit_leaves_interactive_input() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session_id = app
+            .selected_session()
+            .expect("test_app selects a session")
+            .id
+            .clone();
+        app.engine.agent_tabs.insert(
+            "tab-x".to_string(),
+            crate::model::AgentTab {
+                id: "tab-x".to_string(),
+                session_id: session_id.clone(),
+                provider: ProviderKind::from_str("claude"),
+                sort_order: 1,
+                created_at: Utc::now(),
+            },
+        );
+        let client = crate::pty::PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "echo hi; exit 0".to_string()],
+            Path::new("."),
+            10,
+            40,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert("tab-x".to_string(), client);
+        app.focused_tabs
+            .insert(session_id.clone(), "tab-x".to_string());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        // Wait for the child to exit, then let drain_events observe it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !app
+            .engine
+            .providers
+            .get_mut("tab-x")
+            .is_some_and(|c| c.is_exited() || c.try_wait().is_some())
+        {
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.drain_events();
+
+        assert!(
+            !app.engine.providers.contains_key("tab-x"),
+            "the exited tab should have been pruned"
+        );
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "interactive input must drop the moment the focused tab's CLI exits"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::Agent,
+            "the fullscreen dormant-tab (relaunch) screen stays up"
+        );
     }
 
     /// `EventReaction::ClearStatus` (the `Final::Clear` outcome of a StatusOp)

@@ -6531,6 +6531,21 @@ impl App {
             return false;
         }
 
+        // A left-click outside a (non-interactive) fullscreen agent/terminal
+        // surface dismisses it — matching the click-outside dismiss the
+        // interactive raw-input path already provides. Interactive mode never
+        // reaches this handler (its mouse bytes go through raw stdin).
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && !self
+                .mouse_layout
+                .agent_term
+                .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
+        {
+            self.close_top_overlay();
+            return false;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
@@ -13877,6 +13892,77 @@ cyan = "#00ffff"
                     "session-1".into()
                 )),
             "ReconnectAgent (the explicit reconnect action) must still launch a dormant tab"
+        );
+    }
+
+    /// The dormant-agent fullscreen (an exited tab's "relaunch" screen) is a
+    /// non-interactive overlay: every ordinary escape hatch must leave it, not
+    /// just ExitInteractive. Esc dismisses it like any other overlay.
+    #[test]
+    fn esc_minimizes_dormant_agent_fullscreen() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        // No provider: the focused tab is dormant, but the pane is fullscreen
+        // (the state left behind when a tab's CLI exits under the user).
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "Esc must dismiss the non-interactive agent fullscreen overlay"
+        );
+    }
+
+    /// Tab (FocusNext) while a non-interactive fullscreen overlay is up must
+    /// minimize it: moving focus under a still-rendered fullscreen surface
+    /// looks like the key did nothing and traps the user.
+    #[test]
+    fn tab_minimizes_dormant_agent_fullscreen() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "Tab must minimize the non-interactive fullscreen overlay instead of \
+             moving focus invisibly beneath it"
+        );
+    }
+
+    /// A left-click outside the fullscreen surface dismisses it — matching the
+    /// click-outside dismiss the interactive raw-input path already provides.
+    #[test]
+    fn click_outside_minimizes_dormant_agent_fullscreen() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        // The fullscreen surface occupies this rect; the click lands outside.
+        app.mouse_layout.agent_term = Some(Rect::new(20, 5, 60, 20));
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "a click outside the fullscreen surface must dismiss it"
         );
     }
 
