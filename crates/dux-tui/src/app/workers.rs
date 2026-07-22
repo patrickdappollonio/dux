@@ -196,7 +196,8 @@ impl App {
             self.engine.pty_input.remove(tab_id);
             self.engine.resume_fallback_candidates.remove(tab_id);
             if let Some(session_id) = owning {
-                if !self.engine.any_tab_active(&session_id) {
+                let agent_detached = !self.engine.any_tab_active(&session_id);
+                if agent_detached {
                     // A clean exit of the session-slot tab is the "user quit the
                     // agent" signal that cancels auto-reopen; an extra tab (or a
                     // crash) leaves the auto-reopen intent untouched.
@@ -206,29 +207,73 @@ impl App {
                     self.engine
                         .mark_session_status(&session_id, SessionStatus::Detached);
                 }
-                if let Some(provider) = support_provider {
-                    self.set_info(format!("Tab ({provider}) exited."));
-                }
-                // If the user was interactive ON this tab when its CLI exited,
-                // drop interactive input right now. Leaving `input_target` on
-                // Agent keeps the raw-input path engaged against the pruned
-                // provider for another tick and then surfaces a misleading
-                // "Agent disconnected." error — and until that tick, every
-                // escape key is swallowed by the passthrough. The fullscreen
-                // overlay deliberately stays up: the dormant-tab relaunch
-                // screen is the desired post-exit view, and Esc/Tab/Ctrl-g/a
-                // click outside all dismiss it from here.
-                if self.input_target == InputTarget::Agent
-                    && self.session_surface == SessionSurface::Agent
-                    && self.selected_session().map(|s| s.id.clone()) == Some(session_id.clone())
-                    && &self.focused_tab_id(&session_id) == tab_id
-                {
-                    self.input_target = InputTarget::None;
-                    self.terminal_selection = None;
-                    self.in_bracket_paste = false;
-                    self.raw_input_buf.clear();
-                    self.raw_input_parser.clear();
-                    self.loading_input_buf.clear();
+                let was_focused_tab = self.selected_session().is_some_and(|s| s.id == session_id)
+                    && &self.focused_tab_id(&session_id) == tab_id;
+                // A clean exit (code 0) of an extra tab closes the tab itself —
+                // the user deliberately ended that conversation (e.g. /exit),
+                // and the row holds nothing worth keeping (the provider's
+                // conversation history lives in the worktree). Shared rule with
+                // the web's `prune_exited_ptys`: `clean_exit_closes_tab_row`.
+                // A crash keeps the dormant relaunch screen for diagnosis.
+                let tab_closed =
+                    dux_core::engine::clean_exit_closes_tab_row(is_main, *exit_success)
+                        && self.engine.remove_agent_tab_row(tab_id);
+                if tab_closed {
+                    if let Some(provider) = &support_provider {
+                        self.set_info(format!("Tab ({provider}) exited cleanly and was closed."));
+                    }
+                    if was_focused_tab {
+                        // Land on a live sibling; with none left, this falls
+                        // back to the (now dormant) session-slot tab.
+                        let target = self
+                            .engine
+                            .first_live_tab(&session_id)
+                            .unwrap_or_else(|| session_id.clone());
+                        self.set_focused_tab(&session_id, &target);
+                        if self.session_surface == SessionSurface::Agent {
+                            // The surface under the user just vanished: drop
+                            // interactive input and the fullscreen overlay.
+                            // With no live sibling the agent detached, so land
+                            // in the list exactly like a single agent's clean
+                            // exit does.
+                            self.input_target = InputTarget::None;
+                            self.fullscreen_overlay = FullscreenOverlay::None;
+                            self.terminal_selection = None;
+                            self.in_bracket_paste = false;
+                            self.raw_input_buf.clear();
+                            self.raw_input_parser.clear();
+                            self.loading_input_buf.clear();
+                            if agent_detached {
+                                self.focus = FocusPane::Left;
+                            }
+                        }
+                    }
+                    self.rebuild_left_items();
+                } else {
+                    if let Some(provider) = &support_provider {
+                        self.set_info(format!("Tab ({provider}) exited."));
+                    }
+                    // If the user was interactive ON this tab when its CLI
+                    // exited, drop interactive input right now. Leaving
+                    // `input_target` on Agent keeps the raw-input path engaged
+                    // against the pruned provider for another tick and then
+                    // surfaces a misleading "Agent disconnected." error — and
+                    // until that tick, every escape key is swallowed by the
+                    // passthrough. The fullscreen overlay deliberately stays
+                    // up: the dormant-tab relaunch screen is the desired
+                    // post-crash view, and Esc/Tab/Ctrl-g/a click outside all
+                    // dismiss it from here.
+                    if self.input_target == InputTarget::Agent
+                        && self.session_surface == SessionSurface::Agent
+                        && was_focused_tab
+                    {
+                        self.input_target = InputTarget::None;
+                        self.terminal_selection = None;
+                        self.in_bracket_paste = false;
+                        self.raw_input_buf.clear();
+                        self.raw_input_parser.clear();
+                        self.loading_input_buf.clear();
+                    }
                 }
             }
         }
@@ -1612,15 +1657,10 @@ mod tests {
         }
     }
 
-    /// When the FOCUSED extra tab's CLI exits (the user typed /exit in it)
-    /// while the pane is interactive on that tab, the quiet tab-scoped exit
-    /// path must drop interactive input immediately. Leaving `input_target`
-    /// on Agent keeps the raw-input path engaged against a pruned provider
-    /// for a tick and then surfaces a misleading "Agent disconnected." error.
-    /// The fullscreen overlay deliberately stays up: its dormant-tab screen
-    /// (the relaunch indicator) is the desired post-exit view.
-    #[test]
-    fn focused_extra_tab_exit_leaves_interactive_input() {
+    /// Shared scaffolding for the focused-extra-tab exit tests: an extra tab
+    /// of the selected session whose CLI exits with `code`, with the user
+    /// interactive + fullscreen ON that tab, ticked through `drain_events`.
+    fn drain_focused_extra_tab_exit(code: &str) -> crate::app::App {
         let mut app =
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let session_id = app
@@ -1640,7 +1680,7 @@ mod tests {
         );
         let client = crate::pty::PtyClient::spawn(
             "sh",
-            &["-c".to_string(), "echo hi; exit 0".to_string()],
+            &["-c".to_string(), format!("echo hi; exit {code}")],
             Path::new("."),
             10,
             40,
@@ -1667,10 +1707,47 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         app.drain_events();
-
         assert!(
             !app.engine.providers.contains_key("tab-x"),
             "the exited tab should have been pruned"
+        );
+        app
+    }
+
+    /// A CLEAN exit (code 0) of the focused extra tab closes the tab itself:
+    /// the user deliberately ended that conversation (e.g. /exit), so the row
+    /// is deleted and — with no live sibling left — the pane minimizes and
+    /// focus lands in the list, exactly like a single agent's clean exit.
+    #[test]
+    fn focused_extra_tab_clean_exit_closes_the_tab_and_minimizes() {
+        let app = drain_focused_extra_tab_exit("0");
+        assert!(
+            !app.engine.agent_tabs.contains_key("tab-x"),
+            "a clean exit must close the tab (delete its row)"
+        );
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "the pane minimizes like a single agent's clean exit"
+        );
+        assert_eq!(
+            app.focus,
+            FocusPane::Left,
+            "with no live sibling the user lands back in the list"
+        );
+    }
+
+    /// A CRASH (non-zero exit) of the focused extra tab keeps the tab: the
+    /// dormant relaunch screen is the crash-diagnosis surface, so the row
+    /// survives and the fullscreen overlay stays up — but interactive input
+    /// still drops immediately so every escape hatch works.
+    #[test]
+    fn focused_extra_tab_crash_keeps_the_dormant_tab() {
+        let app = drain_focused_extra_tab_exit("3");
+        assert!(
+            app.engine.agent_tabs.contains_key("tab-x"),
+            "a crash must keep the tab row for diagnosis/relaunch"
         );
         assert_eq!(
             app.input_target,

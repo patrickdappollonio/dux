@@ -1265,6 +1265,12 @@ pub(crate) fn run_engine_loop(
                 PrunedPtyKind::Agent if pruned.agent_detached => {
                     WireStatus::new("warning", format!("Agent \"{}\" exited.", pruned.label))
                 }
+                // A clean exit closed the tab itself (its row is gone), so say
+                // so — "exited" alone would imply a dormant tab is left behind.
+                PrunedPtyKind::Agent if pruned.tab_closed => WireStatus::new(
+                    "info",
+                    format!("Tab ({}) exited cleanly and was closed.", pruned.label),
+                ),
                 PrunedPtyKind::Agent => {
                     WireStatus::new("info", format!("Tab ({}) exited.", pruned.label))
                 }

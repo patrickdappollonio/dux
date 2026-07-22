@@ -27,7 +27,7 @@ pub use events::{
 pub use in_flight::{InFlightKey, InFlightSet, RenameExpectation};
 pub use lifecycle::{
     DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, ShutdownReport,
-    TerminatingPty, format_shutdown_result, format_shutdown_start,
+    TerminatingPty, clean_exit_closes_tab_row, format_shutdown_result, format_shutdown_start,
 };
 pub use resume_fallback::ResumeFallbackOutcome;
 pub use spawn_worker::{
@@ -2634,6 +2634,24 @@ impl Engine {
         }
 
         Ok(tab_id)
+    }
+
+    /// Remove an extra tab's row (memory + session store) for a tab whose PTY
+    /// is already gone — the clean-exit auto-close used by both surfaces' exit
+    /// paths (see `clean_exit_closes_tab_row`). Returns `true` when a row was
+    /// actually removed. A store failure is logged, not fatal: the in-memory
+    /// removal already happened and the stale row is re-reconciled on the next
+    /// restart at worst.
+    pub fn remove_agent_tab_row(&mut self, tab_id: &str) -> bool {
+        if self.agent_tabs.remove(tab_id).is_none() {
+            return false;
+        }
+        if let Err(err) = self.session_store.delete_agent_tab(tab_id) {
+            crate::logger::warn(&format!(
+                "failed to delete cleanly-exited tab {tab_id} from the session store: {err}"
+            ));
+        }
+        true
     }
 
     /// Close an extra tab: delete its row first (so a persistence failure leaves

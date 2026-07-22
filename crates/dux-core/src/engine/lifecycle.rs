@@ -73,6 +73,23 @@ pub struct PrunedPty {
     /// "{provider} on {branch}" descriptor (extra tab), or the terminal's label
     /// (companion terminal).
     pub label: String,
+    /// True when the exit also CLOSED the tab (deleted its `agent_tabs` row):
+    /// a clean exit (code 0) of an extra tab is the user deliberately ending
+    /// that conversation, so no dead pill is left in the strip. Nothing of
+    /// value is lost — the provider's conversation history lives in the
+    /// worktree, not the row. Always `false` for the session-slot tab (it has
+    /// no row), for a non-zero/unknown exit (the dormant relaunch screen is
+    /// the crash-diagnosis surface), and for a companion terminal.
+    pub tab_closed: bool,
+}
+
+/// Whether an exited agent tab's row should be closed along with the prune:
+/// only an EXTRA tab (the session-slot tab has no row) that exited CLEANLY
+/// (code 0 — the user deliberately ended the conversation, e.g. /exit). The
+/// one shared rule both surfaces' exit paths consult, so the TUI loop and the
+/// web's `prune_exited_ptys` cannot drift.
+pub fn clean_exit_closes_tab_row(is_session_slot: bool, exit_success: Option<bool>) -> bool {
+    !is_session_slot && exit_success == Some(true)
 }
 
 /// A deferred worktree removal that must wait for a WHOLE GROUP of an agent's
@@ -233,12 +250,15 @@ impl Engine {
                 }
                 self.mark_session_status(sid, SessionStatus::Detached);
             }
+            let tab_closed = clean_exit_closes_tab_row(is_session_slot, exit_success)
+                && self.remove_agent_tab_row(&tab_id);
             pruned.push(PrunedPty {
                 kind: PrunedPtyKind::Agent,
                 id: tab_id,
                 owner,
                 agent_detached,
                 label,
+                tab_closed,
             });
         }
 
@@ -267,6 +287,7 @@ impl Engine {
                 owner,
                 agent_detached: false,
                 label,
+                tab_closed: false,
             });
         }
 
@@ -594,6 +615,91 @@ mod tests {
     /// a safe stand-in for both clean-exit and shutdown tests.
     fn spawn_cat(cwd: &Path) -> PtyClient {
         PtyClient::spawn_with_env("cat", &[], cwd, 24, 80, 1000, &[]).expect("spawn cat")
+    }
+
+    /// A clean exit (code 0) of an EXTRA tab is the user deliberately ending
+    /// that conversation (e.g. typing /exit): prune closes the tab's row too,
+    /// so no dead pill lingers in the strip. Nothing of value is lost — the
+    /// provider's conversation history lives in the worktree, not the row. A
+    /// non-zero exit keeps the row: the dormant relaunch screen is the
+    /// crash-diagnosis surface.
+    #[test]
+    fn prune_closes_extra_tab_row_on_clean_exit_and_keeps_it_on_crash() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.agent_tabs.insert(
+            "tab-clean".into(),
+            sample_tab("tab-clean", "s1", "claude", 1),
+        );
+        engine.agent_tabs.insert(
+            "tab-crash".into(),
+            sample_tab("tab-crash", "s1", "codex", 2),
+        );
+
+        let spawn = |code: &str| {
+            PtyClient::spawn_with_env(
+                "sh",
+                &["-c".to_string(), format!("exit {code}")],
+                worktree.path(),
+                24,
+                80,
+                100,
+                &[],
+            )
+            .expect("spawn sh")
+        };
+        engine.providers.insert("tab-clean".into(), spawn("0"));
+        engine.providers.insert("tab-crash".into(), spawn("3"));
+
+        // Wait until both children exited, then prune.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let all_done = ["tab-clean", "tab-crash"].iter().all(|id| {
+                engine
+                    .providers
+                    .get_mut(*id)
+                    .is_some_and(|c| c.is_exited() || c.try_wait().is_some())
+            });
+            if all_done {
+                break;
+            }
+            assert!(Instant::now() < deadline, "children never exited");
+            sleep(Duration::from_millis(20));
+        }
+        let pruned = engine.prune_exited_ptys();
+
+        let clean = pruned
+            .iter()
+            .find(|p| p.id == "tab-clean")
+            .expect("clean tab pruned");
+        assert!(
+            clean.tab_closed,
+            "a clean extra-tab exit must close the tab row"
+        );
+        assert!(
+            !engine.agent_tabs.contains_key("tab-clean"),
+            "the cleanly-exited tab's row must be gone"
+        );
+
+        let crash = pruned
+            .iter()
+            .find(|p| p.id == "tab-crash")
+            .expect("crashed tab pruned");
+        assert!(
+            !crash.tab_closed,
+            "a non-zero exit must keep the tab row for diagnosis/relaunch"
+        );
+        assert!(
+            engine.agent_tabs.contains_key("tab-crash"),
+            "the crashed tab's dormant row must survive"
+        );
     }
 
     #[test]
