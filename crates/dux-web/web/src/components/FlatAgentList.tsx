@@ -70,6 +70,7 @@ import { changesCountFor } from "@/lib/agentVitals"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { clipboardWorktree } from "@/lib/flatClipboard"
 import {
+  displayedSessionOrder,
   FLAT_SORT_LABELS,
   partitionQuiet,
   sortMainSessions,
@@ -78,6 +79,7 @@ import {
 } from "@/lib/flatList"
 import {
   assembleFlatTerminals,
+  displayedTerminalOrder,
   sortFlatTerminals,
   terminalStateWord,
   type FlatTerminal,
@@ -852,13 +854,19 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   )
 
   // The terminal drag's twin of `handleDragEnd`: move the dragged terminal to the
-  // drop target's slot in the COMPLETE base terminal id order (any owner), and if
-  // that changed the order, flip the shared sort to manual (so the dropped position
-  // sticks instead of being re-sorted away) and persist via `reorderTerminals`.
+  // drop target's slot in the COMPLETE terminal id order (any owner) as the
+  // active sort mode DISPLAYS it (`displayedTerminalOrder`; in manual that is
+  // the base order verbatim), and if that changed the order, flip the shared
+  // sort to manual (so the dropped position sticks instead of being re-sorted
+  // away) and persist via `reorderTerminals`. The displayed order matters
+  // because drags start from every sort mode: computing the move against the
+  // hidden base order would land the row relative to neighbors the user is not
+  // seeing. The search filter is deliberately NOT applied: the persisted order
+  // must be total.
   function handleTerminalDragEnd(event: DragEndEvent) {
     const { active, over } = event
     if (!over || active.id === over.id) return
-    const fullOrder = overlaidTerminals.map((ft) => ft.terminal.id)
+    const fullOrder = displayedTerminalOrder(overlaidTerminals, agentSort)
     const next = moveItem(fullOrder, String(active.id), String(over.id))
     if (ordersMatch(fullOrder, next)) return
     if (!manual) setAgentSort("manual")
@@ -868,9 +876,13 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
     if (!over || active.id === over.id) return
-    // Global flat reorder: move the dragged agent to the drop target's slot in the
-    // complete session order, regardless of project. No project-block special case.
-    const fullOrder = coreSessions.map((s) => s.id)
+    // Global flat reorder: move the dragged agent to the drop target's slot in
+    // the COMPLETE session order as the active sort mode DISPLAYS it (sorted
+    // main list, quiet tail appended; manual stays the base order verbatim, its
+    // long-standing behavior). Drags start from every sort mode, so the move
+    // must be computed against what the user is looking at, and the captured
+    // baseline is total (all sessions, never the search-filtered subset).
+    const fullOrder = displayedSessionOrder(coreSessions, agentSort)
     const next = moveItem(fullOrder, String(active.id), String(over.id))
     if (ordersMatch(fullOrder, next)) return
     // A drag is an explicit request for manual control. If the user reordered from

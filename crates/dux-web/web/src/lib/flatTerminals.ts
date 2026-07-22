@@ -138,6 +138,20 @@ function compareTerminalName(a: TerminalView, b: TerminalView): number {
 // the TUI's stable `sort_by_key`. These comparators are kept in LOCKSTEP with the
 // TUI `terminal_items` in `crates/dux-tui/src/app/mod.rs` (duplicated per surface
 // by necessity). A copy is sorted so the caller's array is untouched.
+// The terminal drag baseline, the twin of `displayedSessionOrder` in
+// flatList.ts: the COMPLETE flat terminal id list in the order the shared sort
+// mode displays it, so a drop made from a computed mode persists what the user
+// was looking at (never the hidden base order, and never a search-filtered
+// subset; the persisted order is total). Manual needs no special case here:
+// `sortFlatTerminals` already returns the base order verbatim for it, which is
+// exactly how manual terminal drags always computed their move.
+export function displayedTerminalOrder(
+  items: FlatTerminal[],
+  key: FlatSortKey,
+): string[] {
+  return sortFlatTerminals(items, key).map((item) => item.terminal.id)
+}
+
 export function sortFlatTerminals(
   items: FlatTerminal[],
   key: FlatSortKey,

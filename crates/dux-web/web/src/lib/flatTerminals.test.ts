@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   assembleFlatTerminals,
+  displayedTerminalOrder,
   sortFlatTerminals,
   terminalStateWord,
   type FlatTerminal,
@@ -226,5 +227,30 @@ describe("sortFlatTerminals", () => {
     const before = ids(list)
     sortFlatTerminals(list, "name")
     expect(ids(list)).toEqual(before)
+  })
+})
+
+// The terminal drag baseline, the twin of `displayedSessionOrder`: the complete
+// flat terminal list in the order the shared sort mode displays it. Manual is
+// verbatim (`sortFlatTerminals` already treats it so), matching pre-existing
+// manual-drag behavior; a computed mode captures what the user sees so the
+// persisted order matches the screen.
+describe("displayedTerminalOrder", () => {
+  const items = [
+    flat(term({ id: "t-z", label: "zsh" })),
+    flat(term({ id: "t-hot", label: "vim", working: true })),
+    flat(term({ id: "t-a", label: "bash" })),
+  ]
+
+  it("captures the name-sorted displayed order", () => {
+    expect(displayedTerminalOrder(items, "name")).toEqual(["t-a", "t-hot", "t-z"])
+  })
+
+  it("captures the active-first float for the active key", () => {
+    expect(displayedTerminalOrder(items, "active")).toEqual(["t-hot", "t-z", "t-a"])
+  })
+
+  it("returns the base order verbatim for manual", () => {
+    expect(displayedTerminalOrder(items, "manual")).toEqual(["t-z", "t-hot", "t-a"])
   })
 })

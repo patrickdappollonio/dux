@@ -89,6 +89,25 @@ export function sortMainSessions(
 // project-aware `flatDragPlan` (same-project reorder vs cross-project block move)
 // was removed with that change.
 
+// The drag baseline for a drop: the COMPLETE session id list in the order the
+// user is actually looking at. Drag-reorder works from every sort mode; on a
+// drop made in a computed mode (active/name/updated/created) the new manual
+// baseline must be "what the screen showed, totalized": the main list in the
+// active sort's display order, then the quiet tail (which renders below the
+// main list) in its base relative order. Every session is included, never just
+// the visible/filtered subset, because the persisted order is total. MANUAL is
+// deliberately the base order VERBATIM (quiet sessions stay interleaved where
+// the base has them): that is exactly how manual drags always computed their
+// move, and drag-from-any-mode must not change manual's behavior.
+export function displayedSessionOrder(
+  sessions: SessionView[],
+  key: FlatSortKey,
+): string[] {
+  if (key === "manual") return sessions.map((session) => session.id)
+  const { main, quiet } = partitionQuiet(sessions)
+  return [...sortMainSessions(main, key), ...quiet].map((session) => session.id)
+}
+
 // The colored STATE WORD shown on a row's second line, the honest, field-backed
 // stand-in for an "activity" string (dux has no such field). It reads straight
 // off the same flags that drive the bob and the attention pulse, so the word and

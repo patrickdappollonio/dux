@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
   activeFirstSessions,
+  displayedSessionOrder,
   FLAT_SORT_LABELS,
   partitionQuiet,
   sortMainSessions,
@@ -99,6 +100,56 @@ describe("sortMainSessions", () => {
     const input = sessions.slice()
     sortMainSessions(input, "name")
     expect(input.map((s) => s.id)).toEqual(["b", "a"])
+  })
+})
+
+// The drag baseline for a drop made in a NON-manual sort mode: the complete
+// session list as the user sees it, totalized (sorted main list first, then the
+// quiet tail in base order), so the persisted manual order matches the screen.
+describe("displayedSessionOrder", () => {
+  const sessions = [
+    makeSession({ id: "zeta", title: "Zeta" }),
+    makeSession({ id: "gone", title: "Gone", status: "exited" }),
+    makeSession({ id: "alpha", title: "Alpha" }),
+    makeSession({ id: "hot", title: "Hot", working: true }),
+    makeSession({ id: "parked", title: "Parked", status: "detached" }),
+  ]
+
+  it("captures the name-sorted main list with the quiet tail appended, totally", () => {
+    // The tail rides at the END (it renders below the main list) in its own
+    // base relative order, and every session is present: the persisted order
+    // must be total, not just the visible subset.
+    expect(displayedSessionOrder(sessions, "name")).toEqual([
+      "alpha",
+      "hot",
+      "zeta",
+      "gone",
+      "parked",
+    ])
+  })
+
+  it("captures the active-first float for the active key", () => {
+    expect(displayedSessionOrder(sessions, "active")).toEqual([
+      "hot",
+      "zeta",
+      "alpha",
+      "gone",
+      "parked",
+    ])
+  })
+
+  it("returns the base order VERBATIM for manual (quiet stays interleaved)", () => {
+    // Manual drags behaved this way before drag-from-any-mode existed: the
+    // move applies over the raw base order, quiet sessions in place. Keeping
+    // that exact behavior is a requirement, so manual does not re-home the
+    // tail to the back.
+    expect(displayedSessionOrder(sessions, "manual")).toEqual([
+      "zeta",
+      "gone",
+      "alpha",
+      "hot",
+      "parked",
+    ])
   })
 })
 

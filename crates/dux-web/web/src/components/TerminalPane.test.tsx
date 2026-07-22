@@ -19,7 +19,11 @@ import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 
 class TermStub {
   static instances: TermStub[] = []
-  constructor() {
+  // The options object TerminalPane constructs the Terminal with, captured so
+  // tests can pin construction-time options (e.g. scrollSensitivity).
+  options: Record<string, unknown>
+  constructor(options?: Record<string, unknown>) {
+    this.options = options ?? {}
     TermStub.instances.push(this)
   }
   rows = 24
@@ -621,6 +625,20 @@ describe("TerminalPane mobile compose bar", () => {
     mockState = makeState()
     rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(composeTextarea().value).toBe("draft survives")
+  })
+})
+
+// Desktop wheel scrolling: one wheel notch moves 3 lines of local scrollback,
+// via xterm's scrollSensitivity option (the installed xterm 6 Viewport feeds it
+// to its scrollable element as mouseWheelScrollSensitivity for LOCAL scrolling
+// only; the wheel-report path to a mouse-tracking app sends one report per
+// wheel event regardless, so forwarding stays 1:1 per tick).
+describe("TerminalPane wheel scroll speed", () => {
+  it("constructs the terminal with scrollSensitivity 3", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    expect(term.options.scrollSensitivity).toBe(3)
   })
 })
 

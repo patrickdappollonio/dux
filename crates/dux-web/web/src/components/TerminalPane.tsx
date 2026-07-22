@@ -122,6 +122,17 @@ let mouseCaptureHintShown = false
 // hint from firing on a plain click into a mouse-reporting app.
 const DRAG_THRESHOLD_PX = 4
 
+// Desktop wheel speed for LOCAL scrollback scrolling: xterm's scrollSensitivity
+// multiplier, set to 3 so one wheel notch moves three lines' worth instead of
+// one (matching the TUI's MOUSE_WHEEL_LINES). Verified against the installed
+// xterm 6 source: the Viewport passes this option to its scrollable element as
+// `mouseWheelScrollSensitivity` (local viewport scrolling only), and that local
+// wheel handling is DISABLED entirely while an app in the PTY captures the
+// wheel; the wheel-REPORT path to a mouse-tracking app sends one report per
+// wheel event regardless of this value, so app forwarding stays 1:1 per tick.
+// The touch drag path (dragScrollLines) is finger-proportional and unaffected.
+const WHEEL_SCROLL_SENSITIVITY = 3
+
 // Copy the terminal's current selection to the clipboard and toast the result.
 // `copyToClipboard` writes via the async Clipboard API in a secure context and
 // falls back SYNCHRONOUSLY to an execCommand hidden-textarea over plain-HTTP, so
@@ -535,6 +546,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       cursorBlink: true,
       convertEol: false,
       scrollback: scrollbackRef.current,
+      // One wheel notch = 3 lines of local scrollback (see the constant's doc).
+      scrollSensitivity: WHEEL_SCROLL_SENSITIVITY,
       overviewRuler: { width: scrollbarWidth },
       theme: { background: resolvedBg },
       // When the app in the PTY enables mouse reporting, xterm forwards a drag to

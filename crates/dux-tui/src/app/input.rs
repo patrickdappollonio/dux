@@ -3,6 +3,16 @@ use super::*;
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::statusline::StatusTone;
+/// Lines moved per mouse-wheel tick for LOCAL scrolling: the PTY pane's
+/// scrollback (inline center pane and the fullscreen surface alike), the diff
+/// view, the help overlay, the startup-log viewers, and the commit input all
+/// share this step through their wheel handlers, so wheel speed feels uniform
+/// across the app. Deliberately NOT applied where the wheel is forwarded to the
+/// child instead of scrolled locally (`handle_center_mouse_wheel`'s
+/// `should_forward_wheel` branch sends exactly one SGR wheel report per tick, a
+/// 1:1 forward, so a mouse-tracking app is never over-scrolled). Keyboard
+/// scrolling is unaffected: arrows stay one line, PgUp/PgDn stay a page. The
+/// web surface matches via xterm's `scrollSensitivity: 3` in TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
 const MIN_LEFT_WIDTH_PCT: u16 = 14;
 const MAX_LEFT_WIDTH_PCT: u16 = 38;
@@ -11087,6 +11097,83 @@ not_a_real_action = ["x"]
 
         assert_eq!(app.focus, FocusPane::Left);
         assert_eq!(app.selected_left, 1);
+    }
+
+    /// Spawn a real child that prints enough lines to build alacritty history,
+    /// then wait until the PTY has at least `lines` of scrollback (polling with
+    /// a reset each miss: `set_scrollback` to a positive offset PAUSES
+    /// ingestion, so a too-early probe must return to 0 or history would stop
+    /// growing and the wait could never succeed).
+    fn install_scrolled_pty(app: &mut App, lines: usize) {
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec!["-c".to_string(), "seq 1 200; sleep 30".to_string()];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 1000)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.session_surface = SessionSurface::Agent;
+
+        let provider = app
+            .selected_terminal_surface_client()
+            .expect("provider for selected session");
+        let mut seeded = false;
+        for _ in 0..200 {
+            provider.set_scrollback(lines);
+            if provider.scrollback_offset() >= lines {
+                seeded = true;
+                break;
+            }
+            provider.set_scrollback(0);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seeded, "PTY never accumulated {lines} lines of scrollback");
+    }
+
+    /// One wheel tick over the inline PTY pane scrolls the LOCAL scrollback by
+    /// exactly `MOUSE_WHEEL_LINES` (3), not 1. The child (`sh`) has no mouse
+    /// tracking and no alt screen, so the wheel takes the local-scroll branch.
+    #[test]
+    fn mouse_wheel_over_pty_pane_scrolls_three_lines_per_tick() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        install_scrolled_pty(&mut app, 10);
+
+        // (30, 5) is inside the center pane / agent terminal area.
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 30, 5));
+
+        let offset = app
+            .selected_terminal_surface_client()
+            .expect("provider")
+            .scrollback_offset();
+        // LITERAL 13, not `10 + MOUSE_WHEEL_LINES`: asserting against the
+        // constant would track any change to it and never fail, pinning
+        // nothing. Three lines per tick is the contract.
+        assert_eq!(
+            offset, 13,
+            "a wheel tick must scroll exactly 3 lines further back"
+        );
+    }
+
+    /// The same 3-line wheel step must hold on the (non-interactive) fullscreen
+    /// PTY surface, which routes through the same `handle_center_mouse_wheel`
+    /// via `mouse_target`'s fullscreen branch.
+    #[test]
+    fn mouse_wheel_in_fullscreen_pty_scrolls_three_lines_per_tick() {
+        let mut app = test_app(default_bindings());
+        install_mouse_layout(&mut app);
+        install_scrolled_pty(&mut app, 10);
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 30, 5));
+
+        let offset = app
+            .selected_terminal_surface_client()
+            .expect("provider")
+            .scrollback_offset();
+        // Literal 13 for the same reason as the inline-pane test above.
+        assert_eq!(
+            offset, 13,
+            "the fullscreen surface shares the 3-line wheel step"
+        );
     }
 
     #[test]
