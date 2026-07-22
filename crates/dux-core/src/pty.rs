@@ -1120,9 +1120,25 @@ impl PtyClient {
                 pixel_height: 0,
             })
             .context("failed to resize PTY")?;
-        if let Ok(mut terminal) = self.terminal.lock() {
+        // A resize can move the scrollback offset across the live-bottom
+        // boundary (growing the viewport pulls history into the grid and
+        // resets the display offset to 0), so it must sync the ingestion
+        // pause exactly like `scroll`/`set_scrollback`. Skipping this
+        // stranded `scroll_paused` on at offset 0: the reader buffered all
+        // child output unparsed and the pane froze with no scrollback
+        // indicator. Capture the transition under the lock, sync after
+        // releasing it (`resume_ingestion` re-locks the terminal).
+        let transition = if let Ok(mut terminal) = self.terminal.lock() {
+            let prev = terminal.scrollback_offset();
             terminal.resize(rows, cols);
+            let next = terminal.scrollback_offset();
             self.dirty.store(true, Ordering::Release);
+            Some((prev, next))
+        } else {
+            None
+        };
+        if let Some((prev, next)) = transition {
+            self.sync_pause_state(prev, next);
         }
         if let Ok(mut ts) = self.last_resize_at.lock() {
             *ts = Some(Instant::now());
@@ -3882,6 +3898,50 @@ mod tests {
         // single log line on resume can summarize the session.
         append_with_cap(&mut pending, b"", cap);
         assert!(pending.dropped);
+    }
+
+    /// Regression: a resize can move the scrollback offset back to the live
+    /// bottom (alacritty resets the display offset when the viewport grows,
+    /// pulling history into the visible grid), and `resize` used to skip the
+    /// pause-state sync that `scroll` and `set_scrollback` perform. That
+    /// stranded `scroll_paused` on with the offset at 0: the reader thread
+    /// buffered all child output without parsing it, so the pane froze with
+    /// no scrollback indicator until a later scroll happened to cross the
+    /// back-to-bottom transition. A resize that lands on the live bottom must
+    /// resume ingestion exactly like any other return to offset 0.
+    #[test]
+    fn resize_back_to_live_bottom_resumes_ingestion() {
+        let args = vec!["-c".to_string(), "cat".to_string()];
+        let client =
+            PtyClient::spawn("/bin/sh", &args, Path::new("."), 10, 40, 1000).expect("spawn pty");
+
+        // Fill enough history that scrolling back 20 rows is possible.
+        let mut fill = String::new();
+        for i in 0..60 {
+            fill.push_str(&format!("line {i}\n"));
+        }
+        client.write_bytes(fill.as_bytes()).expect("write fill");
+        wait_for_viewport(&client, "line 59");
+
+        // Scroll back: crossing 0 -> 20 pauses PTY ingestion.
+        client.set_scrollback(20);
+        assert_eq!(client.scrollback_offset(), 20, "scrolled back 20 rows");
+
+        // Growing the viewport resets the offset to the live bottom
+        // (measured against alacritty_terminal 0.26).
+        client.resize(30, 40).expect("resize");
+        assert_eq!(
+            client.scrollback_offset(),
+            0,
+            "a grow consumes history and lands on the live bottom"
+        );
+
+        // Ingestion must be live again: new child output has to reach the
+        // grid. Before the fix the reader stayed paused and this timed out.
+        client
+            .write_bytes(b"marker-after-resize\n")
+            .expect("write marker");
+        wait_for_viewport(&client, "marker-after-resize");
     }
 
     fn repaint_cell(row: u16, col: u16, symbol: &str, fg: CellColor) -> SnapshotCell {
