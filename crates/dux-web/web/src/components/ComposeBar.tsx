@@ -56,13 +56,28 @@ const MAX_ROWS = 5
 // content's natural height), capping it at MAX_ROWS' worth of pixels. The
 // `|| 20` fallback covers environments whose computed line-height is not a
 // parseable pixel value ("normal", or empty under jsdom); the explicit
-// `leading-6` class below makes it parseable (24px) in real browsers.
+// `leading-5` class below makes it parseable (20px) in real browsers.
+//
+// BORDER-BOX, load-bearing: Tailwind preflight sets `box-sizing: border-box`,
+// so the height style must cover content + padding + BORDER, while
+// `scrollHeight` is content + padding only. Setting height = scrollHeight
+// left the content area short by the border width and, with overflow-y
+// hidden, clipped the bottom of the last line on device. The border delta is
+// measured as `offsetHeight - clientHeight` (both include/exclude exactly the
+// border) and added to the height AND to the cap; the cap likewise adds the
+// vertical padding so it means "MAX_ROWS lines of CONTENT", not "MAX_ROWS
+// lines minus the box chrome".
 function autosize(el: HTMLTextAreaElement): void {
   el.style.height = "auto"
-  const line = parseFloat(getComputedStyle(el).lineHeight) || 20
-  const max = Math.ceil(line * MAX_ROWS)
-  el.style.height = `${Math.min(el.scrollHeight, max)}px`
-  el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden"
+  const style = getComputedStyle(el)
+  const line = parseFloat(style.lineHeight) || 20
+  const padding =
+    (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0)
+  const border = el.offsetHeight - el.clientHeight
+  const max = Math.ceil(line * MAX_ROWS + padding + border)
+  const needed = el.scrollHeight + border
+  el.style.height = `${Math.min(needed, max)}px`
+  el.style.overflowY = needed > max ? "auto" : "hidden"
 }
 
 export function ComposeBar({
@@ -127,9 +142,14 @@ export function ComposeBar({
         autoCorrect="on"
         autoCapitalize="sentences"
         spellCheck={true}
-        // leading-6 pins the line-height to a parseable 24px so `autosize`'s
+        // text-sm (14px) matches the xterm canvas next door (Terminal option
+        // fontSize: 14); the browser-default 16px visibly towered over the
+        // terminal text on a phone. An input font under 16px normally trips
+        // iOS Safari's auto-zoom-on-focus; index.html's viewport
+        // `maximum-scale=1` disables that zoom (see the comment there).
+        // leading-5 pins the line-height to a parseable 20px so `autosize`'s
         // computed-style read never falls back to its jsdom-only default.
-        className="min-h-10 min-w-0 flex-1 resize-none rounded-md border bg-background px-3 py-2 text-base leading-6 text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="min-h-10 min-w-0 flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
       {/* Enabled even when the buffer is empty: an empty Send is a bare Enter
           (confirming TUI menus/prompts), not a no-op. size-10 keeps the 40px

@@ -20,8 +20,16 @@
          viewport-pinning in App.tsx/TerminalPane.tsx sits the accessory bar
          exactly on the keyboard. The directive is Chromium-only; iOS Safari and
          Firefox ignore it and fall back to the same visualViewport handling
-         (which already reports an accurate height there). -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+         (which already reports an accurate height there).
+
+         maximum-scale=1 exists for ONE reason: the mobile compose bar's
+         textarea uses 14px type (matching the terminal), and iOS Safari
+         auto-zooms the page when an input with a font under 16px gains focus.
+         This is the standard, accessibility-preserving fix: Chromium/Android
+         ignores maximum-scale entirely, and since iOS 10 Safari ignores it for
+         USER pinch-zoom too (so accessibility zoom still works) while it still
+         disables that input-focus auto-zoom. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>dux</title>
   </head>
   <body>

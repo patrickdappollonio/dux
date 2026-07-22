@@ -141,4 +141,47 @@ describe("ComposeBar", () => {
     render(<Harness initial="carried over" />)
     expect(textarea().value).toBe("carried over")
   })
+
+  // Autosize under Tailwind preflight's `box-sizing: border-box`: the height
+  // style covers content + padding + BORDER, but `scrollHeight` excludes the
+  // border. Setting height = scrollHeight therefore leaves the content area
+  // short by the border width, and with overflow-y hidden that clips the
+  // bottom of the last line (the on-device "text cut off at the bottom" bug).
+  // jsdom does no layout, so the probe stubs the element's metrics and pins
+  // the arithmetic itself.
+  it("sizes the textarea to scrollHeight PLUS the border delta (border-box)", () => {
+    render(<Harness />)
+    const ta = textarea()
+    // 60px of content+padding, and a 2px total vertical border
+    // (offsetHeight - clientHeight), the textarea's real border-1 on each edge.
+    Object.defineProperty(ta, "scrollHeight", { value: 60, configurable: true })
+    Object.defineProperty(ta, "offsetHeight", { value: 52, configurable: true })
+    Object.defineProperty(ta, "clientHeight", { value: 50, configurable: true })
+    fireEvent.change(ta, { target: { value: "one\ntwo" } })
+    expect(ta.style.height).toBe("62px")
+    expect(ta.style.overflowY).toBe("hidden")
+  })
+
+  it("caps the height at MAX_ROWS of content plus padding and border, then scrolls", () => {
+    render(<Harness />)
+    const ta = textarea()
+    // Content far past the cap. jsdom reports no parseable line-height or
+    // padding, so the cap resolves to 5 lines * the 20px fallback + 0 padding
+    // + the 2px border = 102px; the box must still cover its own border.
+    Object.defineProperty(ta, "scrollHeight", { value: 400, configurable: true })
+    Object.defineProperty(ta, "offsetHeight", { value: 52, configurable: true })
+    Object.defineProperty(ta, "clientHeight", { value: 50, configurable: true })
+    fireEvent.change(ta, { target: { value: "a\nb\nc\nd\ne\nf\ng\nh" } })
+    expect(ta.style.height).toBe("102px")
+    expect(ta.style.overflowY).toBe("auto")
+  })
+
+  it("matches the terminal's 14px type, not the browser-default 16px", () => {
+    // The xterm canvas next door renders at fontSize 14 (see TerminalPane's
+    // Terminal options); text-base (16px) visibly towers over it on a phone.
+    render(<Harness />)
+    const ta = textarea()
+    expect(ta.className).toContain("text-sm")
+    expect(ta.className).not.toContain("text-base")
+  })
 })

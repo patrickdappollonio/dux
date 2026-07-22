@@ -7,7 +7,11 @@ import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
 import { ComposeBar } from "@/components/ComposeBar"
-import { composeSendPayload, composeSendTooLarge } from "@/lib/composebar"
+import {
+  COMPOSE_SUBMIT_DELAY_MS,
+  composeSendTooLarge,
+  composeSendWrites,
+} from "@/lib/composebar"
 import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
 import {
@@ -1430,14 +1434,15 @@ export function TerminalPane(props: TerminalPaneProps) {
   // it's simply consumed. Sends go through the same socket path as typed input.
   const encoder = new TextEncoder()
 
-  // The compose bar's Send: deliver the buffered message and submit it, in one
-  // PTY write. The payload rules (line-ending normalization, the empty-buffer
-  // bare Enter, the bracketed-paste wrap) live in the pure `composeSendPayload`;
-  // bracketed paste is read off the live terminal at send time because the app
-  // in the PTY can toggle it at any moment. The shared landing-effects writer
-  // replays the scroll-to-live-edge and selection-drop a typed key would get.
-  // Focus stays in the compose textarea (the Send button preventDefaults its
-  // pointerdown, so it never left).
+  // The compose bar's Send: deliver the buffered message and submit it. The
+  // write plan (line-ending normalization, the empty-buffer bare Enter, the
+  // bracketed-paste wrap with its SEPARATE, delayed CR) lives in the pure
+  // `composeSendWrites`; bracketed paste is read off the live terminal at send
+  // time because the app in the PTY can toggle it at any moment. The shared
+  // landing-effects writer replays the scroll-to-live-edge and selection-drop
+  // a typed key would get, ONCE, with the first write. Focus stays in the
+  // compose textarea (the Send button preventDefaults its pointerdown, so it
+  // never left).
   //
   // Returns whether the send happened; the bar clears its buffer only on
   // true. A composed message can be minutes of typing, so unlike a keystroke
@@ -1465,10 +1470,10 @@ export function TerminalPane(props: TerminalPaneProps) {
       })
       return false
     }
-    const payload = composeSendPayload(text, {
+    const writes = composeSendWrites(text, {
       bracketedPaste: termRef.current?.modes.bracketedPasteMode ?? false,
     })
-    if (composeSendTooLarge(payload)) {
+    if (composeSendTooLarge(writes.join(""))) {
       toast.error("Message too large to send. Trim it down and try again.", {
         id: "compose-send",
       })
@@ -1477,8 +1482,25 @@ export function TerminalPane(props: TerminalPaneProps) {
     writeInputWithLandingEffects(
       termRef.current,
       ptyRef.current,
-      encoder.encode(payload),
+      encoder.encode(writes[0]),
     )
+    // A split plan (bracketed paste): the submitting CR goes as a SECOND write
+    // after a short gap, because Ink-based TUIs consume a CR that rides in the
+    // same stdin chunk as the paste (see composeSendWrites for the full why).
+    // The send is committed at this point, hence `true` below; the delayed CR
+    // is a bare PTY write with no further side effects. Guards: the pane may
+    // unmount (its cleanup nulls `ptyRef`, so the identity check fails) or the
+    // socket may drop (`isOpen`) before the timer fires; in either case the
+    // orphaned CR is skipped rather than delivered to a socket this pane no
+    // longer drives.
+    if (writes.length > 1) {
+      const pty = ptyRef.current
+      const rest = writes.slice(1)
+      setTimeout(() => {
+        if (pty === null || ptyRef.current !== pty || !pty.isOpen) return
+        for (const w of rest) pty.sendInput(encoder.encode(w))
+      }, COMPOSE_SUBMIT_DELAY_MS)
+    }
     return true
   }
 

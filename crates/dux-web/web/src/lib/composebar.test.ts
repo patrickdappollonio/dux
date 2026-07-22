@@ -1,69 +1,86 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  COMPOSE_SUBMIT_DELAY_MS,
   MAX_COMPOSE_SEND_BYTES,
-  composeSendPayload,
   composeSendTooLarge,
+  composeSendWrites,
 } from "./composebar"
 
-// The full payload matrix for the mobile compose bar's Send action. The helper
-// is pure (no xterm import), so every rule the component relies on is pinned
-// here without mounting anything: normalization, the empty-buffer bare Enter,
-// and the bracketed-paste wrap with the submitting CR OUTSIDE the wrap.
-describe("composeSendPayload", () => {
-  it("appends a trailing CR to a plain single line", () => {
-    expect(composeSendPayload("ls -la", { bracketedPaste: false })).toBe(
+// The full write-plan matrix for the mobile compose bar's Send action. The
+// helper is pure (no xterm import), so every rule the component relies on is
+// pinned here without mounting anything: normalization, the empty-buffer bare
+// Enter, and the bracketed-paste wrap whose submitting CR is a SEPARATE,
+// delayed second write (see composeSendWrites' doc for why one write swallowed
+// the Enter in Ink-based TUIs).
+describe("composeSendWrites", () => {
+  it("sends a plain single line with its trailing CR in one write", () => {
+    expect(composeSendWrites("ls -la", { bracketedPaste: false })).toEqual([
       "ls -la\r",
-    )
+    ])
   })
 
-  it("keeps internal newlines as LF and submits with a trailing CR", () => {
+  it("keeps internal newlines as LF and submits with a trailing CR, one write", () => {
     // The LF bytes are the soft-newline byte (Ctrl-j) agent CLIs already treat
     // as newline-without-submit, so a multiline message lands as typed.
     expect(
-      composeSendPayload("first line\nsecond line", { bracketedPaste: false }),
-    ).toBe("first line\nsecond line\r")
+      composeSendWrites("first line\nsecond line", { bracketedPaste: false }),
+    ).toEqual(["first line\nsecond line\r"])
   })
 
   it("normalizes CRLF pairs to LF before sending", () => {
-    expect(composeSendPayload("a\r\nb", { bracketedPaste: false })).toBe(
+    expect(composeSendWrites("a\r\nb", { bracketedPaste: false })).toEqual([
       "a\nb\r",
-    )
+    ])
   })
 
   it("normalizes a lone CR to LF before sending", () => {
-    expect(composeSendPayload("a\rb", { bracketedPaste: false })).toBe("a\nb\r")
+    expect(composeSendWrites("a\rb", { bracketedPaste: false })).toEqual([
+      "a\nb\r",
+    ])
   })
 
-  it("sends a bare Enter (CR) for an empty buffer", () => {
+  it("sends a bare Enter (CR) as a single write for an empty buffer", () => {
     // An empty Send is how the user confirms a TUI menu/prompt without ever
-    // focusing xterm, so it must be a plain CR, not a no-op.
-    expect(composeSendPayload("", { bracketedPaste: false })).toBe("\r")
+    // focusing xterm, so it must be a plain CR, not a no-op. It is a
+    // KEYSTROKE, not a paste, so it never splits or delays.
+    expect(composeSendWrites("", { bracketedPaste: false })).toEqual(["\r"])
   })
 
-  it("wraps the body in bracketed-paste markers with the CR outside the wrap", () => {
-    expect(composeSendPayload("hello\nworld", { bracketedPaste: true })).toBe(
-      "\x1b[200~hello\nworld\x1b[201~\r",
-    )
+  it("splits a bracketed-paste send into the wrap and a separate CR write", () => {
+    // The wrapped body is write one; the submitting CR is write two, which
+    // the caller delivers after COMPOSE_SUBMIT_DELAY_MS. A CR inside the same
+    // stdin chunk as the paste is consumed by Ink's paste handling instead of
+    // acting as Enter, which is how Send "typed but did not submit" on device.
+    expect(composeSendWrites("hello\nworld", { bracketedPaste: true })).toEqual([
+      "\x1b[200~hello\nworld\x1b[201~",
+      "\r",
+    ])
   })
 
-  it("still sends a bare CR for an empty buffer under bracketed paste", () => {
-    // There is no body to protect, and a wrapped empty paste would make some
-    // CLIs treat the following CR as paste-adjacent instead of a submit.
-    expect(composeSendPayload("", { bracketedPaste: true })).toBe("\r")
+  it("still sends a single bare CR for an empty buffer under bracketed paste", () => {
+    // There is no body to protect: no wrap, no split, no delay.
+    expect(composeSendWrites("", { bracketedPaste: true })).toEqual(["\r"])
   })
 
   it("treats whitespace-only text as text, not as an empty buffer", () => {
-    expect(composeSendPayload("  ", { bracketedPaste: false })).toBe("  \r")
-    expect(composeSendPayload(" ", { bracketedPaste: true })).toBe(
-      "\x1b[200~ \x1b[201~\r",
-    )
+    expect(composeSendWrites("  ", { bracketedPaste: false })).toEqual(["  \r"])
+    expect(composeSendWrites(" ", { bracketedPaste: true })).toEqual([
+      "\x1b[200~ \x1b[201~",
+      "\r",
+    ])
   })
 
   it("normalizes before the empty check, so a lone CR is a newline, not empty", () => {
     // A buffer holding only "\r" (a mobile keyboard artifact) normalizes to
     // "\n": one soft newline plus the submit, not the bare-Enter path.
-    expect(composeSendPayload("\r", { bracketedPaste: false })).toBe("\n\r")
+    expect(composeSendWrites("\r", { bracketedPaste: false })).toEqual(["\n\r"])
+  })
+
+  it("pins the submit delay in the one-frame-ish range the split relies on", () => {
+    // Long enough that Ink processes the paste chunk in an earlier input event
+    // than the CR; short enough to be imperceptible next to a tap.
+    expect(COMPOSE_SUBMIT_DELAY_MS).toBe(40)
   })
 })
 
