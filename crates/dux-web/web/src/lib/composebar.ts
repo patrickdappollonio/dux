@@ -23,41 +23,48 @@ const CR = 0x0d
 export const MAX_COMPOSE_SEND_BYTES = 2 * 1024 * 1024
 
 /**
- * True when `payload` (the built send bytes) exceeds
- * [`MAX_COMPOSE_SEND_BYTES`]. Measured on the final bytes, so multi-byte text
- * (CJK, emoji) counts at its real wire size.
+ * True when a send totalling `payloadBytes` (the summed byte length of its
+ * writes) exceeds [`MAX_COMPOSE_SEND_BYTES`]. Callers measure the built
+ * bytes, so multi-byte text (CJK, emoji) counts at its real wire size.
  */
-export function composeSendTooLarge(payload: Uint8Array): boolean {
-  return payload.byteLength > MAX_COMPOSE_SEND_BYTES
+export function composeSendTooLarge(payloadBytes: number): boolean {
+  return payloadBytes > MAX_COMPOSE_SEND_BYTES
 }
 
+// How long the caller waits between the body write and the submitting CR
+// write of a non-empty send (see `composeSendWrites`). MEASURED, not guessed:
+// the installed Claude Code 2.1.217 bundle merges stdin chunks into one paste
+// through a 50ms debounce (and force-classifies any single key event over 800
+// chars as a paste), so an Enter arriving with or within 50ms of the body is
+// swallowed into the paste as a newline instead of submitting, intermittently,
+// depending on chunk timing and length. 150ms is 3x that window with margin,
+// still imperceptible next to the tap that triggered the send. This is also
+// how a human behaves: paste, a beat, then Enter, as separate key events.
+export const COMPOSE_SUBMIT_DELAY_MS = 150
+
 /**
- * Builds the single PTY write a compose-bar Send performs: the message as a
- * MACRO-style keystroke stream, submitted by a trailing Enter.
+ * Builds the ordered PTY writes a compose-bar Send performs: the message as a
+ * MACRO-style keystroke stream, submitted by an Enter that travels alone.
  *
  * The body is exactly [`macroPayloadBytes`] (the transform the macro
  * quick-picker already uses against these same PTYs): every newline, in any
  * of its `\r\n` / `\n` / `\r` spellings, becomes Alt+Enter (ESC CR), the
- * soft-newline keystroke agent CLIs treat as newline-without-submit. The one
- * byte compose adds is the trailing bare CR, the submitting Enter.
+ * soft-newline keystroke agent CLIs treat as newline-without-submit. This
+ * deliberately does not use bracketed paste: the keystroke stream keeps "line
+ * break" and "Enter" distinct on the wire, so nothing here depends on a paste
+ * protocol the app may or may not negotiate.
  *
- * Because the payload is a keystroke stream, "line break" and "Enter" are
- * DISTINCT keys on the wire and everything goes as one immediate write. This
- * deliberately does not use bracketed paste: wrapping the body as a paste made
- * Ink-based TUIs (Claude Code and friends) consume a same-chunk CR inside
- * their paste handling, so Send typed the message but never submitted it, and
- * working around that needed a delayed second write. The macro convention has
- * neither problem.
- *
- * An EMPTY buffer therefore sends a bare CR, a plain Enter, with no special
- * case: it is how the user confirms a TUI menu or permission prompt without
- * ever focusing xterm, so Send stays enabled on an empty buffer.
- * Whitespace-only text is real text, not empty.
+ * Two elements mean the caller writes the body immediately and the bare-CR
+ * submit after [`COMPOSE_SUBMIT_DELAY_MS`] (see that constant for the measured
+ * paste-debounce reason). One element is a single immediate write: an EMPTY
+ * buffer sends just the bare CR, a plain Enter, which is how the user confirms
+ * a TUI menu or permission prompt without ever focusing xterm; it is a lone
+ * keystroke with no body for a paste heuristic to merge it into, so it is
+ * never delayed. Whitespace-only text is real text, not empty.
  */
-export function composeSendBytes(text: string): Uint8Array {
+export function composeSendWrites(text: string): Uint8Array[] {
   const body = macroPayloadBytes(text)
-  const out = new Uint8Array(body.byteLength + 1)
-  out.set(body, 0)
-  out[body.byteLength] = CR
-  return out
+  const submit = new Uint8Array([CR])
+  if (body.byteLength === 0) return [submit]
+  return [body, submit]
 }

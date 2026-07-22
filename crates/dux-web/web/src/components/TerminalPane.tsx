@@ -7,7 +7,11 @@ import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
 import { ComposeBar } from "@/components/ComposeBar"
-import { composeSendBytes, composeSendTooLarge } from "@/lib/composebar"
+import {
+  COMPOSE_SUBMIT_DELAY_MS,
+  composeSendTooLarge,
+  composeSendWrites,
+} from "@/lib/composebar"
 import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
 import {
@@ -423,6 +427,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   // senders) to read synchronously. Kept in sync only at the mutation points
   // (a take-over and the handover handler), never written during render.
   const isOwnerRef = useRef(isOwner)
+  // The typing surfaces render only while this client owns the input, so on
+  // regaining ownership the compose bar mounts in the SAME commit that flips
+  // `isOwner`; `takeOver`'s own `focusTypingSurface()` call runs before that
+  // commit (the compose ref is still null) and falls back to xterm. This
+  // effect lands after the commit and moves the keyboard into the freshly
+  // mounted compose box. Idempotent on the initial mobile mount, a no-op on
+  // desktop (`composeBarEnabled` is mobile-gated).
+  useEffect(() => {
+    if (isOwner && composeBarEnabled) composeInputRef.current?.focus()
+  }, [isOwner, composeBarEnabled])
   // This view's PTY-socket connection id, delivered as the socket's first
   // `connected` frame (and re-issued on every reconnect). Compared against each
   // `pty.owner` event's claimer id to decide ownership. Null until that frame lands.
@@ -1430,16 +1444,20 @@ export function TerminalPane(props: TerminalPaneProps) {
   // it's simply consumed. Sends go through the same socket path as typed input.
   const encoder = new TextEncoder()
 
-  // The compose bar's Send: deliver the buffered message and submit it, in
-  // one PTY write. The payload rules live in the pure `composeSendBytes`: the
-  // MACRO keystroke convention (newlines are Alt+Enter, ESC CR, exactly like
-  // `macroPayloadBytes`) with the submitting bare CR appended, an empty
-  // buffer thus being a plain Enter. Deliberately NOT bracketed paste, and no
-  // read of `bracketedPasteMode`: see composeSendBytes for why (a paste wrap
-  // made Ink TUIs swallow the same-chunk Enter). The shared landing-effects
-  // writer replays the scroll-to-live-edge and selection-drop a typed key
-  // would get. Focus stays in the compose textarea (the Send button
-  // preventDefaults its pointerdown, so it never left).
+  // The compose bar's Send: deliver the buffered message, then submit it.
+  // The write plan lives in the pure `composeSendWrites`: the MACRO keystroke
+  // convention (newlines are Alt+Enter, ESC CR, exactly like
+  // `macroPayloadBytes`) as the body write, and the submitting bare CR as a
+  // SEPARATE write the timeout below delivers COMPOSE_SUBMIT_DELAY_MS later.
+  // Deliberately NOT bracketed paste, and no read of `bracketedPasteMode`;
+  // and the Enter travels alone because Claude Code merges stdin chunks into
+  // one paste through a measured 50ms debounce that would swallow a
+  // same-window CR into the paste as a newline (see COMPOSE_SUBMIT_DELAY_MS).
+  // An empty buffer is a single immediate bare CR, a lone Enter keystroke.
+  // The shared landing-effects writer replays the scroll-to-live-edge and
+  // selection-drop a typed key would get, ONCE, with the first write. Focus
+  // stays in the compose textarea (the Send button preventDefaults its
+  // pointerdown, so it never left).
   //
   // Returns whether the send happened; the bar clears its buffer only on
   // true. A composed message can be minutes of typing, so unlike a keystroke
@@ -1467,14 +1485,30 @@ export function TerminalPane(props: TerminalPaneProps) {
       })
       return false
     }
-    const payload = composeSendBytes(text)
-    if (composeSendTooLarge(payload)) {
+    const writes = composeSendWrites(text)
+    const totalBytes = writes.reduce((n, w) => n + w.byteLength, 0)
+    if (composeSendTooLarge(totalBytes)) {
       toast.error("Message too large to send. Trim it down and try again.", {
         id: "compose-send",
       })
       return false
     }
-    writeInputWithLandingEffects(termRef.current, ptyRef.current, payload)
+    writeInputWithLandingEffects(termRef.current, ptyRef.current, writes[0])
+    // A two-write plan: the submitting CR follows after the measured-safe gap
+    // (see composeSendWrites). The send is committed at this point, hence
+    // `true` below; the delayed CR is a bare PTY write with no further side
+    // effects. Guards: the pane may unmount (its cleanup nulls `ptyRef`, so
+    // the identity check fails) or the socket may drop (`isOpen`) before the
+    // timer fires; in either case the orphaned CR is skipped rather than
+    // delivered to a socket this pane no longer drives.
+    if (writes.length > 1) {
+      const pty = ptyRef.current
+      const rest = writes.slice(1)
+      setTimeout(() => {
+        if (pty === null || ptyRef.current !== pty || !pty.isOpen) return
+        for (const w of rest) pty.sendInput(w)
+      }, COMPOSE_SUBMIT_DELAY_MS)
+    }
     return true
   }
 
@@ -1769,29 +1803,42 @@ export function TerminalPane(props: TerminalPaneProps) {
   return (
     <div className="flex h-full w-full flex-col bg-background">
       {pane}
-      <AccessoryBar
-        onEsc={() => sendSeq(ESC)}
-        onTab={() => sendSeq(TAB)}
-        onNewline={sendNewline}
-        onArrow={onArrow}
-        onScroll={onScroll}
-        ctrl={ctrl}
-        alt={alt}
-        onToggleCtrl={toggleCtrl}
-        onToggleAlt={toggleAlt}
-      />
-      {/* The compose bar (the `ui.compose_bar` preference, default on): the
-          third row, below the accessory bar's two key rows, so the typing
-          surface sits directly on the soft keyboard. When the preference is
-          off nothing renders and the tap-to-focus redirect stays dormant, so
-          the terminal behaves exactly as it did before the bar existed. */}
-      {composeBarEnabled ? (
-        <ComposeBar
-          value={composeText}
-          onChange={setComposeText}
-          onSend={sendCompose}
-          inputRef={composeInputRef}
-        />
+      {/* Typing surfaces render only for the input OWNER. When another device
+          drives this PTY, the take-over card (inside `pane`) is this client's
+          only interaction: hiding the accessory keys and the compose bar
+          removes any surface that could even stage input at a session this
+          device does not drive. The per-write owner gates (`sendSeq`,
+          `sendCompose`) stay behind this as defense in depth, and the bars
+          reappear the moment ownership returns. */}
+      {isOwner ? (
+        <>
+          <AccessoryBar
+            onEsc={() => sendSeq(ESC)}
+            onTab={() => sendSeq(TAB)}
+            onNewline={sendNewline}
+            onArrow={onArrow}
+            onScroll={onScroll}
+            ctrl={ctrl}
+            alt={alt}
+            onToggleCtrl={toggleCtrl}
+            onToggleAlt={toggleAlt}
+          />
+          {/* The compose bar (the `ui.compose_bar` preference, default on):
+              the third row, below the accessory bar's two key rows, so the
+              typing surface sits directly on the soft keyboard. When the
+              preference is off nothing renders and the tap-to-focus redirect
+              stays dormant, so the terminal behaves exactly as it did before
+              the bar existed. The draft value lives in this pane's state, so
+              losing and regaining ownership keeps an in-progress draft. */}
+          {composeBarEnabled ? (
+            <ComposeBar
+              value={composeText}
+              onChange={setComposeText}
+              onSend={sendCompose}
+              inputRef={composeInputRef}
+            />
+          ) : null}
+        </>
       ) : null}
     </div>
   )

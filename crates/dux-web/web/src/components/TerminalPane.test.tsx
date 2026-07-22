@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import { COMPOSE_SUBMIT_DELAY_MS } from "@/lib/composebar"
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
@@ -464,83 +465,113 @@ describe("TerminalPane mobile compose bar", () => {
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   })
 
-  it("Send writes the buffer plus a submitting CR to the PTY", () => {
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = last()
-    fireEvent.change(composeTextarea(), { target: { value: "ls -la" } })
-    fireEvent.pointerDown(sendButton())
-    expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("ls -la\r")
+  it("Send writes the body first and the submitting CR as a DELAYED second write", () => {
+    // Claude Code merges stdin chunks into one paste through a measured 50ms
+    // debounce, swallowing a same-window CR into the paste as a newline. The
+    // Enter must travel alone, a beat later, like a human's (see
+    // COMPOSE_SUBMIT_DELAY_MS). Fake timers pin the two-write timing.
+    vi.useFakeTimers()
+    try {
+      goMobile()
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      fireEvent.change(composeTextarea(), { target: { value: "ls -la" } })
+      fireEvent.pointerDown(sendButton())
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+      expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("ls -la")
+      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      expect(pty.sendInput).toHaveBeenCalledTimes(2)
+      expect(bytesOf(pty.sendInput.mock.calls[1])).toBe("\r")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it("an empty Send writes a bare Enter (CR)", () => {
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = last()
-    fireEvent.pointerDown(sendButton())
-    expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
+  it("a multiline body uses Alt+Enter newlines (the macro convention)", () => {
+    vi.useFakeTimers()
+    try {
+      goMobile()
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
+      fireEvent.pointerDown(sendButton())
+      expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("a\x1b\rb")
+      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      expect(bytesOf(pty.sendInput.mock.calls[1])).toBe("\r")
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it("a multiline Send is one macro-style write: Alt+Enter newlines, then CR", () => {
-    // The macro convention (macroPayloadBytes): newlines are the Alt+Enter
-    // keystroke (ESC CR, newline-without-submit), the trailing bare CR is the
-    // submitting Enter. One write; line break and Enter are distinct keys.
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = last()
-    fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
-    fireEvent.pointerDown(sendButton())
-    expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("a\x1b\rb\r")
+  it("an empty Send is ONE immediate bare CR (a lone keystroke, never delayed)", () => {
+    vi.useFakeTimers()
+    try {
+      goMobile()
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      fireEvent.pointerDown(sendButton())
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+      expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
+      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it("ignores bracketed paste: the payload is keystrokes even when the app negotiated it", () => {
-    // Deliberate: wrapping the body as a paste made Ink-based TUIs (Claude
-    // Code) swallow a same-chunk CR inside their paste handling, so Send typed
-    // the message but never submitted. The keystroke stream has no paste for a
-    // guard to interfere with, so bracketedPasteMode is simply not consulted.
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = last()
-    const term = TermStub.instances.at(-1)
-    if (!term) throw new Error("no terminal constructed")
-    term.modes.bracketedPasteMode = true
-    fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
-    fireEvent.pointerDown(sendButton())
-    expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("a\x1b\rb\r")
+  it("skips the delayed CR when the pane unmounted before it fired", () => {
+    vi.useFakeTimers()
+    try {
+      goMobile()
+      const { unmount } = render(
+        <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+      )
+      const pty = last()
+      fireEvent.change(composeTextarea(), { target: { value: "gone" } })
+      fireEvent.pointerDown(sendButton())
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+      // The pane goes away before the delay elapses: the orphaned CR must not
+      // land on a socket the pane no longer owns.
+      unmount()
+      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it("an empty Send is a single bare CR regardless of bracketed paste", () => {
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = last()
-    const term = TermStub.instances.at(-1)
-    if (!term) throw new Error("no terminal constructed")
-    term.modes.bracketedPasteMode = true
-    fireEvent.pointerDown(sendButton())
-    expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
+  it("skips the delayed CR when the socket dropped in between", () => {
+    vi.useFakeTimers()
+    try {
+      goMobile()
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      fireEvent.change(composeTextarea(), { target: { value: "dropped" } })
+      fireEvent.pointerDown(sendButton())
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+      pty.isOpen = false
+      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it("a non-owner's Send writes nothing, keeps the buffer, and toasts why", () => {
+  it("hides the compose bar AND the accessory bar for a non-owner viewer", () => {
+    // If the session is being driven from another machine, this client's
+    // typing surfaces disappear entirely: the take-over card is the only
+    // interaction left, so there is no way to even stage input at a PTY this
+    // device does not drive. (The Send owner-gate below stays as defense in
+    // depth behind the hidden UI.)
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    const pty = last()
+    expect(composeTextarea()).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
     // A foreign device takes over: this view is demoted to a read-only viewer.
     act(() => notifyPtyOwner("s1", "conn-other", undefined, undefined))
-    fireEvent.change(composeTextarea(), { target: { value: "stolen" } })
-    fireEvent.pointerDown(sendButton())
-    expect(pty.sendInput).not.toHaveBeenCalled()
-    // The draft is KEPT so a take-over can retry it, and the refusal is
-    // explained instead of silently swallowed.
-    expect(composeTextarea().value).toBe("stolen")
-    expect(toastError).toHaveBeenCalledWith(
-      "Another device is driving this terminal. Take over to send.",
-      expect.anything(),
-    )
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
   })
 
   it("a Send while the socket is down keeps the buffer and toasts", () => {
