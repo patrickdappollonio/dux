@@ -282,6 +282,7 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.pr_poll_interval_seconds,
     );
     patch_table_bool(doc, "ui", "copy_on_select", config.ui.copy_on_select);
+    patch_table_bool(doc, "ui", "compose_bar", config.ui.compose_bar);
     patch_table_u64(
         doc,
         "ui",
@@ -796,6 +797,28 @@ mod tests {
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
         assert_eq!(parsed.shutdown_timeout_seconds, 0);
         assert_eq!(parsed.server.shutdown_timeout_seconds, 0);
+    }
+
+    #[test]
+    fn compose_bar_renders_and_round_trips() {
+        // The default (true) renders and re-parses.
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert!(parsed.ui.compose_bar);
+
+        // A user-set false survives a regenerate. This is the half that catches
+        // a missing `patch_table_bool` line: with the key absent from the
+        // render, the re-parse would silently fall back to the default (true).
+        let config = Config {
+            ui: crate::config::UiConfig {
+                compose_bar: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert!(!parsed.ui.compose_bar);
     }
 
     #[test]

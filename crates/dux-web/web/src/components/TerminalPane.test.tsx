@@ -17,11 +17,19 @@ import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 // terminal. That no-op is the regression this file guards, for BOTH kinds.
 
 class TermStub {
+  static instances: TermStub[] = []
+  constructor() {
+    TermStub.instances.push(this)
+  }
   rows = 24
   cols = 80
   textarea = { setAttribute() {}, blur() {} }
   buffer = { active: { type: "normal" } }
-  modes = { mouseTrackingMode: "none", applicationCursorKeysMode: false }
+  modes = {
+    mouseTrackingMode: "none",
+    applicationCursorKeysMode: false,
+    bracketedPasteMode: false,
+  }
   // The pane registers a parser-level OSC 8 gate directly on the terminal (the
   // hyperlink on/off gate), so the stub must expose registerOscHandler.
   parser = {
@@ -67,6 +75,9 @@ class FakePtySocket {
   sendResize = vi.fn()
   sendInput = vi.fn()
   sendViewed = vi.fn()
+  // Mirrors the real socket's `isOpen` getter; a test flips it to false to
+  // model a disconnected socket (the compose bar's Send checks it).
+  isOpen = true
   onConnected: (id: string) => void = () => {}
   onOpen: () => void = () => {}
   onReconnecting: () => void = () => {}
@@ -85,6 +96,15 @@ class FakePtySocket {
 
 vi.mock("@xterm/xterm", () => ({ Terminal: TermStub }))
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: FitStub }))
+// Spy on sonner so the compose bar's refused-send tests can assert the user
+// was told WHY the message stayed in the buffer (owner/offline/oversized).
+const toastError = vi.fn()
+vi.mock("sonner", () => ({
+  toast: Object.assign(vi.fn(), {
+    success: vi.fn(),
+    error: (...args: unknown[]) => toastError(...args),
+  }),
+}))
 vi.mock("@/lib/suppressViewerReports", () => ({ suppressViewerReports: () => {} }))
 const notifyRegistrations: { title: () => string }[] = []
 vi.mock("@/lib/agentNotifications", () => ({
@@ -198,7 +218,9 @@ function last(): FakePtySocket {
 
 beforeEach(() => {
   FakePtySocket.instances = []
+  TermStub.instances = []
   notifyRegistrations.length = 0
+  toastError.mockClear()
   mockState = makeState()
   installStubs()
   // The `pty.owner` epoch high-water marks are module-global; reset so a handover
@@ -391,5 +413,229 @@ describe("TerminalPane project-terminal owner resolution", () => {
       />,
     )
     expect(screen.getByText("Launching terminal…")).toBeTruthy()
+  })
+})
+
+// The mobile compose bar (the `ui.compose_bar` preference, default on): the
+// third row of the mobile shell, whose Send delivers the buffered message plus
+// a submitting Enter to the PTY through the pure `composeSendPayload` rules.
+// `useIsMobile` reads `window.innerWidth`, so shrinking it below the 768px
+// breakpoint is how these tests mount the mobile shell.
+describe("TerminalPane mobile compose bar", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  const composeTextarea = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+  const sendButton = () => screen.getByRole("button", { name: "Send" })
+  const bytesOf = (call: unknown[]) =>
+    new TextDecoder().decode(call[0] as Uint8Array)
+
+  it("renders on mobile by default (preference absent falls back to on)", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeTextarea()).toBeTruthy()
+    expect(sendButton()).toBeTruthy()
+  })
+
+  it("does not render when the ui.compose_bar preference is off", () => {
+    goMobile()
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
+      false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  })
+
+  it("does not render on desktop", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  })
+
+  it("Send writes the buffer plus a submitting CR to the PTY", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    fireEvent.change(composeTextarea(), { target: { value: "ls -la" } })
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("ls -la\r")
+  })
+
+  it("an empty Send writes a bare Enter (CR)", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
+  })
+
+  it("wraps the body in bracketed-paste markers when the terminal has it on", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    term.modes.bracketedPasteMode = true
+    fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
+    fireEvent.pointerDown(sendButton())
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\x1b[200~a\nb\x1b[201~\r")
+  })
+
+  it("a non-owner's Send writes nothing, keeps the buffer, and toasts why", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // A foreign device takes over: this view is demoted to a read-only viewer.
+    act(() => notifyPtyOwner("s1", "conn-other", undefined, undefined))
+    fireEvent.change(composeTextarea(), { target: { value: "stolen" } })
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).not.toHaveBeenCalled()
+    // The draft is KEPT so a take-over can retry it, and the refusal is
+    // explained instead of silently swallowed.
+    expect(composeTextarea().value).toBe("stolen")
+    expect(toastError).toHaveBeenCalledWith(
+      "Another device is driving this terminal. Take over to send.",
+      expect.anything(),
+    )
+  })
+
+  it("a Send while the socket is down keeps the buffer and toasts", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // Model a dropped connection: the real socket's isOpen getter reads the
+    // WebSocket readyState; the fake exposes it as a writable flag.
+    pty.isOpen = false
+    fireEvent.change(composeTextarea(), { target: { value: "while offline" } })
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).not.toHaveBeenCalled()
+    expect(composeTextarea().value).toBe("while offline")
+    expect(toastError).toHaveBeenCalledWith(
+      "Not connected right now. Your message was kept.",
+      expect.anything(),
+    )
+  })
+
+  it("an oversized Send keeps the buffer and toasts instead of writing", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    // One byte over the 2 MiB client-side cap; the server would abort the
+    // whole PTY socket on a genuinely oversized frame, so the client refuses.
+    const huge = "a".repeat(2 * 1024 * 1024 + 1)
+    fireEvent.change(composeTextarea(), { target: { value: huge } })
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).not.toHaveBeenCalled()
+    expect(composeTextarea().value).toBe(huge)
+    expect(toastError).toHaveBeenCalled()
+  })
+
+  it("keeps in-progress text across a compose-bar unmount (pref flip off and on)", () => {
+    goMobile()
+    const { rerender } = render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" />,
+    )
+    fireEvent.change(composeTextarea(), { target: { value: "draft survives" } })
+    // The preference flips off: the bar unmounts. The buffer lives in
+    // TerminalPane state, not the bar, so it must survive the round trip.
+    const off = makeState()
+    ;(off.bootstrap as unknown as { compose_bar?: boolean }).compose_bar = false
+    mockState = off
+    rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    mockState = makeState()
+    rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(composeTextarea().value).toBe("draft survives")
+  })
+})
+
+// The tap-to-focus redirect, driven through real touch events on the terminal
+// container (jsdom accepts plain {clientX, clientY} objects in the touch
+// lists). touchend must be read via `changedTouches` (the `touches` list is
+// empty once the finger lifts).
+describe("TerminalPane tap-to-focus redirect", () => {
+  const desktopWidth = window.innerWidth
+  const goMobile = () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  }
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  const container = () => screen.getByTestId("terminal-container")
+  const composeTextarea = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+  const tap = (el: HTMLElement) => {
+    fireEvent.touchStart(el, {
+      touches: [{ clientX: 10, clientY: 10 }],
+    })
+    // fireEvent returns false iff preventDefault was called on the touchend,
+    // which is the mechanism that stops xterm's synthetic-mousedown focus.
+    return !fireEvent.touchEnd(el, {
+      touches: [],
+      changedTouches: [{ clientX: 10, clientY: 10 }],
+    })
+  }
+
+  it("a tap preventDefaults and focuses the compose textarea (owner, pref on)", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const prevented = tap(container())
+    expect(prevented).toBe(true)
+    expect(document.activeElement).toBe(composeTextarea())
+  })
+
+  it("does not intercept the tap when the preference is off", () => {
+    goMobile()
+    const state = makeState()
+    ;(state.bootstrap as unknown as { compose_bar?: boolean }).compose_bar =
+      false
+    mockState = state
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    // No preventDefault: the synthetic mouse events flow and xterm focuses its
+    // hidden textarea exactly as before the compose bar existed.
+    expect(tap(container())).toBe(false)
+  })
+
+  it("forwards a synthetic SGR click to a mouse-tracking app AND focuses compose", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = FakePtySocket.instances.at(-1)
+    const term = TermStub.instances.at(-1)
+    if (!pty || !term) throw new Error("no pty/term constructed")
+    // The app in the PTY has grabbed the mouse: the swallowed tap must still
+    // reach it as a left click (press + release) at the tapped cell, or
+    // tap-driven TUIs go dead with the compose bar up.
+    term.modes.mouseTrackingMode = "sgr"
+    const prevented = tap(container())
+    expect(prevented).toBe(true)
+    expect(document.activeElement).toBe(composeTextarea())
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    const bytes = new TextDecoder().decode(
+      pty.sendInput.mock.calls[0][0] as Uint8Array,
+    )
+    // jsdom rects/sizes are all 0, so the drag-path math degrades to the
+    // 1px-per-cell guard: cell = floor(10 / 1) + 1 = 11 on both axes.
+    expect(bytes).toBe("\x1b[<0;11;11M\x1b[<0;11;11m")
   })
 })

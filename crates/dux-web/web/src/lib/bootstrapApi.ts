@@ -41,6 +41,13 @@ export interface Bootstrap {
   /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
    * terminal auto-copies it to the clipboard (default true). */
   copy_on_select: boolean
+  /** Mirrors `config.ui.compose_bar`: whether the mobile terminal shows the
+   * compose bar (a buffered textarea with native autocorrect whose Send
+   * delivers the message plus a submitting Enter) and redirects a tap on the
+   * terminal into it. When false, a tap focuses xterm directly, the
+   * pre-compose-bar behavior. Older servers omit it, so consumers fall back
+   * to true. */
+  compose_bar?: boolean
   /** Mirrors `config.ui.attention_grace_seconds`: seconds the attention
    * indicators stay visible after the browser tab returns to the foreground,
    * before the focused agent's needs-attention flag clears (default 3; 0

@@ -68,6 +68,11 @@ pub struct BootstrapView {
     /// terminal auto-copies it (default true). Read by the terminal pane and by
     /// the web's Preferences dialog.
     pub copy_on_select: bool,
+    /// Mirrors `config.ui.compose_bar`: whether the web's mobile terminal shows
+    /// the compose bar (the buffered phone typing surface with native
+    /// autocorrect) and redirects a terminal tap into it (default true). Read
+    /// by the terminal pane and by the web's Preferences dialog. Web-only.
+    pub compose_bar: bool,
     /// Mirrors `config.ui.attention_grace_seconds`: seconds the attention
     /// indicators stay visible in the web UI after the browser tab returns to
     /// the foreground, before the focused agent's needs-attention flag
@@ -778,6 +783,7 @@ impl Engine {
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
+            compose_bar: self.config.ui.compose_bar,
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
@@ -1567,6 +1573,16 @@ mod tests {
     }
 
     #[test]
+    fn compose_bar_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        assert!(engine.bootstrap().compose_bar);
+
+        engine.config.ui.compose_bar = false;
+        assert!(!engine.bootstrap().compose_bar);
+    }
+
+    #[test]
     fn global_default_provider_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -1589,6 +1605,7 @@ mod tests {
             "gh_available",
             "github_integration",
             "copy_on_select",
+            "compose_bar",
             "attention_grace_seconds",
             "web_notifications",
             "hyperlinks",

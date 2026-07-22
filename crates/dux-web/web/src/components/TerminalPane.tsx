@@ -6,6 +6,8 @@ import { MonitorSmartphone } from "lucide-react"
 import { toast } from "sonner"
 import { AccessoryBar } from "@/components/AccessoryBar"
 import type { ScrollDir } from "@/components/AccessoryBar"
+import { ComposeBar } from "@/components/ComposeBar"
+import { composeSendPayload, composeSendTooLarge } from "@/lib/composebar"
 import { MacroPopover } from "@/components/MacroPopover"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,6 +30,7 @@ import {
   ESC,
   LF,
   pageKeySeq,
+  sgrClickSeq,
   sgrWheelSeq,
   softNewlineAction,
   TAB,
@@ -80,18 +83,29 @@ type TerminalPaneProps =
   | { kind: "agent"; id: string; sessionId: string }
   | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
 
-// A soft newline (LF / Ctrl-j) written straight to the PTY, plus the view side
-// effects a typed key would get through xterm's data pipeline — which both the
-// physical Shift-Enter handler and the accessory bar's ⇧↵ key deliberately
-// bypass: snap to the live edge and drop any stale selection so the user sees
-// where the input landed. Latch clearing is left to each caller (they compute it
-// from different sources). Module-scoped and shared so the two entry points that
-// insert a soft newline can't drift apart.
-const LF_BYTES = new TextEncoder().encode(LF)
-function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
+// Bytes written straight to the PTY (bypassing xterm's data pipeline), plus the
+// view side effects a typed key would get through that pipeline: snap to the
+// live edge and drop any stale selection so the user sees where the input
+// landed. Module-scoped and shared so every entry point that writes input
+// directly (the physical Shift-Enter handler, the accessory bar's ⇧↵ key, and
+// the mobile compose bar's Send) lands identically and can't drift apart.
+// Latch handling is left to each caller (they decide it from different rules).
+function writeInputWithLandingEffects(
+  term: Terminal | null,
+  pty: PtySocket | null,
+  bytes: Uint8Array,
+): void {
   term?.scrollToBottom()
   term?.clearSelection()
-  pty?.sendInput(LF_BYTES)
+  pty?.sendInput(bytes)
+}
+
+// A soft newline (LF / Ctrl-j): the shared landing-effects write with the one
+// fixed LF byte, kept as its own named helper so the two soft-newline entry
+// points (physical Shift-Enter and the accessory bar's ⇧↵ key) stay in step.
+const LF_BYTES = new TextEncoder().encode(LF)
+function writeSoftNewline(term: Terminal | null, pty: PtySocket | null): void {
+  writeInputWithLandingEffects(term, pty, LF_BYTES)
 }
 
 // Whether the "app captured the mouse, hold the modifier to select" hint has been
@@ -111,7 +125,11 @@ const DRAG_THRESHOLD_PX = 4
 // the write permitted even over a Tailscale plain-HTTP origin. The deduped toast
 // id makes rapid copy-on-select replace the toast rather than stack it. Module
 // level so it's a stable reference shared by the mount effect and the menu.
-function copyTermSelection(term: Terminal): void {
+// `refocus` restores focus once the copy settles: the call sites pass the
+// pane's `focusTypingSurface` so focus lands on the ACTIVE typing surface (the
+// compose textarea when the mobile compose bar is up, xterm otherwise) rather
+// than being hardwired to `term.focus()`.
+function copyTermSelection(term: Terminal, refocus: () => void): void {
   const sel = term.getSelection()
   if (!sel) return
   void copyToClipboard(sel)
@@ -120,7 +138,7 @@ function copyTermSelection(term: Terminal): void {
         ? toast.success("Copied to clipboard", { id: "term-copy" })
         : toast.error("Couldn't copy to clipboard", { id: "term-copy" }),
     )
-    .finally(() => term.focus())
+    .finally(refocus)
 }
 
 // Paste the BROWSER clipboard into the terminal via the async Clipboard API.
@@ -130,11 +148,13 @@ function copyTermSelection(term: Terminal): void {
 // catch a synchronous throw. The plain-HTTP/Ctrl-v path (handled by xterm's
 // native paste event) stays the secure-context-free fallback. `term.paste`
 // applies bracketed-paste (DECSET 2004) and newline normalization.
-function pasteIntoTerm(term: Terminal): void {
+// `refocus` mirrors `copyTermSelection`'s: the call site passes
+// `focusTypingSurface` so focus returns to the active typing surface.
+function pasteIntoTerm(term: Terminal, refocus: () => void): void {
   const read = navigator.clipboard?.readText?.()
   if (!read) {
     toast.error("Couldn't read clipboard — use Ctrl+v to paste", { id: "term-paste" })
-    term.focus()
+    refocus()
     return
   }
   void read
@@ -142,7 +162,7 @@ function pasteIntoTerm(term: Terminal): void {
     .catch(() =>
       toast.error("Couldn't read clipboard — use Ctrl+v to paste", { id: "term-paste" }),
     )
-    .finally(() => term.focus())
+    .finally(refocus)
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
@@ -235,6 +255,31 @@ export function TerminalPane(props: TerminalPaneProps) {
   useEffect(() => {
     copyOnSelectRef.current = bootstrap?.copy_on_select ?? true
   }, [bootstrap?.copy_on_select])
+  // The mobile compose bar (the `ui.compose_bar` preference, default on): the
+  // phone's typing surface, a buffered textarea below the accessory bar whose
+  // Send delivers the message in one write. Rendering reads the reactive value;
+  // the ref mirrors "the compose bar is up" (mobile AND preference on) for the
+  // stable mount-effect closures (the tap-to-focus redirect below), which would
+  // otherwise capture a stale value. When the preference is off, nothing
+  // renders and no focus behavior changes, exactly today's tap-focuses-xterm.
+  const composeBarEnabled = isMobile && (bootstrap?.compose_bar ?? true)
+  // The ref lags the rendered value by one commit (it is synced in an effect),
+  // so an event firing inside that window can see the previous state. Both
+  // mismatch directions degrade gracefully: a stale `false` falls through to
+  // `term.focus()` (today's behavior), a stale `true` at worst redirects one
+  // tap into a bar that just unmounted (the focus call no-ops on a null ref).
+  const composeActiveRef = useRef(composeBarEnabled)
+  useEffect(() => {
+    composeActiveRef.current = composeBarEnabled
+  }, [composeBarEnabled])
+  // The compose textarea, owned by ComposeBar but targeted from here: the
+  // tap-to-focus redirect and the scroll-gesture keyboard dismissal both need
+  // to focus/blur it from outside the component.
+  const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
+  // The compose BUFFER lives here, not in ComposeBar, precisely so the bar can
+  // unmount (a preference flip, a rotation past the mobile breakpoint) without
+  // destroying in-progress text; the bar is a controlled input over this state.
+  const [composeText, setComposeText] = useState("")
   // The `ui.attention_grace_seconds` preference (default 3s), converted to ms.
   // Read via a ref inside the stable mount-effect visibility handlers so
   // changing it never recreates the terminal; the fallback (3s) applies only
@@ -650,7 +695,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         // The chord is not a browser copy event, so we copy the selection
         // ourselves. preventDefault so the browser/devtools don't also act;
         // return false so xterm doesn't process the chord.
-        copyTermSelection(term)
+        copyTermSelection(term, focusTypingSurface)
         e.preventDefault()
         return false
       }
@@ -667,13 +712,18 @@ export function TerminalPane(props: TerminalPaneProps) {
       return false
     })
 
-    // Focus the terminal on selection so the user can type immediately — no extra
-    // click into the pane. This effect re-runs (and the pane remounts) on every
-    // agent OR companion-terminal selection (keyed by [kind, id]), so both cases
-    // are covered. Runs after the click that selected the row, so it wins focus.
-    // Skip when we attached as a read-only observer (non-owner): there is nothing
-    // to type into, and the take-over placeholder owns the surface instead.
-    if (isOwnerRef.current) term.focus()
+    // Focus the typing surface on selection so the user can type immediately,
+    // with no extra click into the pane. This effect re-runs (and the pane remounts)
+    // on every agent OR companion-terminal selection (keyed by [kind, id]), so
+    // both cases are covered. Runs after the click that selected the row, so it
+    // wins focus. With the mobile compose bar up, the typing surface is the
+    // compose textarea (so the soft keyboard types into the buffer from the
+    // first moment), otherwise xterm's hidden textarea as always; the routing
+    // lives in `focusTypingSurface` (it reads only refs, so this once-created
+    // closure calling the mount-time instance is harmless). Skip when we
+    // attached as a read-only observer (non-owner): there is nothing to type
+    // into, and the take-over placeholder owns the surface instead.
+    if (isOwnerRef.current) focusTypingSurface()
 
     // Copy-on-select (highlight to copy), gated by the `copy_on_select`
     // preference. Runs in the `mouseup` user gesture so the clipboard write is
@@ -700,7 +750,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         hintShown: mouseCaptureHintShown,
       })
       if (action === "copy") {
-        copyTermSelection(term)
+        copyTermSelection(term, focusTypingSurface)
       } else if (action === "hint") {
         mouseCaptureHintShown = true
         toast(
@@ -808,7 +858,10 @@ export function TerminalPane(props: TerminalPaneProps) {
         clearTimeout(longPressTimer)
         touchScrolling = true
         // Reading gesture: get the keyboard out of the way (see onScroll).
+        // Whichever surface holds it (xterm's hidden textarea or the compose
+        // bar's) must let go, or the keyboard stays up over the scrollback.
         term.textarea?.blur()
+        composeInputRef.current?.blur()
       }
       e.preventDefault()
       const rowHeight = container.clientHeight / term.rows
@@ -838,9 +891,60 @@ export function TerminalPane(props: TerminalPaneProps) {
       touchScrolling = false
       touchSelecting = false
     }
+    // Tap-to-focus redirect for the compose bar. xterm grabs focus from a
+    // `mousedown` listener on its element (`ev.preventDefault(); this.focus()`,
+    // see CoreBrowserTerminal), and on touch that mousedown is the SYNTHETIC
+    // one the browser dispatches after `touchend`. So when the compose bar is
+    // up and this client owns the input, a plain TAP (the gesture the
+    // disambiguator above left as neither a scroll nor a long-press)
+    // `preventDefault`s the touchend (suppressing the synthetic mouse events,
+    // so xterm never focuses its hidden textarea) and focuses the compose
+    // textarea instead: the soft keyboard always opens into the buffer.
+    //
+    // Swallowing those synthetic mouse events also swallows the CLICK a
+    // mouse-tracking app would have received through xterm's mouse pipeline,
+    // and full-screen TUIs (menus, buttons) are driven by exactly that click.
+    // So when the app has mouse tracking on, we forward the tap ourselves as a
+    // synthetic SGR left click (press + release) at the tapped cell, computed
+    // from `changedTouches[0]` (`touches` is already empty on touchend) with
+    // the same cell math as the drag path above. This restores the BEHAVIOR
+    // the app saw before the redirect existed, not a byte-exact replay of the
+    // browser's event pipeline; apps consume the click, not the DOM events.
+    //
+    // Scroll and long-press selection take the other branches and are
+    // untouched, a non-owner is covered by the take-over overlay anyway, and
+    // with the preference off (or on desktop) the redirect never fires, so a
+    // tap reaches xterm exactly as today. The listener is registered
+    // non-passive UNCONDITIONALLY (even when the redirect never fires): a
+    // deliberate, harmless choice, since touchend passivity does not gate the
+    // browser's scroll optimizations the way touchmove's does.
+    const onTouchEnd = (e: TouchEvent) => {
+      const wasTap = touchActive && !touchScrolling && !touchSelecting
+      endTouch()
+      if (!wasTap) return
+      if (!composeActiveRef.current || !isOwnerRef.current) return
+      const compose = composeInputRef.current
+      if (!compose) return
+      e.preventDefault()
+      const touch = e.changedTouches[0]
+      if (touch && term.modes.mouseTrackingMode !== "none") {
+        // Mirror onTouchMove's wheel-coordinate math: 1-based cell from the
+        // touch point, with the divide-by-zero guards for a not-yet-measured
+        // container.
+        const rect = container.getBoundingClientRect()
+        const colWidth = container.clientWidth / term.cols
+        const rowHeight = container.clientHeight / term.rows
+        const col =
+          Math.floor((touch.clientX - rect.left) / (colWidth > 0 ? colWidth : 1)) + 1
+        const cellRow =
+          Math.floor((touch.clientY - rect.top) / (rowHeight > 0 ? rowHeight : 1)) + 1
+        pty.sendInput(encoder.encode(sgrClickSeq(col, cellRow)))
+      }
+      compose.focus()
+    }
     container.addEventListener("touchstart", onTouchStart, { passive: true })
     container.addEventListener("touchmove", onTouchMove, { passive: false })
-    container.addEventListener("touchend", endTouch, { passive: true })
+    container.addEventListener("touchend", onTouchEnd, { passive: false })
     container.addEventListener("touchcancel", endTouch, { passive: true })
 
     // Sizing has two halves with very different costs:
@@ -1201,7 +1305,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       container.removeEventListener("contextmenu", onContextMenuPasteGuard)
       container.removeEventListener("touchstart", onTouchStart)
       container.removeEventListener("touchmove", onTouchMove)
-      container.removeEventListener("touchend", endTouch)
+      container.removeEventListener("touchend", onTouchEnd)
       container.removeEventListener("touchcancel", endTouch)
       ro.disconnect()
       document.removeEventListener("visibilitychange", resyncToForeground)
@@ -1289,7 +1393,10 @@ export function TerminalPane(props: TerminalPaneProps) {
         pendingClaimRef.current = true
       }
     }
-    term?.focus()
+    // Refocus the active typing surface (the compose textarea when the mobile
+    // compose bar is up, xterm's hidden textarea otherwise) so typing resumes
+    // where it belongs the moment ownership returns.
+    focusTypingSurface()
   }
 
   // Right-click pastes the browser clipboard (classic terminal: selecting copies
@@ -1299,7 +1406,21 @@ export function TerminalPane(props: TerminalPaneProps) {
   // (plain-HTTP).
   function onRightClickPaste() {
     const term = termRef.current
-    if (term && isOwnerRef.current) pasteIntoTerm(term)
+    if (term && isOwnerRef.current) pasteIntoTerm(term, focusTypingSurface)
+  }
+
+  // Where typing focus belongs right now: the compose textarea while the
+  // mobile compose bar is up (so the soft keyboard keeps typing into the
+  // buffer), xterm's hidden textarea otherwise. Every handler that used to
+  // refocus the terminal after acting routes through this, keeping the
+  // accessory-bar contract (a bar key never steals focus from the active
+  // typing surface) intact for both surfaces.
+  function focusTypingSurface() {
+    if (composeActiveRef.current && composeInputRef.current) {
+      composeInputRef.current.focus()
+    } else {
+      termRef.current?.focus()
+    }
   }
 
   // Accessory-bar key sends. Esc/Tab/arrows are full sequences, not single
@@ -1308,6 +1429,59 @@ export function TerminalPane(props: TerminalPaneProps) {
   // latch one-shot afterward — Ctrl on a non-char key has no meaning here, so
   // it's simply consumed. Sends go through the same socket path as typed input.
   const encoder = new TextEncoder()
+
+  // The compose bar's Send: deliver the buffered message and submit it, in one
+  // PTY write. The payload rules (line-ending normalization, the empty-buffer
+  // bare Enter, the bracketed-paste wrap) live in the pure `composeSendPayload`;
+  // bracketed paste is read off the live terminal at send time because the app
+  // in the PTY can toggle it at any moment. The shared landing-effects writer
+  // replays the scroll-to-live-edge and selection-drop a typed key would get.
+  // Focus stays in the compose textarea (the Send button preventDefaults its
+  // pointerdown, so it never left).
+  //
+  // Returns whether the send happened; the bar clears its buffer only on
+  // true. A composed message can be minutes of typing, so unlike a keystroke
+  // (cheap to re-type, silently droppable) every refused send KEEPS the buffer
+  // and toasts the reason: not the input owner (like every write path; take
+  // over to reclaim), socket not open (the sendInput readyState guard would
+  // silently drop the bytes), or payload over the client-side cap (an
+  // oversized frame would make the server abort the whole socket, see
+  // MAX_COMPOSE_SEND_BYTES).
+  //
+  // Deliberately does NOT consume the one-shot Ctrl/Alt accessory latches: a
+  // latch arms the next direct KEY, and a composed message is not a key; a
+  // user who tapped Ctrl intending Ctrl-c should not lose the latch to an
+  // unrelated Send.
+  function sendCompose(text: string): boolean {
+    if (!isOwnerRef.current) {
+      toast.error("Another device is driving this terminal. Take over to send.", {
+        id: "compose-send",
+      })
+      return false
+    }
+    if (!(ptyRef.current?.isOpen ?? false)) {
+      toast.error("Not connected right now. Your message was kept.", {
+        id: "compose-send",
+      })
+      return false
+    }
+    const payload = composeSendPayload(text, {
+      bracketedPaste: termRef.current?.modes.bracketedPasteMode ?? false,
+    })
+    if (composeSendTooLarge(payload)) {
+      toast.error("Message too large to send. Trim it down and try again.", {
+        id: "compose-send",
+      })
+      return false
+    }
+    writeInputWithLandingEffects(
+      termRef.current,
+      ptyRef.current,
+      encoder.encode(payload),
+    )
+    return true
+  }
+
   function sendSeq(seq: string) {
     // Read-only when not the owner: the accessory-bar keys (Esc/Tab/arrows) are
     // input too, so a secondary viewer's taps are dropped just like typed input.
@@ -1318,7 +1492,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       setMods({ ctrl: false, alt: false })
     }
     ptyRef.current?.sendInput(encoder.encode(out))
-    termRef.current?.focus()
+    focusTypingSurface()
   }
 
   function onArrow(dir: "up" | "down" | "left" | "right") {
@@ -1338,17 +1512,17 @@ export function TerminalPane(props: TerminalPaneProps) {
       setMods({ ctrl: false, alt: false })
     }
     writeSoftNewline(termRef.current, ptyRef.current)
-    termRef.current?.focus()
+    focusTypingSurface()
   }
 
   function toggleCtrl() {
     setMods({ ctrl: !modsRef.current.ctrl, alt: modsRef.current.alt })
-    termRef.current?.focus()
+    focusTypingSurface()
   }
 
   function toggleAlt() {
     setMods({ ctrl: modsRef.current.ctrl, alt: !modsRef.current.alt })
-    termRef.current?.focus()
+    focusTypingSurface()
   }
 
   // Scroll the xterm viewport from the accessory bar's second row. On the normal
@@ -1398,7 +1572,12 @@ export function TerminalPane(props: TerminalPaneProps) {
         // Keyboard-only full-screen app: send the actual PgUp/PgDn key.
         ptyRef.current?.sendInput(encoder.encode(pageKeySeq(up ? "up" : "down")))
       }
-      if (navigator.maxTouchPoints > 0) term.textarea?.blur()
+      if (navigator.maxTouchPoints > 0) {
+        term.textarea?.blur()
+        // The compose textarea holds the keyboard when the compose bar is up;
+        // a page-scroll is a reading gesture on either surface, so let it go.
+        composeInputRef.current?.blur()
+      }
       return
     }
     switch (dir) {
@@ -1411,8 +1590,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
     // Only a touch device has a soft keyboard to dismiss. Gating on touch
     // capability stops a narrow-window mouse user (who also gets this mobile bar)
-    // from silently losing terminal focus when paging through output.
-    if (navigator.maxTouchPoints > 0) term.textarea?.blur()
+    // from silently losing terminal focus when paging through output. The
+    // compose textarea can be the keyboard's holder too, so both surfaces let go.
+    if (navigator.maxTouchPoints > 0) {
+      term.textarea?.blur()
+      composeInputRef.current?.blur()
+    }
   }
 
   // The host div owns the padding so the resolved bg fills the padding area
@@ -1465,7 +1648,14 @@ export function TerminalPane(props: TerminalPaneProps) {
           onRightClickPaste()
         }}
       >
-        <div ref={containerRef} className="h-full w-full" />
+        {/* data-testid: the touch-gesture and tap-redirect tests dispatch real
+            TouchEvents on this exact node (the element the gesture listeners
+            are registered on); there is no accessible role to query it by. */}
+        <div
+          ref={containerRef}
+          data-testid="terminal-container"
+          className="h-full w-full"
+        />
       </div>
       {/* Pane chrome. An absolutely-positioned overlay (a sibling of the xterm
           host, NOT inside the unpadded containerRef xterm opens into) so it never
@@ -1594,6 +1784,19 @@ export function TerminalPane(props: TerminalPaneProps) {
         onToggleCtrl={toggleCtrl}
         onToggleAlt={toggleAlt}
       />
+      {/* The compose bar (the `ui.compose_bar` preference, default on): the
+          third row, below the accessory bar's two key rows, so the typing
+          surface sits directly on the soft keyboard. When the preference is
+          off nothing renders and the tap-to-focus redirect stays dormant, so
+          the terminal behaves exactly as it did before the bar existed. */}
+      {composeBarEnabled ? (
+        <ComposeBar
+          value={composeText}
+          onChange={setComposeText}
+          onSend={sendCompose}
+          inputRef={composeInputRef}
+        />
+      ) : null}
     </div>
   )
 }

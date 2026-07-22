@@ -189,6 +189,16 @@ fat-fingering the wrong control. The soft keyboard is handled by the browser
 shrinking the layout, so the accessory bar sits flush on top of the keyboard with
 no fiddly per-pane math, and there is no fullscreen mode to fight with.
 
+Below the accessory bar sits the **compose bar**: a real text box where you type
+the message and hit **Send** when it is ready. This is where your keyboard's
+autocorrect, swipe typing, and voice input actually work, because typing straight
+into a terminal gives a phone keyboard nothing to fix. Enter adds a newline
+instead of submitting, so multi-line prompts read the way you wrote them; Send
+delivers the whole message and presses Enter for you, and an empty Send is a
+plain Enter for confirming menus and prompts. Tapping the terminal drops you into
+the compose box (a refused send keeps your draft and tells you why), and the
+whole thing can be turned off in Preferences if you would rather type raw.
+
 ## Install it like an app
 
 dux ships a small PWA manifest, so your browser will offer to add it to your home

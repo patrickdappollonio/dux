@@ -290,6 +290,7 @@ async fn set_instance_identity(
 #[serde(default, deny_unknown_fields)]
 struct UiSettingsPatch {
     copy_on_select: Option<bool>,
+    compose_bar: Option<bool>,
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
     status_clear_seconds: Option<u16>,
@@ -384,6 +385,7 @@ async fn set_settings(
         // boundary between the public HTTP shape and the wire command.
         WireCommand::SetSettings(SettingsPatch {
             copy_on_select: body.ui.copy_on_select,
+            compose_bar: body.ui.compose_bar,
             show_changes_pane: body.ui.show_changes_pane,
             web_notifications: body.capabilities.web_notifications,
             always_show_tab_strip: body.ui.always_show_tab_strip,
@@ -844,6 +846,7 @@ mod tests {
                 r#"{
                     "ui": {
                         "copy_on_select": false,
+                        "compose_bar": false,
                         "always_show_tab_strip": true,
                         "status_clear_seconds": 42,
                         "attention_grace_seconds": 11,
@@ -872,6 +875,7 @@ mod tests {
         let raw = read_raw_config_text(&app).await;
         for expected in [
             "copy_on_select = false",
+            "compose_bar = false",
             "always_show_tab_strip = true",
             "status_clear_seconds = 42",
             "attention_grace_seconds = 11",

@@ -154,6 +154,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
         read: (b) => b.copy_on_select ?? true,
       },
       {
+        key: "ui.compose_bar",
+        label: "Mobile compose bar",
+        description:
+          "On phones, adds a compose box below the terminal keys: type with your keyboard's autocorrect and swipe input, then Send delivers the message and presses Enter. When off, tapping the terminal types directly into it, as before.",
+        surface: "web",
+        control: { kind: "bool" },
+        default: true,
+        writeTarget: "settings",
+        read: (b) => b.compose_bar ?? true,
+      },
+      {
         key: "capabilities.web_notifications",
         label: "Desktop notifications",
         description:

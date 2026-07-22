@@ -677,6 +677,10 @@ pub fn normalize_pr_banner_position(raw: &str) -> Option<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SettingsPatch {
     pub copy_on_select: Option<bool>,
+    /// `ui.compose_bar`: the web mobile terminal's compose bar (the buffered
+    /// phone typing surface). A plain field write with no side effects, so it
+    /// rides the generic settings path like `copy_on_select`.
+    pub compose_bar: Option<bool>,
     pub show_changes_pane: Option<bool>,
     pub web_notifications: Option<bool>,
     pub always_show_tab_strip: Option<bool>,
@@ -1357,6 +1361,7 @@ impl Engine {
         // list left on this path. Do not "tidy" it with `..`.
         let SettingsPatch {
             copy_on_select,
+            compose_bar,
             show_changes_pane,
             web_notifications,
             always_show_tab_strip,
@@ -1393,6 +1398,9 @@ impl Engine {
         let mut candidate = self.config.clone();
         if let Some(v) = copy_on_select {
             candidate.ui.copy_on_select = v;
+        }
+        if let Some(v) = compose_bar {
+            candidate.ui.compose_bar = v;
         }
         if let Some(v) = enable_randomized_pet_name_by_default {
             candidate.defaults.enable_randomized_pet_name_by_default = v;
@@ -8716,6 +8724,13 @@ mod tests {
                 expect: "false",
             },
             SettingsFieldRow {
+                key: "compose_bar",
+                seed: |c| c.ui.compose_bar = true,
+                sent: serde_json::json!(false),
+                read: |c| c.ui.compose_bar.to_string(),
+                expect: "false",
+            },
+            SettingsFieldRow {
                 key: "show_changes_pane",
                 seed: |c| c.ui.show_changes_pane = true,
                 sent: serde_json::json!(false),
@@ -8810,7 +8825,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            12,
+            13,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -8853,6 +8868,7 @@ mod tests {
         // by accidentally already holding the value we send.
         let patch = WireCommand::SetSettings(SettingsPatch {
             copy_on_select: Some(!before.ui.copy_on_select),
+            compose_bar: Some(!before.ui.compose_bar),
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),
             always_show_tab_strip: Some(!before.ui.always_show_tab_strip),
@@ -8877,6 +8893,7 @@ mod tests {
 
         let after = &engine.config;
         assert_eq!(after.ui.copy_on_select, !before.ui.copy_on_select);
+        assert_eq!(after.ui.compose_bar, !before.ui.compose_bar);
         assert_eq!(after.ui.show_changes_pane, !before.ui.show_changes_pane);
         assert_eq!(
             after.capabilities.web_notifications,
@@ -8913,6 +8930,7 @@ mod tests {
         let raw = std::fs::read_to_string(&engine.paths.config_path).expect("read config");
         let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
         assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
+        assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
         assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
         assert_eq!(
             disk.capabilities.web_notifications,

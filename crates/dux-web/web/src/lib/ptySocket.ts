@@ -210,6 +210,15 @@ export class PtySocket extends ReconnectingSocket {
     console.warn("[dux] PTY socket error; reconnect will follow", event)
   }
 
+  // Whether the underlying WebSocket is currently open, i.e. whether a send
+  // right now would actually go on the wire. The send methods below silently
+  // drop frames when it is not (fine for keystrokes, which are re-typed), but
+  // the compose bar's Send must instead KEEP its buffered message and tell the
+  // user, so it checks this before writing.
+  get isOpen(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN
+  }
+
   // Send PTY stdin as a Binary frame. A copy is sent so the buffer is a plain
   // `ArrayBuffer` (not `ArrayBufferLike`, which `WebSocket.send` rejects under
   // strict lib typings) and the caller's view can't mutate it in flight.

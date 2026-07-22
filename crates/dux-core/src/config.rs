@@ -481,6 +481,15 @@ pub struct UiConfig {
     /// clipboard (X11-style "highlight to copy"). Changing it from the web's
     /// Preferences dialog persists the new value here. Web-only behavior.
     pub copy_on_select: bool,
+    /// Whether the web UI's mobile terminal shows the compose bar: a buffered
+    /// text box below the accessory-bar keys where the phone keyboard's
+    /// autocorrect/swipe input work, with a Send button that delivers the
+    /// message plus a submitting Enter in one write. While enabled, tapping
+    /// the terminal focuses the compose box instead of the raw terminal input.
+    /// When false, the bar is hidden and a tap types directly into the
+    /// terminal (the pre-compose-bar behavior). Changing it from the web's
+    /// Preferences dialog persists the new value here. Web-only behavior.
+    pub compose_bar: bool,
     /// Seconds the attention indicators stay visible after dux regains your
     /// attention, before the focused agent's needs-attention flag clears.
     /// Applies when you return to the dux browser tab (web UI) and when your
@@ -741,6 +750,7 @@ impl Default for UiConfig {
             github_integration: true,
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
             copy_on_select: true,
+            compose_bar: true,
             attention_grace_seconds: 3,
             auto_reopen_agents: false,
             show_changes_pane: true,
@@ -1223,6 +1233,7 @@ impl Default for Config {
                 github_integration: true,
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
                 copy_on_select: true,
+                compose_bar: true,
                 attention_grace_seconds: 3,
                 auto_reopen_agents: false,
                 show_changes_pane: true,

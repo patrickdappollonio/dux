@@ -202,6 +202,21 @@ describe("PtySocket", () => {
     expect(last().sent).toHaveLength(0)
   })
 
+  it("isOpen reflects the socket lifecycle (pre-open, open, closed)", () => {
+    // The compose bar's Send checks this before writing so a message typed
+    // while disconnected is kept (with a toast) instead of silently dropped by
+    // the sendInput readyState guard.
+    const sock = new PtySocket("ws://x/pty")
+    expect(sock.isOpen).toBe(false)
+    sock.connect()
+    expect(sock.isOpen).toBe(false)
+    const ws = last()
+    ws.open()
+    expect(sock.isOpen).toBe(true)
+    sock.close()
+    expect(sock.isOpen).toBe(false)
+  })
+
   it("sends a resize as a Text JSON frame {rows, cols}", () => {
     const sock = new PtySocket("ws://x/pty")
     sock.connect()

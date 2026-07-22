@@ -147,6 +147,28 @@ export function sgrWheelSeq(lines: number, col: number, row: number): string {
 }
 
 /**
+ * Encodes a single SGR (1006) LEFT-BUTTON CLICK, press immediately followed by
+ * release, at the 1-based cell (`col`, `row`).
+ *
+ * Used by the compose bar's tap-to-focus redirect: the redirect swallows the
+ * touchend (so xterm never focuses its hidden textarea), which also swallows
+ * the synthetic mouse events xterm would have translated into a click for a
+ * mouse-tracking app. When such an app owns the PTY, the caller forwards this
+ * synthetic click at the tapped cell so tap-driven UIs (menu items, buttons in
+ * full-screen TUIs) keep working with the compose bar up.
+ *
+ * SGR forms: press is `ESC [ < 0 ; Col ; Row M` (button code 0 = left),
+ * release is the same sequence with a lowercase `m`. As with `sgrWheelSeq`,
+ * this emits SGR unconditionally; the caller is responsible for only invoking
+ * it when `mouseTrackingMode` is not `"none"`.
+ */
+export function sgrClickSeq(col: number, row: number): string {
+  const c = Math.max(1, Math.trunc(col))
+  const r = Math.max(1, Math.trunc(row))
+  return `${ESC}[<0;${c};${r}M${ESC}[<0;${c};${r}m`
+}
+
+/**
  * Returns the byte sequence for a Page Up / Page Down key, used to page a
  * full-screen app that scrolls by keyboard rather than mouse (no mouse
  * tracking). These are the standard CSI tilde sequences `ESC [ 5 ~` (PgUp) and

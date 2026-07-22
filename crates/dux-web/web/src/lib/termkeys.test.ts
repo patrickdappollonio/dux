@@ -11,6 +11,7 @@ import {
   ESC,
   LF,
   pageKeySeq,
+  sgrClickSeq,
   sgrWheelSeq,
   softNewline,
   softNewlineAction,
@@ -249,6 +250,24 @@ describe("sgrWheelSeq", () => {
 
   it("truncates fractional line counts and coordinates", () => {
     expect(sgrWheelSeq(-1.9, 2.8, 4.2)).toBe(`${ESC}[<64;2;4M`)
+  })
+})
+
+describe("sgrClickSeq", () => {
+  // SGR left-button click: press ESC [ < 0 ; Col ; Row M immediately followed
+  // by release ESC [ < 0 ; Col ; Row m at the same cell. Forwarded when a tap
+  // on the terminal is redirected to the compose bar but the app in the PTY has
+  // mouse tracking on, so the app still receives the click it would have.
+  it("emits a press then a release at the given cell", () => {
+    expect(sgrClickSeq(3, 7)).toBe(`${ESC}[<0;3;7M${ESC}[<0;3;7m`)
+  })
+
+  it("clamps the cell to a 1-based minimum so an out-of-bounds touch is valid", () => {
+    expect(sgrClickSeq(0, -4)).toBe(`${ESC}[<0;1;1M${ESC}[<0;1;1m`)
+  })
+
+  it("truncates fractional coordinates", () => {
+    expect(sgrClickSeq(2.8, 4.2)).toBe(`${ESC}[<0;2;4M${ESC}[<0;2;4m`)
   })
 })
 

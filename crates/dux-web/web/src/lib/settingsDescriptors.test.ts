@@ -14,6 +14,7 @@ const sampleBootstrap: Bootstrap = {
   gh_available: false,
   github_integration: false,
   copy_on_select: false,
+  compose_bar: false,
   attention_grace_seconds: 11,
   web_notifications: false,
   hyperlinks: false,
@@ -54,6 +55,7 @@ describe("settingsDescriptors", () => {
         "server.favicon",
         "ui.show_changes_pane",
         "ui.copy_on_select",
+        "ui.compose_bar",
         "capabilities.web_notifications",
         "ui.status_clear_seconds",
         "ui.attention_grace_seconds",
@@ -93,6 +95,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["server.favicon"]).toBe("amber")
     expect(byKey["ui.show_changes_pane"]).toBe(false)
     expect(byKey["ui.copy_on_select"]).toBe(false)
+    expect(byKey["ui.compose_bar"]).toBe(false)
     expect(byKey["capabilities.web_notifications"]).toBe(false)
     expect(byKey["ui.status_clear_seconds"]).toBe(42)
     expect(byKey["ui.attention_grace_seconds"]).toBe(11)
@@ -131,6 +134,7 @@ describe("settingsDescriptors", () => {
       "ui.attention_grace_seconds",
       "ui.attention_indicator",
       "ui.attention_on_bell",
+      "ui.compose_bar",
       "ui.copy_on_select",
       "ui.pr_banner_position",
       "ui.status_clear_seconds",
@@ -171,12 +175,14 @@ describe("settingsDescriptors", () => {
     delete bare.attention_indicator
     delete bare.attention_on_bell
     delete bare.global_default_provider
+    delete bare.compose_bar
     const byKey = Object.fromEntries(
       allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
     )
     expect(byKey["ui.attention_indicator"]).toBe(true)
     expect(byKey["ui.attention_on_bell"]).toBe(true)
     expect(byKey["defaults.provider"]).toBe("claude")
+    expect(byKey["ui.compose_bar"]).toBe(true)
   })
 
   // The global default-provider row's options aren't known statically: they

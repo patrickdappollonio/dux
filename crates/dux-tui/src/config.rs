@@ -621,6 +621,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.copy_on_select),
         },
         ConfigEntry::Field {
+            key: "compose_bar",
+            comment: Some(CommentSource::Static(
+                "# Web UI only: on a phone, show a compose box below the terminal keys.\n# You type into it with your keyboard's autocorrect and swipe input, then\n# the Send button delivers the whole message and presses Enter for you\n# (Enter inside the box just adds a newline). While enabled, tapping the\n# terminal focuses the compose box so the soft keyboard always types into\n# it. Set to false to hide the box and type directly into the terminal.\n# Change it at runtime from the web UI's Preferences dialog.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.compose_bar),
+        },
+        ConfigEntry::Field {
             key: "attention_grace_seconds",
             comment: Some(CommentSource::Static(
                 "# Seconds the attention indicators stay visible after dux regains your\n# attention, before the focused agent's needs-attention flag clears. Applies\n# when you return to the dux browser tab (web UI) and when your terminal\n# window regains focus (TUI). Gives you time to see which agent(s) wanted you\n# before the indicator vanishes. Set to 0 to clear the indicator immediately.\n# TUI note: requires a terminal that reports focus; under tmux, set\n# `focus-events on`. Terminals that never report focus keep the old behavior.",
@@ -1527,6 +1534,7 @@ mod tests {
         assert!(rendered.contains("pr_poll_interval_seconds = 180"));
         assert!(rendered.contains("empty_project_separator_min_projects = 5"));
         assert!(rendered.contains("copy_on_select = true"));
+        assert!(rendered.contains("compose_bar = true"));
         assert!(rendered.contains("attention_grace_seconds = 3"));
         assert!(rendered.contains("auto_reopen_agents = false"));
         assert!(rendered.contains("always_show_tab_strip = false"));
