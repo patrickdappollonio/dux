@@ -146,6 +146,14 @@ pub struct App {
     /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
     /// is active. See `rebuild_left_items`.
     pub(crate) inactive_collapse_overridden: bool,
+    /// The normalized filter query under which the user explicitly collapsed a
+    /// search-expanded Inactive tail. While the agent filter has a hit inside
+    /// the tail, the tail renders open as DERIVED state (the collapse
+    /// preference is untouched); collapsing it during that query is an explicit
+    /// act recorded here, winning until the query changes (a changed or cleared
+    /// query expires it in `rebuild_left_items`). Mirrors the web QuietTail's
+    /// `dismissedQuery`.
+    pub(crate) inactive_search_dismissed: Option<String>,
     pub(crate) left_items_cache: Vec<LeftItem>,
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
@@ -2277,6 +2285,7 @@ impl App {
             start_time: Instant::now(),
             readonly_nudge_tick: None,
             inactive_collapsed: true,
+            inactive_search_dismissed: None,
             inactive_collapse_overridden: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),
@@ -3461,6 +3470,22 @@ impl App {
                 .any(|s| matches!(s.status, crate::model::SessionStatus::Active));
             self.inactive_collapsed = has_active;
         }
+        // Expire a stale query-scoped dismissal: it applies only to the exact
+        // query it was made under, so a changed or cleared query drops it and
+        // the derivation below re-applies.
+        let current_query = self.active_filter_query();
+        if self
+            .inactive_search_dismissed
+            .as_deref()
+            .is_some_and(|dismissed| current_query.as_deref() != Some(dismissed))
+        {
+            self.inactive_search_dismissed = None;
+        }
+        // Derived search expansion: while the filter query hits something in
+        // the Inactive tail (and the user has not dismissed it for this exact
+        // query), the tail renders OPEN without mutating `inactive_collapsed`,
+        // so clearing the query restores the user's collapse preference.
+        let effective_collapsed = self.inactive_collapsed && !self.inactive_tail_forced_open();
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
         // Precompute the "hot" bit (working || needs-attention) per session so the
         // predicate can borrow this Vec while `build_left_items` borrows
@@ -3481,7 +3506,7 @@ impl App {
         let visible: Vec<bool> = self.agent_visibility_mask();
         self.left_items_cache = build_left_items(
             &self.engine.sessions,
-            self.inactive_collapsed,
+            effective_collapsed,
             mode,
             &|i| hot[i],
             &|i| visible[i],
@@ -3554,6 +3579,28 @@ impl App {
                     )
             })
             .count()
+    }
+
+    /// The live agent-filter query, normalized, or `None` when filter mode is
+    /// off or the query is empty/whitespace (which filters nothing).
+    fn active_filter_query(&self) -> Option<String> {
+        let raw = self.agent_filter.as_ref()?.text.as_str();
+        let query = dux_core::agent_search::normalize_query(raw);
+        (!query.is_empty()).then_some(query)
+    }
+
+    /// Whether the Inactive tail is currently held open by the search: a live
+    /// query with at least one visible inactive hit, not dismissed for this
+    /// exact query. Pure derivation; `inactive_collapsed` is never consulted or
+    /// mutated here.
+    fn inactive_tail_forced_open(&self) -> bool {
+        let Some(query) = self.active_filter_query() else {
+            return false;
+        };
+        if self.inactive_search_dismissed.as_deref() == Some(query.as_str()) {
+            return false;
+        }
+        self.visible_inactive_count() > 0
     }
 
     /// Enter agent-list filter mode: seed an empty query and rebuild the list.
@@ -3649,7 +3696,21 @@ impl App {
     pub(crate) fn toggle_collapse_selected_project(&mut self) {
         // A manual toggle takes over from the auto-manage in `rebuild_left_items`.
         self.inactive_collapse_overridden = true;
-        self.inactive_collapsed = !self.inactive_collapsed;
+        if self.inactive_tail_forced_open() {
+            // Collapsing a tail the search is holding open is an explicit act:
+            // record the dismissal for THIS query (it expires when the query
+            // changes) and collapse the base state too, so clearing the query
+            // lands on the state the user last chose. Mirrors the web QuietTail.
+            self.inactive_search_dismissed = self.active_filter_query();
+            self.inactive_collapsed = true;
+        } else if self.active_filter_query().is_some() && self.inactive_search_dismissed.is_some() {
+            // Reopening under the query that was dismissed: drop the dismissal
+            // so the derivation applies again.
+            self.inactive_search_dismissed = None;
+            self.inactive_collapsed = false;
+        } else {
+            self.inactive_collapsed = !self.inactive_collapsed;
+        }
         self.rebuild_left_items();
         if let Some(new_index) = self
             .left_items()
@@ -5439,6 +5500,93 @@ mod tests {
         let items = build_left_items(&sessions, true, AgentSortMode::Active, &|_| false, &visible);
         assert_eq!(items, vec![LeftItem::Session(0)]);
         assert!(!items.contains(&LeftItem::InactiveToggle));
+    }
+
+    /// App with one ACTIVE agent (index 0) and one EXITED "quiet-fox" agent
+    /// (index 1), so the Inactive tail auto-collapses (an active agent exists)
+    /// and a search can hit either bucket.
+    fn quiet_search_app() -> App {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.engine.sessions[0].status = SessionStatus::Active;
+        let mut quiet = app.engine.sessions[0].clone();
+        quiet.id = "session-quiet".to_string();
+        quiet.branch_name = "quiet-fox".to_string();
+        quiet.initial_branch = "quiet-fox".to_string();
+        quiet.title = None;
+        quiet.status = SessionStatus::Exited;
+        app.engine.sessions.push(quiet);
+        app.rebuild_left_items();
+        app
+    }
+
+    /// Search auto-expand is DERIVED: a query hitting a quiet agent shows its
+    /// row without mutating the collapse preference, and clearing the query
+    /// restores the collapsed tail.
+    #[test]
+    fn quiet_tail_auto_expands_when_search_hits_an_inactive_agent() {
+        let mut app = quiet_search_app();
+        assert!(
+            app.inactive_collapsed,
+            "an active agent auto-collapses the tail"
+        );
+        assert!(!app.left_items().contains(&LeftItem::Session(1)));
+
+        app.agent_filter = Some(TextInput::with_text("fox".to_string()));
+        app.rebuild_left_items();
+        assert!(
+            app.left_items().contains(&LeftItem::Session(1)),
+            "a quiet-hit query must reveal the matching quiet row"
+        );
+        assert!(
+            app.inactive_collapsed,
+            "the derivation must not mutate the user's collapse preference"
+        );
+
+        app.close_agent_filter();
+        assert!(
+            !app.left_items().contains(&LeftItem::Session(1)),
+            "clearing the query must restore the collapsed tail"
+        );
+    }
+
+    #[test]
+    fn quiet_tail_stays_collapsed_for_a_query_matching_only_active_agents() {
+        let mut app = quiet_search_app();
+        app.agent_filter = Some(TextInput::with_text("agent-branch".to_string()));
+        app.rebuild_left_items();
+        // The quiet agent does not match, so it is filtered out entirely: no
+        // revealed row and no Inactive toggle (same as the web, whose section
+        // hides when no quiet row matches).
+        assert!(!app.left_items().contains(&LeftItem::Session(1)));
+        assert!(!app.left_items().contains(&LeftItem::InactiveToggle));
+    }
+
+    /// Collapsing the tail WHILE a matching query holds it open is an explicit
+    /// act that wins for that query; a changed query expires the dismissal.
+    #[test]
+    fn collapsing_a_search_expanded_tail_wins_until_the_query_changes() {
+        let mut app = quiet_search_app();
+        app.agent_filter = Some(TextInput::with_text("fox".to_string()));
+        app.rebuild_left_items();
+        assert!(app.left_items().contains(&LeftItem::Session(1)));
+
+        app.toggle_collapse_selected_project();
+        assert!(
+            !app.left_items().contains(&LeftItem::Session(1)),
+            "a manual collapse must win over the search derivation"
+        );
+        app.rebuild_left_items();
+        assert!(
+            !app.left_items().contains(&LeftItem::Session(1)),
+            "the dismissal must hold across rebuilds under the same query"
+        );
+
+        // A different query that still hits the quiet agent: the dismissal was
+        // scoped to the old query, so the tail derives open again.
+        app.agent_filter = Some(TextInput::with_text("quiet".to_string()));
+        app.rebuild_left_items();
+        assert!(app.left_items().contains(&LeftItem::Session(1)));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { matchesSessionQuery, matchesTerminalQuery, normalizeQuery } from "@/lib/agentSearch"
+import { matchCharRange, matchesSessionQuery, matchesTerminalQuery, normalizeQuery } from "@/lib/agentSearch"
 import type { SessionView, TerminalView } from "@/lib/types"
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
@@ -100,5 +100,30 @@ describe("matchesTerminalQuery", () => {
 
   it("does not match unrelated text", () => {
     expect(matchesTerminalQuery(terminal, "server-mode", "dux", "zzz")).toBe(false)
+  })
+})
+
+// The highlight range helper, the TS twin of dux-core's `match_char_range`
+// (shared vectors). CODE-POINT indices, never UTF-16 units or bytes, so a
+// label with emoji or CJK highlights the right characters.
+describe("matchCharRange", () => {
+  it("finds a case-insensitive hit in code-point indices", () => {
+    expect(matchCharRange("API-Refactor", "refactor")).toEqual({ start: 4, end: 12 })
+    expect(matchCharRange("feature/login", "LOGIN")).toEqual({ start: 8, end: 13 })
+    expect(matchCharRange("abc", "abc")).toEqual({ start: 0, end: 3 })
+  })
+
+  it("returns null for no hit or an empty/whitespace query", () => {
+    expect(matchCharRange("api", "zzz")).toBeNull()
+    expect(matchCharRange("api", "")).toBeNull()
+    expect(matchCharRange("api", "   ")).toBeNull()
+  })
+
+  it("counts code points, not UTF-16 units, for astral-plane labels", () => {
+    // The duck emoji is ONE code point (two UTF-16 units); "duck" starts at
+    // code-point index 2 (emoji + space).
+    expect(matchCharRange("🦆 duck", "duck")).toEqual({ start: 2, end: 6 })
+    expect(matchCharRange("höhe-fix", "fix")).toEqual({ start: 5, end: 8 })
+    expect(matchCharRange("日本語テスト", "語テ")).toEqual({ start: 2, end: 4 })
   })
 })

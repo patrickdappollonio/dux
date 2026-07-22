@@ -124,6 +124,8 @@ ansi_darkgray = "#808080"
 "dux.scroll_indicator_fg"  = "#d2d2d2"
 "dux.scroll_indicator_bg"  = "#373737"
 "dux.warning_fg"           = "ansi_yellow"
+# Emphasis on the part of a row label the agent-list search matched.
+"dux.search_match_fg"      = "ansi_yellow"
 
 # ── Buttons ──────────────────────────────────────────────────────────
 "dux.button_active_fg"     = "ansi_white"

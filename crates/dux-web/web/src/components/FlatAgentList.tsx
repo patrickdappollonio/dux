@@ -65,7 +65,7 @@ import {
 } from "@/components/ui/empty"
 import { agentRowVisual } from "@/lib/agentRow"
 import { defaultProviderForSession } from "@/lib/agentTabs"
-import { matchesSessionQuery, matchesTerminalQuery } from "@/lib/agentSearch"
+import { matchCharRange, matchesSessionQuery, matchesTerminalQuery } from "@/lib/agentSearch"
 import { changesCountFor } from "@/lib/agentVitals"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { clipboardWorktree } from "@/lib/flatClipboard"
@@ -271,6 +271,27 @@ function TypingCaret() {
   )
 }
 
+// A row label with the part the live search query matched wrapped in a
+// token-styled emphasis span (bg-primary at low alpha, never a hardcoded
+// color). The range comes from the pure `matchCharRange` (code-point safe, the
+// TS twin of dux-core's `match_char_range`), computed against the DISPLAYED
+// string only, so nothing highlights that the filter did not match on this
+// row's visible text. Splitting via Array.from keeps emoji/CJK intact.
+function HighlightedText({ text, query }: { text: string; query: string }) {
+  const range = matchCharRange(text, query)
+  if (!range) return <>{text}</>
+  const chars = Array.from(text)
+  return (
+    <>
+      {chars.slice(0, range.start).join("")}
+      <span className="rounded-[2px] bg-primary/25">
+        {chars.slice(range.start, range.end).join("")}
+      </span>
+      {chars.slice(range.end).join("")}
+    </>
+  )
+}
+
 // The two-line agent row: line one is the Bot (with the verbatim working bob +
 // attention pulse + name shimmer cues) + name + PR link + relative time; line two
 // is the clickable project tag, a colored state word, and (when they diverge) the
@@ -281,12 +302,15 @@ function AgentFlatRow({
   selectedTarget,
   handlers,
   sortable,
+  query,
 }: {
   session: SessionView
   projectName: string
   selectedTarget: SelectedTarget | null
   handlers: FlatSelectHandlers
   sortable: boolean
+  // The live search query, for the match highlight ("" renders plain).
+  query: string
 }) {
   const label = session.title || session.branch_name
   const agentSelected =
@@ -377,7 +401,7 @@ function AgentFlatRow({
                     shimmer && "agent-name-shimmer--on",
                   )}
                 >
-                  {label}
+                  <HighlightedText text={label} query={query} />
                 </span>
                 {/* Typing cue: the violet caret next to the name (working's bob +
                     shimmer are suppressed while typing, so this is the sole cue). */}
@@ -484,6 +508,7 @@ function TerminalFlatRow({
   active,
   onSelect,
   sortable,
+  query,
 }: {
   terminal: TerminalView
   siblings: readonly TerminalView[]
@@ -492,6 +517,8 @@ function TerminalFlatRow({
   active: boolean
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
   sortable: boolean
+  // The live search query, for the match highlight ("" renders plain).
+  query: string
 }) {
   // In the sidebar row an idle terminal reads a plain "Terminal" (the owner on
   // line two and row order distinguish several), while a running one shows its
@@ -551,7 +578,7 @@ function TerminalFlatRow({
                   shimmer && "agent-name-shimmer--on",
                 )}
               >
-                {title}
+                <HighlightedText text={title} query={query} />
               </span>
             </SimpleTooltip>
             {terminal.typing ? <TypingCaret /> : null}
@@ -609,22 +636,26 @@ function TerminalFlatRow({
 
 // The flat Terminals section: every terminal (companion + project), each a
 // two-line TerminalFlatRow, under a collapsible labeled divider that matches the
-// Quiet tail's header and toggle exactly (a chevron, no leading icon). Defaults
-// OPEN, unlike the Quiet tail: a listed terminal is a live PTY worth surfacing,
-// so it is shown by default but can be collapsed to reclaim space. Renders
-// nothing when there are no terminals.
+// Quiet tail's header and toggle exactly (a chevron, no leading icon). Renders
+// directly below the main agent list, ABOVE the Inactive tail. Defaults OPEN,
+// unlike the Quiet tail: a listed terminal is a live PTY worth surfacing, so it
+// is shown by default but can be collapsed to reclaim space. Renders nothing
+// when there are no terminals.
 function TerminalsSection({
   terminals,
   selectedTarget,
   onSelect,
   sensors,
   onDragEnd,
+  query,
 }: {
   terminals: FlatTerminal[]
   selectedTarget: SelectedTarget | null
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
   sensors: ReturnType<typeof useSensors>
   onDragEnd: (event: DragEndEvent) => void
+  // The live search query, forwarded to each row's match highlight.
+  query: string
 }) {
   const [open, setOpen] = useState(true)
   if (terminals.length === 0) return null
@@ -674,6 +705,7 @@ function TerminalsSection({
                   }
                   onSelect={onSelect}
                   sortable
+                  query={query}
                 />
               ))}
             </div>
@@ -687,36 +719,76 @@ function TerminalsSection({
 // The collapsed Quiet tail: detached / exited agents, hidden by default so
 // dormant work stops hogging the list. Its rows reuse the same AgentFlatRow (they
 // render dimmed via agentRowVisual and carry the Detached/Exited state word).
+//
+// Search auto-expand is DERIVED state, never a mutation of the collapse
+// preference: while `searchHit` (the live query matches something quiet) the
+// section renders open so the results are visible, and it falls back to the
+// manual `open` state the moment the query stops matching. The one override:
+// a user who collapses the section WHILE a matching query is active has made
+// an explicit call, so that dismissal wins, keyed to the exact query text and
+// expiring the moment the query changes (`prevQuery` tracks the transition via
+// React's adjust-state-on-input-change pattern, no effect pass needed).
 function QuietTail({
   sessions,
   projectName,
   selectedTarget,
   handlers,
+  query,
+  searchHit,
 }: {
   sessions: SessionView[]
   projectName: (id: string) => string
   selectedTarget: SelectedTarget | null
   handlers: FlatSelectHandlers
+  query: string
+  searchHit: boolean
 }) {
   const [open, setOpen] = useState(false)
+  // The query under which the user explicitly collapsed a search-expanded
+  // tail; inert once the query text changes.
+  const [dismissedQuery, setDismissedQuery] = useState<string | null>(null)
+  const [prevQuery, setPrevQuery] = useState(query)
+  if (query !== prevQuery) {
+    setPrevQuery(query)
+    if (dismissedQuery !== null && dismissedQuery !== query) {
+      setDismissedQuery(null)
+    }
+  }
+  const forcedOpen = searchHit && dismissedQuery !== query
+  const effectiveOpen = forcedOpen || open
+  const toggle = () => {
+    if (effectiveOpen) {
+      // Collapsing: when the search is holding the section open, record the
+      // dismissal for this query; the base state collapses too, so clearing
+      // the query lands on the state the user last chose.
+      if (forcedOpen) setDismissedQuery(query)
+      setOpen(false)
+    } else {
+      setDismissedQuery(null)
+      setOpen(true)
+    }
+  }
   if (sessions.length === 0) return null
   return (
     <div className="mt-2 border-t border-border/50 pt-2">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
+        onClick={toggle}
+        aria-expanded={effectiveOpen}
         className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
       >
         <ChevronRight
-          className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
+          className={cn(
+            "size-3 shrink-0 transition-transform",
+            effectiveOpen && "rotate-90",
+          )}
         />
         <span>Inactive</span>
         <span className="ml-auto rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground">
           {sessions.length}
         </span>
       </button>
-      {open ? (
+      {effectiveOpen ? (
         <div className="mt-1 flex flex-col gap-1">
           {sessions.map((session) => (
             <AgentFlatRow
@@ -726,6 +798,7 @@ function QuietTail({
               selectedTarget={selectedTarget}
               handlers={handlers}
               sortable={false}
+              query={query}
             />
           ))}
         </div>
@@ -971,25 +1044,36 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                       selectedTarget={selectedTarget}
                       handlers={handlers}
                       sortable
+                      query={query}
                     />
                   ))}
                 </div>
               </SortableContext>
             </DndContext>
 
-            <QuietTail
-              sessions={visibleQuiet}
-              projectName={projectName}
-              selectedTarget={selectedTarget}
-              handlers={handlers}
-            />
-
+            {/* Terminals sit ABOVE the Inactive tail: a live terminal is worth
+                more prominence than dormant agents, and the default-open
+                Terminals section would otherwise render below a section that is
+                default-closed. Collapse defaults are unchanged (Terminals open,
+                Inactive closed, per the CLAUDE.md tenet). */}
             <TerminalsSection
               terminals={flatTerminals}
               selectedTarget={selectedTarget}
               onSelect={handlers.onSelectTerminal}
               sensors={sensors}
               onDragEnd={handleTerminalDragEnd}
+              query={query}
+            />
+
+            <QuietTail
+              sessions={visibleQuiet}
+              projectName={projectName}
+              selectedTarget={selectedTarget}
+              handlers={handlers}
+              query={query}
+              // A live query with a quiet hit derives the section open (see the
+              // QuietTail doc); an empty query never forces anything.
+              searchHit={query.trim() !== "" && visibleQuiet.length > 0}
             />
           </>
         )}

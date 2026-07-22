@@ -45,6 +45,46 @@ pub fn matches_session(
     providers.iter().any(|p| p.to_lowercase().contains(&q))
 }
 
+/// The CHAR range (start inclusive, end exclusive, in char indices, never
+/// bytes) of the first case-insensitive occurrence of `query` in `field`, or
+/// `None` when the query is empty/whitespace or does not occur. The search-hit
+/// highlight uses this to emphasize the matched part of a row's name, so it
+/// applies the exact same normalization the filter itself applies
+/// (`normalize_query` + lowercase contains): what highlights is what matched.
+///
+/// Char indices, deliberately: user-visible labels carry multi-byte UTF-8
+/// (CJK, emoji, box drawing), and byte-based slicing panics inside a
+/// multi-byte char (the CLAUDE.md truncation rule). Lowercasing can EXPAND a
+/// char (ß becomes ss), so the haystack is lowered char by char while
+/// recording each lowered char's SOURCE char index; the range is then mapped
+/// back through that record, keeping the highlight aligned with the original
+/// string however the case-folding reshaped it.
+pub fn match_char_range(field: &str, query: &str) -> Option<(usize, usize)> {
+    let q: Vec<char> = normalize_query(query).chars().collect();
+    if q.is_empty() {
+        return None;
+    }
+    let mut lowered: Vec<char> = Vec::new();
+    let mut source_index: Vec<usize> = Vec::new();
+    for (index, ch) in field.chars().enumerate() {
+        for lower in ch.to_lowercase() {
+            lowered.push(lower);
+            source_index.push(index);
+        }
+    }
+    if q.len() > lowered.len() {
+        return None;
+    }
+    for start in 0..=(lowered.len() - q.len()) {
+        if lowered[start..start + q.len()] == q[..] {
+            let from = source_index[start];
+            let to = source_index[start + q.len() - 1] + 1;
+            return Some((from, to));
+        }
+    }
+    None
+}
+
 /// Match a terminal row against a raw query. Fields: the terminal's label and its
 /// running foreground command, the owner label ("agent name" or "project"), and the
 /// project name.
@@ -70,6 +110,31 @@ pub fn matches_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn match_char_range_finds_a_case_insensitive_hit_in_char_indices() {
+        assert_eq!(match_char_range("API-Refactor", "refactor"), Some((4, 12)));
+        assert_eq!(match_char_range("feature/login", "LOGIN"), Some((8, 13)));
+        assert_eq!(match_char_range("abc", "abc"), Some((0, 3)));
+    }
+
+    #[test]
+    fn match_char_range_returns_none_for_no_hit_or_empty_query() {
+        assert_eq!(match_char_range("api", "zzz"), None);
+        assert_eq!(match_char_range("api", ""), None);
+        assert_eq!(match_char_range("api", "   "), None);
+    }
+
+    #[test]
+    fn match_char_range_counts_chars_not_bytes_for_multibyte_labels() {
+        // "höhe-fix": the umlaut is two UTF-8 bytes but ONE char; "fix" starts
+        // at char index 5, not byte index 6.
+        assert_eq!(match_char_range("höhe-fix", "fix"), Some((5, 8)));
+        // An emoji (single char here) before the hit shifts the range by one.
+        assert_eq!(match_char_range("🦆 duck", "duck"), Some((2, 6)));
+        // Matching THROUGH multi-byte chars works too.
+        assert_eq!(match_char_range("日本語テスト", "語テ"), Some((2, 4)));
+    }
 
     #[test]
     fn empty_query_matches_everything() {

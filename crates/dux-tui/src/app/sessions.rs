@@ -3894,6 +3894,7 @@ mod tests {
             start_time: std::time::Instant::now(),
             readonly_nudge_tick: None,
             inactive_collapsed: false,
+            inactive_search_dismissed: None,
             inactive_collapse_overridden: false,
             left_items_cache: Vec::new(),
             mouse_layout: MouseLayoutState::default(),

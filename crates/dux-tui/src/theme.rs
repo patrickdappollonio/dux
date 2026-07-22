@@ -130,6 +130,13 @@ pub struct Theme {
     pub scroll_indicator_fg: Color,
     pub scroll_indicator_bg: Color,
     pub warning_fg: Color,
+    /// Emphasis for the part of a row label that the live agent-list search
+    /// query matched. Applied to the matched substring only (with BOLD at the
+    /// render site), so the hit is visible at a glance. A foreground, not a
+    /// background: the framed-row selection paints its tint on content rows
+    /// while keeping each span's fg, so a fg-based emphasis stays legible
+    /// inside a selected row.
+    pub search_match_fg: Color,
     pub button_active_fg: Color,
     pub button_confirm_border: Color,
     pub button_danger_border: Color,
@@ -419,6 +426,9 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.scroll_indicator_fg", text_primary);
     theme.register_default_token("dux.scroll_indicator_bg", bg_active);
     theme.register_default_token("dux.warning_fg", warning);
+    // Search-hit emphasis: the warning hue doubles as a find/highlight accent
+    // (the conventional "search match" yellow) and is defined by every theme.
+    theme.register_default_token("dux.search_match_fg", warning);
 
     // Buttons
     theme.register_default_token("dux.button_active_fg", text_primary);
@@ -554,6 +564,7 @@ impl Theme {
             scroll_indicator_fg: pick("dux.scroll_indicator_fg"),
             scroll_indicator_bg: pick("dux.scroll_indicator_bg"),
             warning_fg: pick("dux.warning_fg"),
+            search_match_fg: pick("dux.search_match_fg"),
             button_active_fg: pick("dux.button_active_fg"),
             button_confirm_border: pick("dux.button_confirm_border"),
             button_danger_border: pick("dux.button_danger_border"),
@@ -796,6 +807,7 @@ mod tests {
             scroll_indicator_fg: Color::Rgb(210, 210, 210),
             scroll_indicator_bg: Color::Rgb(55, 55, 55),
             warning_fg: Color::Yellow,
+            search_match_fg: Color::Yellow,
             button_active_fg: Color::White,
             button_confirm_border: Color::Cyan,
             button_danger_border: Color::Red,
@@ -901,6 +913,7 @@ mod tests {
         assert_field!(scroll_indicator_fg);
         assert_field!(scroll_indicator_bg);
         assert_field!(warning_fg);
+        assert_field!(search_match_fg);
         assert_field!(button_active_fg);
         assert_field!(button_confirm_border);
         assert_field!(button_danger_border);

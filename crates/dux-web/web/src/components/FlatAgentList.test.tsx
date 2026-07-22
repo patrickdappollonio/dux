@@ -125,7 +125,15 @@ function makeState(sort: string): DuxState {
           id: "zeta",
           title: "Zeta",
           terminals: [
-            makeTerminal({ id: "t-z", label: "zsh", sort_order: 1 }),
+            makeTerminal({
+              id: "t-z",
+              label: "zsh",
+              sort_order: 1,
+              // A running foreground command so the row DISPLAYS "zsh" (an
+              // idle terminal reads a plain "Terminal"); the highlight test
+              // needs the displayed string to be the matched one.
+              foreground_cmd: "zsh",
+            }),
             makeTerminal({ id: "t-a", label: "bash", sort_order: 2 }),
           ],
         }),
@@ -181,6 +189,124 @@ function terminalsDragEnd(): (event: DragEndEvent) => void {
 function drop(handler: (event: DragEndEvent) => void, active: string, over: string) {
   handler({ active: { id: active }, over: { id: over } } as DragEndEvent)
 }
+
+describe("FlatAgentList section order", () => {
+  it("renders Terminals ABOVE the Inactive quiet tail", () => {
+    // Wanted order: main agents, then Terminals, then Inactive. Both section
+    // headers exist in this fixture (a quiet session and two terminals), so
+    // the DOM order of the two toggles pins the layout.
+    render(<FlatAgentList handlers={handlers} />)
+    const terminals = screen.getByText("Terminals")
+    const inactive = screen.getByText("Inactive")
+    const position = terminals.compareDocumentPosition(inactive)
+    // DOCUMENT_POSITION_FOLLOWING (4): `inactive` comes after `terminals`.
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBe(4)
+  })
+
+  it("keeps the collapse defaults: Terminals open, Inactive closed", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    expect(
+      screen.getByText("Terminals").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("true")
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+  })
+})
+
+// Auto-expanding the Inactive tail on a search hit is DERIVED state: while the
+// query matches something quiet the group renders open; clearing the query
+// restores the collapsed default; and a manual collapse during a matching query
+// wins until the query changes.
+describe("FlatAgentList quiet-tail search auto-expand", () => {
+  const withQuery = (query: string): DuxState => {
+    const state = makeState("name")
+    ;(state as unknown as { agentSearch: string }).agentSearch = query
+    return state
+  }
+
+  it("expands and shows the quiet row when the query hits a quiet agent", () => {
+    mockState = withQuery("gone")
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("Gone")).toBeTruthy()
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("true")
+  })
+
+  it("re-collapses when the query is cleared", () => {
+    mockState = withQuery("gone")
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("Gone")).toBeTruthy()
+    mockState = withQuery("")
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByText("Gone")).toBeNull()
+    expect(
+      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
+    ).toBe("false")
+  })
+
+  it("does not reveal quiet rows for a query matching only main agents", () => {
+    mockState = withQuery("alpha")
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByText("Gone")).toBeNull()
+  })
+
+  it("a manual collapse during a matching query wins until the query changes", () => {
+    mockState = withQuery("gone")
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("Gone")).toBeTruthy()
+    // Explicit collapse while the search holds it open: the user wins.
+    fireEvent.click(screen.getByText("Inactive"))
+    expect(screen.queryByText("Gone")).toBeNull()
+    // Same query keeps the dismissal.
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(screen.queryByText("Gone")).toBeNull()
+    // The query changes (cleared, then re-typed): the dismissal expires and
+    // the matching query auto-expands again.
+    mockState = withQuery("")
+    rerender(<FlatAgentList handlers={handlers} />)
+    mockState = withQuery("gone")
+    rerender(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("Gone")).toBeTruthy()
+  })
+})
+
+// The search-match highlight: the matched part of a row's NAME (the field the
+// filter searched and the row displays) wraps in a token-styled emphasis span.
+describe("FlatAgentList search-match highlight", () => {
+  const withQuery = (query: string): DuxState => {
+    const state = makeState("name")
+    ;(state as unknown as { agentSearch: string }).agentSearch = query
+    return state
+  }
+
+  it("wraps the matched part of an agent name in the emphasis span", () => {
+    mockState = withQuery("alph")
+    render(<FlatAgentList handlers={handlers} />)
+    const mark = screen.getByText("Alph")
+    // Token-derived emphasis only, never a hardcoded color.
+    expect(mark.className).toContain("bg-primary")
+    // The full label survives around the mark.
+    expect(mark.parentElement?.textContent).toBe("Alpha")
+  })
+
+  it("renders plain labels when no query is active", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByText("Alpha")).toBeTruthy()
+    expect(screen.queryByText("Alph")).toBeNull()
+  })
+
+  it("highlights the matched terminal label too", () => {
+    // t-z runs "zsh" as its foreground command, so the row displays (and the
+    // filter matched) that string.
+    mockState = withQuery("zs")
+    render(<FlatAgentList handlers={handlers} />)
+    const mark = screen.getByText("zs")
+    expect(mark.className).toContain("bg-primary")
+    expect(mark.parentElement?.textContent).toBe("zsh")
+  })
+})
 
 describe("FlatAgentList drag from any sort mode", () => {
   it("main rows carry drag props in a computed (name) mode; quiet rows never do", () => {

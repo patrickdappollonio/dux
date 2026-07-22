@@ -86,6 +86,37 @@ pub(crate) fn left_row_to_item(offset: usize, heights: &[u16], area_height: u16)
     map
 }
 
+/// Split `label` into up to three spans around a matched CHAR range
+/// (`dux_core::agent_search::match_char_range` semantics: start inclusive, end
+/// exclusive, char indices): the text before the hit in `base`, the hit in
+/// `matched`, the rest back in `base`. Empty side segments are omitted. All
+/// slicing is char-based, never byte offsets, per the CLAUDE.md truncation
+/// rule (labels carry emoji/CJK and a byte slice can panic mid-character).
+fn search_highlight_spans(
+    label: &str,
+    base: Style,
+    matched: Style,
+    range: (usize, usize),
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = label.chars().collect();
+    let end = range.1.min(chars.len());
+    let start = range.0.min(end);
+    let mut spans = Vec::new();
+    let pre: String = chars[..start].iter().collect();
+    if !pre.is_empty() {
+        spans.push(Span::styled(pre, base));
+    }
+    let hit: String = chars[start..end].iter().collect();
+    if !hit.is_empty() {
+        spans.push(Span::styled(hit, matched));
+    }
+    let post: String = chars[end..].iter().collect();
+    if !post.is_empty() {
+        spans.push(Span::styled(post, base));
+    }
+    spans
+}
+
 /// Wrap two content lines into the standard left-pane row item: the two lines
 /// plus a trailing blank spacer. Both agent rows and terminal rows funnel
 /// through here so their three-line structure (and thus the framed-selection
@@ -835,15 +866,39 @@ impl App {
         let name_style = italic(Style::default().fg(base_color));
         let glyph_style = italic(Style::default().fg(glyph_color));
 
-        // The name shimmers while the agent is operating (a live cue that
-        // replaces the old state coloring); otherwise it is a single plain span.
-        let name_spans: Vec<Span<'static>> = match (working && !deleting, base_color) {
-            (true, Color::Rgb(r, g, b)) => crate::shimmer::shimmer_spans(
+        // A live filter query that matched the NAME emphasizes the matched part
+        // (theme `search_match_fg` + BOLD; the same range logic the web uses).
+        // Only the name field is checked, so a row that matched on its project,
+        // branch, or provider highlights nothing, exactly what the filter
+        // matched on this visible text. While a hit is highlighted the working
+        // shimmer stands down for that row: the search is transient and seeing
+        // WHAT matched is its whole point.
+        let search_range = self
+            .agent_filter
+            .as_ref()
+            .and_then(|input| dux_core::agent_search::match_char_range(&label, &input.text));
+        // Otherwise the name shimmers while the agent is operating (a live cue
+        // that replaces the old state coloring), or renders as one plain span.
+        let name_spans: Vec<Span<'static>> = if let Some(range) = search_range {
+            search_highlight_spans(
                 &label,
-                (r, g, b),
-                self.start_time.elapsed().as_millis(),
-            ),
-            _ => vec![Span::styled(label.clone(), name_style)],
+                name_style,
+                italic(
+                    Style::default()
+                        .fg(self.theme.search_match_fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                range,
+            )
+        } else {
+            match (working && !deleting, base_color) {
+                (true, Color::Rgb(r, g, b)) => crate::shimmer::shimmer_spans(
+                    &label,
+                    (r, g, b),
+                    self.start_time.elapsed().as_millis(),
+                ),
+                _ => vec![Span::styled(label.clone(), name_style)],
+            }
         };
 
         // Line one: glyph + name packed left, and (if present) the PR badge
@@ -9024,6 +9079,45 @@ mod tests {
         // Needs-attention wins over every other state, including working.
         assert_eq!(agent_state_word(Active, true, false, true), "Needs you");
         assert_eq!(agent_state_word(Detached, false, false, true), "Needs you");
+    }
+
+    /// The search-hit split: styled spans around the matched char range, the
+    /// match carrying the emphasis style, the rest the base style.
+    #[test]
+    fn search_highlight_spans_split_around_the_match_with_the_match_style() {
+        let base = Style::default().fg(Color::White);
+        let hit = Style::default().fg(Color::Yellow);
+        let spans = search_highlight_spans("API-Refactor", base, hit, (4, 12));
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>(),
+            vec!["API-", "Refactor"],
+        );
+        assert_eq!(spans[0].style, base);
+        assert_eq!(spans[1].style, hit);
+    }
+
+    #[test]
+    fn search_highlight_spans_split_by_chars_never_bytes() {
+        let base = Style::default();
+        let hit = Style::default().fg(Color::Yellow);
+        // The duck emoji is one CHAR but four UTF-8 bytes; a byte-based split
+        // would panic or land mid-character. Range (2, 6) is char indices.
+        let spans = search_highlight_spans("🦆 duck", base, hit, (2, 6));
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>(),
+            vec!["🦆 ", "duck"],
+        );
+        assert_eq!(spans[1].style, hit);
+    }
+
+    #[test]
+    fn search_highlight_spans_whole_label_match_is_one_emphasized_span() {
+        let base = Style::default();
+        let hit = Style::default().fg(Color::Yellow);
+        let spans = search_highlight_spans("abc", base, hit, (0, 3));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content.as_ref(), "abc");
+        assert_eq!(spans[0].style, hit);
     }
 
     #[test]
