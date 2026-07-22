@@ -2544,8 +2544,12 @@ impl App {
                     // intermediate events (Up, scroll, etc.) don't each cost
                     // a full render cycle.  This keeps double-click timestamps
                     // close to wall-clock time.
+                    // Poll faster while a row animates (spinner + name shimmer +
+                    // attention blink) so those render smoothly (~30fps); stay on
+                    // the lazy 100ms cadence otherwise to keep idle CPU low.
+                    let poll_ms = if self.any_row_animating() { 33 } else { 100 };
                     let ready = match crate::io_retry::retry_on_interrupt(|| {
-                        event::poll(Duration::from_millis(100))
+                        event::poll(Duration::from_millis(poll_ms))
                     }) {
                         Ok(ready) => ready,
                         Err(err) => {
@@ -2844,6 +2848,25 @@ impl App {
     /// use wall-clock time" tenet.
     pub(crate) fn attention_blink_on(&self) -> bool {
         attention_blink_phase(self.start_time.elapsed().as_millis())
+    }
+
+    /// Whether any sidebar row currently has a live animation: a working agent or
+    /// terminal (spinner + name shimmer) or an attention blink. The run loop
+    /// polls faster while this is true so those animations render smoothly, and
+    /// falls back to the lazy cadence when everything is quiet.
+    pub(crate) fn any_row_animating(&self) -> bool {
+        let attention_on = self.engine.config.ui.attention_indicator;
+        let agents = self.engine.sessions.iter().any(|s| {
+            matches!(s.status, crate::model::SessionStatus::Active)
+                && (self.engine.session_is_streaming(&s.id)
+                    || (attention_on && self.engine.session_needs_attention(&s.id)))
+        });
+        let terminals = self
+            .engine
+            .companion_terminals
+            .keys()
+            .any(|id| self.engine.is_agent_streaming(id));
+        agents || terminals
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {

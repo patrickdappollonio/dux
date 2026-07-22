@@ -787,59 +787,70 @@ impl App {
         let typing = matches!(session.status, crate::model::SessionStatus::Active)
             && self.engine.session_is_typing(&session.id);
         let (steady_dot, steady_color) = self.theme.session_dot(&session.status);
-        let (dot, dot_color) = if needs_attention {
-            let glyph = if self.attention_blink_on() {
+        // The line-one glyph SHAPE encodes the state (attention blink, typing
+        // caret, working spinner, else the steady dot); its COLOR does not, so
+        // identity stays stable. Only attention keeps an accent so the "act now"
+        // cue still pops. The live-state color lives on the state word (line two).
+        let dot = if needs_attention {
+            if self.attention_blink_on() {
                 crate::theme::ATTENTION_GLYPH
             } else {
                 " "
-            };
-            (glyph.to_string(), self.theme.session_attention)
+            }
+            .to_string()
         } else if typing {
-            (
-                crate::theme::TYPING_GLYPH.to_string(),
-                self.theme.session_typing,
-            )
+            crate::theme::TYPING_GLYPH.to_string()
         } else if working {
-            let idx = self.spinner_frame_index();
-            (
-                crate::theme::SPINNER_FRAMES[idx].to_string(),
-                self.theme.session_working,
-            )
+            crate::theme::SPINNER_FRAMES[self.spinner_frame_index()].to_string()
         } else {
-            (steady_dot.to_string(), steady_color)
+            steady_dot.to_string()
         };
         // A background delete dims and italicizes the whole row.
         let deleting = self.engine.pending_deletions.contains(&session.id);
-        // The name takes the status/attention color, not the PR state; the PR
-        // state rides its own badge (line one), matching the web row. While
-        // blinking for attention, the glyph pulses the accent while the name
-        // stays steady, so it falls back to the plain status-dot color.
-        let name_color = if deleting {
+        // Identity color for the NAME: neutral for a live agent, dimmed for
+        // detached/exited, never the typing/working color. The GLYPH keeps the
+        // lifecycle color (steady_color: neutral active, amber detached, muted
+        // exited) plus the attention accent.
+        let base_color = if deleting {
+            self.theme.session_deleting
+        } else if matches!(session.status, crate::model::SessionStatus::Active) {
+            self.theme.session_active
+        } else {
+            self.theme.session_exited
+        };
+        let glyph_color = if deleting {
             self.theme.session_deleting
         } else if needs_attention {
+            self.theme.session_attention
+        } else {
             steady_color
-        } else {
-            dot_color
         };
-        let name_style = if deleting {
-            Style::default()
-                .fg(name_color)
-                .add_modifier(Modifier::ITALIC)
-        } else {
-            Style::default().fg(name_color)
+        let italic = |style: Style| {
+            if deleting {
+                style.add_modifier(Modifier::ITALIC)
+            } else {
+                style
+            }
         };
-        let glyph_style = if needs_attention && !deleting {
-            Style::default().fg(dot_color)
-        } else {
-            name_style
+        let name_style = italic(Style::default().fg(base_color));
+        let glyph_style = italic(Style::default().fg(glyph_color));
+
+        // The name shimmers while the agent is operating (a live cue that
+        // replaces the old state coloring); otherwise it is a single plain span.
+        let name_spans: Vec<Span<'static>> = match (working && !deleting, base_color) {
+            (true, Color::Rgb(r, g, b)) => crate::shimmer::shimmer_spans(
+                &label,
+                (r, g, b),
+                (255, 255, 255),
+                self.start_time.elapsed().as_millis(),
+            ),
+            _ => vec![Span::styled(label.clone(), name_style)],
         };
 
         // Line one: glyph + name packed left, and (if present) the PR badge
         // pinned to the right edge with the name ellipsized to fit.
-        let line1_left = vec![
-            Span::styled(format!("{dot} "), glyph_style),
-            Span::styled(label.clone(), name_style),
-        ];
+        let mut line1_left = vec![Span::styled(format!("{dot} "), glyph_style)];
+        line1_left.extend(name_spans);
         let pr_badge = self.engine.pr_statuses.get(&session.id).map(|pr| {
             let pr_color = match pr.state {
                 crate::model::PrState::Merged => self.theme.pr_merged_label,
@@ -1433,6 +1444,7 @@ impl App {
                         fg_cmd.as_deref(),
                         owner_name,
                         term_text_width,
+                        self.start_time.elapsed().as_millis(),
                     );
                     // Same three-line row shape as the agents (see `framed_row_item`).
                     framed_row_item(line1, line2)
@@ -8507,14 +8519,19 @@ fn terminal_row_lines(
     fg_cmd: Option<&str>,
     owner_name: &str,
     text_width: u16,
+    elapsed_ms: u128,
 ) -> (Line<'static>, Line<'static>) {
-    let (glyph, glyph_color) = if typing {
-        (crate::theme::TYPING_GLYPH.to_string(), theme.session_typing)
+    // The glyph SHAPE encodes state (typing caret, running spinner, else the
+    // steady dot); its color is the neutral identity color, never the live-state
+    // color (that lives on the state word below).
+    let glyph = if typing {
+        crate::theme::TYPING_GLYPH.to_string()
     } else if working {
-        (spinner.to_string(), theme.session_working)
+        spinner.to_string()
     } else {
-        (crate::theme::DOT_GLYPH.to_string(), theme.session_active)
+        crate::theme::DOT_GLYPH.to_string()
     };
+    let base_color = theme.session_active;
     // Something running (a non-empty foreground command) names the row; an idle
     // terminal reads a plain "Terminal" (the owner on line two and row order
     // distinguish several idle terminals, so the "Terminal N" number is not
@@ -8523,13 +8540,23 @@ fn terminal_row_lines(
         Some(cmd) if !cmd.is_empty() => cmd,
         _ => "Terminal",
     };
-    let line1 = ellipsize_spans(
-        vec![
-            Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
-            Span::styled(primary.to_string(), Style::default().fg(glyph_color)),
-        ],
-        text_width,
-    );
+    // The label shimmers while the terminal is Running (a live cue that replaces
+    // the old state coloring); otherwise it is a single plain span.
+    let name_spans: Vec<Span<'static>> = match (working, base_color) {
+        (true, Color::Rgb(r, g, b)) => {
+            crate::shimmer::shimmer_spans(primary, (r, g, b), (255, 255, 255), elapsed_ms)
+        }
+        _ => vec![Span::styled(
+            primary.to_string(),
+            Style::default().fg(base_color),
+        )],
+    };
+    let mut spans = vec![Span::styled(
+        format!("{glyph} "),
+        Style::default().fg(base_color),
+    )];
+    spans.extend(name_spans);
+    let line1 = ellipsize_spans(spans, text_width);
 
     let muted = theme.provider_label_fg;
     // Priority mirrors `agent_state_word`, minus the states a live terminal cannot
@@ -9026,29 +9053,47 @@ mod tests {
         // and a muted "Idle" word. `terminal_row_lines` now returns the two
         // content lines; the trailing spacer is added by `framed_row_item`.
         let (idle0, idle1) =
-            terminal_row_lines(&theme, false, false, '⠋', None, "my-branch", width);
+            terminal_row_lines(&theme, false, false, '⠋', None, "my-branch", width, 0);
         assert!(line_text(&idle0).contains(crate::theme::DOT_GLYPH));
         assert!(line_text(&idle0).contains("Terminal"));
         assert!(!line_text(&idle0).contains("zsh"));
+        // Line one carries no live-state color: the glyph is the neutral identity
+        // color, never the typing/working color (that stays on the state word).
+        assert_eq!(idle0.spans[0].style.fg, Some(theme.session_active));
         assert!(line_text(&idle1).contains("my-branch"));
         assert_eq!(word_span(&idle1, "Idle"), Some(theme.provider_label_fg));
 
         // Busy terminal: the foreground command replaces the label, the spinner
-        // glyph shows, and the word is "Running" (not "Working") in the busy color.
-        let (working0, working1) =
-            terminal_row_lines(&theme, false, true, '⠙', Some("cargo test"), "proj", width);
+        // glyph shows in the NEUTRAL color, the label shimmers (split per char),
+        // and only the word is "Running" in the busy color.
+        let (working0, working1) = terminal_row_lines(
+            &theme,
+            false,
+            true,
+            '⠙',
+            Some("cargo test"),
+            "proj",
+            width,
+            0,
+        );
         assert!(line_text(&working0).contains("cargo test"));
         assert!(!line_text(&working0).contains("zsh"));
         assert!(line_text(&working0).contains('⠙'));
+        assert_eq!(working0.spans[0].style.fg, Some(theme.session_active));
+        // The shimmer splits the label into per-character spans (glyph + chars).
+        assert!(
+            working0.spans.len() > 3,
+            "expected a shimmered (per-char) label"
+        );
         assert_eq!(word_span(&working1, "Running"), Some(theme.session_working));
 
-        // Typing wins over working: the typing glyph and word, both in the
-        // session_typing color, and the foreground command as the label.
+        // Typing wins over working: the typing glyph shows, but line one stays
+        // neutral; only the "Typing" word carries the session_typing color.
         let (typing0, typing1) =
-            terminal_row_lines(&theme, true, true, '⠹', Some("vim"), "proj", width);
+            terminal_row_lines(&theme, true, true, '⠹', Some("vim"), "proj", width, 0);
         assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
         assert!(line_text(&typing0).contains("vim"));
-        assert_eq!(typing0.spans[0].style.fg, Some(theme.session_typing));
+        assert_eq!(typing0.spans[0].style.fg, Some(theme.session_active));
         assert_eq!(word_span(&typing1, "Typing"), Some(theme.session_typing));
     }
 

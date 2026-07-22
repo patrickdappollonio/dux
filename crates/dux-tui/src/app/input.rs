@@ -11763,6 +11763,23 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn any_row_animating_tracks_a_streaming_session() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions.clear();
+        app.engine
+            .sessions
+            .push(filter_test_session("s1", "b1", "p1", Utc::now()));
+        // Idle: nothing is animating, so the loop can stay on the lazy cadence.
+        assert!(!app.any_row_animating());
+        // Fresh PTY activity on the session-slot tab marks it streaming (working),
+        // which drives the spinner + shimmer, so the loop must animate.
+        app.engine
+            .pty_activity
+            .insert("s1".to_string(), std::time::Instant::now());
+        assert!(app.any_row_animating());
+    }
+
+    #[test]
     fn command_palette_hides_terminal_move_commands_without_a_terminal() {
         let app = test_app(default_bindings());
         // No companion terminals -> the move-terminal-* commands are not offered.

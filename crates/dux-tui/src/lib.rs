@@ -10,6 +10,7 @@ mod focus;
 mod keybindings;
 mod raw_input;
 mod server_screen;
+mod shimmer;
 mod theme;
 mod tui_color;
 
