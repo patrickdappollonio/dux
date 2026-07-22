@@ -1,5 +1,10 @@
 /target
 /dist
+
+# Node caches. The web app's real node_modules lives under crates/dux-web/web
+# (covered by its own .gitignore); this guards against a stray one appearing at
+# the root, e.g. an npx/vitest invocation run from the wrong directory.
+node_modules/
 flamegraph.svg
 perf.data
 perf.data.old
