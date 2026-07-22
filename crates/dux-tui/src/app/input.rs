@@ -11763,6 +11763,171 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn command_palette_hides_terminal_move_commands_without_a_terminal() {
+        let app = test_app(default_bindings());
+        // No companion terminals -> the move-terminal-* commands are not offered.
+        assert!(app.filtered_palette_commands("move-terminal-up").is_empty());
+        assert!(
+            app.filtered_palette_commands("move-terminal-top")
+                .is_empty()
+        );
+        // The agent move commands are always offered (never gated).
+        assert!(!app.filtered_palette_commands("move-agent-up").is_empty());
+        assert!(
+            !app.filtered_palette_commands("move-agent-bottom")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn move_agent_up_reorders_switches_to_manual_and_follows_the_selection() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        app.engine
+            .sessions
+            .push(filter_test_session("s1", "b1", "p1", now));
+        app.engine
+            .sessions
+            .push(filter_test_session("s2", "b2", "p1", now));
+        app.engine
+            .sessions
+            .push(filter_test_session("s3", "b3", "p1", now));
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.rebuild_left_items();
+        // Select the second agent (s2).
+        app.selected_left = 1;
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s2"));
+
+        app.move_selected_agent(crate::app::reorder::MoveDir::Up);
+
+        // s2 moved above s1; s3 unchanged.
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s2", "s1", "s3"]);
+        // Sorting switched to manual, and the selection follows the moved agent.
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+        assert_eq!(app.selected_session().map(|s| s.id.as_str()), Some("s2"));
+    }
+
+    #[test]
+    fn execute_command_routes_move_agent_top_to_the_handler() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        app.engine
+            .sessions
+            .push(filter_test_session("s1", "b1", "p1", now));
+        app.engine
+            .sessions
+            .push(filter_test_session("s2", "b2", "p1", now));
+        app.engine
+            .sessions
+            .push(filter_test_session("s3", "b3", "p1", now));
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.rebuild_left_items();
+        app.selected_left = 2; // s3
+
+        app.execute_command("move-agent-top".to_string()).unwrap();
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s3", "s1", "s2"]);
+    }
+
+    #[test]
+    fn move_agent_up_at_the_top_is_a_no_op() {
+        let mut app = test_app(default_bindings());
+        let now = Utc::now();
+        app.engine.sessions.clear();
+        app.engine
+            .sessions
+            .push(filter_test_session("s1", "b1", "p1", now));
+        app.engine
+            .sessions
+            .push(filter_test_session("s2", "b2", "p1", now));
+        app.engine.config.ui.agent_sort = "active".to_string();
+        app.rebuild_left_items();
+        app.selected_left = 0; // s1, already at the top
+
+        app.move_selected_agent(crate::app::reorder::MoveDir::Up);
+
+        let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, vec!["s1", "s2"]);
+        // A no-op move must not flip an unrelated sort mode to manual.
+        assert_eq!(app.engine.config.ui.agent_sort, "active");
+    }
+
+    #[test]
+    fn move_terminal_down_reorders_switches_to_manual_and_follows_the_selection() {
+        let mut app = test_app(default_bindings());
+        let args: Vec<String> = vec![];
+        for (id, ord) in [("term-1", 1u64), ("term-2", 2), ("term-3", 3)] {
+            app.engine.companion_terminals.insert(
+                id.to_string(),
+                crate::app::CompanionTerminal {
+                    owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
+                    label: "shell".to_string(),
+                    foreground_cmd: None,
+                    client: PtyClient::spawn(
+                        "/bin/sh",
+                        &args,
+                        std::path::Path::new("."),
+                        24,
+                        80,
+                        1_000,
+                    )
+                    .expect("spawn terminal"),
+                    sort_order: ord,
+                    created_at: chrono::Utc::now(),
+                },
+            );
+        }
+        app.engine.config.ui.agent_sort = "manual".to_string();
+        app.selected_terminal_index = 0; // term-1 (first by sort_order)
+        assert_eq!(app.terminal_items()[0].0, "term-1");
+
+        app.move_selected_terminal(crate::app::reorder::MoveDir::Down);
+
+        // term-1 moved below term-2; the selection follows it to index 1.
+        let order: Vec<String> = app
+            .terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        assert_eq!(order, vec!["term-2", "term-1", "term-3"]);
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+        assert_eq!(
+            app.terminal_items()[app.selected_terminal_index].0,
+            "term-1"
+        );
+    }
+
+    #[test]
+    fn command_palette_shows_terminal_move_commands_with_a_terminal() {
+        let mut app = test_app(default_bindings());
+        let args: Vec<String> = vec![];
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: PtyClient::spawn(
+                    "/bin/sh",
+                    &args,
+                    std::path::Path::new("."),
+                    24,
+                    80,
+                    1_000,
+                )
+                .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        assert!(!app.filtered_palette_commands("move-terminal-up").is_empty());
+    }
+
+    #[test]
     fn footer_hints_show_pr_only_for_center_focus_with_known_pr() {
         let mut app = test_app(default_bindings());
         app.engine.pr_statuses.insert(

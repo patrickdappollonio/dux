@@ -429,6 +429,49 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-session: web exposes "Force recreate agent…" in the agent menu,
         // gated by a confirmation dialog.
     },
+    // ── Manual reordering ─────────────────────────────────────────
+    // The TUI equivalent of the web's drag-to-reorder. The web has no palette;
+    // it reorders by dragging within each group, so these have no web counterpart.
+    PaletteCommand {
+        action: Action::MoveAgentUp,
+        name: "move-agent-up",
+        description: "Move the selected agent up one position (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveAgentDown,
+        name: "move-agent-down",
+        description: "Move the selected agent down one position (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveAgentTop,
+        name: "move-agent-top",
+        description: "Move the selected agent to the top (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveAgentBottom,
+        name: "move-agent-bottom",
+        description: "Move the selected agent to the bottom (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveTerminalUp,
+        name: "move-terminal-up",
+        description: "Move the selected terminal up one position (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveTerminalDown,
+        name: "move-terminal-down",
+        description: "Move the selected terminal down one position (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveTerminalTop,
+        name: "move-terminal-top",
+        description: "Move the selected terminal to the top (sorting becomes manual)",
+    },
+    PaletteCommand {
+        action: Action::MoveTerminalBottom,
+        name: "move-terminal-bottom",
+        description: "Move the selected terminal to the bottom (sorting becomes manual)",
+    },
 ];
 
 /// Look up a palette command by the action it dispatches.

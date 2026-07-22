@@ -1,0 +1,205 @@
+//! Manual reordering of the sidebar's agents and terminals, driven by the
+//! `move-agent-*` / `move-terminal-*` palette commands (the TUI's equivalent of
+//! the web's drag-to-reorder). The pure `move_in_order` helper does the list
+//! math; the `impl App` handlers apply it to the live agent/terminal order,
+//! switch the sort to manual, persist, and keep the selection on the moved item.
+
+use super::*;
+use dux_core::engine::Command;
+
+/// Direction for a manual reorder move in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveDir {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
+/// Move the item at `idx` within `order` in the given direction, returning the
+/// new order. An out-of-range `idx`, or a move that is already at the relevant
+/// edge, returns the order unchanged.
+pub(crate) fn move_in_order<T: Clone>(order: &[T], idx: usize, dir: MoveDir) -> Vec<T> {
+    let mut out = order.to_vec();
+    if idx >= out.len() {
+        return out;
+    }
+    match dir {
+        MoveDir::Up => {
+            if idx > 0 {
+                out.swap(idx, idx - 1);
+            }
+        }
+        MoveDir::Down => {
+            if idx + 1 < out.len() {
+                out.swap(idx, idx + 1);
+            }
+        }
+        MoveDir::Top => {
+            let item = out.remove(idx);
+            out.insert(0, item);
+        }
+        MoveDir::Bottom => {
+            let item = out.remove(idx);
+            out.push(item);
+        }
+    }
+    out
+}
+
+impl App {
+    /// Move the selected agent within the global agent order and switch the sort
+    /// to manual (like the web's drag-to-reorder), keeping the selection on the
+    /// moved agent. Guards like the rest of the palette: no selected agent posts
+    /// a status and does nothing; a single agent or an already-at-the-edge move
+    /// is a no-op that leaves the sort mode untouched.
+    pub(crate) fn move_selected_agent(&mut self, dir: MoveDir) {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            self.set_error("Select an agent to move.");
+            return;
+        };
+        let order: Vec<String> = self.engine.sessions.iter().map(|s| s.id.clone()).collect();
+        if order.len() < 2 {
+            self.set_info("Only one agent; nothing to reorder.");
+            return;
+        }
+        let Some(idx) = order.iter().position(|id| *id == session_id) else {
+            return;
+        };
+        let new_order = move_in_order(&order, idx, dir);
+        if new_order == order {
+            return; // already at the relevant edge; leave the sort mode as it was
+        }
+        // Switch to manual so the display honors the new order.
+        self.engine.set_agent_sort("manual");
+        match self.engine.apply(Command::ReorderAgents {
+            session_ids: new_order,
+        }) {
+            Ok(reaction) => self.apply_reaction(reaction),
+            Err(err) => {
+                self.set_error(format!("Could not reorder agents: {err}"));
+                return;
+            }
+        }
+        self.rebuild_left_items();
+        // The selection follows the moved agent to its new row.
+        let target = self
+            .left_items()
+            .iter()
+            .enumerate()
+            .find_map(|(pos, item)| match item {
+                LeftItem::Session(i)
+                    if self.engine.sessions.get(*i).map(|s| s.id.as_str())
+                        == Some(session_id.as_str()) =>
+                {
+                    Some(pos)
+                }
+                _ => None,
+            });
+        if let Some(pos) = target {
+            self.selected_left = pos;
+        }
+        self.set_info("Reordered agents. Sorting is now manual.");
+    }
+
+    /// Move the selected terminal within the terminal order and switch the sort
+    /// to manual, keeping the selection on the moved terminal. Runtime-only
+    /// (terminal order resets on restart). A single terminal or an
+    /// already-at-the-edge move is a no-op that leaves the sort mode untouched.
+    pub(crate) fn move_selected_terminal(&mut self, dir: MoveDir) {
+        let order: Vec<String> = self
+            .terminal_items()
+            .iter()
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        if order.len() < 2 {
+            self.set_info("Only one terminal; nothing to reorder.");
+            return;
+        }
+        let Some(terminal_id) = order.get(self.selected_terminal_index).cloned() else {
+            self.set_error("Select a terminal to move.");
+            return;
+        };
+        let new_order = move_in_order(&order, self.selected_terminal_index, dir);
+        if new_order == order {
+            return; // already at the relevant edge; leave the sort mode as it was
+        }
+        self.engine.set_agent_sort("manual");
+        match self.engine.apply(Command::ReorderTerminals {
+            terminal_ids: new_order,
+        }) {
+            Ok(reaction) => self.apply_reaction(reaction),
+            Err(err) => {
+                self.set_error(format!("Could not reorder terminals: {err}"));
+                return;
+            }
+        }
+        // The selection follows the moved terminal to its new row.
+        if let Some(pos) = self
+            .terminal_items()
+            .iter()
+            .position(|(id, _)| *id == &terminal_id)
+        {
+            self.selected_terminal_index = pos;
+        }
+        self.set_info("Reordered terminals. Sorting is now manual.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_up_swaps_with_the_previous_item() {
+        assert_eq!(
+            move_in_order(&["a", "b", "c"], 1, MoveDir::Up),
+            vec!["b", "a", "c"]
+        );
+    }
+
+    #[test]
+    fn move_up_at_the_top_is_a_no_op() {
+        assert_eq!(
+            move_in_order(&["a", "b", "c"], 0, MoveDir::Up),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn move_down_swaps_with_the_next_item() {
+        assert_eq!(
+            move_in_order(&["a", "b", "c"], 1, MoveDir::Down),
+            vec!["a", "c", "b"]
+        );
+    }
+
+    #[test]
+    fn move_down_at_the_bottom_is_a_no_op() {
+        assert_eq!(
+            move_in_order(&["a", "b", "c"], 2, MoveDir::Down),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn move_top_brings_the_item_to_the_front_keeping_the_rest_in_order() {
+        assert_eq!(
+            move_in_order(&["a", "b", "c", "d"], 2, MoveDir::Top),
+            vec!["c", "a", "b", "d"]
+        );
+    }
+
+    #[test]
+    fn move_bottom_sends_the_item_to_the_end_keeping_the_rest_in_order() {
+        assert_eq!(
+            move_in_order(&["a", "b", "c", "d"], 1, MoveDir::Bottom),
+            vec!["a", "c", "d", "b"]
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_index_leaves_the_order_unchanged() {
+        assert_eq!(move_in_order(&["a", "b"], 5, MoveDir::Up), vec!["a", "b"]);
+    }
+}

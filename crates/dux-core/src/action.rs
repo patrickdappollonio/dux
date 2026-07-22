@@ -146,6 +146,17 @@ pub enum Action {
     /// Open the read-only Agent Info modal for the focused agent (name, provider,
     /// branch lineage, worktree, status).
     OpenAgentInfo,
+    // Manual reordering (the TUI equivalent of the web's drag-to-reorder). Each
+    // moves the selected agent/terminal in the sidebar and switches the sort to
+    // manual. Palette-only (no default keybinding).
+    MoveAgentUp,
+    MoveAgentDown,
+    MoveAgentTop,
+    MoveAgentBottom,
+    MoveTerminalUp,
+    MoveTerminalDown,
+    MoveTerminalTop,
+    MoveTerminalBottom,
 }
 
 impl Action {
@@ -262,6 +273,14 @@ impl Action {
             Action::StartWebServer => "start_web_server",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::OpenAgentInfo => "open_agent_info",
+            Action::MoveAgentUp => "move_agent_up",
+            Action::MoveAgentDown => "move_agent_down",
+            Action::MoveAgentTop => "move_agent_top",
+            Action::MoveAgentBottom => "move_agent_bottom",
+            Action::MoveTerminalUp => "move_terminal_up",
+            Action::MoveTerminalDown => "move_terminal_down",
+            Action::MoveTerminalTop => "move_terminal_top",
+            Action::MoveTerminalBottom => "move_terminal_bottom",
         }
     }
 
@@ -424,6 +443,30 @@ impl Action {
             Action::OpenAgentInfo => {
                 "Show the selected agent's details: provider, branch lineage, worktree, and status."
             }
+            Action::MoveAgentUp => {
+                "Move the selected agent up one position (switches sorting to manual)."
+            }
+            Action::MoveAgentDown => {
+                "Move the selected agent down one position (switches sorting to manual)."
+            }
+            Action::MoveAgentTop => {
+                "Move the selected agent to the top (switches sorting to manual)."
+            }
+            Action::MoveAgentBottom => {
+                "Move the selected agent to the bottom (switches sorting to manual)."
+            }
+            Action::MoveTerminalUp => {
+                "Move the selected terminal up one position (switches sorting to manual)."
+            }
+            Action::MoveTerminalDown => {
+                "Move the selected terminal down one position (switches sorting to manual)."
+            }
+            Action::MoveTerminalTop => {
+                "Move the selected terminal to the top (switches sorting to manual)."
+            }
+            Action::MoveTerminalBottom => {
+                "Move the selected terminal to the bottom (switches sorting to manual)."
+            }
         }
     }
 
@@ -537,7 +580,15 @@ impl Action {
             | Action::ReloadConfig
             | Action::StartWebServer
             | Action::ToggleAlwaysShowTabs
-            | Action::OpenAgentInfo => None,
+            | Action::OpenAgentInfo
+            | Action::MoveAgentUp
+            | Action::MoveAgentDown
+            | Action::MoveAgentTop
+            | Action::MoveAgentBottom
+            | Action::MoveTerminalUp
+            | Action::MoveTerminalDown
+            | Action::MoveTerminalTop
+            | Action::MoveTerminalBottom => None,
         }
     }
 }

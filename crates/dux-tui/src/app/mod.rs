@@ -2042,6 +2042,7 @@ pub(crate) fn build_left_items(
 mod components;
 mod input;
 mod render;
+mod reorder;
 mod sessions;
 #[cfg(test)]
 mod test_support;
@@ -2928,6 +2929,13 @@ impl App {
     fn is_palette_action_available(&self, action: Action) -> bool {
         match action {
             Action::OpenCurrentPullRequest => self.current_pr_info().is_some(),
+            // The terminal-move commands are offered only when a terminal exists;
+            // the agent-move commands are always offered (they fall through to
+            // `true` and guard at invoke, like the rest of the palette).
+            Action::MoveTerminalUp
+            | Action::MoveTerminalDown
+            | Action::MoveTerminalTop
+            | Action::MoveTerminalBottom => !self.engine.companion_terminals.is_empty(),
             _ => true,
         }
     }
@@ -3040,6 +3048,38 @@ impl App {
             "kill-running" => self.open_kill_running(),
             "reconnect-agent" => self.reconnect_selected_session(),
             "force-reconnect-agent" => self.force_reconnect_agent(),
+            "move-agent-up" => {
+                self.move_selected_agent(reorder::MoveDir::Up);
+                Ok(())
+            }
+            "move-agent-down" => {
+                self.move_selected_agent(reorder::MoveDir::Down);
+                Ok(())
+            }
+            "move-agent-top" => {
+                self.move_selected_agent(reorder::MoveDir::Top);
+                Ok(())
+            }
+            "move-agent-bottom" => {
+                self.move_selected_agent(reorder::MoveDir::Bottom);
+                Ok(())
+            }
+            "move-terminal-up" => {
+                self.move_selected_terminal(reorder::MoveDir::Up);
+                Ok(())
+            }
+            "move-terminal-down" => {
+                self.move_selected_terminal(reorder::MoveDir::Down);
+                Ok(())
+            }
+            "move-terminal-top" => {
+                self.move_selected_terminal(reorder::MoveDir::Top);
+                Ok(())
+            }
+            "move-terminal-bottom" => {
+                self.move_selected_terminal(reorder::MoveDir::Bottom);
+                Ok(())
+            }
             "show-agent" => self.activate_center_agent(true),
             "show-terminal" => self.show_or_open_first_terminal(),
             "new-terminal-for-agent" => self.new_companion_terminal(),
