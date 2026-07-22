@@ -5947,13 +5947,14 @@ leading_branch = "main"
         app.engine.config.shutdown_timeout_seconds = 1;
         app.engine.config.server.shutdown_timeout_seconds = 20;
 
-        // `trap '' TERM` makes the shell ignore SIGTERM; `echo ready` marks the
+        // `trap '' TERM HUP` makes the shell ignore the whole graceful salvo
+        // (`terminate()` sends SIGTERM then SIGHUP); `echo ready` marks the
         // trap as installed; the busy loop keeps it alive until force-killed.
         let client = crate::pty::PtyClient::spawn(
             "sh",
             &[
                 "-c".to_string(),
-                "trap '' TERM; echo ready; while true; do :; done".to_string(),
+                "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
             ],
             std::path::Path::new("/tmp"),
             24,

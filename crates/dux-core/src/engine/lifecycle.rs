@@ -853,18 +853,20 @@ mod tests {
         );
     }
 
-    /// A child that ignores SIGTERM (so it must be SIGKILLed) and never exits on
-    /// its own. The `trap` makes the shell ignore TERM; the `echo` then emits a
-    /// marker AFTER the trap is installed, so a caller can poll `has_output()` to
-    /// know the trap is live before signalling — otherwise a SIGTERM that lands
-    /// during shell startup (before `trap` runs) would kill it by default and the
-    /// test would not exercise the force-kill path. The busy loop keeps it alive.
+    /// A child that ignores the whole graceful-shutdown salvo (SIGTERM and
+    /// SIGHUP, which `terminate()` sends back to back) so it must be SIGKILLed,
+    /// and never exits on its own. The `trap` makes the shell ignore both; the
+    /// `echo` then emits a marker AFTER the trap is installed, so a caller can
+    /// poll `has_output()` to know the trap is live before signalling —
+    /// otherwise a signal that lands during shell startup (before `trap` runs)
+    /// would kill it by default and the test would not exercise the force-kill
+    /// path. The busy loop keeps it alive.
     fn spawn_sigterm_ignorer(cwd: &Path) -> PtyClient {
         PtyClient::spawn_with_env(
             "sh",
             &[
                 "-c".to_string(),
-                "trap '' TERM; echo ready; while true; do :; done".to_string(),
+                "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
             ],
             cwd,
             24,
@@ -1054,7 +1056,7 @@ mod tests {
         engine.config.terminal.command = "sh".to_string();
         engine.config.terminal.args = vec![
             "-c".to_string(),
-            "trap '' TERM; echo ready; while true; do :; done".to_string(),
+            "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
         ];
         let (terminal_id, _label) = engine
             .create_companion_terminal("s1")

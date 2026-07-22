@@ -1255,17 +1255,28 @@ impl PtyClient {
         self.child.process_id()
     }
 
-    /// Politely ask the child to exit (SIGTERM), so the CLI or the app running in
-    /// a terminal can flush state before the hard group `kill()` in `Drop` (or
-    /// process teardown) reaps stragglers. Signals the child's whole process group
-    /// (the child is a process-group leader -- portable-pty calls `setsid` -- so a
-    /// SIGTERM aimed at the lone PID would leave its descendants running) AND the
-    /// foreground process group when a job-controlled app owns a different one:
-    /// an interactive shell (a terminal) puts each foreground command in its own
-    /// pgroup, so signaling only the shell's group would never reach the running
-    /// app. See [`Self::signal_process_groups`].
+    /// Politely ask the child to exit (SIGTERM, then SIGHUP), so the CLI or the
+    /// app running in a terminal can flush state before the hard group `kill()`
+    /// in `Drop` (or process teardown) reaps stragglers. Signals the child's
+    /// whole process group (the child is a process-group leader -- portable-pty
+    /// calls `setsid` -- so a signal aimed at the lone PID would leave its
+    /// descendants running) AND the foreground process group when a
+    /// job-controlled app owns a different one: an interactive shell (a
+    /// terminal) puts each foreground command in its own pgroup, so signaling
+    /// only the shell's group would never reach the running app. See
+    /// [`Self::signal_process_groups`].
+    ///
+    /// SIGHUP rides along because SIGTERM alone can never end a companion
+    /// terminal: an interactive shell deliberately IGNORES SIGTERM, so even
+    /// with its foreground app dead the shell survived and every shutdown ate
+    /// the full force-kill timeout. SIGHUP is the signal that means "your
+    /// terminal went away" -- exactly what a real terminal emulator delivers on
+    /// close -- and shells answer it by resending HUP to their jobs and
+    /// exiting. Apps that handle SIGTERM exit on the first signal and never
+    /// observe the second.
     pub fn terminate(&self) {
         let _ = self.signal_process_groups(rustix::process::Signal::TERM);
+        let _ = self.signal_process_groups(rustix::process::Signal::HUP);
     }
 
     /// Hard-kill the child's whole process group (SIGKILL) — the forceful
@@ -3155,6 +3166,45 @@ mod tests {
                 Instant::now() < deadline,
                 "terminate() did not reach the foreground app's process group: the \
                  foreground sleep is still running after SIGTERM"
+            );
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn terminate_ends_an_interactive_shell() {
+        // An interactive shell deliberately ignores SIGTERM, so a graceful
+        // shutdown that only sends SIGTERM can NEVER end a companion
+        // terminal: the foreground app may die, but the shell survives and
+        // the terminal always eats the full force-kill timeout ("0 terminals
+        // exited successfully" on every shutdown). The signal that means
+        // "your terminal is going away" is SIGHUP — what a real terminal
+        // emulator delivers on close, and which shells answer by resending
+        // HUP to their jobs and exiting. `terminate()` must send it too.
+        let args = vec![
+            "--norc".to_string(),
+            "--noprofile".to_string(),
+            "-i".to_string(),
+        ];
+        let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
+            Ok(c) => c,
+            Err(_) => return, // bash unavailable on this host; skip.
+        };
+
+        // Make sure the shell is up and responsive before signaling it.
+        client
+            .write_bytes(b"echo shell-ready\n")
+            .expect("write to the shell");
+        wait_for_viewport(&client, "shell-ready");
+
+        client.terminate();
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(8);
+        while !client.is_exited() {
+            assert!(
+                Instant::now() < deadline,
+                "terminate() did not end the interactive shell: it ignores \
+                 SIGTERM, so the graceful path must also deliver SIGHUP"
             );
             thread::sleep(std::time::Duration::from_millis(20));
         }

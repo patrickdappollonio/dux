@@ -53,8 +53,10 @@ warning and the server carries on.
 #### Stopping it
 
 `Ctrl-c` (or a `SIGTERM`) starts a graceful shutdown, not an instant kill. dux
-drains open connections and sends `SIGTERM` to every running agent so its CLI
-gets a chance to save state, waiting up to `[server] shutdown_timeout_seconds`
+drains open connections and sends `SIGTERM` (plus `SIGHUP`, the classic
+"terminal closed" signal that interactive shells actually honor) to every
+running agent and terminal so each gets a chance to save state and bow out,
+waiting up to `[server] shutdown_timeout_seconds`
 (30 seconds by default) before force-killing whatever is left. A second `Ctrl-c`
 during that wait skips the grace period and exits immediately.
 
