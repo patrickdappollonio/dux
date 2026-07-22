@@ -1,5 +1,6 @@
-//! The pure math behind the sidebar's "operating" shimmer: a soft highlight that
-//! sweeps left to right across an agent/terminal name while its PTY is streaming.
+//! The pure math behind the sidebar's "operating" shimmer: a dark band that
+//! sweeps left to right across an agent/terminal name while it is working, over
+//! text that otherwise rests at its normal identity color.
 //! Kept free of ratatui layout so the wave and the color blend are unit-testable,
 //! and driven by wall-clock elapsed time (per the animation tenet) so the cadence
 //! is independent of how often the run loop ticks.
@@ -42,24 +43,23 @@ pub fn lerp_rgb(base: (u8, u8, u8), bright: (u8, u8, u8), t: f32) -> Color {
 }
 
 /// Build one styled `Span` per character of `label`, foreground-blended by its
-/// shimmer weight so a highlight sweeps the text. The sweep endpoints are derived
-/// from `base` (the name's normal identity color): the trough sits DIMMER than
-/// base and the crest BRIGHTER, so the motion reads clearly even when the base is
-/// already near-white (brightening alone would barely change contrast there).
-/// Char-based (never byte-sliced), so multi-byte names are safe. Returns a single
-/// plain span for an empty label.
+/// shimmer weight so a DARK band sweeps the text: characters rest at `base` (the
+/// name's normal identity color) and dip toward a dimmed trough as the band
+/// passes, so a working name keeps its normal brightness and the motion reads as
+/// a passing shadow (a bright band would be nearly invisible on the near-white
+/// base). Char-based (never byte-sliced), so multi-byte names are safe. Returns
+/// a single plain span for an empty label.
 pub fn shimmer_spans(label: &str, base: (u8, u8, u8), elapsed_ms: u128) -> Vec<Span<'static>> {
     let len = label.chars().count();
     if len == 0 {
         return vec![Span::raw(String::new())];
     }
-    // Sweep endpoints derived from the base: the trough is a dimmed base (so a
-    // shimmering name reads visibly duller than a static idle one) and the crest
-    // is lifted well toward white, giving strong contrast on any base color.
-    let dim = |v: u8| (v as f32 * 0.55).round() as u8;
-    let lift = |v: u8| (v as f32 + (255.0 - v as f32) * 0.85).round() as u8;
+    // The band is the DARK part: the name rests at its normal identity color and
+    // a dimmed band sweeps through, so a working name keeps the same brightness
+    // as an idle one and the motion reads as a passing shadow. One dial: how deep
+    // the band dips (fraction of the base kept at the band's center).
+    let dim = |v: u8| (v as f32 * 0.45).round() as u8;
     let trough = (dim(base.0), dim(base.1), dim(base.2));
-    let crest = (lift(base.0), lift(base.1), lift(base.2));
     label
         .chars()
         .enumerate()
@@ -67,7 +67,7 @@ pub fn shimmer_spans(label: &str, base: (u8, u8, u8), elapsed_ms: u128) -> Vec<S
             let w = shimmer_weight(i, len, elapsed_ms);
             Span::styled(
                 c.to_string(),
-                Style::default().fg(lerp_rgb(trough, crest, w)),
+                Style::default().fg(lerp_rgb(base, trough, w)),
             )
         })
         .collect()
@@ -95,29 +95,30 @@ mod tests {
     }
 
     #[test]
-    fn shimmer_spans_brightest_char_tracks_the_sweep() {
-        // The brightest span (highest green channel here) should move rightward
-        // as time advances, matching the weight sweep.
-        let brightest = |elapsed: u128| {
+    fn shimmer_spans_darkest_char_tracks_the_sweep() {
+        // The DARK band (lowest green channel here) should move rightward as
+        // time advances, matching the weight sweep.
+        let darkest = |elapsed: u128| {
             shimmer_spans("abcdefghij", (0, 128, 0), elapsed)
                 .into_iter()
                 .enumerate()
-                .max_by_key(|(_, s)| match s.style.fg {
+                .min_by_key(|(_, s)| match s.style.fg {
                     Some(Color::Rgb(_, g, _)) => g,
-                    _ => 0,
+                    _ => u8::MAX,
                 })
                 .map(|(i, _)| i)
                 .unwrap()
         };
-        assert!(brightest(0) < brightest(PERIOD_MS - 1));
+        assert!(darkest(0) < darkest(PERIOD_MS - 1));
     }
 
     #[test]
-    fn shimmer_dims_the_trough_and_brightens_the_crest() {
-        // The sweep must read on ANY base, including a near-white one where pure
-        // brightening has no headroom: characters far from the band sit DIMMER
-        // than base, and the band's crest sits BRIGHTER than base. A long label
-        // guarantees both a far-from-band char and an in-band char exist.
+    fn shimmer_is_a_dark_band_over_the_normal_color() {
+        // The name rests at its NORMAL identity color and a darker band sweeps
+        // through: characters far from the band sit exactly at base (a working
+        // name keeps its brightness), the band dips clearly below base, and
+        // nothing ever renders brighter than base. A long label guarantees both
+        // a far-from-band char and an in-band char exist.
         let base = (128u8, 128u8, 128u8);
         let reds: Vec<u8> = shimmer_spans("abcdefghijklmnopqrst", base, PERIOD_MS / 2)
             .into_iter()
@@ -128,14 +129,13 @@ mod tests {
             .collect();
         let dimmest = *reds.iter().min().unwrap();
         let brightest = *reds.iter().max().unwrap();
-        assert!(
-            dimmest < base.0,
-            "trough ({dimmest}) must sit dimmer than base ({})",
-            base.0
+        assert_eq!(
+            brightest, base.0,
+            "resting chars sit at base; the shimmer never brightens"
         );
         assert!(
-            brightest > base.0,
-            "crest ({brightest}) must sit brighter than base ({})",
+            dimmest < base.0,
+            "the band ({dimmest}) must dip below base ({})",
             base.0
         );
     }
