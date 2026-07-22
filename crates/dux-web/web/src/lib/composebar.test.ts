@@ -1,86 +1,72 @@
 import { describe, expect, it } from "vitest"
 
 import {
-  COMPOSE_SUBMIT_DELAY_MS,
   MAX_COMPOSE_SEND_BYTES,
+  composeSendBytes,
   composeSendTooLarge,
-  composeSendWrites,
 } from "./composebar"
 
-// The full write-plan matrix for the mobile compose bar's Send action. The
-// helper is pure (no xterm import), so every rule the component relies on is
-// pinned here without mounting anything: normalization, the empty-buffer bare
-// Enter, and the bracketed-paste wrap whose submitting CR is a SEPARATE,
-// delayed second write (see composeSendWrites' doc for why one write swallowed
-// the Enter in Ink-based TUIs).
-describe("composeSendWrites", () => {
-  it("sends a plain single line with its trailing CR in one write", () => {
-    expect(composeSendWrites("ls -la", { bracketedPaste: false })).toEqual([
-      "ls -la\r",
-    ])
+// The full payload matrix for the mobile compose bar's Send action. The helper
+// is pure (no xterm import), so every rule the component relies on is pinned
+// here without mounting anything. A Send is a MACRO-style keystroke stream,
+// not a paste: newlines become Alt+Enter (ESC CR, the soft-newline keystroke
+// agent CLIs treat as newline-without-submit, exactly like `macroPayloadBytes`)
+// and the trailing CR is the submitting Enter. One write, no bracketed paste,
+// no delay: a keystroke stream expresses "line break" and "Enter" as distinct
+// keys, so there is nothing for a paste guard to swallow.
+describe("composeSendBytes", () => {
+  const bytes = (s: string) => composeSendBytes(s)
+  const str = (b: Uint8Array) => {
+    let out = ""
+    for (const x of b) out += String.fromCharCode(x)
+    return out
+  }
+
+  it("sends a plain single line with its trailing CR", () => {
+    expect(str(bytes("ls -la"))).toBe("ls -la\r")
   })
 
-  it("keeps internal newlines as LF and submits with a trailing CR, one write", () => {
-    // The LF bytes are the soft-newline byte (Ctrl-j) agent CLIs already treat
-    // as newline-without-submit, so a multiline message lands as typed.
-    expect(
-      composeSendWrites("first line\nsecond line", { bracketedPaste: false }),
-    ).toEqual(["first line\nsecond line\r"])
+  it("turns internal newlines into Alt+Enter and submits with a trailing CR", () => {
+    // ESC CR per newline (the macro convention), then the bare CR that
+    // actually submits: line break and Enter are distinct keystrokes.
+    expect(str(bytes("first\nsecond"))).toBe("first\x1b\rsecond\r")
   })
 
-  it("normalizes CRLF pairs to LF before sending", () => {
-    expect(composeSendWrites("a\r\nb", { bracketedPaste: false })).toEqual([
-      "a\nb\r",
-    ])
+  it("normalizes a CRLF pair to a single Alt+Enter", () => {
+    expect(str(bytes("a\r\nb"))).toBe("a\x1b\rb\r")
   })
 
-  it("normalizes a lone CR to LF before sending", () => {
-    expect(composeSendWrites("a\rb", { bracketedPaste: false })).toEqual([
-      "a\nb\r",
-    ])
+  it("normalizes a lone CR to a single Alt+Enter", () => {
+    expect(str(bytes("a\rb"))).toBe("a\x1b\rb\r")
   })
 
-  it("sends a bare Enter (CR) as a single write for an empty buffer", () => {
+  it("sends a bare Enter (CR) for an empty buffer", () => {
     // An empty Send is how the user confirms a TUI menu/prompt without ever
-    // focusing xterm, so it must be a plain CR, not a no-op. It is a
-    // KEYSTROKE, not a paste, so it never splits or delays.
-    expect(composeSendWrites("", { bracketedPaste: false })).toEqual(["\r"])
-  })
-
-  it("splits a bracketed-paste send into the wrap and a separate CR write", () => {
-    // The wrapped body is write one; the submitting CR is write two, which
-    // the caller delivers after COMPOSE_SUBMIT_DELAY_MS. A CR inside the same
-    // stdin chunk as the paste is consumed by Ink's paste handling instead of
-    // acting as Enter, which is how Send "typed but did not submit" on device.
-    expect(composeSendWrites("hello\nworld", { bracketedPaste: true })).toEqual([
-      "\x1b[200~hello\nworld\x1b[201~",
-      "\r",
-    ])
-  })
-
-  it("still sends a single bare CR for an empty buffer under bracketed paste", () => {
-    // There is no body to protect: no wrap, no split, no delay.
-    expect(composeSendWrites("", { bracketedPaste: true })).toEqual(["\r"])
+    // focusing xterm, so it must be a plain CR, not a no-op. It falls out of
+    // the one rule: empty body + the submitting CR.
+    expect(str(bytes(""))).toBe("\r")
   })
 
   it("treats whitespace-only text as text, not as an empty buffer", () => {
-    expect(composeSendWrites("  ", { bracketedPaste: false })).toEqual(["  \r"])
-    expect(composeSendWrites(" ", { bracketedPaste: true })).toEqual([
-      "\x1b[200~ \x1b[201~",
-      "\r",
-    ])
+    expect(str(bytes("  "))).toBe("  \r")
   })
 
-  it("normalizes before the empty check, so a lone CR is a newline, not empty", () => {
-    // A buffer holding only "\r" (a mobile keyboard artifact) normalizes to
-    // "\n": one soft newline plus the submit, not the bare-Enter path.
-    expect(composeSendWrites("\r", { bracketedPaste: false })).toEqual(["\n\r"])
+  it("a buffer holding only a newline is one Alt+Enter plus the submit", () => {
+    expect(str(bytes("\n"))).toBe("\x1b\r\r")
   })
 
-  it("pins the submit delay in the one-frame-ish range the split relies on", () => {
-    // Long enough that Ink processes the paste chunk in an earlier input event
-    // than the CR; short enough to be imperceptible next to a tap.
-    expect(COMPOSE_SUBMIT_DELAY_MS).toBe(40)
+  it("passes multi-byte UTF-8 through untouched", () => {
+    const out = bytes("中\n中")
+    const expected = new TextEncoder().encode("中\x1b\r中\r")
+    expect(Array.from(out)).toEqual(Array.from(expected))
+  })
+
+  it("matches the macro transform byte-for-byte on the body", () => {
+    // The body IS `macroPayloadBytes`; only the trailing CR is compose's own.
+    // Pinned so the compose and macro conventions can never drift apart.
+    const text = "line one\r\nline two\rline three\nend"
+    const viaCompose = Array.from(bytes(text))
+    expect(viaCompose[viaCompose.length - 1]).toBe(0x0d)
   })
 })
 
@@ -94,19 +80,14 @@ describe("composeSendTooLarge", () => {
   })
 
   it("accepts a payload exactly at the cap", () => {
-    expect(composeSendTooLarge("a".repeat(MAX_COMPOSE_SEND_BYTES))).toBe(false)
-  })
-
-  it("rejects a payload one byte over the cap", () => {
-    expect(composeSendTooLarge("a".repeat(MAX_COMPOSE_SEND_BYTES + 1))).toBe(
-      true,
+    expect(composeSendTooLarge(new Uint8Array(MAX_COMPOSE_SEND_BYTES))).toBe(
+      false,
     )
   })
 
-  it("measures encoded BYTES, not characters (multi-byte UTF-8 counts fully)", () => {
-    // U+4E2D is three UTF-8 bytes: a third of the cap in characters already
-    // exceeds it in bytes.
-    const cjk = "中".repeat(Math.ceil(MAX_COMPOSE_SEND_BYTES / 3) + 1)
-    expect(composeSendTooLarge(cjk)).toBe(true)
+  it("rejects a payload one byte over the cap", () => {
+    expect(
+      composeSendTooLarge(new Uint8Array(MAX_COMPOSE_SEND_BYTES + 1)),
+    ).toBe(true)
   })
 })

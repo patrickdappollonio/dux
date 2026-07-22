@@ -4,91 +4,60 @@
 // autocorrect, swipe input, local editing) and deliver the finished message to
 // the PTY. This module owns what the delivery LOOKS like on the wire; the
 // component (`ComposeBar.tsx`) owns the input surface, and `TerminalPane.tsx`
-// owns the PTY writes and their side effects. Like `termkeys.ts`, it is
+// owns the PTY write and its side effects. Like `termkeys.ts`, it is
 // deliberately free of any xterm/React/DOM import so the whole matrix is
 // unit-testable in isolation (see `composebar.test.ts`).
 
-import { ESC, LF } from "./termkeys"
+import { macroPayloadBytes } from "./macros"
 
 // The carriage-return byte (CR, 0x0D), what a plain Enter sends. Interactive
-// CLIs treat it as submit, which is exactly what Send means; the message body's
-// internal newlines stay LF (the Ctrl-j soft-newline byte, see `LF` in
-// termkeys.ts) so they never submit early.
-const CR = "\r"
+// CLIs treat it as submit, which is exactly what Send means.
+const CR = 0x0d
 
-// Bracketed-paste markers (DECSET 2004). When the app in the PTY has enabled
-// bracketed paste, wrapping the body tells it "this is one pasted block": the
-// app then treats internal newlines as literal text instead of interpreting
-// each one as a keystroke. Agent CLIs and modern shells all negotiate this.
-const BRACKETED_PASTE_START = `${ESC}[200~`
-const BRACKETED_PASTE_END = `${ESC}[201~`
-
-// How long the caller waits between the wrapped-body write and the submitting
-// CR write of a split bracketed-paste send (see `composeSendWrites`). One
-// frame-ish: long enough that the terminal app reads the paste chunk in an
-// EARLIER stdin/input event than the CR (Ink batches everything that arrives
-// in one chunk into one input event), short enough to be imperceptible next
-// to the tap that triggered it.
-export const COMPOSE_SUBMIT_DELAY_MS = 40
-
-// The largest total payload a compose Send will put on the wire, in encoded
-// UTF-8 bytes across all of its writes. The server enforces a 16 MiB per-frame
-// cap (`MAX_WS_MESSAGE_SIZE` in `crates/dux-web/src/server.rs`) and an
-// oversized frame ABORTS the whole PTY socket, so without a client-side check
-// a giant accidental paste would kill the connection instead of failing one
-// send. 2 MiB is far more than any real composed message while staying well
-// under the server's limit.
+// The largest payload a compose Send will put on the wire, in bytes. The
+// server enforces a 16 MiB per-frame cap (`MAX_WS_MESSAGE_SIZE` in
+// `crates/dux-web/src/server.rs`) and an oversized frame ABORTS the whole PTY
+// socket, so without a client-side check a giant accidental paste would kill
+// the connection instead of failing one send. 2 MiB is far more than any real
+// composed message while staying well under the server's limit.
 export const MAX_COMPOSE_SEND_BYTES = 2 * 1024 * 1024
 
 /**
- * True when `payload` (the concatenation of the send's writes) exceeds
- * [`MAX_COMPOSE_SEND_BYTES`] once UTF-8 encoded. Measured in BYTES, not
- * characters: multi-byte text (CJK, emoji) reaches the cap in fewer characters.
+ * True when `payload` (the built send bytes) exceeds
+ * [`MAX_COMPOSE_SEND_BYTES`]. Measured on the final bytes, so multi-byte text
+ * (CJK, emoji) counts at its real wire size.
  */
-export function composeSendTooLarge(payload: string): boolean {
-  return new TextEncoder().encode(payload).byteLength > MAX_COMPOSE_SEND_BYTES
-}
-
-export interface ComposeSendOptions {
-  /** The terminal's live `term.modes.bracketedPasteMode`, read at send time. */
-  bracketedPaste: boolean
+export function composeSendTooLarge(payload: Uint8Array): boolean {
+  return payload.byteLength > MAX_COMPOSE_SEND_BYTES
 }
 
 /**
- * Builds the ordered PTY writes a compose-bar Send performs. One element is a
- * single immediate write; two elements mean the caller writes the first
- * immediately and the second after [`COMPOSE_SUBMIT_DELAY_MS`].
+ * Builds the single PTY write a compose-bar Send performs: the message as a
+ * MACRO-style keystroke stream, submitted by a trailing Enter.
  *
- * - Line endings are normalized first: mobile keyboards can emit `\r\n` or a
- *   lone `\r`, and both must become the LF soft-newline byte before any other
- *   rule looks at the text.
- * - An EMPTY buffer is one write of a bare CR, a plain Enter. This is
- *   deliberate: it is how the user confirms a TUI menu or permission prompt
- *   without ever focusing xterm's hidden textarea, so Send stays enabled on an
- *   empty buffer. It is a keystroke, not a paste: never wrapped, never split.
- *   Whitespace-only text is real text, not empty.
- * - With bracketed paste active, the wrapped body and the submitting CR are
- *   SEPARATE writes. Ink-based TUIs (Claude Code and friends) process an
- *   entire stdin chunk as ONE input event, and a CR riding in the same chunk
- *   as the paste is consumed by the paste handling instead of acting as
- *   Enter; on device the message was typed into the prompt but never
- *   submitted. A human pasting and then pressing Enter always produces two
- *   writes with a gap, so the split (plus the delay the caller applies)
- *   restores the shape those TUIs actually handle. (A CR inside the wrap is
- *   no alternative: it would be pasted as text, not treated as Enter.)
- * - Without bracketed paste, the body (internal LFs are the soft-newline byte
- *   agent CLIs treat as Ctrl-j) and the trailing CR go as one write; readline
- *   and friends process byte streams, not batched paste events, and show no
- *   evidence of the swallowed-Enter problem.
+ * The body is exactly [`macroPayloadBytes`] (the transform the macro
+ * quick-picker already uses against these same PTYs): every newline, in any
+ * of its `\r\n` / `\n` / `\r` spellings, becomes Alt+Enter (ESC CR), the
+ * soft-newline keystroke agent CLIs treat as newline-without-submit. The one
+ * byte compose adds is the trailing bare CR, the submitting Enter.
+ *
+ * Because the payload is a keystroke stream, "line break" and "Enter" are
+ * DISTINCT keys on the wire and everything goes as one immediate write. This
+ * deliberately does not use bracketed paste: wrapping the body as a paste made
+ * Ink-based TUIs (Claude Code and friends) consume a same-chunk CR inside
+ * their paste handling, so Send typed the message but never submitted it, and
+ * working around that needed a delayed second write. The macro convention has
+ * neither problem.
+ *
+ * An EMPTY buffer therefore sends a bare CR, a plain Enter, with no special
+ * case: it is how the user confirms a TUI menu or permission prompt without
+ * ever focusing xterm, so Send stays enabled on an empty buffer.
+ * Whitespace-only text is real text, not empty.
  */
-export function composeSendWrites(
-  text: string,
-  opts: ComposeSendOptions,
-): string[] {
-  const body = text.replace(/\r\n/g, LF).replace(/\r/g, LF)
-  if (body === "") return [CR]
-  if (opts.bracketedPaste) {
-    return [`${BRACKETED_PASTE_START}${body}${BRACKETED_PASTE_END}`, CR]
-  }
-  return [body + CR]
+export function composeSendBytes(text: string): Uint8Array {
+  const body = macroPayloadBytes(text)
+  const out = new Uint8Array(body.byteLength + 1)
+  out.set(body, 0)
+  out[body.byteLength] = CR
+  return out
 }

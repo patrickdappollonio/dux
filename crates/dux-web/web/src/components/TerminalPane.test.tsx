@@ -5,7 +5,6 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { DuxState } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
-import { COMPOSE_SUBMIT_DELAY_MS } from "@/lib/composebar"
 
 // TerminalPane embeds xterm.js, whose canvas rendering jsdom cannot back (see the
 // note in TerminalArea.test.tsx). So we mount the REAL TerminalPane — exercising
@@ -419,7 +418,7 @@ describe("TerminalPane project-terminal owner resolution", () => {
 
 // The mobile compose bar (the `ui.compose_bar` preference, default on): the
 // third row of the mobile shell, whose Send delivers the buffered message plus
-// a submitting Enter to the PTY through the pure `composeSendPayload` rules.
+// a submitting Enter to the PTY through the pure `composeSendBytes` rules.
 // `useIsMobile` reads `window.innerWidth`, so shrinking it below the 768px
 // breakpoint is how these tests mount the mobile shell.
 describe("TerminalPane mobile compose bar", () => {
@@ -484,93 +483,46 @@ describe("TerminalPane mobile compose bar", () => {
     expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
   })
 
-  it("bracketed paste: wrap lands first, the CR follows as a DELAYED second write", () => {
-    // Ink-based TUIs (Claude Code) process a whole stdin chunk as one input
-    // event, so a CR in the same chunk as the paste is swallowed by the paste
-    // handling instead of submitting; the split is the fix (see
-    // composeSendWrites). Fake timers pin the two-write timing.
-    vi.useFakeTimers()
-    try {
-      goMobile()
-      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-      const pty = last()
-      const term = TermStub.instances.at(-1)
-      if (!term) throw new Error("no terminal constructed")
-      term.modes.bracketedPasteMode = true
-      fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
-      fireEvent.pointerDown(sendButton())
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-      expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\x1b[200~a\nb\x1b[201~")
-      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
-      expect(pty.sendInput).toHaveBeenCalledTimes(2)
-      expect(bytesOf(pty.sendInput.mock.calls[1])).toBe("\r")
-    } finally {
-      vi.useRealTimers()
-    }
+  it("a multiline Send is one macro-style write: Alt+Enter newlines, then CR", () => {
+    // The macro convention (macroPayloadBytes): newlines are the Alt+Enter
+    // keystroke (ESC CR, newline-without-submit), the trailing bare CR is the
+    // submitting Enter. One write; line break and Enter are distinct keys.
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("a\x1b\rb\r")
   })
 
-  it("skips the delayed CR when the pane unmounted before it fired", () => {
-    vi.useFakeTimers()
-    try {
-      goMobile()
-      const { unmount } = render(
-        <TerminalPane kind="agent" id="s1" sessionId="s1" />,
-      )
-      const pty = last()
-      const term = TermStub.instances.at(-1)
-      if (!term) throw new Error("no terminal constructed")
-      term.modes.bracketedPasteMode = true
-      fireEvent.change(composeTextarea(), { target: { value: "gone" } })
-      fireEvent.pointerDown(sendButton())
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-      // The pane goes away before the delay elapses: the orphaned CR must not
-      // land on a socket the pane no longer owns.
-      unmount()
-      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    } finally {
-      vi.useRealTimers()
-    }
+  it("ignores bracketed paste: the payload is keystrokes even when the app negotiated it", () => {
+    // Deliberate: wrapping the body as a paste made Ink-based TUIs (Claude
+    // Code) swallow a same-chunk CR inside their paste handling, so Send typed
+    // the message but never submitted. The keystroke stream has no paste for a
+    // guard to interfere with, so bracketedPasteMode is simply not consulted.
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    term.modes.bracketedPasteMode = true
+    fireEvent.change(composeTextarea(), { target: { value: "a\nb" } })
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("a\x1b\rb\r")
   })
 
-  it("skips the delayed CR when the socket dropped in between", () => {
-    vi.useFakeTimers()
-    try {
-      goMobile()
-      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-      const pty = last()
-      const term = TermStub.instances.at(-1)
-      if (!term) throw new Error("no terminal constructed")
-      term.modes.bracketedPasteMode = true
-      fireEvent.change(composeTextarea(), { target: { value: "dropped" } })
-      fireEvent.pointerDown(sendButton())
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-      pty.isOpen = false
-      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it("an empty Send on a bracketed terminal is ONE immediate CR (keystroke, not paste)", () => {
-    vi.useFakeTimers()
-    try {
-      goMobile()
-      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-      const pty = last()
-      const term = TermStub.instances.at(-1)
-      if (!term) throw new Error("no terminal constructed")
-      term.modes.bracketedPasteMode = true
-      fireEvent.pointerDown(sendButton())
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-      expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
-      // No trailing split write: confirming a TUI prompt is a single Enter.
-      vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
-      expect(pty.sendInput).toHaveBeenCalledTimes(1)
-    } finally {
-      vi.useRealTimers()
-    }
+  it("an empty Send is a single bare CR regardless of bracketed paste", () => {
+    goMobile()
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    const term = TermStub.instances.at(-1)
+    if (!term) throw new Error("no terminal constructed")
+    term.modes.bracketedPasteMode = true
+    fireEvent.pointerDown(sendButton())
+    expect(pty.sendInput).toHaveBeenCalledTimes(1)
+    expect(bytesOf(pty.sendInput.mock.calls[0])).toBe("\r")
   })
 
   it("a non-owner's Send writes nothing, keeps the buffer, and toasts why", () => {
