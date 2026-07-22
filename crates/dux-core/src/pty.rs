@@ -1289,10 +1289,7 @@ impl PtyClient {
     /// When the shell owns the foreground (idle) the foreground pgid equals the
     /// child pid and the extra signal is skipped. Returns the first error (ESRCH,
     /// "group already gone", is benign).
-    fn signal_process_groups(
-        &self,
-        sig: rustix::process::Signal,
-    ) -> Result<(), rustix::io::Errno> {
+    fn signal_process_groups(&self, sig: rustix::process::Signal) -> Result<(), rustix::io::Errno> {
         let Some(child) = self.child_process_id() else {
             return Ok(());
         };
@@ -3100,7 +3097,11 @@ mod tests {
         // interactive shell ignores SIGTERM, so signaling just the shell's group
         // (the pre-fix behavior) would leave sleep running with the foreground
         // pinned to it, and the assertion below would time out.
-        let args = vec!["--norc".to_string(), "--noprofile".to_string(), "-i".to_string()];
+        let args = vec![
+            "--norc".to_string(),
+            "--noprofile".to_string(),
+            "-i".to_string(),
+        ];
         let client = match PtyClient::spawn("bash", &args, Path::new("."), 24, 80, 100) {
             Ok(c) => c,
             Err(_) => return, // bash unavailable on this host; skip.
@@ -3109,7 +3110,9 @@ mod tests {
             return;
         };
 
-        client.write_bytes(b"sleep 30\n").expect("write to the shell");
+        client
+            .write_bytes(b"sleep 30\n")
+            .expect("write to the shell");
 
         // Wait until job control moves the foreground onto sleep's own group.
         let deadline = Instant::now() + std::time::Duration::from_secs(8);

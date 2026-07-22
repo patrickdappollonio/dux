@@ -1189,8 +1189,7 @@ impl App {
                         .iter()
                         .find(|s| &s.id == sid)
                         .map(|s| {
-                            let agent =
-                                s.title.clone().unwrap_or_else(|| s.branch_name.clone());
+                            let agent = s.title.clone().unwrap_or_else(|| s.branch_name.clone());
                             match self.engine.projects.iter().find(|p| p.id == s.project_id) {
                                 Some(p) => format!("{agent}@{}", p.name),
                                 None => agent,
