@@ -427,6 +427,59 @@
     border-top: 1px solid var(--color-border-soft);
     margin: 2.5rem 0;
   }
+  /* GitHub-style admonitions. A `> [!NOTE]` blockquote is rewritten to
+     `<div class="admonition admonition-note">` by src/lib/remark-admonitions.mjs;
+     the per-type accent (mapped to the site's semantic colors below) drives the
+     border, the octicon, and the title. */
+  .prose-docs :where(.admonition):not(:where(.not-prose *)) {
+    --admonition-accent: var(--color-accent);
+    margin: 1.5rem 0;
+    padding: 0.85rem 1.1rem;
+    border: 1px solid
+      color-mix(in oklab, var(--admonition-accent) 28%, var(--color-border-soft));
+    border-left: 3px solid var(--admonition-accent);
+    border-radius: 0.6rem;
+    background: color-mix(in oklab, var(--admonition-accent) 7%, var(--color-panel));
+  }
+  /* Trim the outer margins of the callout's own content so the box hugs its text
+     (the title is the first child; the last paragraph is the last child). */
+  .prose-docs :where(.admonition > :first-child):not(:where(.not-prose *)) {
+    margin-top: 0;
+  }
+  .prose-docs :where(.admonition > :last-child):not(:where(.not-prose *)) {
+    margin-bottom: 0;
+  }
+  .admonition-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    color: var(--admonition-accent);
+  }
+  .admonition-icon {
+    width: 1.05em;
+    height: 1.05em;
+    flex: none;
+  }
+  .admonition-note {
+    --admonition-accent: var(--color-accent);
+  }
+  .admonition-tip {
+    --admonition-accent: var(--color-success);
+  }
+  .admonition-important {
+    --admonition-accent: var(--color-purple);
+  }
+  .admonition-warning {
+    --admonition-accent: var(--color-warning);
+  }
+  .admonition-caution {
+    --admonition-accent: var(--color-error);
+  }
   .prose-docs :where(table):not(:where(.not-prose *)) {
     display: block;
     width: 100%;

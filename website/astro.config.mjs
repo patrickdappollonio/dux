@@ -7,6 +7,7 @@ import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeProseImages from "./src/lib/rehype-prose-images.mjs";
 import remarkGemoji from "remark-gemoji";
+import remarkAdmonitions from "./src/lib/remark-admonitions.mjs";
 
 export default defineConfig({
   site: "https://getdux.app",
@@ -43,7 +44,10 @@ export default defineConfig({
       // GitHub-style emoji shortcodes (`:smile:` -> 😄) in any Markdown page.
       // Operates on text nodes only, so shortcodes inside code spans/blocks are
       // left literal.
-      remarkPlugins: [remarkGemoji],
+      //
+      // remarkAdmonitions turns GitHub-style `> [!NOTE]` blockquotes into styled
+      // alert callouts (see src/lib/remark-admonitions.mjs; styled in global.css).
+      remarkPlugins: [remarkGemoji, remarkAdmonitions],
       rehypePlugins: [
         // Give every heading a stable slug id, then append a clickable "#"
         // anchor so docs headings are linkable. The slug ids also power the
