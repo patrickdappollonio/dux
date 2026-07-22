@@ -841,7 +841,6 @@ impl App {
             (true, Color::Rgb(r, g, b)) => crate::shimmer::shimmer_spans(
                 &label,
                 (r, g, b),
-                (255, 255, 255),
                 self.start_time.elapsed().as_millis(),
             ),
             _ => vec![Span::styled(label.clone(), name_style)],
@@ -8544,7 +8543,7 @@ fn terminal_row_lines(
     // the old state coloring); otherwise it is a single plain span.
     let name_spans: Vec<Span<'static>> = match (working, base_color) {
         (true, Color::Rgb(r, g, b)) => {
-            crate::shimmer::shimmer_spans(primary, (r, g, b), (255, 255, 255), elapsed_ms)
+            crate::shimmer::shimmer_spans(primary, (r, g, b), elapsed_ms)
         }
         _ => vec![Span::styled(
             primary.to_string(),

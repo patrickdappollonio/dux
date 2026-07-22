@@ -11780,6 +11780,37 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn any_row_animating_tracks_a_running_terminal_even_while_quiet() {
+        let mut app = test_app(default_bindings());
+        app.engine.sessions.clear();
+        assert!(!app.any_row_animating());
+        // A terminal whose foreground is owned by an app is Running (its spinner
+        // and label shimmer animate) even with no output streaming, so the loop
+        // must animate for it too, not only for PTY-streaming rows.
+        let args: Vec<String> = vec![];
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            crate::app::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
+                label: "shell".to_string(),
+                foreground_cmd: Some("vim".to_string()),
+                client: PtyClient::spawn(
+                    "/bin/sh",
+                    &args,
+                    std::path::Path::new("."),
+                    24,
+                    80,
+                    1_000,
+                )
+                .expect("spawn terminal"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        assert!(app.any_row_animating());
+    }
+
+    #[test]
     fn command_palette_hides_terminal_move_commands_without_a_terminal() {
         let app = test_app(default_bindings());
         // No companion terminals -> the move-terminal-* commands are not offered.

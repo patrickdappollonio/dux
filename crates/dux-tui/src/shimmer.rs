@@ -41,20 +41,25 @@ pub fn lerp_rgb(base: (u8, u8, u8), bright: (u8, u8, u8), t: f32) -> Color {
     )
 }
 
-/// Build one styled `Span` per character of `label`, each foreground-blended from
-/// `base` toward `bright` by its shimmer weight, so a soft highlight sweeps the
-/// text. Char-based (never byte-sliced), so multi-byte names are safe. Returns a
-/// single plain span for an empty label.
-pub fn shimmer_spans(
-    label: &str,
-    base: (u8, u8, u8),
-    bright: (u8, u8, u8),
-    elapsed_ms: u128,
-) -> Vec<Span<'static>> {
+/// Build one styled `Span` per character of `label`, foreground-blended by its
+/// shimmer weight so a highlight sweeps the text. The sweep endpoints are derived
+/// from `base` (the name's normal identity color): the trough sits DIMMER than
+/// base and the crest BRIGHTER, so the motion reads clearly even when the base is
+/// already near-white (brightening alone would barely change contrast there).
+/// Char-based (never byte-sliced), so multi-byte names are safe. Returns a single
+/// plain span for an empty label.
+pub fn shimmer_spans(label: &str, base: (u8, u8, u8), elapsed_ms: u128) -> Vec<Span<'static>> {
     let len = label.chars().count();
     if len == 0 {
         return vec![Span::raw(String::new())];
     }
+    // Sweep endpoints derived from the base: the trough is a dimmed base (so a
+    // shimmering name reads visibly duller than a static idle one) and the crest
+    // is lifted well toward white, giving strong contrast on any base color.
+    let dim = |v: u8| (v as f32 * 0.55).round() as u8;
+    let lift = |v: u8| (v as f32 + (255.0 - v as f32) * 0.85).round() as u8;
+    let trough = (dim(base.0), dim(base.1), dim(base.2));
+    let crest = (lift(base.0), lift(base.1), lift(base.2));
     label
         .chars()
         .enumerate()
@@ -62,7 +67,7 @@ pub fn shimmer_spans(
             let w = shimmer_weight(i, len, elapsed_ms);
             Span::styled(
                 c.to_string(),
-                Style::default().fg(lerp_rgb(base, bright, w)),
+                Style::default().fg(lerp_rgb(trough, crest, w)),
             )
         })
         .collect()
@@ -74,7 +79,7 @@ mod tests {
 
     #[test]
     fn shimmer_spans_yields_one_span_per_character() {
-        let spans = shimmer_spans("hello", (10, 10, 10), (250, 250, 250), 400);
+        let spans = shimmer_spans("hello", (10, 10, 10), 400);
         assert_eq!(spans.len(), 5);
         assert_eq!(
             spans.iter().map(|s| s.content.as_ref()).collect::<String>(),
@@ -85,7 +90,7 @@ mod tests {
     #[test]
     fn shimmer_spans_counts_characters_not_bytes() {
         // Four user-perceived characters, several multi-byte.
-        let spans = shimmer_spans("café→", (0, 0, 0), (255, 255, 255), 0);
+        let spans = shimmer_spans("café→", (0, 0, 0), 0);
         assert_eq!(spans.len(), 5);
     }
 
@@ -94,7 +99,7 @@ mod tests {
         // The brightest span (highest green channel here) should move rightward
         // as time advances, matching the weight sweep.
         let brightest = |elapsed: u128| {
-            shimmer_spans("abcdefghij", (0, 0, 0), (0, 255, 0), elapsed)
+            shimmer_spans("abcdefghij", (0, 128, 0), elapsed)
                 .into_iter()
                 .enumerate()
                 .max_by_key(|(_, s)| match s.style.fg {
@@ -105,6 +110,34 @@ mod tests {
                 .unwrap()
         };
         assert!(brightest(0) < brightest(PERIOD_MS - 1));
+    }
+
+    #[test]
+    fn shimmer_dims_the_trough_and_brightens_the_crest() {
+        // The sweep must read on ANY base, including a near-white one where pure
+        // brightening has no headroom: characters far from the band sit DIMMER
+        // than base, and the band's crest sits BRIGHTER than base. A long label
+        // guarantees both a far-from-band char and an in-band char exist.
+        let base = (128u8, 128u8, 128u8);
+        let reds: Vec<u8> = shimmer_spans("abcdefghijklmnopqrst", base, PERIOD_MS / 2)
+            .into_iter()
+            .map(|s| match s.style.fg {
+                Some(Color::Rgb(r, _, _)) => r,
+                other => panic!("expected an RGB fg, got {other:?}"),
+            })
+            .collect();
+        let dimmest = *reds.iter().min().unwrap();
+        let brightest = *reds.iter().max().unwrap();
+        assert!(
+            dimmest < base.0,
+            "trough ({dimmest}) must sit dimmer than base ({})",
+            base.0
+        );
+        assert!(
+            brightest > base.0,
+            "crest ({brightest}) must sit brighter than base ({})",
+            base.0
+        );
     }
 
     #[test]

@@ -2861,11 +2861,14 @@ impl App {
                 && (self.engine.session_is_streaming(&s.id)
                     || (attention_on && self.engine.session_needs_attention(&s.id)))
         });
+        // `terminal_is_working`, not `is_agent_streaming`: a terminal running a
+        // quiet foreground app is "Running" (its spinner and label shimmer
+        // animate) even with no output streaming.
         let terminals = self
             .engine
             .companion_terminals
             .keys()
-            .any(|id| self.engine.is_agent_streaming(id));
+            .any(|id| self.engine.terminal_is_working(id));
         agents || terminals
     }
 
