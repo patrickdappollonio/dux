@@ -166,13 +166,13 @@ describe("ComposeBar", () => {
     render(<Harness />)
     const ta = textarea()
     // Content far past the cap. jsdom reports no parseable line-height or
-    // padding, so the cap resolves to 5 lines * the 20px fallback + 0 padding
-    // + the 2px border = 102px; the box must still cover its own border.
+    // padding, so the cap resolves to 3 lines * the 20px fallback + 0 padding
+    // + the 2px border = 62px; the box must still cover its own border.
     Object.defineProperty(ta, "scrollHeight", { value: 400, configurable: true })
     Object.defineProperty(ta, "offsetHeight", { value: 52, configurable: true })
     Object.defineProperty(ta, "clientHeight", { value: 50, configurable: true })
     fireEvent.change(ta, { target: { value: "a\nb\nc\nd\ne\nf\ng\nh" } })
-    expect(ta.style.height).toBe("102px")
+    expect(ta.style.height).toBe("62px")
     expect(ta.style.overflowY).toBe("auto")
   })
 

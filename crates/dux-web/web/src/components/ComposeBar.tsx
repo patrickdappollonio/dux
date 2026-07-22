@@ -46,9 +46,11 @@ interface ComposeBarProps {
 }
 
 // The textarea grows with its content from one line up to this many, then
-// scrolls internally. Five lines is enough to review a short prompt without
-// the bar swallowing the terminal on a phone's scarce vertical space.
-const MAX_ROWS = 5
+// scrolls internally. Three lines: with the soft keyboard up the terminal is
+// already down to a handful of rows, and device testing showed a taller box
+// left too little PTY visible; three still shows enough of a draft to review,
+// and the box scrolls for anything longer.
+const MAX_ROWS = 3
 
 // Autosize by measurement, not CSS: `field-sizing: content` is unsupported on
 // OLDER iOS Safari (it shipped in 26.2, Dec 2025), so the JS measurement keeps
