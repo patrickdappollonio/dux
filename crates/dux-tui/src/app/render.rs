@@ -1921,14 +1921,17 @@ impl App {
         // the strip doesn't reflow/jitter as focus moves.
         let tab_active_dot: &str = crate::theme::DOT_GLYPH;
         let dot_gutter: String = " ".repeat(tab_active_dot.cell_width().max(1) as usize);
+        // The label is padded symmetrically: the right margin mirrors the
+        // left one (space + dot-width + space) so the text sits centered in
+        // its box instead of hugging the right border.
         let mut seg_content: Vec<String> = labels
             .iter()
             .enumerate()
             .map(|(i, l)| {
                 if tab_ids[i] == focused_id {
-                    format!(" {tab_active_dot} {l} ")
+                    format!(" {tab_active_dot} {l} {dot_gutter} ")
                 } else {
-                    format!(" {dot_gutter} {l} ")
+                    format!(" {dot_gutter} {l} {dot_gutter} ")
                 }
             })
             .collect();
@@ -7772,9 +7775,11 @@ impl App {
         };
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Agent;
-        // Display-only tab strip in fullscreen (no switching / no click Rects).
-        let term_area = self.render_agent_tab_strip_if_needed(frame, area, false);
-        self.render_agent_terminal(frame, term_area, &title, true);
+        // No tab strip in fullscreen: tabs cannot be switched there, so the
+        // boxes would be dead chrome spending three rows of a surface whose
+        // whole point is maximum terminal space. The windowed center pane is
+        // where tabs render and switch.
+        self.render_agent_terminal(frame, area, &title, true);
         self.session_surface = saved;
     }
 
@@ -9442,6 +9447,41 @@ mod tests {
         );
     }
 
+    /// The maximized (fullscreen) agent pane must NOT render the tab strip:
+    /// tabs cannot be switched there, so the boxes would be dead chrome
+    /// eating three rows. Only the windowed center pane shows the strip.
+    /// With the strip gone, the only rounded box in a bare fullscreen render
+    /// is the agent pane itself — exactly one top-left corner glyph.
+    #[test]
+    fn fullscreen_agent_renders_no_tab_strip() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_render_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.set_focused_tab(&session_id, "tab-2");
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_fullscreen_agent(frame);
+            })
+            .expect("render frame");
+
+        let buf = terminal.backend().buffer();
+        let corner_count = (0..24)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() == "╭")
+            .count();
+        assert_eq!(
+            corner_count, 1,
+            "fullscreen must draw only the agent pane's own box — no tab boxes"
+        );
+    }
+
     /// `always_show_tab_strip = false` (the default) must keep hiding the strip
     /// when the selected session has only its session-slot tab: the returned
     /// area is the full input area and no clickable tab regions are recorded.
@@ -9591,6 +9631,16 @@ mod tests {
         assert!(
             labels.contains('│'),
             "the label row must carry the boxes' vertical borders, got: {labels}"
+        );
+        // Symmetric padding: the right margin mirrors the left (space +
+        // dot-width + space), for both the focused and the unfocused box.
+        assert!(
+            labels.contains("│ ● claude   │"),
+            "the focused label must be padded symmetrically, got: {labels}"
+        );
+        assert!(
+            labels.contains("│   codex   │"),
+            "the unfocused label must be padded symmetrically, got: {labels}"
         );
 
         // The focused box uses the shared focused border/title styles (the
