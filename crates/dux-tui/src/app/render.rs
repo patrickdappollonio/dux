@@ -1874,7 +1874,6 @@ impl App {
         record_clicks: bool,
     ) -> Rect {
         self.agent_tab_regions.clear();
-        self.agent_tab_add_region = None;
 
         let Some(session) = self.selected_session() else {
             return area;
@@ -1889,7 +1888,6 @@ impl App {
             return area;
         }
         let focused_id = self.focused_tab_id(&session_id);
-        let at_cap = tab_ids.len() >= self.engine.agent_tabs_max() as usize;
 
         // Gather owned per-tab data under immutable borrows, then render/mutate.
         let providers: Vec<String> = tab_ids
@@ -1903,12 +1901,10 @@ impl App {
             .constraints([Constraint::Length(3), Constraint::Min(1)])
             .areas(area);
 
-        // Add button occupies the rightmost columns of the label row, with a
-        // one-column gap so it never touches the last tab's box.
-        let add_text = " + ";
-        let add_w = add_text.chars().count() as u16;
-        let add_total_w = add_w + 1;
-        let avail = strip_area.width.saturating_sub(add_total_w);
+        // No "+" add button: new tabs are created via the `new-agent-tab`
+        // palette command (or the NewTab keybinding), so the boxes get the
+        // full strip width.
+        let avail = strip_area.width;
 
         // Label text per tab (the content INSIDE each box). All tabs are
         // generic — no per-tab marker — except the focused tab, which is
@@ -2057,18 +2053,6 @@ impl App {
                 ));
             }
             x += seg_w[i];
-        }
-
-        // Trailing add button, vertically centered on the label row.
-        let add_x = strip_area.x + strip_area.width - add_w;
-        let add_style = if at_cap {
-            Style::default().fg(self.theme.hint_dim_desc_fg)
-        } else {
-            Style::default().fg(self.theme.hint_key_fg)
-        };
-        buf.set_string(add_x, mid_y, add_text, add_style);
-        if record_clicks && !at_cap {
-            self.agent_tab_add_region = Some(Rect::new(add_x, mid_y, add_w, 1));
         }
 
         term_area
@@ -9678,9 +9662,8 @@ mod tests {
     }
 
     /// Width/truncation math: the strip must never draw past the pane width,
-    /// even once separators and the active dot widen each tab beyond a bare
-    /// label, and the trailing add button (with its own closing separator)
-    /// must still fit.
+    /// even once the box borders and the active dot widen each tab beyond a
+    /// bare label.
     #[test]
     fn tab_strip_width_math_stays_within_pane_with_many_tabs() {
         use ratatui::Terminal;
@@ -9716,21 +9699,15 @@ mod tests {
                 "tab region for {tab_id} must stay within the pane width: {rect:?}"
             );
         }
-        if let Some(add_region) = app.agent_tab_add_region {
-            assert!(
-                add_region.x + add_region.width <= area.x + area.width,
-                "the add-tab region must stay within the pane width: {add_region:?}"
-            );
-        }
     }
 
     /// F1 regression: a custom provider label made of double-width CJK glyphs
     /// must be measured by real display columns (unicode-width), not
     /// `chars().count()`. A char-count-based width undercounts "克劳德" (3
-    /// chars, 6 display columns) by half, so the label overflows its
-    /// recorded region and paints over the add button.
+    /// chars, 6 display columns) by half, so the label would overflow its
+    /// recorded region and paint past its box.
     #[test]
-    fn tab_strip_cjk_label_region_matches_rendered_width_and_no_add_button_overlap() {
+    fn tab_strip_cjk_label_region_matches_rendered_width() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -9755,14 +9732,9 @@ mod tests {
             .find(|(id, _)| id == "tab-2")
             .map(|(_, rect)| *rect)
             .expect("tab-2 region recorded");
-        let add_region = app
-            .agent_tab_add_region
-            .expect("add button region recorded");
-
         assert!(
-            tab_region.x + tab_region.width <= add_region.x,
-            "the CJK tab's recorded region must not overlap the add button: \
-             tab={tab_region:?} add={add_region:?}"
+            tab_region.x + tab_region.width <= area.x + area.width,
+            "the CJK tab's recorded region must stay within the pane: {tab_region:?}"
         );
 
         // The region must be wide enough to actually contain the rendered

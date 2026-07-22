@@ -124,7 +124,6 @@ pub struct App {
     /// Kept out of `MouseLayoutState` (which is `Copy`); reset by the strip
     /// renderer, empty when the strip is hidden (< 2 tabs) or in fullscreen.
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
-    pub(crate) agent_tab_add_region: Option<Rect>,
     pub(crate) terminal_return_to_list: bool,
     pub(crate) last_pty_size: (u16, u16),
     pub(crate) prev_scrollback_offset: usize,
@@ -2268,7 +2267,6 @@ impl App {
             host_forward_carry: Vec::new(),
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
-            agent_tab_add_region: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             prev_scrollback_offset: 0,

@@ -3884,7 +3884,6 @@ mod tests {
             host_forward_carry: Vec::new(),
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
-            agent_tab_add_region: None,
             terminal_return_to_list: false,
             last_pty_size: (0, 0),
             prev_scrollback_offset: 0,

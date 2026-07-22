@@ -6328,15 +6328,10 @@ impl App {
     }
 
     /// Handle a left-click on the agent tab strip. Returns true if the click
-    /// landed on a tab (focus it) or the `+` add button (create a tab).
+    /// landed on a tab (focus it). There is deliberately no "+" add button:
+    /// new tabs are created via the `new-agent-tab` palette command or the
+    /// NewTab keybinding, keeping the strip free of extra chrome.
     fn handle_agent_tab_strip_click(&mut self, column: u16, row: u16) -> bool {
-        if let Some(add) = self.agent_tab_add_region
-            && contains_point(add, column, row)
-        {
-            self.focus = FocusPane::Center;
-            let _ = self.open_new_tab_provider_prompt();
-            return true;
-        }
         if let Some((tab_id, _)) = self
             .agent_tab_regions
             .iter()
