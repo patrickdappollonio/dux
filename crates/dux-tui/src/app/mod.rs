@@ -2780,6 +2780,10 @@ impl App {
         }
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
             let return_to_list = self.terminal_return_to_list;
+            // Snap to the live edge while the surface still resolves the
+            // terminal client — a scrolled-back PTY pauses ingestion, and the
+            // pane behind the dismissed overlay must come back live.
+            self.reset_pty_scrollback();
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.session_surface = SessionSurface::Agent;
             self.input_target = InputTarget::None;
@@ -2807,6 +2811,9 @@ impl App {
         // overlay. Interactive mode never reaches this path — its keys go
         // through the raw-input passthrough, which has its own exit handling.
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Agent) {
+            // Same live-edge snap as `exit_interactive_mode`: the minimized
+            // pane must never come back frozen on a paused, scrolled-back PTY.
+            self.reset_pty_scrollback();
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.input_target = InputTarget::None;
             let key = self.bindings.label_for(Action::FocusAgent);

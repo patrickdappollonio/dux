@@ -969,7 +969,7 @@ impl App {
         provider.scroll(up, amount);
     }
 
-    fn reset_pty_scrollback(&self) {
+    pub(crate) fn reset_pty_scrollback(&self) {
         if let Some(provider) = self.selected_terminal_surface_client() {
             provider.set_scrollback(0);
         }
@@ -6956,6 +6956,14 @@ impl App {
         let return_to_terminal_list =
             matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
         let return_to_projects = matches!(self.input_target, InputTarget::Agent);
+        // Snap the PTY to the live edge BEFORE the surface fields reset (the
+        // client resolves through the current surface). Scrolling back pauses
+        // ingestion so the view holds still; leaving that pause behind froze
+        // the minimized pane on stale content until a later scroll crossed
+        // back to the bottom. Entering interactive mode already snaps to the
+        // live edge — exiting mirrors it, and the snap's 0-crossing resumes
+        // ingestion and drains anything buffered while scrolled back.
+        self.reset_pty_scrollback();
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
         self.session_surface = SessionSurface::Agent;
@@ -13676,6 +13684,82 @@ cyan = "#00ffff"
         assert_ne!(first_id, second_id);
         assert_eq!(app.engine.companion_terminals.len(), 2);
         assert_eq!(app.terminal_items().len(), 2);
+    }
+
+    fn viewport_contains(client: &crate::pty::PtyClient, needle: &str) -> bool {
+        let snap = client.snapshot();
+        let mut rows: Vec<String> = vec![String::new(); usize::from(snap.rows)];
+        for cell in &snap.cells {
+            if let Some(row) = rows.get_mut(usize::from(cell.row)) {
+                row.push_str(&cell.symbol);
+            }
+        }
+        rows.iter().any(|r| r.contains(needle))
+    }
+
+    /// Minimizing (Ctrl-g) while scrolled back must snap the PTY to the live
+    /// edge. Scrolling back pauses ingestion so the view holds still; leaving
+    /// that pause behind on exit froze the minimized pane on stale content
+    /// (no updates until a later scroll crossed back to the bottom). Entering
+    /// interactive mode already snaps to the live edge — exiting must too.
+    #[test]
+    fn exit_interactive_while_scrolled_back_snaps_to_the_live_edge() {
+        let mut app = test_app(default_bindings());
+        let client = crate::pty::PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "cat".to_string()],
+            std::path::Path::new("."),
+            10,
+            40,
+            1000,
+        )
+        .expect("spawn pty");
+        // Fill enough history that scrolling back 20 rows is possible.
+        let mut fill = String::new();
+        for i in 0..60 {
+            fill.push_str(&format!("line {i}\n"));
+        }
+        client.write_bytes(fill.as_bytes()).expect("write fill");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !viewport_contains(&client, "line 59") {
+            assert!(std::time::Instant::now() < deadline, "fill never echoed");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.engine.providers.insert("session-1".to_string(), client);
+        app.focus = FocusPane::Center;
+        app.center_mode = CenterMode::Agent;
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+
+        // The user wheel-scrolled up to read history: ingestion pauses.
+        let provider = app.engine.providers.get("session-1").expect("provider");
+        provider.set_scrollback(20);
+        assert_eq!(provider.scrollback_offset(), 20, "scrolled back");
+
+        app.exit_interactive_mode();
+
+        let provider = app.engine.providers.get("session-1").expect("provider");
+        assert_eq!(
+            provider.scrollback_offset(),
+            0,
+            "exiting interactive mode must snap the PTY to the live edge"
+        );
+        // And ingestion must be live again: new output reaches the grid.
+        provider
+            .write_bytes(b"marker-after-exit\n")
+            .expect("write marker");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !viewport_contains(
+            app.engine.providers.get("session-1").expect("provider"),
+            "marker-after-exit",
+        ) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the minimized pane never received new PTY output: ingestion \
+                 stayed paused after exiting interactive mode"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
