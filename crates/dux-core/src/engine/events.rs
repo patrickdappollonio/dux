@@ -1133,6 +1133,12 @@ impl Engine {
             self.clear_terminal_runtime(terminal_id);
         }
         self.agent_tabs.retain(|_, t| t.session_id != session.id);
+        // Drop the PR runtime state with the session: an in-flight PR check's
+        // late result is separately guarded at `PrStatusReady`, and the store
+        // rows go with the session row, so anything left here would be pure
+        // in-memory residue for an agent that no longer exists.
+        self.pr_statuses.remove(&session.id);
+        self.pr_last_checked.remove(&session.id);
         self.update_branch_sync_sessions();
 
         let project_still_has_sessions = self
@@ -2056,10 +2062,22 @@ impl Engine {
                 let now = Instant::now();
                 let mut changed = false;
                 for (session_id, maybe_pr) in results {
-                    self.pr_last_checked.insert(session_id.clone(), now);
                     // Clear any one-shot PR-check in-flight guard for this session
                     // (a no-op for batched-loop results, which set no key).
                     self.clear_in_flight(&InFlightKey::PrCheck(session_id.clone()));
+                    // The check is async, so its result can land AFTER the
+                    // session was deleted. Drop such a result whole: the
+                    // sqlite upsert would fail the sessions FOREIGN KEY (an
+                    // ERROR log on every delete-with-open-PR), and the map
+                    // inserts would resurrect in-memory PR state for a
+                    // session that no longer exists.
+                    if !self.sessions.iter().any(|s| s.id == session_id) {
+                        logger::debug(&format!(
+                            "[gh-integration] dropping PR result for deleted session {session_id}",
+                        ));
+                        continue;
+                    }
+                    self.pr_last_checked.insert(session_id.clone(), now);
                     match maybe_pr {
                         Some(pr) => {
                             // Persist the PR association (including state) so
@@ -3381,8 +3399,85 @@ mod tests {
     }
 
     #[test]
+    fn pr_status_ready_skips_results_for_deleted_sessions() {
+        // The PR check is async: its result can land AFTER the session was
+        // deleted. Applying it anyway used to (a) attempt an sqlite upsert
+        // that failed the sessions FOREIGN KEY, logging a scary ERROR on
+        // every delete-with-open-PR, and (b) re-insert in-memory PR status
+        // and a poll timestamp for a session that no longer exists.
+        let (mut engine, _tmp) = test_engine();
+        let pr = PrInfo {
+            number: 7,
+            state: PrState::Open,
+            title: "stale".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://example".into(),
+        };
+
+        // "ghost" is not a session the engine knows (deleted before the
+        // result arrived). The result must be dropped whole: no status, no
+        // timestamp, no store row, and no changed-flag rebuild.
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![(
+            "ghost".to_string(),
+            Some(pr),
+        )]));
+
+        assert!(
+            matches!(reaction, EventReaction::Nothing),
+            "a ghost-only batch changes nothing, got {}",
+            reaction_kind(&reaction),
+        );
+        assert!(!engine.pr_statuses.contains_key("ghost"));
+        assert!(!engine.pr_last_checked.contains_key("ghost"));
+        let stored = engine
+            .session_store
+            .load_all_latest_prs()
+            .expect("load prs");
+        assert!(stored.iter().all(|p| p.session_id != "ghost"));
+    }
+
+    #[test]
+    fn deleting_a_session_drops_its_pr_runtime_state() {
+        // The delete itself must clear the PR maps so a deleted agent leaves
+        // no in-memory PR residue behind (the store rows cascade with the
+        // session row).
+        let (mut engine, _tmp) = test_engine();
+        let project = sample_project("p1", "/tmp/p1");
+        engine.projects.push(project);
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let session_id = "s1".to_string();
+        let pr = PrInfo {
+            number: 9,
+            state: PrState::Open,
+            title: "doomed".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://example".into(),
+        };
+        engine.pr_statuses.insert(session_id.clone(), pr);
+        engine
+            .pr_last_checked
+            .insert(session_id.clone(), Instant::now());
+
+        engine
+            .finish_delete_session_memory(&session_id)
+            .expect("delete the session");
+
+        assert!(!engine.pr_statuses.contains_key(&session_id));
+        assert!(!engine.pr_last_checked.contains_key(&session_id));
+    }
+
+    #[test]
     fn pr_status_ready_none_removes_existing_and_records_timestamps() {
         let (mut engine, _tmp) = test_engine();
+        // Results only apply to sessions the engine still knows (late results
+        // for deleted sessions are dropped), so s1/s2 must exist.
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine.sessions.push(sample_session("s1", "p1", "feat/a"));
+        engine.sessions.push(sample_session("s2", "p1", "feat/b"));
         // Pre-seed pr_statuses for s1 so the None path actually removes
         // something (and flips `changed`). s2 has no PR — None for s2 leaves
         // `changed` alone for s2 but its id must still get a timestamp in
@@ -3418,6 +3513,9 @@ mod tests {
     #[test]
     fn pr_status_ready_unchanged_writes_timestamp_and_returns_nothing() {
         let (mut engine, _tmp) = test_engine();
+        // s1 must exist for its result to apply at all (ghost results drop).
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         // No pre-seeded pr_statuses; sending None for s1 leaves changed=false.
         let reaction =
             engine.process_worker_event(WorkerEvent::PrStatusReady(vec![("s1".to_string(), None)]));
