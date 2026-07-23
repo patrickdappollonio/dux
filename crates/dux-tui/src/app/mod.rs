@@ -3519,8 +3519,8 @@ impl App {
     /// (via the shared core matcher `dux_core::agent_search::matches_session`), so a
     /// filtered row is excluded from both the active and inactive buckets. When
     /// filter mode is off, or the query is empty/whitespace, every session is
-    /// visible. The provider haystack mirrors the web sidebar search exactly: the
-    /// session's own provider first, then each of its tabs' providers.
+    /// visible. Fields mirror the web sidebar search exactly: display name,
+    /// project name, branch (provider names are deliberately not searched).
     fn agent_visibility_mask(&self) -> Vec<bool> {
         let query = match &self.agent_filter {
             Some(input) => input.text.as_str(),
@@ -3540,19 +3540,10 @@ impl App {
                     .find(|p| p.id == session.project_id)
                     .map(|p| p.name.as_str())
                     .unwrap_or("");
-                // Session provider first, then each tab's provider (any-tab match),
-                // exactly like the web's `[session.provider, ...tabs.provider]`.
-                let mut providers: Vec<&str> = vec![session.provider.as_str()];
-                for tab in self.engine.agent_tabs.values() {
-                    if tab.session_id == session.id {
-                        providers.push(tab.provider.as_str());
-                    }
-                }
                 dux_core::agent_search::matches_session(
                     session.title.as_deref(),
                     &session.branch_name,
                     project_name,
-                    &providers,
                     query,
                 )
             })

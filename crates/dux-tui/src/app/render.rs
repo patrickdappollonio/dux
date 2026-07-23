@@ -294,6 +294,56 @@ fn right_align_line(
     out
 }
 
+/// Styling knobs for `fit_agent_meta_line`, bundled so the field spans stay
+/// positional without pushing the signature past clippy's argument-count lint:
+/// the `" · "` separator style, and the optional search-hit highlight (the raw
+/// query plus the match style).
+struct MetaLineStyle<'q> {
+    sep: Style,
+    highlight: Option<(&'q str, Style)>,
+}
+
+/// Fit one flexible meta-line field into `alloc` cells and, when a live search
+/// query is supplied, overlay the match emphasis on the EXACT text that will
+/// render. The plain fit runs first (`ellipsize_spans` on the single field
+/// span), so characters and widths are byte-identical with the unhighlighted
+/// path; the highlight is a pure styling split on top. Recomputing
+/// `match_char_range` against the fitted text (instead of clamping a
+/// full-field range) is what makes truncation safe: a match the ellipsis
+/// swallowed simply is not present in the rendered text, so nothing highlights
+/// and nothing can land misaligned. The trailing `…` is re-styled with the
+/// field's base style explicitly, so even a match cut mid-way never bleeds its
+/// emphasis onto the ellipsis. All splitting is char-based (see
+/// `search_highlight_spans`), never byte offsets.
+fn ellipsize_field_highlighted(
+    field: Span<'static>,
+    alloc: u16,
+    highlight: Option<(&str, Style)>,
+) -> Vec<Span<'static>> {
+    let base_style = field.style;
+    let fitted = ellipsize_spans(vec![field], alloc);
+    let Some((query, match_style)) = highlight else {
+        return fitted;
+    };
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for span in fitted {
+        if span.content.as_ref() == "…" {
+            out.push(Span::styled("…", base_style));
+            continue;
+        }
+        match dux_core::agent_search::match_char_range(span.content.as_ref(), query) {
+            Some(range) => out.extend(search_highlight_spans(
+                span.content.as_ref(),
+                base_style,
+                match_style,
+                range,
+            )),
+            None => out.push(span),
+        }
+    }
+    out
+}
+
 /// Assemble the agent row's second line (`<marker> project · State [· branch]
 /// [· tabs]`) so it matches the web sidebar: the marker, the state word, and the
 /// tab count are FIXED and stay fully visible, while the project name and the
@@ -302,6 +352,13 @@ fn right_align_line(
 /// from the right, which would drop the tab count first. `marker` already
 /// includes the leading indent (e.g. `"  ※ "`); `sep_style` styles the `" · "`
 /// separators.
+///
+/// `style.highlight` is the live search query plus the match style: the
+/// project name and the branch are searched fields the line renders, so a hit
+/// inside either gets the emphasis (via `ellipsize_field_highlighted`,
+/// computed on the final fitted text). `None` (no filter, or the terminal row,
+/// whose fields the TUI search does not filter) renders byte-identically to
+/// the pre-highlight code.
 fn fit_agent_meta_line(
     total_w: u16,
     marker: Span<'static>,
@@ -309,8 +366,12 @@ fn fit_agent_meta_line(
     word: Span<'static>,
     branch: Option<Span<'static>>,
     tabs: Option<Span<'static>>,
-    sep_style: Style,
+    style: MetaLineStyle<'_>,
 ) -> Vec<Span<'static>> {
+    let MetaLineStyle {
+        sep: sep_style,
+        highlight,
+    } = style;
     let width = |s: &Span<'static>| s.content.as_ref().cell_width();
     let sep = || Span::styled(" · ", sep_style);
     const SEP_W: u16 = 3; // " · "
@@ -355,13 +416,13 @@ fn fit_agent_meta_line(
 
     let mut out: Vec<Span<'static>> = vec![marker];
     if let Some(name) = name {
-        out.extend(ellipsize_spans(vec![name], name_alloc));
+        out.extend(ellipsize_field_highlighted(name, name_alloc, highlight));
     }
     out.push(sep());
     out.push(word);
     if let Some(branch) = branch {
         out.push(sep());
-        out.extend(ellipsize_spans(vec![branch], branch_alloc));
+        out.extend(ellipsize_field_highlighted(branch, branch_alloc, highlight));
     }
     if let Some(tabs) = tabs {
         out.push(sep());
@@ -983,6 +1044,23 @@ impl App {
             Some(badge) => right_align_line(line1_left, vec![badge], text_width, 2),
             None => ellipsize_spans(line1_left, text_width),
         };
+        // Line two renders two more searched fields (project name, branch), so
+        // a live filter hit inside either gets the same emphasis as the name on
+        // line one. The style matches the name highlight; the range is computed
+        // per field on the exact fitted text (see ellipsize_field_highlighted).
+        let line2_highlight = self.agent_filter.as_ref().and_then(|input| {
+            let query = input.text.as_str();
+            (!dux_core::agent_search::normalize_query(query).is_empty()).then(|| {
+                (
+                    query,
+                    italic(
+                        Style::default()
+                            .fg(self.theme.search_match_fg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                )
+            })
+        });
         let line2 = fit_agent_meta_line(
             text_width,
             marker,
@@ -990,7 +1068,10 @@ impl App {
             Span::styled(word.to_string(), Style::default().fg(word_color)),
             branch_span,
             tabs_span,
-            Style::default().fg(muted),
+            MetaLineStyle {
+                sep: Style::default().fg(muted),
+                highlight: line2_highlight,
+            },
         );
 
         // A trailing blank line gives each agent breathing room: unselected rows
@@ -8639,7 +8720,12 @@ fn terminal_row_lines(
         Span::styled(word.to_string(), Style::default().fg(word_color)),
         None,
         None,
-        Style::default().fg(muted),
+        MetaLineStyle {
+            sep: Style::default().fg(muted),
+            // Terminal rows carry no search highlight: the TUI's agent filter
+            // does not filter the terminal list, so nothing here matched.
+            highlight: None,
+        },
     );
 
     // The two content lines; the trailing blank spacer is added by
@@ -10836,7 +10922,10 @@ mod tests {
             Span::raw("Idle".to_string()),
             None,
             None,
-            Style::default(),
+            MetaLineStyle {
+                sep: Style::default(),
+                highlight: None,
+            },
         );
         assert_eq!(spans_text(&out), "  ※ proj · Idle");
         assert!(!spans_text(&out).contains('…'));
@@ -10851,7 +10940,10 @@ mod tests {
             Span::raw("Idle".to_string()),
             None,
             Some(Span::raw("3 tabs".to_string())),
-            Style::default(),
+            MetaLineStyle {
+                sep: Style::default(),
+                highlight: None,
+            },
         );
         assert!(spans_width(&out) <= 30, "never overflows the width");
         let text = spans_text(&out);
@@ -10873,12 +10965,122 @@ mod tests {
             Span::raw("Working".to_string()),
             Some(Span::raw("feature/some-long-branch".to_string())),
             None,
-            Style::default(),
+            MetaLineStyle {
+                sep: Style::default(),
+                highlight: None,
+            },
         );
         assert!(spans_width(&out) <= 34);
         let text = spans_text(&out);
         assert!(text.contains("Working"), "state word stays fixed: {text:?}");
         assert!(text.contains('…'), "a flexible field truncated: {text:?}");
+    }
+
+    // --- fit_agent_meta_line search-hit highlighting ---
+
+    fn meta_hl_style() -> Style {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Build the same meta line with and without a highlight so tests can pin
+    /// that the emphasis is a pure styling overlay: rendered characters stay
+    /// byte-identical.
+    fn meta_line_pair(
+        total_w: u16,
+        project: &str,
+        branch: &str,
+        highlight: Option<(&str, Style)>,
+    ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+        let build = |hl: Option<(&str, Style)>| {
+            fit_agent_meta_line(
+                total_w,
+                Span::raw("  ".to_string()),
+                Some(Span::raw(project.to_string())),
+                Span::raw("Idle".to_string()),
+                Some(Span::raw(branch.to_string())),
+                None,
+                MetaLineStyle {
+                    sep: Style::default(),
+                    highlight: hl,
+                },
+            )
+        };
+        (build(highlight), build(None))
+    }
+
+    #[test]
+    fn meta_line_highlights_a_project_hit_without_changing_the_text() {
+        let (hl, plain) =
+            meta_line_pair(80, "demo-web", "feat/login", Some(("web", meta_hl_style())));
+        let mark = hl
+            .iter()
+            .find(|s| s.content.as_ref() == "web")
+            .expect("the matched project substring gets its own span");
+        assert_eq!(mark.style, meta_hl_style());
+        assert_eq!(spans_text(&hl), spans_text(&plain));
+    }
+
+    #[test]
+    fn meta_line_highlights_a_branch_hit_without_changing_the_text() {
+        let (hl, plain) = meta_line_pair(
+            80,
+            "demo-web",
+            "feat/login",
+            Some(("login", meta_hl_style())),
+        );
+        let mark = hl
+            .iter()
+            .find(|s| s.content.as_ref() == "login")
+            .expect("the matched branch substring gets its own span");
+        assert_eq!(mark.style, meta_hl_style());
+        assert_eq!(spans_text(&hl), spans_text(&plain));
+    }
+
+    /// The truncation-cuts-the-match case: the emphasis is recomputed on the
+    /// EXACT fitted text, so a match the ellipsis swallowed simply does not
+    /// highlight, nothing shifts onto the "…", and nothing panics. Multi-byte
+    /// project text exercises the char-based paths.
+    #[test]
+    fn meta_line_truncated_match_never_emphasizes_the_ellipsis() {
+        // Width 18: fixed parts (marker 2 + sep 3 + "Idle" 4 + sep 3) leave a
+        // 6-cell budget shared by the two fields, so "branch" (the match, at
+        // the branch's tail) is guaranteed to be cut off.
+        let (hl, plain) = meta_line_pair(
+            18,
+            "日本語プロジェクト",
+            "silver-branch",
+            Some(("branch", meta_hl_style())),
+        );
+        assert!(
+            spans_text(&plain).contains('…'),
+            "the fixture must truncate"
+        );
+        assert_eq!(spans_text(&hl), spans_text(&plain));
+        assert!(
+            hl.iter().all(|s| s.style != meta_hl_style()),
+            "a match cut off by the truncation must not highlight anything: {:?}",
+            hl,
+        );
+    }
+
+    #[test]
+    fn meta_line_match_that_survives_truncation_still_highlights() {
+        // Wide enough that the project keeps its "日本" head even though the
+        // branch truncates; the multi-byte hit still gets its emphasis span.
+        let (hl, plain) = meta_line_pair(
+            30,
+            "日本語プロジェクト",
+            "silver-branch-very-long",
+            Some(("日本", meta_hl_style())),
+        );
+        assert_eq!(spans_text(&hl), spans_text(&plain));
+        let mark = hl
+            .iter()
+            .find(|s| s.content.as_ref() == "日本")
+            .expect("the multi-byte hit keeps its emphasis when it survives the fit");
+        assert_eq!(mark.style, meta_hl_style());
     }
 
     #[test]

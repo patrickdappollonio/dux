@@ -15,10 +15,11 @@ function haystackHas(query: string, ...fields: (string | null | undefined)[]): b
   return fields.some((field) => (field ?? "").toLowerCase().includes(query))
 }
 
-// Match an agent row against a raw query. Fields: the display name
-// (title, falling back to branch), the project name, the branch, and every
-// provider the agent runs (its own provider plus each tab's provider, so a search
-// for "codex" finds an agent whose codex tab is the interesting one).
+// Match an agent row against a raw query. Fields: the display name (title,
+// falling back to branch), the project name, and the branch. Provider names
+// are deliberately NOT searched: "claude"/"codex" are far too generic as
+// terms, so a provider-only hit would surface almost every agent. Mirrors the
+// Rust `matches_session` in dux-core's agent_search.rs (shared vectors).
 export function matchesSessionQuery(
   session: SessionView,
   projectName: string,
@@ -26,11 +27,7 @@ export function matchesSessionQuery(
 ): boolean {
   const q = normalizeQuery(query)
   if (q === "") return true
-  const providers = [session.provider, ...session.tabs.map((tab) => tab.provider)]
-  return (
-    haystackHas(q, session.title, session.branch_name, projectName) ||
-    providers.some((provider) => provider.toLowerCase().includes(q))
-  )
+  return haystackHas(q, session.title, session.branch_name, projectName)
 }
 
 // Match a terminal row against a raw query. Fields: the terminal title (its

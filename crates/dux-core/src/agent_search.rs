@@ -24,25 +24,20 @@ fn haystack_has(query: &str, fields: &[Option<&str>]) -> bool {
 }
 
 /// Match an agent row against a raw query. Fields: the display name (`title`,
-/// falling back to `branch_name`), the project name, the branch, and every provider
-/// the agent runs (its own provider plus each tab's provider, so a search for
-/// "codex" finds an agent whose codex tab is the interesting one). `providers` is
-/// the caller-gathered list (session provider first, then each tab's).
+/// falling back to `branch_name`), the project name, and the branch. Provider
+/// names are deliberately NOT searched: "claude"/"codex" are far too generic
+/// as terms, so a provider-only hit would surface almost every agent.
 pub fn matches_session(
     title: Option<&str>,
     branch_name: &str,
     project_name: &str,
-    providers: &[&str],
     query: &str,
 ) -> bool {
     let q = normalize_query(query);
     if q.is_empty() {
         return true;
     }
-    if haystack_has(&q, &[title, Some(branch_name), Some(project_name)]) {
-        return true;
-    }
-    providers.iter().any(|p| p.to_lowercase().contains(&q))
+    haystack_has(&q, &[title, Some(branch_name), Some(project_name)])
 }
 
 /// The CHAR range (start inclusive, end exclusive, in char indices, never
@@ -138,14 +133,8 @@ mod tests {
 
     #[test]
     fn empty_query_matches_everything() {
-        assert!(matches_session(
-            Some("api"),
-            "main",
-            "proj",
-            &["claude"],
-            ""
-        ));
-        assert!(matches_session(None, "main", "proj", &[], "   "));
+        assert!(matches_session(Some("api"), "main", "proj", ""));
+        assert!(matches_session(None, "main", "proj", "   "));
         assert!(matches_terminal("shell", None, "owner", "proj", ""));
     }
 
@@ -156,34 +145,23 @@ mod tests {
             Some("API-Refactor"),
             "b",
             "proj",
-            &[],
             "refactor"
         ));
         // Branch (name falls back to branch, but branch is matched directly too).
-        assert!(matches_session(None, "feature/login", "proj", &[], "LOGIN"));
+        assert!(matches_session(None, "feature/login", "proj", "LOGIN"));
         // Project name.
-        assert!(matches_session(Some("x"), "b", "demo-web", &[], "web"));
+        assert!(matches_session(Some("x"), "b", "demo-web", "web"));
         // Non-match.
-        assert!(!matches_session(Some("x"), "b", "proj", &["claude"], "zzz"));
+        assert!(!matches_session(Some("x"), "b", "proj", "zzz"));
     }
 
     #[test]
-    fn matches_any_provider_including_tabs() {
-        // The session runs claude, but a tab runs codex; searching "codex" hits.
-        assert!(matches_session(
-            Some("x"),
-            "b",
-            "proj",
-            &["claude", "codex"],
-            "codex"
-        ));
-        assert!(!matches_session(
-            Some("x"),
-            "b",
-            "proj",
-            &["claude"],
-            "codex"
-        ));
+    fn provider_names_do_not_match() {
+        // Provider names ("claude", "codex", ...) are too generic as search
+        // terms, so an agent named nothing like the query must NOT surface
+        // just because it runs that provider. (Providers were once a searched
+        // field; this pins the removal.)
+        assert!(!matches_session(Some("api"), "main", "proj", "codex"));
     }
 
     #[test]

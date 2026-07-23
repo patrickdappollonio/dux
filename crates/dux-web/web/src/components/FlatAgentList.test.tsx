@@ -138,10 +138,18 @@ function makeState(sort: string): DuxState {
           ],
         }),
         makeSession({ id: "gone", title: "Gone", status: "exited" }),
-        makeSession({ id: "alpha", title: "Alpha" }),
+        // A branch that diverges from the title so line two renders it (the
+        // branch-hit highlight test needs a visible branch).
+        makeSession({ id: "alpha", title: "Alpha", branch_name: "feat/silver" }),
         makeSession({ id: "mike", title: "Mike" }),
       ],
-      sidebar: { groups: [], agentless_start: null },
+      // A real sidebar group: `partitionProjects` resolves project display
+      // names from here, and the project-hit highlight/filter tests need
+      // `projectName("p1")` to be "Repo", not a fallback.
+      sidebar: {
+        groups: [{ project_id: "p1", name: "Repo", orphaned: false }],
+        agentless_start: null,
+      },
     },
     bootstrap: null,
     selectedTarget: null,
@@ -295,6 +303,42 @@ describe("FlatAgentList search-match highlight", () => {
     render(<FlatAgentList handlers={handlers} />)
     expect(screen.getByText("Alpha")).toBeTruthy()
     expect(screen.queryByText("Alph")).toBeNull()
+  })
+
+  it("highlights a project-name hit on the agent row's second line", () => {
+    // "rep" hits the project name "Repo" (and nothing on line one), so the
+    // result must explain itself by emphasizing the project text.
+    mockState = withQuery("rep")
+    render(<FlatAgentList handlers={handlers} />)
+    const marks = screen.getAllByText("Rep")
+    expect(marks.length).toBeGreaterThan(0)
+    for (const mark of marks) {
+      expect(mark.className).toContain("bg-primary")
+    }
+    // At least one mark is the project tag itself.
+    expect(marks.some((m) => m.parentElement?.textContent === "Repo")).toBe(true)
+  })
+
+  it("highlights a branch hit on the agent row's second line", () => {
+    mockState = withQuery("silver")
+    render(<FlatAgentList handlers={handlers} />)
+    const mark = screen.getByText("silver")
+    expect(mark.className).toContain("bg-primary")
+    expect(mark.parentElement?.textContent).toBe("feat/silver")
+  })
+
+  it("highlights an owner-label hit on the terminal row's second line", () => {
+    // "zeta@" only occurs in the companion terminal's owner label
+    // ("Zeta@Repo"), a searched field the row renders on line two.
+    mockState = withQuery("zeta@")
+    render(<FlatAgentList handlers={handlers} />)
+    // Both of Zeta's terminals carry the owner label, so match all marks.
+    const marks = screen.getAllByText("Zeta@")
+    expect(marks.length).toBeGreaterThan(0)
+    for (const mark of marks) {
+      expect(mark.className).toContain("bg-primary")
+      expect(mark.parentElement?.textContent).toBe("Zeta@Repo")
+    }
   })
 
   it("highlights the matched terminal label too", () => {

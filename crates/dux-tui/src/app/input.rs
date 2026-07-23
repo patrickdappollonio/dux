@@ -8568,9 +8568,13 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn filter_matches_a_tab_provider() {
-        // An agent runs codex, but a tab runs claude; searching "claude" surfaces
-        // it, mirroring the web's any-tab provider match.
+    fn filter_does_not_match_provider_names() {
+        // Provider names ("claude", "codex", ...) are far too generic as search
+        // terms, so neither the session's provider nor any tab's provider is a
+        // searched field: an agent named nothing like "claude" must NOT surface
+        // just because a tab runs claude. Pins the removal, in lockstep with
+        // the core vector `provider_names_do_not_match` and the web's
+        // "does NOT match on provider names".
         let mut app = test_app(default_bindings());
         let now = Utc::now();
         let project_id = app.engine.projects[0].id.clone();
@@ -8606,7 +8610,8 @@ not_a_real_action = ["x"]
         }
         app.rebuild_left_items();
 
-        assert_eq!(filtered_branches(&app), vec!["codex-agent".to_string()]);
+        // No hit: the query matched only providers, which are not searched.
+        assert_eq!(filtered_branches(&app), Vec::<String>::new());
     }
 
     /// A filter query that matches ZERO sessions must not panic when the user

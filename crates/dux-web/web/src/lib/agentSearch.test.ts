@@ -74,8 +74,12 @@ describe("matchesSessionQuery", () => {
     expect(matchesSessionQuery(session, "dux", "auth-v2")).toBe(true)
   })
 
-  it("matches on a tab's provider, not just the session provider", () => {
-    expect(matchesSessionQuery(session, "dux", "codex")).toBe(true)
+  it("does NOT match on provider names (session or tab)", () => {
+    // Provider names ("claude", "codex", ...) are far too generic as search
+    // terms; a provider-only hit would surface almost every agent. Pins the
+    // removal, in lockstep with the Rust vector `provider_names_do_not_match`.
+    expect(matchesSessionQuery(session, "dux", "codex")).toBe(false)
+    expect(matchesSessionQuery(session, "dux", "claude")).toBe(false)
   })
 
   it("does not match unrelated text", () => {

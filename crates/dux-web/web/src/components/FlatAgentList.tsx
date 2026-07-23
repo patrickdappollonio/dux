@@ -244,12 +244,16 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
 // Display-only project label on a row's second line. It shows which project the
 // agent belongs to; the project's ACTIONS live in the agent's ⋯ menu (a "Project"
 // submenu) and in the New-agent picker, so this label stays a plain span and the
-// whole row remains one clean click target for selecting the agent.
-function ProjectTag({ name }: { name: string }) {
+// whole row remains one clean click target for selecting the agent. The project
+// name is a searched field, so a query hit inside it gets the match emphasis
+// (a result that matched on its project must explain itself).
+function ProjectTag({ name, query }: { name: string; query: string }) {
   return (
     <span className="flex min-w-0 shrink items-center gap-1 text-muted-foreground">
       <Folder className="size-3 shrink-0" />
-      <span className="min-w-0 truncate">{name}</span>
+      <span className="min-w-0 truncate">
+        <HighlightedText text={name} query={query} />
+      </span>
     </span>
   )
 }
@@ -437,7 +441,7 @@ function AgentFlatRow({
               {/* Line two: display-only project + state word + branch + tabs.
                   Sans throughout to match the app; only the branch is mono. */}
               <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <ProjectTag name={projectName} />
+                <ProjectTag name={projectName} query={query} />
                 <Dot className="text-muted-foreground" />
                 {/* Keyed on the label so a state change (Working ⇄ Idle ⇄ Detached
                     …) remounts the span and replays the one-shot fade+rise instead
@@ -455,7 +459,7 @@ function AgentFlatRow({
                   <>
                     <Dot className="text-muted-foreground" />
                     <span className="min-w-0 truncate font-mono">
-                      {session.branch_name}
+                      <HighlightedText text={session.branch_name} query={query} />
                     </span>
                   </>
                 ) : null}
@@ -588,7 +592,9 @@ function TerminalFlatRow({
                 this terminal belongs to, then its colored state word. */}
             <span className="flex min-w-0 shrink items-center gap-1">
               <span aria-hidden>↳</span>
-              <span className="min-w-0 truncate">{ownerLabel}</span>
+              <span className="min-w-0 truncate">
+                <HighlightedText text={ownerLabel} query={query} />
+              </span>
             </span>
             <Dot className="text-muted-foreground" />
             <span
