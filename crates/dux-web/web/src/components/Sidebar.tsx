@@ -262,9 +262,15 @@ export function AppSidebar() {
         <SidebarMenu>
           <SidebarMenuItem className="flex items-center gap-1">
             {/* overflow-visible in icon mode so the collapsed logo's corner
-                connection dot is not clipped by the button's rounded box. */}
+                connection dot is not clipped by the button's rounded box.
+                Clicking the brand block goes HOME: selectSession(null) clears
+                the selected target (the center pane falls back to the Welcome
+                tips, no PTY attached) and rewrites the URL hash back to root,
+                the same clear path an agent exit takes. */}
             <SidebarMenuButton
               size="lg"
+              aria-label="Go to home"
+              onClick={() => selectSession(null)}
               className="flex-1 group-data-[collapsible=icon]:overflow-visible"
             >
               <span className="relative shrink-0">

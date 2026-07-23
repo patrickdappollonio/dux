@@ -173,6 +173,21 @@ describe("AppSidebar brand block", () => {
     )
     expect(screen.getByText("dux")).toBeTruthy()
   })
+
+  it("clicking the logo goes home: clears the selection (and thus the PTY + hash)", () => {
+    mockState = makeState()
+    render(
+      <SidebarProvider>
+        <AppSidebar />
+      </SidebarProvider>,
+    )
+    fireEvent.click(screen.getByRole("button", { name: /go to home/i }))
+    // selectSession(null) is the one home path: it clears the target (the
+    // center pane falls back to the Welcome tips) and rewrites the URL hash
+    // back to root; both are its own tested behavior, so the pin here is the
+    // call itself.
+    expect(selectSessionMock).toHaveBeenCalledWith(null)
+  })
 })
 
 describe("AppSidebar agent ⋯ menu — Add tab (G7)", () => {
