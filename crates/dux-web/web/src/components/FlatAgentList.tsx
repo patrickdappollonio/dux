@@ -624,12 +624,12 @@ function TerminalFlatRow({
             <Ellipsis />
           </DropdownMenuTrigger>
         </div>
+        {/* One real action only: closing. Opening the terminal is the row's own
+            click, and a menu duplicate of it ("Stream") was removed as
+            misleading; the menu stays (rather than an inline X) so the
+            destructive action keeps its confirm flow and misclick-safe
+            reveal-on-hover treatment. */}
         <DropdownMenuContent side="right" align="start">
-          <DropdownMenuItem onClick={() => onSelect(terminal.id, owner)}>
-            <SquareTerminal />
-            Stream
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
             <X />
             Close…
