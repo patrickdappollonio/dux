@@ -681,6 +681,10 @@ pub struct SettingsPatch {
     /// phone typing surface). A plain field write with no side effects, so it
     /// rides the generic settings path like `copy_on_select`.
     pub compose_bar: Option<bool>,
+    /// `ui.auto_reopen_agents`: the global startup auto-reopen switch. A plain
+    /// field write with no side effects (the reopen pass reads it at the NEXT
+    /// startup), so it rides the generic settings path.
+    pub auto_reopen_agents: Option<bool>,
     pub show_changes_pane: Option<bool>,
     pub web_notifications: Option<bool>,
     pub always_show_tab_strip: Option<bool>,
@@ -1362,6 +1366,7 @@ impl Engine {
         let SettingsPatch {
             copy_on_select,
             compose_bar,
+            auto_reopen_agents,
             show_changes_pane,
             web_notifications,
             always_show_tab_strip,
@@ -1401,6 +1406,9 @@ impl Engine {
         }
         if let Some(v) = compose_bar {
             candidate.ui.compose_bar = v;
+        }
+        if let Some(v) = auto_reopen_agents {
+            candidate.ui.auto_reopen_agents = v;
         }
         if let Some(v) = enable_randomized_pet_name_by_default {
             candidate.defaults.enable_randomized_pet_name_by_default = v;
@@ -8731,6 +8739,13 @@ mod tests {
                 expect: "false",
             },
             SettingsFieldRow {
+                key: "auto_reopen_agents",
+                seed: |c| c.ui.auto_reopen_agents = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.auto_reopen_agents.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
                 key: "show_changes_pane",
                 seed: |c| c.ui.show_changes_pane = true,
                 sent: serde_json::json!(false),
@@ -8825,7 +8840,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            13,
+            14,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -8869,6 +8884,7 @@ mod tests {
         let patch = WireCommand::SetSettings(SettingsPatch {
             copy_on_select: Some(!before.ui.copy_on_select),
             compose_bar: Some(!before.ui.compose_bar),
+            auto_reopen_agents: Some(!before.ui.auto_reopen_agents),
             show_changes_pane: Some(!before.ui.show_changes_pane),
             web_notifications: Some(!before.capabilities.web_notifications),
             always_show_tab_strip: Some(!before.ui.always_show_tab_strip),
@@ -8894,6 +8910,7 @@ mod tests {
         let after = &engine.config;
         assert_eq!(after.ui.copy_on_select, !before.ui.copy_on_select);
         assert_eq!(after.ui.compose_bar, !before.ui.compose_bar);
+        assert_eq!(after.ui.auto_reopen_agents, !before.ui.auto_reopen_agents);
         assert_eq!(after.ui.show_changes_pane, !before.ui.show_changes_pane);
         assert_eq!(
             after.capabilities.web_notifications,
@@ -8931,6 +8948,7 @@ mod tests {
         let disk: crate::config::Config = toml::from_str(&raw).expect("parse config");
         assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
         assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
+        assert_eq!(disk.ui.auto_reopen_agents, after.ui.auto_reopen_agents);
         assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
         assert_eq!(
             disk.capabilities.web_notifications,

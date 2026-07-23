@@ -238,6 +238,17 @@ export const SETTING_GROUPS: SettingGroup[] = [
         read: (b) => b.attention_on_bell ?? true,
       },
       {
+        key: "ui.auto_reopen_agents",
+        label: "Reopen agents on startup",
+        description:
+          "When dux starts, agents that were running when it last exited and have auto-reopen enabled are relaunched automatically. Per-project and per-agent switches can opt out.",
+        surface: "both",
+        control: { kind: "bool" },
+        default: false,
+        writeTarget: "settings",
+        read: (b) => b.auto_reopen_agents ?? false,
+      },
+      {
         key: "ui.always_show_tab_strip",
         label: "Always show tab strip",
         description:

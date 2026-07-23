@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use crate::model::{SessionStatus, TerminalOwner};
+use crate::model::{AgentSession, SessionStatus, TerminalOwner};
 use crate::pty::PtyClient;
 
 use super::Engine;
@@ -473,6 +473,42 @@ impl Engine {
         }
     }
 
+    /// The sessions eligible for a startup auto-reopen relaunch, the CORE-owned
+    /// eligibility rule both surfaces apply (the TUI after `restore_sessions`,
+    /// the web server after `bootstrap_engine`'s status normalization). A
+    /// session qualifies only when EVERY condition holds:
+    ///
+    /// - the global `ui.auto_reopen_agents` switch is on,
+    /// - the session recorded reopen intent (`desired_running`: it was still
+    ///   running when dux last exited),
+    /// - the per-agent `auto_reopen_enabled` opt-in is on,
+    /// - its worktree still exists on disk (a vanished worktree cannot host a
+    ///   provider),
+    /// - its project has not opted out (`project_allows_auto_reopen`), and
+    /// - its provider can actually resume a conversation
+    ///   (`supports_session_resume`; reopening a provider that starts from
+    ///   scratch would silently discard the conversation the intent was about).
+    ///
+    /// Only the DECISION lives here; each surface keeps its own launch dispatch
+    /// (`build_agent_launch_request` with `AgentLaunchKind::StartupAutoReopen`).
+    pub fn auto_reopen_candidates(&self) -> Vec<AgentSession> {
+        if !self.config.ui.auto_reopen_agents {
+            return Vec::new();
+        }
+        self.sessions
+            .iter()
+            .filter(|session| {
+                session.desired_running
+                    && session.auto_reopen_enabled
+                    && std::path::Path::new(&session.worktree_path).exists()
+                    && self.project_allows_auto_reopen(&session.project_id)
+                    && crate::config::provider_config(&self.config, &session.provider)
+                        .supports_session_resume()
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Gracefully wind down every running PTY for server shutdown: SIGTERM each
     /// child (agents save state for a later resume), wait up to `grace` for
     /// exits, and mark agent sessions Detached (persisted). `desired_running`
@@ -606,9 +642,11 @@ mod tests {
     use super::PrunedPtyKind;
     use super::TerminatingPty;
     use super::{format_shutdown_result, format_shutdown_start};
+    use crate::engine::Engine;
     use crate::engine::test_support::{sample_project, sample_session, sample_tab, test_engine};
     use crate::model::SessionStatus;
     use crate::pty::PtyClient;
+    use tempfile::TempDir;
 
     /// Spawn a real `cat`-backed PtyClient in the given working directory.
     /// `cat` echoes stdin and exits 0 on EOF, and exits on SIGTERM — making it
@@ -863,6 +901,89 @@ mod tests {
             "a non-clean exit should leave desired_running set"
         );
         assert_eq!(session.status, SessionStatus::Detached);
+    }
+
+    /// Engine with the global auto-reopen switch ON and one session that meets
+    /// EVERY eligibility condition: desired_running, per-agent auto-reopen on,
+    /// a worktree that exists on disk (the tempdir), a project with no opt-out,
+    /// and a resume-capable provider (claude). Each matrix test flips exactly
+    /// one condition off and asserts the candidate disappears.
+    fn auto_reopen_fixture() -> (Engine, TempDir, tempfile::TempDir) {
+        let (mut engine, tmp) = test_engine();
+        engine.config.ui.auto_reopen_agents = true;
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "b1");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        session.desired_running = true;
+        session.auto_reopen_enabled = true;
+        engine.sessions.push(session);
+        (engine, tmp, worktree)
+    }
+
+    fn candidate_ids(engine: &Engine) -> Vec<String> {
+        engine
+            .auto_reopen_candidates()
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    #[test]
+    fn auto_reopen_candidates_returns_a_fully_eligible_session() {
+        let (engine, _tmp, _worktree) = auto_reopen_fixture();
+        assert_eq!(candidate_ids(&engine), vec!["s1".to_string()]);
+    }
+
+    #[test]
+    fn auto_reopen_candidates_empty_when_the_global_switch_is_off() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        engine.config.ui.auto_reopen_agents = false;
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn auto_reopen_candidates_skip_a_session_without_desired_running() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        engine.sessions[0].desired_running = false;
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn auto_reopen_candidates_skip_a_session_that_opted_out() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        engine.sessions[0].auto_reopen_enabled = false;
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn auto_reopen_candidates_skip_a_session_whose_worktree_vanished() {
+        let (mut engine, _tmp, worktree) = auto_reopen_fixture();
+        engine.sessions[0].worktree_path = worktree
+            .path()
+            .join("does-not-exist")
+            .to_string_lossy()
+            .to_string();
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn auto_reopen_candidates_skip_a_project_that_opted_out() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        engine.projects[0].auto_reopen_agents = Some(false);
+        assert!(candidate_ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn auto_reopen_candidates_skip_a_provider_without_session_resume() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        // Copilot ships with `resume_args: None` (excluded from resume by
+        // design, see the tabs tenet), so it can never auto-reopen.
+        engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
+        assert!(candidate_ids(&engine).is_empty());
     }
 
     #[test]

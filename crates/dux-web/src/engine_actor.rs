@@ -959,9 +959,73 @@ impl EngineHandle {
 /// [`run_engine_loop`] — this path simply runs the loop on a spawned thread and
 /// drops the returned engine. The control closure always returns `Continue`, so
 /// the loop's only exit is the inline `Shutdown` request, exactly as before.
+/// Relaunch agents with auto-reopen intent, once, at server startup. The
+/// headless counterpart of the TUI's `auto_reopen_eligible_sessions`: the
+/// ELIGIBILITY rule is core-owned (`Engine::auto_reopen_candidates`, the same
+/// matrix the TUI applies), and every candidate launches through the shared
+/// chokepoint (`build_agent_launch_request` with
+/// `AgentLaunchKind::StartupAutoReopen`, dispatched via
+/// `Command::DispatchAgentLaunch`), never a hand-rolled spawn. The wire drain
+/// already understands the kind: success is silent (mirroring the TUI) and a
+/// failure surfaces through the shared launch-failed path.
+///
+/// Runs only on the fresh-server path (`spawn_engine_thread`, i.e. `dux
+/// serve`): the TUI-flip path hands over a LIVE engine whose agents are
+/// already in their intended state, so re-running the pass there would be
+/// wrong. Must run AFTER `bootstrap_engine`, whose
+/// `normalize_restored_sessions` settles restored statuses first, mirroring
+/// the TUI's restore-then-reopen ordering. No client is connected this early,
+/// so the user-facing signal is a log line rather than a keyed status; the
+/// per-launch statuses ride the normal worker-event drain once the loop runs.
+/// Returns the number of launches actually dispatched.
+pub(crate) fn auto_reopen_agents_on_startup(engine: &mut Engine) -> usize {
+    let candidates = engine.auto_reopen_candidates();
+    if candidates.is_empty() {
+        return 0;
+    }
+    dux_core::logger::info(&format!(
+        "Auto-reopening {} agent(s) that were running when dux last exited...",
+        candidates.len()
+    ));
+    let mut launched = 0;
+    for session in candidates {
+        let id = session.id.clone();
+        let request = engine.build_agent_launch_request(
+            session,
+            true,
+            (24, 80),
+            AgentLaunchKind::StartupAutoReopen,
+        );
+        match engine.apply(Command::DispatchAgentLaunch {
+            request: Box::new(request),
+        }) {
+            // The chokepoint refuses (closing session, in-flight collision) by
+            // returning `launched: false`, not an `Err`; log it like the
+            // subscribe path does rather than counting it as a launch.
+            Ok(EventReaction::DispatchAgentLaunchView(view)) if view.launched => launched += 1,
+            Ok(EventReaction::DispatchAgentLaunchView(view)) => {
+                let message = view
+                    .status
+                    .as_ref()
+                    .map(|s| s.message.clone())
+                    .unwrap_or_else(|| "launch refused".to_string());
+                dux_core::logger::info(&format!("Auto-reopen skipped for {id}: {message}"));
+            }
+            Ok(_) => launched += 1,
+            Err(err) => {
+                dux_core::logger::info(&format!("Auto-reopen dispatch failed for {id}: {err}"));
+            }
+        }
+    }
+    launched
+}
+
 pub fn spawn_engine_thread(mut engine: Engine) -> (EngineHandle, JoinHandle<()>) {
     let (handle, ends) = build_actor_channels(&engine);
     spawn_global_workers(&mut engine);
+    // Startup auto-reopen: dispatched before the loop starts so the loop's very
+    // first worker-event drain picks up the launches' results.
+    auto_reopen_agents_on_startup(&mut engine);
 
     let join = thread::spawn(move || {
         // The dedicated thread never asks the loop to exit; the loop stops only
@@ -2235,6 +2299,77 @@ mod tests {
             updated_at: now,
             last_focused_tab: None,
         }
+    }
+
+    /// The server's startup auto-reopen pass: after `bootstrap_engine` (which
+    /// settles restored statuses), every core-eligible candidate gets a real
+    /// launch dispatched through the shared chokepoint, and nothing else does.
+    /// The in-flight marker is the observable seam: `DispatchAgentLaunch`
+    /// registers `InFlightKey::AgentLaunch(session id)` synchronously, while
+    /// the actual provider spawn runs in a background worker this test never
+    /// drains.
+    #[test]
+    fn startup_auto_reopen_dispatches_launches_for_eligible_sessions_only() {
+        let (_tmp, paths) = temp_paths();
+        // The global switch defaults OFF; the pass must honor the config file
+        // the read-only bootstrap load reads.
+        std::fs::write(&paths.config_path, "[ui]\nauto_reopen_agents = true\n").unwrap();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            // Eligible: reopen intent + per-agent opt-in + existing worktree.
+            let mut eligible = sample_session(
+                "s-reopen",
+                "p1",
+                "feat",
+                paths.root.to_string_lossy().as_ref(),
+            );
+            eligible.auto_reopen_enabled = true;
+            store.upsert_session(&eligible).unwrap();
+            // Same intent but the per-agent opt-in is off: must be skipped.
+            let opted_out = sample_session(
+                "s-optout",
+                "p1",
+                "other",
+                paths.root.to_string_lossy().as_ref(),
+            );
+            store.upsert_session(&opted_out).unwrap();
+        }
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+
+        let launched = auto_reopen_agents_on_startup(&mut engine);
+
+        assert_eq!(launched, 1, "exactly the eligible session launches");
+        assert!(
+            engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                "s-reopen".to_string()
+            )),
+            "the eligible session's launch must be dispatched (in-flight)"
+        );
+        assert!(
+            !engine.is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(
+                "s-optout".to_string()
+            )),
+            "the opted-out session must not launch"
+        );
+    }
+
+    #[test]
+    fn startup_auto_reopen_is_a_noop_with_the_global_switch_off() {
+        let (_tmp, paths) = temp_paths();
+        {
+            let store = dux_core::storage::SessionStore::open(&paths.sessions_db_path).unwrap();
+            let mut eligible = sample_session(
+                "s-reopen",
+                "p1",
+                "feat",
+                paths.root.to_string_lossy().as_ref(),
+            );
+            eligible.auto_reopen_enabled = true;
+            store.upsert_session(&eligible).unwrap();
+        }
+        // No config file: `ui.auto_reopen_agents` stays at its false default.
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        assert_eq!(auto_reopen_agents_on_startup(&mut engine), 0);
     }
 
     #[test]

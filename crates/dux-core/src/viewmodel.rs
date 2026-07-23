@@ -73,6 +73,11 @@ pub struct BootstrapView {
     /// autocorrect) and redirects a terminal tap into it (default true). Read
     /// by the terminal pane and by the web's Preferences dialog. Web-only.
     pub compose_bar: bool,
+    /// Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
+    /// switch (default false). When on, agents that were running when dux last
+    /// exited (and have their per-agent opt-in) are relaunched at startup, by
+    /// the TUI and by `dux serve` alike. Read by the web's Preferences dialog.
+    pub auto_reopen_agents: bool,
     /// Mirrors `config.ui.attention_grace_seconds`: seconds the attention
     /// indicators stay visible in the web UI after the browser tab returns to
     /// the foreground, before the focused agent's needs-attention flag
@@ -784,6 +789,7 @@ impl Engine {
             github_integration: self.config.ui.github_integration,
             copy_on_select: self.config.ui.copy_on_select,
             compose_bar: self.config.ui.compose_bar,
+            auto_reopen_agents: self.config.ui.auto_reopen_agents,
             attention_grace_seconds: self.config.ui.attention_grace_seconds,
             web_notifications: self.config.capabilities.web_notifications,
             hyperlinks: self.config.capabilities.hyperlinks,
@@ -1583,6 +1589,16 @@ mod tests {
     }
 
     #[test]
+    fn auto_reopen_agents_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        assert!(!engine.bootstrap().auto_reopen_agents);
+
+        engine.config.ui.auto_reopen_agents = true;
+        assert!(engine.bootstrap().auto_reopen_agents);
+    }
+
+    #[test]
     fn global_default_provider_is_projected_from_config() {
         let (mut engine, _tmp) = test_engine();
 
@@ -1606,6 +1622,7 @@ mod tests {
             "github_integration",
             "copy_on_select",
             "compose_bar",
+            "auto_reopen_agents",
             "attention_grace_seconds",
             "web_notifications",
             "hyperlinks",

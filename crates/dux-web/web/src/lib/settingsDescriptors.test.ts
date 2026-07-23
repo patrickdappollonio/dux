@@ -15,6 +15,7 @@ const sampleBootstrap: Bootstrap = {
   github_integration: false,
   copy_on_select: false,
   compose_bar: false,
+  auto_reopen_agents: true,
   attention_grace_seconds: 11,
   web_notifications: false,
   hyperlinks: false,
@@ -56,6 +57,7 @@ describe("settingsDescriptors", () => {
         "ui.show_changes_pane",
         "ui.copy_on_select",
         "ui.compose_bar",
+        "ui.auto_reopen_agents",
         "capabilities.web_notifications",
         "ui.status_clear_seconds",
         "ui.attention_grace_seconds",
@@ -96,6 +98,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.show_changes_pane"]).toBe(false)
     expect(byKey["ui.copy_on_select"]).toBe(false)
     expect(byKey["ui.compose_bar"]).toBe(false)
+    expect(byKey["ui.auto_reopen_agents"]).toBe(true)
     expect(byKey["capabilities.web_notifications"]).toBe(false)
     expect(byKey["ui.status_clear_seconds"]).toBe(42)
     expect(byKey["ui.attention_grace_seconds"]).toBe(11)
@@ -134,6 +137,7 @@ describe("settingsDescriptors", () => {
       "ui.attention_grace_seconds",
       "ui.attention_indicator",
       "ui.attention_on_bell",
+      "ui.auto_reopen_agents",
       "ui.compose_bar",
       "ui.copy_on_select",
       "ui.pr_banner_position",
@@ -176,6 +180,7 @@ describe("settingsDescriptors", () => {
     delete bare.attention_on_bell
     delete bare.global_default_provider
     delete bare.compose_bar
+    delete bare.auto_reopen_agents
     const byKey = Object.fromEntries(
       allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
     )
@@ -183,6 +188,8 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.attention_on_bell"]).toBe(true)
     expect(byKey["defaults.provider"]).toBe("claude")
     expect(byKey["ui.compose_bar"]).toBe(true)
+    // Unlike compose_bar, the auto-reopen fallback is FALSE (the config default).
+    expect(byKey["ui.auto_reopen_agents"]).toBe(false)
   })
 
   // The global default-provider row's options aren't known statically: they

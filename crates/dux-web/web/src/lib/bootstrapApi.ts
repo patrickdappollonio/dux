@@ -48,6 +48,12 @@ export interface Bootstrap {
    * pre-compose-bar behavior. Older servers omit it, so consumers fall back
    * to true. */
   compose_bar?: boolean
+  /** Mirrors `config.ui.auto_reopen_agents`: the GLOBAL startup auto-reopen
+   * switch. When on, agents that were still running when dux last exited (and
+   * have their per-agent opt-in) relaunch at the next startup, on the TUI and
+   * on `dux serve` alike. Older servers omit it, so consumers fall back to
+   * FALSE, the config default (unlike `compose_bar`'s true). */
+  auto_reopen_agents?: boolean
   /** Mirrors `config.ui.attention_grace_seconds`: seconds the attention
    * indicators stay visible after the browser tab returns to the foreground,
    * before the focused agent's needs-attention flag clears (default 3; 0

@@ -291,6 +291,7 @@ async fn set_instance_identity(
 struct UiSettingsPatch {
     copy_on_select: Option<bool>,
     compose_bar: Option<bool>,
+    auto_reopen_agents: Option<bool>,
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
     status_clear_seconds: Option<u16>,
@@ -386,6 +387,7 @@ async fn set_settings(
         WireCommand::SetSettings(SettingsPatch {
             copy_on_select: body.ui.copy_on_select,
             compose_bar: body.ui.compose_bar,
+            auto_reopen_agents: body.ui.auto_reopen_agents,
             show_changes_pane: body.ui.show_changes_pane,
             web_notifications: body.capabilities.web_notifications,
             always_show_tab_strip: body.ui.always_show_tab_strip,
@@ -847,6 +849,7 @@ mod tests {
                     "ui": {
                         "copy_on_select": false,
                         "compose_bar": false,
+                        "auto_reopen_agents": true,
                         "always_show_tab_strip": true,
                         "status_clear_seconds": 42,
                         "attention_grace_seconds": 11,
@@ -876,6 +879,7 @@ mod tests {
         for expected in [
             "copy_on_select = false",
             "compose_bar = false",
+            "auto_reopen_agents = true",
             "always_show_tab_strip = true",
             "status_clear_seconds = 42",
             "attention_grace_seconds = 11",

@@ -2713,26 +2713,11 @@ impl App {
         self.auto_reopen_eligible_sessions();
     }
 
+    /// Dispatch the startup auto-reopen launches. The ELIGIBILITY rule is
+    /// core-owned (`Engine::auto_reopen_candidates`, shared with the web
+    /// server's startup pass); only the TUI-side launch dispatch lives here.
     fn auto_reopen_eligible_sessions(&mut self) {
-        if !self.engine.config.ui.auto_reopen_agents {
-            return;
-        }
-
-        let sessions = self.engine.sessions.clone();
-        for session in sessions {
-            if !session.desired_running
-                || !session.auto_reopen_enabled
-                || !Path::new(&session.worktree_path).exists()
-                || !self.engine.project_allows_auto_reopen(&session.project_id)
-            {
-                continue;
-            }
-
-            let cfg = provider_config(&self.engine.config, &session.provider);
-            if !cfg.supports_session_resume() {
-                continue;
-            }
-
+        for session in self.engine.auto_reopen_candidates() {
             let request =
                 self.agent_launch_request(session, true, AgentLaunchKind::StartupAutoReopen);
             self.dispatch_agent_launch(request);
