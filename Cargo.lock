@@ -689,6 +689,7 @@ dependencies = [
  "content_inspector",
  "home",
  "indexmap",
+ "libc",
  "notify",
  "petname",
  "portable-pty",

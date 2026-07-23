@@ -1338,36 +1338,55 @@ impl PtyClient {
     /// the foreground (an idle prompt); differs when a job-controlled app runs in
     /// its own group.
     fn foreground_pgid(&self) -> Option<u32> {
-        use std::os::unix::io::BorrowedFd;
         let raw_fd = self.master.as_raw_fd()?;
-        // SAFETY: the master fd is valid for the lifetime of PtyClient.
-        let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-        let fg = rustix::termios::tcgetpgrp(fd).ok()?;
-        Some(fg.as_raw_nonzero().get() as u32)
+        foreground_pgid_of_fd(raw_fd)
     }
 
     /// Returns the name of the foreground process running in this PTY, or
     /// `None` if the shell itself is in the foreground (idle).
     ///
-    /// Uses `tcgetpgrp()` via rustix to get the foreground process group and
-    /// compares it to the shell PID. If they differ, a child command is
-    /// running and its name is resolved via platform-specific APIs.
+    /// Uses `tcgetpgrp()` (see `foreground_pgid_of_fd` for why it is a direct
+    /// libc call) to get the foreground process group and compares it to the
+    /// shell PID. If they differ, a child command is running and its name is
+    /// resolved via platform-specific APIs.
     pub fn foreground_process_name(&self) -> Option<String> {
-        use std::os::unix::io::BorrowedFd;
-
         let raw_fd = self.master.as_raw_fd()?;
-        // SAFETY: the master fd is valid for the lifetime of PtyClient.
-        let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-        let fg_pid = rustix::termios::tcgetpgrp(fd).ok()?;
+        let fg_pid = foreground_pgid_of_fd(raw_fd)?;
 
         let shell_pid = self.child.process_id()?;
-        if fg_pid.as_raw_nonzero().get() as u32 == shell_pid {
+        if fg_pid == shell_pid {
             // Shell itself is in the foreground — no command running.
             return None;
         }
 
-        process_name(fg_pid.as_raw_nonzero().get() as u32)
+        process_name(fg_pid)
     }
+}
+
+/// The foreground process group of `fd` via a DIRECT `libc::tcgetpgrp` call,
+/// validated by `valid_pgid` before use. Deliberately not rustix's wrapper:
+/// on macOS a PTY whose foreground process group is gone returns 0, and
+/// rustix 1.1.4 guards that case only on Linux (`#[cfg(linux_kernel)]` in its
+/// termios syscalls) before feeding the raw value into
+/// `Pid::from_raw_unchecked`. That is an assertion failure on debug builds
+/// (it killed the engine thread in production the moment the foreground poll
+/// touched an orphaned PTY) and an invalid `NonZeroI32` on release builds.
+/// Here an invalid id is simply "no foreground process", which is also what
+/// it means.
+fn foreground_pgid_of_fd(raw_fd: std::os::unix::io::RawFd) -> Option<u32> {
+    // SAFETY: `tcgetpgrp` only reads from the fd, which the caller owns for
+    // the duration of the call; an invalid fd yields -1, which `valid_pgid`
+    // rejects.
+    let raw = unsafe { libc::tcgetpgrp(raw_fd) };
+    valid_pgid(raw)
+}
+
+/// Whether a raw `tcgetpgrp` result is a usable process-group id: strictly
+/// positive. Zero (macOS's "no foreground process group" on an orphaned PTY)
+/// and negatives (error returns) are not, and must never reach a
+/// `Pid`/`NonZero` construction.
+fn valid_pgid(raw: libc::pid_t) -> Option<u32> {
+    (raw > 0).then_some(raw as u32)
 }
 
 /// Whether a batch of bytes written to a PTY should count as the user "typing"
@@ -2269,6 +2288,22 @@ mod tests {
     use super::*;
     use compact_str::CompactString;
     use portable_pty::CommandBuilder;
+
+    /// The pgid guard behind `tcgetpgrp`: zero and negative raw values are
+    /// invalid process-group ids and must map to `None`, never reach a
+    /// `Pid`/`NonZero` construction. This is the exact hole that killed the
+    /// engine thread in production: on macOS `tcgetpgrp` returns 0 for a PTY
+    /// whose foreground process group is gone, and rustix 1.1.4 only guards
+    /// that case on Linux before feeding the value to `from_raw_unchecked`
+    /// (a debug-build assertion failure, an invalid NonZeroI32 in release).
+    #[test]
+    fn valid_pgid_rejects_zero_and_negative_ids() {
+        assert_eq!(valid_pgid(0), None);
+        assert_eq!(valid_pgid(-1), None);
+        assert_eq!(valid_pgid(i32::MIN), None);
+        assert_eq!(valid_pgid(1), Some(1));
+        assert_eq!(valid_pgid(43210), Some(43210));
+    }
 
     #[test]
     fn write_counts_as_typing_excludes_empty_focus_and_mouse_reports() {

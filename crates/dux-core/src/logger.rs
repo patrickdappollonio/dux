@@ -54,7 +54,41 @@ pub fn init(config: &LoggingConfig, paths: &DuxPaths) {
         };
         let _ = LOGGER.set(logger);
         info(&format!("logger initialized at {}", path.display()));
+        install_panic_hook();
     }
+}
+
+/// Route every panic through the log file BEFORE the default hook prints it to
+/// stderr. Motivated by a real incident: the engine runs on a dedicated OS
+/// thread, so a panic there silently killed it (every later request answered
+/// "the engine is unavailable") while the only evidence, the panic message,
+/// went to a stderr nobody had captured. dux.log now records the thread,
+/// message, and location; the previous hook still runs so terminal users and
+/// `RUST_BACKTRACE` behavior are unchanged. Installed once, only after the
+/// logger has a file to write to.
+fn install_panic_hook() {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let thread = std::thread::current();
+            let name = thread.name().unwrap_or("<unnamed>");
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            error(&format!(
+                "thread '{name}' panicked at {location}: {message}"
+            ));
+            previous(info);
+        }));
+    });
 }
 
 #[allow(dead_code)] // Public API for future callers
