@@ -3,8 +3,8 @@ use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
-use toml_edit::{DocumentMut, Item, Table, Value};
+use anyhow::{Context, Result};
+use toml_edit::{DocumentMut, Item};
 
 use crate::keybindings;
 
@@ -23,10 +23,14 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
     let mut doc: DocumentMut = raw
         .parse()
         .with_context(|| format!("failed to parse {}", paths.config_path.display()))?;
-    let deprecations_changed = apply_config_deprecations(&mut doc)?;
-    let retired_changed = prune_retired_providers(&mut doc);
+    // The deprecated-key + retired-provider migrations are the core-owned
+    // `dux_core::config_migrate::apply_load_migrations` (also applied in memory
+    // by `load_config`, so `dux serve` honors them); the TUI ADDITIONALLY
+    // persists the migrated document. Retired KEYBINDING actions are pruned only
+    // here (they matter only to the TUI's `validate_keys`).
+    let migrations_changed = dux_core::config_migrate::apply_load_migrations(&mut doc)?;
     let retired_keys_changed = prune_retired_key_actions(&mut doc);
-    if deprecations_changed || retired_changed || retired_keys_changed {
+    if migrations_changed || retired_keys_changed {
         // blessed sync-direct: deprecation/retirement migration also runs at boot before the queue exists
         dux_core::config_write::write_config_secure(&paths.config_path, &doc.to_string())
             .with_context(|| format!("failed to write {}", paths.config_path.display()))?;
@@ -47,17 +51,11 @@ pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
 /// Reject a `[server] host` that is not an IP literal before the TUI starts.
 /// `dux server` resolves the bind plan with its own `?` validation as a backstop,
 /// but the TUI flip reads `host` too, so catch a bad value here with a clear
-/// message rather than failing later. Hostnames are not resolved (no DNS); the
-/// value must parse as an `IpAddr` such as `127.0.0.1` or `0.0.0.0`.
+/// message rather than failing later. Delegates to the single-source
+/// `dux_core::config::parse_server_host` (trimming and message shared with
+/// `resolve_server_plan`, so both accept exactly the same values).
 fn validate_server_host(config: &Config) -> Result<()> {
-    use std::str::FromStr;
-    let host = config.server.host.trim();
-    if std::net::IpAddr::from_str(host).is_err() {
-        bail!(
-            "[server] host = \"{host}\" is not a valid IP address. Use an IP literal such as \
-             127.0.0.1 (loopback) or 0.0.0.0 (all interfaces); hostnames are not resolved."
-        );
-    }
+    dux_core::config::parse_server_host(&config.server.host).map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
 }
 
@@ -72,140 +70,6 @@ fn validate_project_envs(config: &Config) -> Result<()> {
     }
     resolve_project_env(&config.env).context("invalid global env")?;
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DeprecatedConfigKey {
-    section: &'static str,
-    key: &'static str,
-}
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-enum DeprecatedConfigKeyAction {
-    Replace {
-        migrate: fn(&mut DocumentMut, DeprecatedConfigKey, Item) -> Result<()>,
-    },
-    Remove,
-    Fail {
-        message: &'static str,
-    },
-}
-
-#[derive(Clone, Copy)]
-struct DeprecatedConfigKeyRule {
-    old: DeprecatedConfigKey,
-    action: DeprecatedConfigKeyAction,
-}
-
-const DEPRECATED_CONFIG_KEYS: &[DeprecatedConfigKeyRule] = &[
-    DeprecatedConfigKeyRule {
-        old: DeprecatedConfigKey {
-            section: "defaults",
-            key: "prompt_for_name",
-        },
-        action: DeprecatedConfigKeyAction::Replace {
-            migrate: migrate_prompt_for_name,
-        },
-    },
-    DeprecatedConfigKeyRule {
-        old: DeprecatedConfigKey {
-            section: "server",
-            key: "bind",
-        },
-        action: DeprecatedConfigKeyAction::Replace {
-            migrate: migrate_server_bind,
-        },
-    },
-];
-
-fn apply_config_deprecations(doc: &mut DocumentMut) -> Result<bool> {
-    apply_config_deprecations_with(doc, DEPRECATED_CONFIG_KEYS)
-}
-
-fn apply_config_deprecations_with(
-    doc: &mut DocumentMut,
-    rules: &[DeprecatedConfigKeyRule],
-) -> Result<bool> {
-    let mut changed = false;
-    for rule in rules {
-        let Some(old_item) =
-            dux_core::config_write::remove_table_key_item(doc, rule.old.section, rule.old.key)
-        else {
-            continue;
-        };
-        match rule.action {
-            DeprecatedConfigKeyAction::Replace { migrate } => {
-                migrate(doc, rule.old, old_item)?;
-            }
-            DeprecatedConfigKeyAction::Remove => {}
-            DeprecatedConfigKeyAction::Fail { message } => {
-                bail!(
-                    "unsupported config key [{}.{}]: {}",
-                    rule.old.section,
-                    rule.old.key,
-                    message
-                );
-            }
-        }
-        changed = true;
-    }
-    Ok(changed)
-}
-
-// ---------------------------------------------------------------------------
-// Retired providers
-//
-// A retired provider once shipped as a default but no longer does. It is no
-// longer rendered into new configs and no longer re-added by
-// `ProvidersConfig::ensure_defaults`. So existing users do not keep a dead
-// stock block forever, an untouched stock block is pruned from their config on
-// load. A user who customized the block (or added one back later) keeps it —
-// config wins for explicit preferences.
-// ---------------------------------------------------------------------------
-
-/// The retired providers and the exact stock block dux shipped for each, so an
-/// untouched stock block can be recognized and removed while a user-customized
-/// block of the same name is preserved.
-fn retired_providers() -> [(&'static str, ProviderCommandConfig); 1] {
-    [("gemini", retired_stock_gemini())]
-}
-
-/// The exact `[providers.gemini]` block dux shipped before Gemini was retired
-/// (Google deprecated the Gemini CLI in favor of Antigravity). Used to
-/// recognize an untouched stock block so it can be pruned from existing
-/// configs.
-fn retired_stock_gemini() -> ProviderCommandConfig {
-    ProviderCommandConfig {
-        command: "gemini".to_string(),
-        args: Vec::new(),
-        resume_args: Some(vec!["--resume".to_string()]),
-        resume_wait_timeout_ms: None,
-        install_hint: Some("brew install gemini-cli".to_string()),
-        forward_scroll: None,
-    }
-}
-
-/// Remove `[providers.<name>]` tables for retired providers when they still
-/// match the stock block dux shipped. A customized block (or one a user adds
-/// back later) does not match and is left untouched. Returns whether the
-/// document changed.
-fn prune_retired_providers(doc: &mut DocumentMut) -> bool {
-    let Some(providers) = doc.get_mut("providers").and_then(Item::as_table_mut) else {
-        return false;
-    };
-    let mut changed = false;
-    for (name, stock) in retired_providers() {
-        let matches = providers
-            .get(name)
-            .and_then(Item::as_table)
-            .is_some_and(|table| table_matches_provider_config(table, &stock));
-        if matches {
-            providers.remove(name);
-            changed = true;
-        }
-    }
-    changed
 }
 
 // ---------------------------------------------------------------------------
@@ -242,117 +106,6 @@ fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
         }
     }
     changed
-}
-
-/// Parse a `[providers.<name>]` table (as it appears in config.toml) into a
-/// `ProviderCommandConfig`. Wrapping the table in a standalone document avoids
-/// any ambiguity about table headers when serializing it back to a string.
-fn provider_table_config(table: &Table) -> Option<ProviderCommandConfig> {
-    #[derive(serde::Deserialize)]
-    struct Wrapper {
-        provider: ProviderCommandConfig,
-    }
-    let mut doc = DocumentMut::new();
-    doc.insert("provider", Item::Table(table.clone()));
-    toml::from_str::<Wrapper>(&doc.to_string())
-        .ok()
-        .map(|wrapper| wrapper.provider)
-}
-
-/// The stock block as it round-trips through the renderer dux uses to write
-/// configs. Going through render-then-parse normalizes fields the renderer
-/// materializes (e.g. an absent `resume_wait_timeout_ms` is written as `0`),
-/// so the comparison reflects exactly what dux wrote into existing configs.
-fn canonical_stock_config(stock: &ProviderCommandConfig) -> Option<ProviderCommandConfig> {
-    let mut rendered = String::new();
-    render_provider_config(&mut rendered, "probe", stock);
-    let doc: DocumentMut = rendered.parse().ok()?;
-    let table = doc.get("providers")?.get("probe")?.as_table()?;
-    provider_table_config(table)
-}
-
-/// Whether a config's provider table is the stock block dux shipped (so it can
-/// be retired), as opposed to one the user customized (which is preserved).
-fn table_matches_provider_config(table: &Table, stock: &ProviderCommandConfig) -> bool {
-    match (provider_table_config(table), canonical_stock_config(stock)) {
-        (Some(user), Some(canonical)) => user == canonical,
-        _ => false,
-    }
-}
-
-fn migrate_prompt_for_name(
-    doc: &mut DocumentMut,
-    old: DeprecatedConfigKey,
-    old_item: Item,
-) -> Result<()> {
-    let Some(prompt_for_name) = old_item.as_value().and_then(Value::as_bool) else {
-        bail!(
-            "unsupported config key [{}.{}]: expected a boolean value",
-            old.section,
-            old.key
-        );
-    };
-
-    let table = dux_core::config_write::ensure_table(doc, "defaults");
-    if !table.contains_key("enable_randomized_pet_name_by_default") {
-        table["enable_randomized_pet_name_by_default"] = toml_edit::value(!prompt_for_name);
-    }
-    Ok(())
-}
-
-/// Migrate the deprecated `[server] bind` key to the new host / port shape. A
-/// NON-LOOPBACK bind writes its IP into `host` and its port into `port` (so a
-/// previously public bind keeps serving where the operator put it), warning so
-/// the change is visible. A LOOPBACK bind is dropped silently; the new
-/// loopback-host default already covers it. An empty or unparseable value is
-/// dropped silently. Existing new-key values are never overwritten (the user's
-/// explicit choice wins).
-fn migrate_server_bind(
-    doc: &mut DocumentMut,
-    old: DeprecatedConfigKey,
-    old_item: Item,
-) -> Result<()> {
-    let Some(raw) = old_item.as_value().and_then(Value::as_str) else {
-        bail!(
-            "unsupported config key [{}.{}]: expected a string value",
-            old.section,
-            old.key
-        );
-    };
-
-    let Ok(addr) = raw.trim().parse::<std::net::SocketAddr>() else {
-        // Not a valid IP:port — nothing safe to migrate; let the new defaults
-        // apply. (An invalid bind would have failed the resolver anyway.)
-        //
-        // NOTE this also drops a hostname `bind` (e.g. "localhost:9000"):
-        // `SocketAddr` only parses literal IP:port. That is NOT a regression —
-        // the OLD resolver also parsed `bind` with `SocketAddr::from_str` and
-        // rejected hostnames (no DNS), so a hostname bind never worked.
-        return Ok(());
-    };
-
-    if addr.ip().is_loopback() {
-        // Loopback bind: the new default host is already loopback, so there is
-        // nothing to carry over. Drop it silently.
-        return Ok(());
-    }
-
-    // Non-loopback bind: carry the IP into `host` and the port into `port` so a
-    // previously reachable bind keeps serving where the operator placed it.
-    let table = dux_core::config_write::ensure_table(doc, "server");
-    if !table.contains_key("host") {
-        table["host"] = toml_edit::value(addr.ip().to_string());
-    }
-    if !table.contains_key("port") {
-        table["port"] = toml_edit::value(i64::from(addr.port()));
-    }
-    dux_core::logger::warn(&format!(
-        "[server] migrated the deprecated `bind = \"{raw}\"` to host = \"{}\" and port = {}. \
-         This server listens on a non-loopback address; only run it on a network you trust.",
-        addr.ip(),
-        addr.port()
-    ));
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1913,178 +1666,6 @@ agent_scrollback_lines = 10000
     }
 
     #[test]
-    fn config_deprecation_replace_migrates_prompt_for_name() {
-        let mut doc: DocumentMut = r#"
-[defaults]
-provider = "claude"
-prompt_for_name = false
-"#
-        .parse()
-        .expect("parse doc");
-
-        let changed = apply_config_deprecations(&mut doc).expect("migrate");
-
-        assert!(changed);
-        let defaults = doc["defaults"].as_table().expect("defaults table");
-        assert!(!defaults.contains_key("prompt_for_name"));
-        assert_eq!(
-            defaults["enable_randomized_pet_name_by_default"]
-                .as_value()
-                .and_then(Value::as_bool),
-            Some(true),
-        );
-    }
-
-    #[test]
-    fn config_deprecation_replace_preserves_explicit_new_key() {
-        let mut doc: DocumentMut = r#"
-[defaults]
-prompt_for_name = false
-enable_randomized_pet_name_by_default = false
-"#
-        .parse()
-        .expect("parse doc");
-
-        apply_config_deprecations(&mut doc).expect("migrate");
-
-        let defaults = doc["defaults"].as_table().expect("defaults table");
-        assert!(!defaults.contains_key("prompt_for_name"));
-        assert_eq!(
-            defaults["enable_randomized_pet_name_by_default"]
-                .as_value()
-                .and_then(Value::as_bool),
-            Some(false),
-        );
-    }
-
-    #[test]
-    fn server_bind_loopback_is_dropped_silently() {
-        // A loopback bind has nothing to carry over (the new default host is
-        // already loopback), so it is dropped and creates no host/port keys.
-        let mut doc: DocumentMut = r#"
-[server]
-bind = "127.0.0.1:9090"
-"#
-        .parse()
-        .expect("parse doc");
-
-        let changed = apply_config_deprecations(&mut doc).expect("migrate");
-        assert!(changed);
-
-        let server = doc["server"].as_table().expect("server table");
-        assert!(!server.contains_key("bind"), "bind must be dropped");
-        assert!(
-            !server.contains_key("host"),
-            "a loopback bind must NOT write host"
-        );
-        // Reparses into the new shape with the default host/port.
-        let config: Config = toml::from_str(&doc.to_string()).expect("reparse migrated config");
-        assert_eq!(config.server.host, "127.0.0.1");
-    }
-
-    #[test]
-    fn server_bind_non_loopback_migrates_into_host_and_port() {
-        let mut doc: DocumentMut = r#"
-[server]
-bind = "0.0.0.0:9000"
-"#
-        .parse()
-        .expect("parse doc");
-
-        let changed = apply_config_deprecations(&mut doc).expect("migrate");
-        assert!(changed);
-
-        let server = doc["server"].as_table().expect("server table");
-        assert!(!server.contains_key("bind"), "bind must be dropped");
-        assert_eq!(
-            server["host"].as_value().and_then(Value::as_str),
-            Some("0.0.0.0")
-        );
-        assert_eq!(
-            server["port"].as_value().and_then(Value::as_integer),
-            Some(9000)
-        );
-
-        // Reparses into the new shape with the migrated host/port.
-        let config: Config = toml::from_str(&doc.to_string()).expect("reparse migrated config");
-        assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.server.port, 9000);
-    }
-
-    #[test]
-    fn server_bind_migration_preserves_explicit_new_keys() {
-        // A non-loopback bind must NOT overwrite an explicitly-set host/port.
-        let mut doc: DocumentMut = r#"
-[server]
-bind = "0.0.0.0:9000"
-host = "10.0.0.1"
-port = 7000
-"#
-        .parse()
-        .expect("parse doc");
-
-        apply_config_deprecations(&mut doc).expect("migrate");
-        let server = doc["server"].as_table().expect("server table");
-        assert!(!server.contains_key("bind"));
-        assert_eq!(
-            server["host"].as_value().and_then(Value::as_str),
-            Some("10.0.0.1"),
-            "explicit host wins over the migrated bind host"
-        );
-        assert_eq!(
-            server["port"].as_value().and_then(Value::as_integer),
-            Some(7000),
-            "explicit port wins over the migrated bind port"
-        );
-    }
-
-    #[test]
-    fn config_deprecation_remove_discards_old_key() {
-        let mut doc: DocumentMut = r#"
-[defaults]
-obsolete = true
-"#
-        .parse()
-        .expect("parse doc");
-        let rules = [DeprecatedConfigKeyRule {
-            old: DeprecatedConfigKey {
-                section: "defaults",
-                key: "obsolete",
-            },
-            action: DeprecatedConfigKeyAction::Remove,
-        }];
-
-        let changed = apply_config_deprecations_with(&mut doc, &rules).expect("remove");
-
-        assert!(changed);
-        assert!(!doc["defaults"].as_table().unwrap().contains_key("obsolete"));
-    }
-
-    #[test]
-    fn config_deprecation_fail_rejects_old_key() {
-        let mut doc: DocumentMut = r#"
-[defaults]
-dangerous = true
-"#
-        .parse()
-        .expect("parse doc");
-        let rules = [DeprecatedConfigKeyRule {
-            old: DeprecatedConfigKey {
-                section: "defaults",
-                key: "dangerous",
-            },
-            action: DeprecatedConfigKeyAction::Fail {
-                message: "remove it manually",
-            },
-        }];
-
-        let err = apply_config_deprecations_with(&mut doc, &rules).expect_err("should fail");
-
-        assert!(err.to_string().contains("unsupported config key"));
-        assert!(err.to_string().contains("remove it manually"));
-    }
-
-    #[test]
     fn default_config_round_trips_commit_pane_height() {
         let mut config = Config::default();
         config.ui.commit_pane_height_pct = 30;
@@ -2289,56 +1870,6 @@ oneshot_output = "stdout"
         assert!(
             providers.iter().all(|(name, _)| *name != "gemini"),
             "gemini was retired and must not ship as a default provider"
-        );
-    }
-
-    #[test]
-    fn prune_retired_providers_removes_stock_gemini_block() {
-        // Render the stock gemini block with the real renderer (exactly how dux
-        // wrote it into existing configs), then confirm the migration prunes it.
-        let mut providers = ProvidersConfig::default();
-        providers
-            .commands
-            .insert("gemini".to_string(), retired_stock_gemini());
-        let mut rendered = String::new();
-        render_provider_configs(&mut rendered, &providers);
-        let mut doc: DocumentMut = rendered.parse().expect("parse rendered providers");
-        assert!(
-            doc["providers"].get("gemini").is_some(),
-            "precondition: the rendered config carries a gemini block"
-        );
-
-        let changed = prune_retired_providers(&mut doc);
-
-        assert!(changed, "stock gemini block should be pruned");
-        assert!(
-            doc["providers"].get("gemini").is_none(),
-            "stock gemini table should be removed from [providers]"
-        );
-        assert!(
-            doc["providers"].get("claude").is_some(),
-            "other provider tables must be left intact"
-        );
-    }
-
-    #[test]
-    fn prune_retired_providers_keeps_customized_gemini_block() {
-        // A user who points gemini at their own command keeps it (config wins).
-        let mut doc: DocumentMut = r#"
-[providers.gemini]
-command = "my-gemini-wrapper"
-oneshot_args = ["-p", "{prompt}"]
-oneshot_output = "stdout"
-"#
-        .parse()
-        .expect("parse doc");
-
-        let changed = prune_retired_providers(&mut doc);
-
-        assert!(!changed, "a customized gemini block must not be pruned");
-        assert!(
-            doc["providers"].get("gemini").is_some(),
-            "a customized gemini block must be preserved"
         );
     }
 
@@ -2765,9 +2296,19 @@ args = [\"-l\"]
         };
 
         // Seed an existing config that still ships the stock gemini provider,
-        // rendered exactly as dux would have written it.
+        // rendered exactly as dux would have written it. The stock block matcher
+        // now lives in core (`config_migrate`); this end-to-end test just needs
+        // the block on disk to prove `ensure_config` prunes AND persists it.
+        let stock_gemini = ProviderCommandConfig {
+            command: "gemini".to_string(),
+            args: Vec::new(),
+            resume_args: Some(vec!["--resume".to_string()]),
+            resume_wait_timeout_ms: None,
+            install_hint: Some("brew install gemini-cli".to_string()),
+            forward_scroll: None,
+        };
         let mut body = render_default_config();
-        render_provider_config(&mut body, "gemini", &retired_stock_gemini());
+        render_provider_config(&mut body, "gemini", &stock_gemini);
         fs::write(&paths.config_path, &body).expect("seed config");
         assert!(
             fs::read_to_string(&paths.config_path)

@@ -2104,6 +2104,29 @@ impl Engine {
     /// invoking this for the same session before the first worker's
     /// `PrStatusReady` event has been processed — does not bypass the
     /// rate-limit and spawn N concurrent `gh` subprocesses.
+    /// Seed `pr_statuses` from the persisted `latest_prs` rows so both startups
+    /// (the TUI and `dux serve`) show PR badges immediately, before the first
+    /// network poll and even when `gh` is unavailable. A no-op when GitHub
+    /// integration is off. The "OPEN"/"MERGED"/"CLOSED" decode is the shared
+    /// `gh::reconstruct_pr_from_stored`, so the mapping lives in one place.
+    pub fn seed_pr_statuses_from_store(&mut self) {
+        if !self.github_integration_enabled {
+            return;
+        }
+        let stored = self.session_store.load_all_latest_prs().unwrap_or_default();
+        for pr in stored {
+            if let Some(info) = crate::gh::reconstruct_pr_from_stored(&pr) {
+                self.pr_statuses.insert(pr.session_id, info);
+            }
+        }
+        if !self.pr_statuses.is_empty() {
+            crate::logger::info(&format!(
+                "[gh-integration] seeded {} PR statuses from database",
+                self.pr_statuses.len(),
+            ));
+        }
+    }
+
     pub fn spawn_pr_check_for_session(&mut self, session_id: &str, min_interval: Duration) {
         if !self.github_integration_enabled
             || !matches!(self.gh_status, crate::model::GhStatus::Available)
@@ -4549,6 +4572,63 @@ mod tests {
             launch_outcome_final(&LaunchOutcome::Missing),
             Final::clear()
         );
+    }
+
+    /// #5: seeding populates `pr_statuses` from the SQLite `latest_prs` rows via
+    /// the shared `gh::reconstruct_pr_from_stored`, so both startups (the TUI and
+    /// `dux serve`) show persisted PR badges immediately, before any network poll.
+    #[test]
+    fn seed_pr_statuses_from_store_populates_from_stored_rows() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        // The PR row has a FK to a session; seed the session first.
+        engine
+            .session_store
+            .upsert_session(&sample_session("s1", "p1", "feat"))
+            .expect("seed session");
+        engine
+            .session_store
+            .upsert_pr(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 42,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "A PR".to_string(),
+                url: "https://github.com/o/r/pull/42".to_string(),
+            })
+            .expect("seed a stored PR");
+
+        engine.seed_pr_statuses_from_store();
+
+        let info = engine.pr_statuses.get("s1").expect("seeded PR status");
+        assert_eq!(info.number, 42);
+        assert_eq!(info.state, crate::model::PrState::Open);
+    }
+
+    #[test]
+    fn seed_pr_statuses_from_store_is_a_noop_when_github_integration_is_off() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = false;
+        engine
+            .session_store
+            .upsert_session(&sample_session("s1", "p1", "feat"))
+            .expect("seed session");
+        engine
+            .session_store
+            .upsert_pr(&crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 42,
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                state: "OPEN".to_string(),
+                title: "A PR".to_string(),
+                url: "u".to_string(),
+            })
+            .expect("seed a stored PR");
+
+        engine.seed_pr_statuses_from_store();
+        assert!(engine.pr_statuses.is_empty());
     }
 
     /// The new-tab default provider resolution is core-owned (both Rust

@@ -2674,40 +2674,10 @@ impl App {
     /// Populate the in-memory PR status map from the database so the UI shows
     /// PR state immediately on startup, before the first background poll.
     fn seed_pr_statuses_from_db(&mut self) {
-        if !self.engine.github_integration_enabled {
-            return;
-        }
-        let stored = self
-            .engine
-            .session_store
-            .load_all_latest_prs()
-            .unwrap_or_default();
-        for pr in stored {
-            use crate::model::{PrInfo, PrState};
-            let state = match pr.state.as_str() {
-                "OPEN" => PrState::Open,
-                "MERGED" => PrState::Merged,
-                "CLOSED" => PrState::Closed,
-                _ => continue,
-            };
-            self.engine.pr_statuses.insert(
-                pr.session_id,
-                PrInfo {
-                    number: pr.pr_number,
-                    state,
-                    title: pr.title,
-                    host: pr.host,
-                    owner_repo: pr.owner_repo,
-                    url: pr.url,
-                },
-            );
-        }
-        if !self.engine.pr_statuses.is_empty() {
-            logger::info(&format!(
-                "[gh-integration] seeded {} PR statuses from database",
-                self.engine.pr_statuses.len(),
-            ));
-        }
+        // The seed (including the shared "OPEN"/"MERGED"/"CLOSED" decode) is the
+        // core-owned `Engine::seed_pr_statuses_from_store`, shared with the web
+        // server bootstrap so both surfaces show persisted PR badges on startup.
+        self.engine.seed_pr_statuses_from_store();
     }
 
     pub(crate) fn close_top_overlay(&mut self) -> bool {
@@ -4479,63 +4449,14 @@ pub(crate) fn sync_config_projects_with_store(
     bindings: &RuntimeBindings,
     session_store: &SessionStore,
 ) -> Result<()> {
-    validate_project_records("config.toml", &config.projects)?;
-    let mut stored = session_store.load_projects()?;
-    validate_project_records("SQLite", &stored)?;
-
-    let mut changed_config = false;
-    let mut changed_store = false;
-    let mut merged = config.projects.clone();
-
-    for (index, cfg_project) in config.projects.iter().enumerate() {
-        match stored.iter().position(|stored_project| {
-            stored_project.id == cfg_project.id
-                || same_expanded_project_path(stored_project, cfg_project)
-        }) {
-            Some(stored_index) => {
-                let stored_project = &stored[stored_index];
-                let (merged_config_project, merged_stored_project) =
-                    merge_project_records(cfg_project, stored_project)?;
-                if &merged_config_project != cfg_project {
-                    merged[index] = merged_config_project;
-                    changed_config = true;
-                }
-                if &merged_stored_project != stored_project {
-                    session_store.upsert_project_at(&merged_stored_project, stored_index as i64)?;
-                    stored[stored_index] = merged_stored_project;
-                    changed_store = true;
-                }
-            }
-            None => {
-                session_store.upsert_project_at(cfg_project, index as i64)?;
-                changed_store = true;
-                stored.push(cfg_project.clone());
-            }
-        }
-    }
-
-    for stored_project in stored {
-        let exists = merged.iter().any(|cfg_project| {
-            cfg_project.id == stored_project.id
-                || same_expanded_project_path(cfg_project, &stored_project)
-        });
-        if !exists {
-            let mut portable = stored_project;
-            portable.path = portable_project_path(&portable.path);
-            merged.push(portable);
-            changed_config = true;
-        }
-    }
-
-    if changed_config {
-        config.projects = merged;
-        save_config(&paths.config_path, config, bindings)?;
-    } else if changed_store {
-        // Keep the on-disk config normalized when the database was repaired
-        // from config-only projects.
-        save_config(&paths.config_path, config, bindings)?;
-    }
-    Ok(())
+    // The reconciliation DECISION (validate identity, merge per field, adopt
+    // config-only, write store-only back) is the core-owned
+    // `dux_core::config_sync::reconcile_config_projects`, shared with the web
+    // server's bootstrap. Only PERSISTING is a surface concern: the TUI renders
+    // the full commented template via `save_config`.
+    dux_core::config_sync::reconcile_config_projects(config, session_store, |config| {
+        save_config(&paths.config_path, config, bindings)
+    })
 }
 
 /// Pre-flight for the in-process TUI→web flip: resolve LOCAL MODE addresses
@@ -4606,119 +4527,14 @@ fn preflight_server_listeners(
     Ok((listeners, urls, warnings))
 }
 
-fn validate_project_records(source: &str, projects: &[crate::config::ProjectConfig]) -> Result<()> {
-    for (index, project) in projects.iter().enumerate() {
-        for other in projects.iter().skip(index + 1) {
-            if project.id == other.id {
-                anyhow::bail!(
-                    "Project sync conflict in {source}: duplicate project id \"{}\". Remove or rename one [[projects]] entry, then restart dux.",
-                    project.id
-                );
-            }
-            if same_expanded_project_path(project, other) {
-                anyhow::bail!(
-                    "Project sync conflict in {source}: duplicate project path \"{}\". Remove one duplicate project entry, then restart dux.",
-                    expanded_project_path(project).unwrap_or_else(|| project.path.clone())
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn merge_project_records(
-    config_project: &crate::config::ProjectConfig,
-    stored_project: &crate::config::ProjectConfig,
-) -> Result<(crate::config::ProjectConfig, crate::config::ProjectConfig)> {
-    let config_path = expanded_project_path(config_project);
-    let stored_path = expanded_project_path(stored_project);
-    if config_project.id == stored_project.id && config_path != stored_path {
-        anyhow::bail!(
-            "Project sync conflict for id \"{}\": config.toml points to \"{}\" but SQLite points to \"{}\". Edit config.toml or remove/re-add the project so both stores agree.",
-            config_project.id,
-            config_project.path,
-            stored_project.path
-        );
-    }
-    if config_path == stored_path && config_project.id != stored_project.id {
-        anyhow::bail!(
-            "Project sync conflict for path \"{}\": config.toml uses id \"{}\" but SQLite uses id \"{}\". Edit config.toml or remove/re-add the project so both stores agree.",
-            config_path.unwrap_or_else(|| config_project.path.clone()),
-            config_project.id,
-            stored_project.id
-        );
-    }
-
-    let mut merged_config = config_project.clone();
-    let mut merged_stored = stored_project.clone();
-
-    sync_config_authoritative_project_field(&mut merged_config.name, &mut merged_stored.name);
-    sync_config_authoritative_project_field(
-        &mut merged_config.default_provider,
-        &mut merged_stored.default_provider,
-    );
-    if merged_stored.leading_branch.is_none() {
-        merged_stored.leading_branch = merged_config.leading_branch.clone();
-    }
-    merged_config.leading_branch = None;
-    sync_config_authoritative_project_field(
-        &mut merged_config.startup_command,
-        &mut merged_stored.startup_command,
-    );
-    sync_config_authoritative_project_field(
-        &mut merged_config.auto_reopen_agents,
-        &mut merged_stored.auto_reopen_agents,
-    );
-    merged_stored.env = merged_config.env.clone();
-
-    Ok((merged_config, merged_stored))
-}
-
-fn sync_config_authoritative_project_field<T>(
-    config_value: &mut Option<T>,
-    stored_value: &mut Option<T>,
-) where
-    T: Clone,
-{
-    match config_value.as_ref() {
-        Some(config) => {
-            *stored_value = Some(config.clone());
-        }
-        None => {
-            *config_value = stored_value.clone();
-        }
-    }
-}
-
-fn same_expanded_project_path(
-    left: &crate::config::ProjectConfig,
-    right: &crate::config::ProjectConfig,
-) -> bool {
-    expanded_project_path(left).is_some_and(|left_path| {
-        expanded_project_path(right).is_some_and(|right_path| left_path == right_path)
-    })
-}
-
-fn expanded_project_path(project: &crate::config::ProjectConfig) -> Option<String> {
-    crate::config::expand_path(&project.path)
-}
-
-pub(crate) fn portable_project_path(path: &str) -> String {
-    let Some(home) = home::home_dir() else {
-        return path.to_string();
-    };
-    let path_buf = Path::new(path);
-    if let Ok(relative) = path_buf.strip_prefix(&home) {
-        let relative = relative.to_string_lossy();
-        if relative.is_empty() {
-            "$HOME".to_string()
-        } else {
-            format!("$HOME/{}", relative)
-        }
-    } else {
-        path.to_string()
-    }
-}
+// The project-reconciliation helpers (`validate_project_records`,
+// `merge_project_records`, and the config-authoritative field merge) moved to
+// core `dux_core::config_sync` and are reached there via
+// `sync_config_projects_with_store` above. The low-level path helpers stay
+// reachable to the OTHER TUI callers below (`persist_runtime_projects_*`,
+// `runtime_project_to_config`) as re-exports of the single core source.
+pub(crate) use dux_core::config_sync::portable_project_path;
+use dux_core::config_sync::{expanded_project_path, same_expanded_project_path};
 
 pub(crate) fn runtime_project_to_config(
     project: &Project,

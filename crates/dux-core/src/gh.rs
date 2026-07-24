@@ -639,6 +639,15 @@ fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
 
 /// Reconstruct a PrInfo from stored data without a network call.
 /// Used for terminal states (merged/closed) that don't need refreshing.
+/// Reconstruct a live [`PrInfo`] from a stored PR row's decoded state, or `None`
+/// when the stored state string is unrecognized. Shared by the PR-sync
+/// reconstruction paths and by `Engine::seed_pr_statuses_from_store` (startup PR
+/// badge seeding), so the "OPEN"/"MERGED"/"CLOSED" decode lives in exactly one
+/// place instead of being re-implemented per surface.
+pub fn reconstruct_pr_from_stored(stored: &StoredPr) -> Option<PrInfo> {
+    reconstruct_from_stored(stored)
+}
+
 fn reconstruct_from_stored(stored: &StoredPr) -> Option<PrInfo> {
     let state = match stored.state.as_str() {
         "MERGED" => PrState::Merged,

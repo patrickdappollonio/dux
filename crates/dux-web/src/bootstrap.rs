@@ -36,8 +36,33 @@ impl ConfigSurface for WebConfigSurface {
             let guard = ReloadCompletionGuard::new(worker_tx);
             // Re-read config from disk (read-only load — same as bootstrap). Returns the
             // REAL config, not Config::default().
-            let config = dux_core::config::load_config(&paths);
-            guard.complete(Ok(config));
+            let mut config = dux_core::config::load_config(&paths);
+            // Reconcile config's `[[projects]]` with SQLite on reload too (the
+            // "config wins" tenet), mirroring `TuiConfigSurface::reload` so an
+            // edited config.toml applies its project preferences on a live
+            // `dux serve`. A store-open or reconciliation error is surfaced
+            // through the reload result rather than crashing the reload thread.
+            let reconciled = SessionStore::open(&paths.sessions_db_path)
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|store| {
+                    #[allow(deprecated)]
+                    dux_core::config_sync::reconcile_config_projects(
+                        &mut config,
+                        &store,
+                        |config| {
+                            dux_core::config_write::save_config_with(
+                                &paths.config_path,
+                                config,
+                                dux_core::config_write::Durability::Fsync,
+                            )
+                        },
+                    )
+                    .map_err(|e| format!("{e:#}"))
+                });
+            match reconciled {
+                Ok(()) => guard.complete(Ok(config)),
+                Err(e) => guard.complete(Err(e)),
+            }
         });
     }
 
@@ -61,8 +86,23 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     // The single-instance lock must be held before any config read, DB open, or
     // config write — matching the TUI's invariant.
     let single_instance_lock = SingleInstanceLock::acquire(&paths.lock_path)?;
-    let config = dux_core::config::load_config(paths);
+    let mut config = dux_core::config::load_config(paths);
     let session_store = SessionStore::open(&paths.sessions_db_path)?;
+    // Reconcile config's `[[projects]]` with SQLite (the "config wins" tenet),
+    // the same core routine the TUI bootstrap runs, so `dux serve` also adopts
+    // config-only projects, applies config-edited preferences to SQLite, and
+    // validates identity conflicts. Persist any normalized config back through
+    // the core save path (surgical toml_edit patch, comment-preserving, when the
+    // file exists; a plain render otherwise). Blessed sync-direct: bootstrap runs
+    // before the engine's config-write queue exists, mirroring the TUI invariant.
+    #[allow(deprecated)]
+    dux_core::config_sync::reconcile_config_projects(&mut config, &session_store, |config| {
+        dux_core::config_write::save_config_with(
+            &paths.config_path,
+            config,
+            dux_core::config_write::Durability::Fsync,
+        )
+    })?;
     let sessions = session_store.load_sessions()?;
     let agent_tabs = session_store.load_agent_tabs()?;
     let projects = dux_core::project_browser::load_projects(
@@ -142,6 +182,11 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     };
 
     engine.normalize_restored_sessions();
+    // Seed PR badges from the persisted `latest_prs` rows (the same core routine
+    // the TUI runs at startup), so `dux serve` shows PR state immediately instead
+    // of blank until the first network poll, and shows persisted state even when
+    // `gh` is unavailable. A no-op when GitHub integration is off.
+    engine.seed_pr_statuses_from_store();
 
     Ok(engine)
 }
@@ -220,6 +265,37 @@ mod tests {
         assert!(
             spine.projects.iter().any(|p| p.id == seeded_id),
             "seeded project id should appear in the spine"
+        );
+    }
+
+    /// The server bootstrap runs the core project reconciliation: a config-only
+    /// `[[projects]]` entry (present in config.toml, absent from SQLite) is
+    /// adopted into the store and appears in the spine, so `dux serve` honors
+    /// config-declared projects (previously it read SQLite only).
+    #[test]
+    fn bootstrap_engine_adopts_a_config_only_project() {
+        let (_tmp, paths) = temp_paths();
+        // A config.toml declaring a project the store has never seen.
+        std::fs::write(
+            &paths.config_path,
+            "[[projects]]\nid = \"cfg-only\"\npath = \"$HOME/proj\"\nname = \"FromConfig\"\n",
+        )
+        .expect("write config");
+
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        assert!(
+            engine.spine().projects.iter().any(|p| p.id == "cfg-only"),
+            "the config-only project must be reconciled into the spine"
+        );
+        // And persisted into SQLite (the reconciliation adopted it).
+        let store = SessionStore::open(&paths.sessions_db_path).expect("reopen store");
+        assert!(
+            store
+                .load_projects()
+                .expect("load")
+                .iter()
+                .any(|p| p.id == "cfg-only"),
+            "the config-only project must be adopted into SQLite"
         );
     }
 }

@@ -1392,7 +1392,23 @@ pub fn load_config(paths: &DuxPaths) -> Config {
             // load (ServerConfig has no deny_unknown_fields), so warn once so the
             // operator knows their old value is no longer in effect.
             warn_on_removed_max_websocket_connections(&raw);
-            recover_config(&raw)
+            // Apply load-time config migrations IN MEMORY at every entrypoint
+            // (deprecated `[server] bind` -> host/port, `prompt_for_name`, and
+            // retired-provider pruning), so `dux serve` honors deprecated keys
+            // instead of silently dropping them. The TUI's `ensure_config`
+            // additionally PERSISTS the migrated document; here it is memory-only.
+            // A parse or migration failure falls through to the normal recovery
+            // path on the raw text (best effort, never fatal at load).
+            let migrated = raw
+                .parse::<toml_edit::DocumentMut>()
+                .ok()
+                .and_then(|mut doc| {
+                    crate::config_migrate::apply_load_migrations(&mut doc)
+                        .ok()
+                        .map(|_| doc.to_string())
+                })
+                .unwrap_or_else(|| raw.clone());
+            recover_config(&migrated)
         }
         Err(_) => Config::default(),
     };
@@ -1597,6 +1613,25 @@ pub struct ServerCliOverrides {
 /// accepted. `tailscale_ip` is the detected Tailscale address (or `None` when
 /// disabled / not detected); when present and not already covered by the primary
 /// bind it is added as a BEST-EFFORT leg.
+/// Parse a `[server] host` value into an [`std::net::IpAddr`], trimming
+/// surrounding whitespace first. The SINGLE server-host parser, shared by
+/// `resolve_server_plan` (the `dux server` bind path) and the TUI's early
+/// `validate_server_host`, so a whitespaced host parses consistently at both
+/// (previously the early check trimmed while the bind path did not, so
+/// `" 0.0.0.0"` passed the check and then failed the actual bind). Hostnames are
+/// not resolved; the value must be an IP literal such as `127.0.0.1` or
+/// `0.0.0.0`.
+pub fn parse_server_host(host: &str) -> Result<std::net::IpAddr, String> {
+    use std::str::FromStr;
+    let trimmed = host.trim();
+    std::net::IpAddr::from_str(trimmed).map_err(|_| {
+        format!(
+            "[server] host = \"{trimmed}\" is not a valid IP address. Use an IP literal such as \
+             127.0.0.1 (loopback) or 0.0.0.0 (all interfaces); hostnames are not resolved."
+        )
+    })
+}
+
 pub fn resolve_server_plan(
     server: &ServerConfig,
     cli: &ServerCliOverrides,
@@ -1610,14 +1645,7 @@ pub fn resolve_server_plan(
             )
         })?,
         None => {
-            let host: std::net::IpAddr = server.host.parse().map_err(|_| {
-                anyhow!(
-                    "invalid [server] host \"{}\": expected an IP address such as 127.0.0.1 \
-                     or 0.0.0.0 (hostnames are not resolved). Set [server] host in config.toml \
-                     or pass --bind IP:port.",
-                    server.host
-                )
-            })?;
+            let host = parse_server_host(&server.host).map_err(|e| anyhow!("{e}"))?;
             std::net::SocketAddr::new(host, cli.port.unwrap_or(server.port))
         }
     };
@@ -2138,6 +2166,89 @@ mod tests {
             lock_path: root.join("dux.lock"),
             root: root.to_path_buf(),
         }
+    }
+
+    /// #30: the ONE server-host parser is trimming and shared, so a config with
+    /// surrounding whitespace parses consistently at the early check and at
+    /// `resolve_server_plan` (which previously parsed untrimmed and failed a
+    /// value the TUI's trimming check had accepted).
+    #[test]
+    fn parse_server_host_trims_and_parses() {
+        assert_eq!(
+            parse_server_host("  0.0.0.0  ").expect("ok"),
+            std::net::IpAddr::from([0, 0, 0, 0])
+        );
+        assert!(parse_server_host("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn resolve_server_plan_accepts_a_whitespaced_host() {
+        let server = ServerConfig {
+            host: " 0.0.0.0 ".to_string(),
+            ..ServerConfig::default()
+        };
+        let plan = resolve_server_plan(&server, &ServerCliOverrides::default(), None)
+            .expect("a whitespaced host must resolve");
+        assert!(
+            plan.addrs
+                .iter()
+                .any(|a| a.addr().ip() == std::net::IpAddr::from([0, 0, 0, 0]))
+        );
+    }
+
+    /// #4: a deprecated `[server] bind` with a NON-loopback address must be
+    /// migrated IN MEMORY by `load_config` (host + port), so every entrypoint,
+    /// including `dux serve`, honors it instead of silently binding loopback.
+    #[test]
+    fn load_config_migrates_deprecated_server_bind_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(&paths.config_path, "[server]\nbind = \"0.0.0.0:9000\"\n")
+            .expect("write config");
+
+        let config = load_config(&paths);
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.server.port, 9000);
+    }
+
+    /// #31: an untouched stock block for a retired provider (gemini) must be
+    /// pruned IN MEMORY by `load_config` so `dux serve`'s provider pickers stop
+    /// offering it (previously only the TUI's `ensure_config` pruned it).
+    #[test]
+    fn load_config_prunes_a_retired_stock_provider_in_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        // The exact stock gemini block dux shipped (as its renderer wrote it).
+        std::fs::write(
+            &paths.config_path,
+            "[providers.gemini]\ncommand = \"gemini\"\nargs = []\nresume_args = [\"--resume\"]\nresume_wait_timeout_ms = 0\ninstall_hint = \"brew install gemini-cli\"\n",
+        )
+        .expect("write config");
+
+        let config = load_config(&paths);
+        assert!(
+            !config.providers.commands.contains_key("gemini"),
+            "an untouched stock retired provider must be pruned"
+        );
+    }
+
+    /// #31: a CUSTOMIZED block for a retired provider is preserved (config wins
+    /// for explicit preferences).
+    #[test]
+    fn load_config_keeps_a_customized_retired_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_test_paths(dir.path());
+        std::fs::write(
+            &paths.config_path,
+            "[providers.gemini]\ncommand = \"/opt/my-gemini\"\nargs = []\nresume_args = [\"--resume\"]\nresume_wait_timeout_ms = 0\n",
+        )
+        .expect("write config");
+
+        let config = load_config(&paths);
+        assert!(
+            config.providers.commands.contains_key("gemini"),
+            "a user-customized retired provider block must be kept"
+        );
     }
 
     #[test]
