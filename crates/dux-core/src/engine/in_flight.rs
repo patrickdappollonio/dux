@@ -58,6 +58,66 @@ impl RenameExpectation {
     }
 }
 
+/// Why `Engine::prepare_branch_rename` refused to start a rename. The engine
+/// mutated nothing for any of these; the surface owns the user-facing copy so
+/// each variant maps to that surface's own error string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchRenameRejection {
+    /// The requested name was empty (after trimming).
+    EmptyName,
+    /// The requested name failed `git::is_valid_agent_name`.
+    MalformedName,
+    /// A branch rename is already in flight for this session.
+    AlreadyInFlight,
+}
+
+/// The parameters a surface needs to dispatch the git branch-rename worker and
+/// to unwind on a spawn failure. Produced by `Engine::prepare_branch_rename`
+/// once it has written the optimistic title and stashed the expectation; the
+/// surface runs `git::rename_branch(worktree_path, old_branch, new_branch)` in
+/// its own background worker and, on a synchronous spawn failure, rolls back
+/// through `Engine::revert_optimistic_rename(session_id, previous_title)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchRenameDispatch {
+    /// The session whose branch is being renamed.
+    pub session_id: String,
+    /// The worktree the `git branch -m` runs in.
+    pub worktree_path: String,
+    /// The branch name before the rename (the `git branch -m` source).
+    pub old_branch: String,
+    /// The branch name to move to (the `git branch -m` target).
+    pub new_branch: String,
+    /// The title the session carried before the optimistic write, so the
+    /// surface (or the completion/unwind handlers) can restore it on failure.
+    pub previous_title: Option<String>,
+}
+
+/// The decision + side effects computed by `Engine::prepare_branch_rename`.
+/// The engine owns the semantics here (name validation, the overlap guard, the
+/// optimistic title write, no-op detection, and the expectation stash); the
+/// surface reads this value to drive its own status/worker/UI wiring. This is
+/// the single core-owned rename primitive both the TUI and a future web rename
+/// consume, so the decision cannot drift between surfaces.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BranchRenamePlan {
+    /// The rename was refused before any state change; surface the matching
+    /// error and stop.
+    Rejected(BranchRenameRejection),
+    /// The display title was updated and no git branch rename is required
+    /// (either the caller asked for title-only, or the new name already matches
+    /// the current branch). `sync_branches` is true only for the deliberate
+    /// title-only path (`rename_branch == false`), which also refreshes
+    /// branch-sync state; it is false for the name-equals-branch no-op.
+    TitleWritten { name: String, sync_branches: bool },
+    /// The display title was updated and the expectation stashed; the surface
+    /// must dispatch the git rename worker with these parameters.
+    RenameBranch(BranchRenameDispatch),
+    /// The target session vanished before the rename could be prepared (the
+    /// optimistic title write also found nothing). The surface stays silent,
+    /// matching the pre-extraction early return.
+    Noop,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

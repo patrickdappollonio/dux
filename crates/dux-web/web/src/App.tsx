@@ -23,6 +23,7 @@ import { CreateAgentDialog } from "@/components/CreateAgentDialog"
 import { NewAgentPickerDialog } from "@/components/NewAgentPickerDialog"
 import { RenameSessionDialog } from "@/components/RenameSessionDialog"
 import { CheckoutDefaultBranchDialog } from "@/components/CheckoutDefaultBranchDialog"
+import { DeleteProjectDialog } from "@/components/DeleteProjectDialog"
 import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MacrosDialog } from "@/components/MacrosDialog"
@@ -84,6 +85,7 @@ function GlobalOverlays() {
       <AddProjectDialog />
       <AttachWorktreeDialog />
       <RemoveProjectDialog />
+      <DeleteProjectDialog />
       <CheckoutDefaultBranchDialog />
       <Toaster />
       {/* The app-wide offline modal. Portals to the body and sits above every

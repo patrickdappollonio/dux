@@ -282,6 +282,12 @@ export interface DuxState {
     loading: boolean
   } | null
   removeProjectTarget: string | null
+  // The project pending a destructive cascade-delete confirmation, or null. The
+  // cascade removes the project, its agents, AND their worktrees from disk
+  // (delete_worktrees=true); the plain keep-worktrees variant uses
+  // `removeProjectTarget` above. Only offered for real projects, so unlike
+  // `removeProjectTarget` this routes through the vanish guard.
+  deleteProjectTarget: string | null
   // The project pending a default-branch checkout confirmation, or null. The
   // checkout moves the source checkout's HEAD, so the web confirms first (the
   // TUI runs it straight from a deliberate palette/keybinding action).
@@ -542,6 +548,7 @@ let state: DuxState = {
   browseLoading: false,
   projectPathInspection: null,
   removeProjectTarget: null,
+  deleteProjectTarget: null,
   checkoutDefaultBranchTarget: null,
   attachWorktreeTarget: null,
   attachWorktreeEntries: [],
@@ -2762,6 +2769,27 @@ export function removeProject(projectId: string): void {
     .remove(projectId)
     .catch((e) =>
       toast.error(e instanceof Error ? e.message : "Could not remove the project."),
+    )
+}
+
+export function openDeleteProject(projectId: string): void {
+  setState({ deleteProjectTarget: projectId })
+}
+
+export function closeDeleteProject(): void {
+  setState({ deleteProjectTarget: null })
+}
+
+// The destructive cascade: removes the project, its agents, AND their worktrees
+// from disk (delete_worktrees=true → WireCommand::DeleteProject). The plain
+// keep-worktrees variant is `removeProject`. Fire-and-forget like the other
+// project mutations; the keyed status stream reports the outcome, and a refusal
+// (e.g. a tab still launching) surfaces as an error toast.
+export function deleteProject(projectId: string): void {
+  projectsApi
+    .deleteWithWorktrees(projectId)
+    .catch((e) =>
+      toast.error(e instanceof Error ? e.message : "Could not delete the project."),
     )
 }
 

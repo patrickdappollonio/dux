@@ -24,7 +24,10 @@ pub use events::{
     FinishDeleteSessionOutcome, FinishDeleteSessionView, ProjectPersistenceOutcome,
     ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
 };
-pub use in_flight::{InFlightKey, InFlightSet, RenameExpectation};
+pub use in_flight::{
+    BranchRenameDispatch, BranchRenamePlan, BranchRenameRejection, InFlightKey, InFlightSet,
+    RenameExpectation,
+};
 pub use lifecycle::{
     DeferredWorktreeRemoval, GroupWorktreeRemoval, PrunedPty, PrunedPtyKind, ShutdownReport,
     TerminatingPty, clean_exit_closes_tab_row, format_shutdown_result, format_shutdown_start,
@@ -2279,6 +2282,109 @@ impl Engine {
         }
     }
 
+    /// Core-owned first half of a branch rename: validate the requested name,
+    /// enforce the single-rename overlap guard, write the display title
+    /// optimistically (and persist it), then decide whether a git branch
+    /// rename is actually needed. When it is, stash the expected branches so
+    /// the branch-sync poller can tell the user's own in-progress rename from
+    /// unrelated external drift, and return the parameters the surface hands to
+    /// `git::rename_branch` in its own background worker.
+    ///
+    /// This is the single decision both the TUI and a future web rename
+    /// consume, so validation, no-op detection, the optimistic write, and the
+    /// expectation stash cannot drift between surfaces. The engine deliberately
+    /// does NOT mark the rename in-flight here — that marker belongs to the
+    /// worker spawn (`BackgroundWorkerSpec::in_flight_key`), so a surface that
+    /// never dispatches (title-only or no-op) leaves no dangling marker.
+    ///
+    /// The surface still owns everything presentation-shaped: the keyed status
+    /// wording, the worker dispatch and its completion event, the list rebuild,
+    /// and, on a synchronous spawn failure, the unwind via
+    /// `revert_optimistic_rename`.
+    pub fn prepare_branch_rename(
+        &mut self,
+        session_id: &str,
+        new_name: &str,
+        rename_branch: bool,
+    ) -> BranchRenamePlan {
+        let name = new_name.trim().to_string();
+        if name.is_empty() {
+            return BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName);
+        }
+        if !crate::git::is_valid_agent_name(&name) {
+            return BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName);
+        }
+        // Block overlapping renames: a second concurrent `git branch -m` on the
+        // same worktree would race the first (and could corrupt the in-flight
+        // drift-suppression bookkeeping). Mirror the CreateAgent busy-guard.
+        if self.is_in_flight(&InFlightKey::BranchRename(session_id.to_string())) {
+            return BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight);
+        }
+
+        // Capture the previous title before mutating, in case a failed branch
+        // rename has to revert it.
+        let previous_title = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.title.clone());
+
+        // Always update the display title immediately (optimistic write).
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.title = Some(name.clone());
+            session.updated_at = Utc::now();
+        }
+        if let Some(session) = self.sessions.iter().find(|s| s.id == session_id) {
+            let _ = self.session_store.upsert_session(session);
+        }
+
+        if !rename_branch {
+            // Title-only change: the branch stays, but branch-sync display
+            // should refresh (matches the pre-extraction `else` arm).
+            return BranchRenamePlan::TitleWritten {
+                name,
+                sync_branches: true,
+            };
+        }
+
+        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
+            // The session vanished before we could resolve its branch (the
+            // optimistic write above also found nothing). Nothing to dispatch.
+            return BranchRenamePlan::Noop;
+        };
+        let old_branch = session.branch_name.clone();
+        if name == old_branch {
+            // The branch already carries this name: only the title changed, and
+            // there is nothing to sync.
+            return BranchRenamePlan::TitleWritten {
+                name,
+                sync_branches: false,
+            };
+        }
+        let worktree_path = session.worktree_path.clone();
+
+        // Stash the expected branches so `BranchSyncReady` can distinguish our
+        // own in-progress rename (silently skip) from an unrelated external
+        // change landing mid-rename (log it). Cleared alongside the in-flight
+        // marker in `BranchRenameCompleted`, or by `revert_optimistic_rename`
+        // on a spawn failure.
+        self.rename_expected.insert(
+            session_id.to_string(),
+            RenameExpectation {
+                old_branch: old_branch.clone(),
+                new_branch: name.clone(),
+            },
+        );
+
+        BranchRenamePlan::RenameBranch(BranchRenameDispatch {
+            session_id: session_id.to_string(),
+            worktree_path,
+            old_branch,
+            new_branch: name,
+            previous_title,
+        })
+    }
+
     /// Roll back the optimistic state that a rename call site set up before
     /// dispatching the branch-rename worker, for the rare case where the
     /// worker never started (a synchronous thread-spawn failure). Normally
@@ -3070,6 +3176,165 @@ mod tests {
             "git init failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn prepare_branch_rename_rejects_empty_and_malformed_names() {
+        // Validation is core-owned: an empty (or whitespace-only) name and a
+        // malformed one are both refused before any state change, so the
+        // optimistic title is never written for an invalid request.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.title = Some("keep-me".into());
+        engine.sessions.push(session);
+
+        for empty in ["", "   "] {
+            let plan = engine.prepare_branch_rename("s1", empty, true);
+            assert_eq!(
+                plan,
+                BranchRenamePlan::Rejected(BranchRenameRejection::EmptyName)
+            );
+        }
+        let plan = engine.prepare_branch_rename("s1", "-nope", true);
+        assert_eq!(
+            plan,
+            BranchRenamePlan::Rejected(BranchRenameRejection::MalformedName)
+        );
+
+        // Nothing was mutated by a refused request.
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.title.as_deref(), Some("keep-me"));
+        assert_eq!(s.branch_name, "old-branch");
+        assert!(engine.rename_expected.is_empty());
+    }
+
+    #[test]
+    fn prepare_branch_rename_rejects_when_rename_in_flight() {
+        // The overlap guard mirrors `apply_rename_session`: a second concurrent
+        // rename for the same session is refused so two `git branch -m` runs
+        // can't race on one worktree.
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_session("s1", "p1", "old-branch"));
+        engine.mark_in_flight(InFlightKey::BranchRename("s1".into()));
+
+        let plan = engine.prepare_branch_rename("s1", "new-name", true);
+        assert_eq!(
+            plan,
+            BranchRenamePlan::Rejected(BranchRenameRejection::AlreadyInFlight)
+        );
+    }
+
+    #[test]
+    fn prepare_branch_rename_title_only_writes_title_and_requests_sync() {
+        // `rename_branch == false`: the display title is written and persisted,
+        // the branch is left alone, and the surface is asked to refresh
+        // branch-sync (matching the pre-extraction `else` arm).
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.title = Some("before".into());
+        engine.sessions.push(session);
+
+        let plan = engine.prepare_branch_rename("s1", "  after  ", false);
+        assert_eq!(
+            plan,
+            BranchRenamePlan::TitleWritten {
+                name: "after".into(),
+                sync_branches: true,
+            }
+        );
+
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.title.as_deref(), Some("after"), "title written");
+        assert_eq!(s.branch_name, "old-branch", "branch untouched");
+        assert!(
+            engine.rename_expected.is_empty(),
+            "no expectation for a title-only change"
+        );
+        assert!(
+            !engine.is_in_flight(&InFlightKey::BranchRename("s1".into())),
+            "prepare must not mark in-flight; the worker spawn does"
+        );
+        // The title write was persisted (reload sees it).
+        let loaded = engine.session_store.load_sessions().expect("load");
+        let stored = loaded.iter().find(|s| s.id == "s1").expect("stored s1");
+        assert_eq!(stored.title.as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn prepare_branch_rename_noop_when_name_equals_branch() {
+        // A branch rename whose new name already equals the current branch is a
+        // no-op on git: the title is written but no expectation is stashed and
+        // the surface is NOT asked to sync (matching the name-equals-branch
+        // early return).
+        let (mut engine, _tmp) = test_engine();
+        engine
+            .sessions
+            .push(sample_session("s1", "p1", "same-branch"));
+
+        let plan = engine.prepare_branch_rename("s1", "same-branch", true);
+        assert_eq!(
+            plan,
+            BranchRenamePlan::TitleWritten {
+                name: "same-branch".into(),
+                sync_branches: false,
+            }
+        );
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.title.as_deref(), Some("same-branch"));
+        assert!(engine.rename_expected.is_empty());
+    }
+
+    #[test]
+    fn prepare_branch_rename_dispatches_and_stashes_expectation() {
+        // The real-rename path: the optimistic title is written, the expectation
+        // is stashed (so branch-sync skips our own in-progress rename), and the
+        // dispatch carries exactly the parameters the surface hands to
+        // `git::rename_branch`, plus the pre-write title for the unwind path.
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "old-branch");
+        session.title = Some("previous-title".into());
+        engine.sessions.push(session);
+
+        let plan = engine.prepare_branch_rename("s1", "new-name", true);
+        assert_eq!(
+            plan,
+            BranchRenamePlan::RenameBranch(BranchRenameDispatch {
+                session_id: "s1".into(),
+                worktree_path: "/tmp/s1-worktree".into(),
+                old_branch: "old-branch".into(),
+                new_branch: "new-name".into(),
+                previous_title: Some("previous-title".into()),
+            })
+        );
+
+        // Optimistic title written; expectation stashed; in-flight NOT yet set.
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.title.as_deref(), Some("new-name"));
+        let exp = engine
+            .rename_expected
+            .get("s1")
+            .expect("expectation stashed");
+        assert_eq!(exp.old_branch, "old-branch");
+        assert_eq!(exp.new_branch, "new-name");
+        assert!(!engine.is_in_flight(&InFlightKey::BranchRename("s1".into())));
+
+        // The unwind primitive restores the pre-write title and drops the stash.
+        engine.revert_optimistic_rename("s1", Some("previous-title".into()));
+        assert!(engine.rename_expected.is_empty());
+        let s = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(s.title.as_deref(), Some("previous-title"));
+    }
+
+    #[test]
+    fn prepare_branch_rename_noop_when_session_missing() {
+        // If the session vanished, prepare mutates nothing and returns Noop so
+        // the surface stays silent (the pre-extraction early return).
+        let (mut engine, _tmp) = test_engine();
+        let plan = engine.prepare_branch_rename("ghost", "new-name", true);
+        assert_eq!(plan, BranchRenamePlan::Noop);
+        assert!(engine.rename_expected.is_empty());
     }
 
     #[test]

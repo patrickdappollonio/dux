@@ -99,6 +99,14 @@ export const projectsApi = {
   }) => request<ProjectView>("POST", "/api/v1/projects", body),
   remove: (id: string) =>
     request<void>("DELETE", `/api/v1/projects/${encodeURIComponent(id)}`),
+  // The destructive cascade: `?delete_worktrees=true` routes the same DELETE to
+  // `WireCommand::DeleteProject`, which removes the project, its agents, AND
+  // their worktrees from disk (the plain `remove` above keeps the worktrees).
+  deleteWithWorktrees: (id: string) =>
+    request<void>(
+      "DELETE",
+      `/api/v1/projects/${encodeURIComponent(id)}?delete_worktrees=true`,
+    ),
   patch: (id: string, body: PatchProjectBody) =>
     request<void>("PATCH", `/api/v1/projects/${encodeURIComponent(id)}`, body),
   reorder: (projectIds: string[]) =>

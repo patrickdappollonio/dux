@@ -97,6 +97,22 @@ pub struct PrunedPty {
     /// no row), for a non-zero/unknown exit (the dormant relaunch screen is
     /// the crash-diagnosis surface), and for a companion terminal.
     pub tab_closed: bool,
+    /// The reaped child's exit-success (`Some(true)` clean, `Some(false)`
+    /// non-zero, `None` when only EOF was observed without a status). Captured
+    /// at reap time because `try_wait` yields the status exactly once; carried
+    /// out so a surface can key its exit message on it without a second reap.
+    /// Always `None` for a companion terminal (its exit needs no status copy).
+    pub exit_success: Option<bool>,
+    /// True when the exited agent produced only minimal output (no scrollback,
+    /// few visible lines) — the "resume printed a short error and quit" shape
+    /// the TUI embeds in its exit message. Captured at reap time, before
+    /// `clear_tab_runtime` drops the client. Always `false` for a terminal.
+    pub is_minimal: bool,
+    /// The visible-text excerpt captured when `is_minimal` is true (empty
+    /// otherwise, and always empty for a terminal). The TUI folds this into its
+    /// exit-status message and error log; the web ignores it. Captured off the
+    /// live client at reap time for the same once-only reason as `exit_success`.
+    pub output_excerpt: String,
 }
 
 /// Whether an exited agent tab's row should be closed along with the prune:
@@ -198,19 +214,30 @@ impl Engine {
         // Agent providers (keyed by session id). Capture each exited client's
         // exit-success so a clean exit can clear `desired_running` (matching the
         // TUI), which keeps a deliberately-exited agent from auto-reopening.
-        let exited_agents: Vec<(String, Option<bool>)> = self
+        // Capture the minimal-output excerpt in the SAME pass, before
+        // `clear_tab_runtime` below drops the client: `try_wait` reaps the child
+        // and yields its status exactly once, and the TUI's exit-status message
+        // needs this data off the returned value (a second reap by any surface
+        // would see `None`). The web ignores these two fields.
+        let exited_agents: Vec<(String, Option<bool>, bool, String)> = self
             .providers
             .iter_mut()
             .filter_map(|(id, client)| {
                 let exit_success = client.try_wait().map(|status| status.success());
                 if exit_success.is_some() || client.is_exited() {
-                    Some((id.clone(), exit_success))
+                    let is_minimal = client.has_minimal_output(5);
+                    let output_excerpt = if is_minimal {
+                        client.visible_text_excerpt(usize::MAX)
+                    } else {
+                        String::new()
+                    };
+                    Some((id.clone(), exit_success, is_minimal, output_excerpt))
                 } else {
                     None
                 }
             })
             .collect();
-        for (tab_id, exit_success) in exited_agents {
+        for (tab_id, exit_success, is_minimal, output_excerpt) in exited_agents {
             // Resolve the exited PTY's owning session and whether it was the Main
             // tab. `providers` is keyed by tab id, so an extra-tab id never
             // matches a session id directly — resolve via the tab index first, or
@@ -283,6 +310,9 @@ impl Engine {
                 agent_detached,
                 label,
                 tab_closed,
+                exit_success,
+                is_minimal,
+                output_excerpt,
             });
         }
 
@@ -312,6 +342,11 @@ impl Engine {
                 agent_detached: false,
                 label,
                 tab_closed: false,
+                // A terminal exit carries no status message, so it needs none of
+                // the agent exit-message fields.
+                exit_success: None,
+                is_minimal: false,
+                output_excerpt: String::new(),
             });
         }
 
@@ -811,6 +846,130 @@ mod tests {
             engine.agent_tabs.contains_key("tab-crash"),
             "the crashed tab's dormant row must survive"
         );
+    }
+
+    #[test]
+    fn prune_carries_exit_success_and_minimal_output_excerpt() {
+        // The TUI's exit-status message needs the reaped exit-success plus a
+        // minimal-output excerpt, and both must ride out on the PrunedPty (the
+        // reap consumes `try_wait` once, so a second surface can't re-read them).
+        // A crashing agent that printed a short line is the canonical shape.
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        // Print one short line, then exit non-zero: minimal output + a crash.
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &["-c".to_string(), "printf 'boom\\n'; exit 3".to_string()],
+            worktree.path(),
+            24,
+            80,
+            1000,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert("s1".to_string(), client);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "s1") {
+                break pruned;
+            }
+            assert!(Instant::now() < deadline, "agent provider never exited");
+            sleep(Duration::from_millis(50));
+        };
+
+        let agent = pruned.iter().find(|p| p.id == "s1").expect("s1 pruned");
+        assert_eq!(
+            agent.exit_success,
+            Some(false),
+            "a non-zero exit must be carried as exit_success = Some(false)"
+        );
+        assert!(
+            agent.is_minimal,
+            "a one-line-then-exit agent has minimal output"
+        );
+        assert!(
+            agent.output_excerpt.contains("boom"),
+            "the captured excerpt must carry the agent's final output, got {:?}",
+            agent.output_excerpt
+        );
+    }
+
+    #[test]
+    fn prune_carries_clean_exit_success_and_terminal_has_no_message_fields() {
+        // A clean exit reports Some(true); a companion terminal never carries
+        // the agent exit-message fields (its exit has no status copy).
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+
+        // Clean-exiting agent (cat exits 0 on EOF).
+        let client = spawn_cat(worktree.path());
+        engine.providers.insert("s1".to_string(), client);
+        engine
+            .providers
+            .get_mut("s1")
+            .unwrap()
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        // A companion terminal that will also EOF-exit.
+        let (terminal_id, _label) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create companion terminal");
+        engine
+            .companion_terminals
+            .get(&terminal_id)
+            .unwrap()
+            .client
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut agent_seen = None;
+        let mut terminal_seen = None;
+        while Instant::now() < deadline && (agent_seen.is_none() || terminal_seen.is_none()) {
+            for p in engine.prune_exited_ptys() {
+                if p.id == "s1" {
+                    agent_seen = Some(p);
+                } else if p.id == terminal_id {
+                    terminal_seen = Some(p);
+                }
+            }
+            if agent_seen.is_none() || terminal_seen.is_none() {
+                sleep(Duration::from_millis(50));
+            }
+        }
+
+        let agent = agent_seen.expect("agent pruned");
+        assert_eq!(
+            agent.exit_success,
+            Some(true),
+            "a clean exit must carry exit_success = Some(true)"
+        );
+        let terminal = terminal_seen.expect("terminal pruned");
+        assert_eq!(terminal.exit_success, None);
+        assert!(!terminal.is_minimal);
+        assert!(terminal.output_excerpt.is_empty());
     }
 
     #[test]

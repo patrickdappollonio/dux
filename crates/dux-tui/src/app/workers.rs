@@ -4,7 +4,7 @@ use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
+    ProjectPersistenceView, PrunedPtyKind, StatusUpdate, WorktreeRemoval,
 };
 
 use super::*;
@@ -96,169 +96,155 @@ impl App {
         for removal in self.engine.reap_terminating_ptys() {
             let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
         }
-        // Detect PTY exits (the sweep above already pulled every retried resume
-        // candidate out of `providers`, so `exited` carries only exits handled
-        // by the normal prune path below). `is_minimal`/`output` are captured for
-        // the exit STATUS MESSAGE, not for resume decisions (those are the sweep's).
-        let mut exited = Vec::new();
-        for (session_id, provider) in &mut self.engine.providers {
-            let exit_success = provider.try_wait().map(|status| status.success());
-            if exit_success.is_some() || provider.is_exited() {
-                let is_minimal = provider.has_minimal_output(5);
-                let output = if is_minimal {
-                    provider.visible_text_excerpt(usize::MAX)
-                } else {
-                    String::new()
-                };
-                exited.push((session_id.clone(), exit_success, is_minimal, output));
-            }
-        }
+        // Snapshot the pre-teardown state the post-prune UI reactions need but
+        // that `prune_exited_ptys` mutates or removes: the selected session and
+        // its focused tab (for `was_focused_tab`), and each extra tab's provider
+        // (for the "Tab (provider) exited" copy, which must survive even when a
+        // clean-exit close deletes the row before we read it).
+        let selected_before = self.selected_session().map(|s| s.id.clone());
+        let focused_tab_before = selected_before.as_ref().map(|sid| self.focused_tab_id(sid));
+        let tab_providers: std::collections::HashMap<String, String> = self
+            .engine
+            .agent_tabs
+            .iter()
+            .map(|(id, tab)| (id.clone(), tab.provider.as_str().to_string()))
+            .collect();
 
-        // The exit-driven and timeout-driven resume-fallback retries used to live
-        // here (and in `retry_hung_resume_sessions`); both are now the core
-        // `sweep_resume_fallbacks` called at the top of this method, before exit
-        // detection. A retried candidate's provider is already gone, so `exited`
-        // never contains it, so no per-tab "handled" bookkeeping is needed here.
-        for (tab_id, exit_success, _, _) in &exited {
-            // `providers` is keyed by tab id. Resolve the exited PTY's owning
-            // session and whether it was the session-slot tab BEFORE mutating. No
-            // tab is privileged: the agent detaches only once its LAST live tab is
-            // gone, so we recompute liveness AFTER clearing this tab's maps.
-            let owning = self.engine.owning_session_for_tab(tab_id);
-            let is_main = owning.as_deref() == Some(tab_id.as_str());
-            let support_provider = (!is_main).then(|| {
-                self.engine
-                    .agent_tabs
-                    .get(tab_id)
-                    .map(|t| t.provider.as_str().to_string())
-                    .unwrap_or_default()
-            });
-            // Tear down EVERY runtime map keyed by this exited tab via the
-            // single-source `clear_tab_runtime` (the same helper core's
-            // `prune_exited_ptys` uses), not a hand-enumerated subset. The old
-            // list dropped providers/pins/activity/input/resume-candidates but
-            // LEAKED `needs_attention`, `pty_progress`, `agent_viewed`, and the
-            // in-flight `AgentLaunch` key (one stranded entry per exited tab on
-            // a long-running session, and a stale flag that could resurface on a
-            // recycled id). This tab is not resume-handled (those were removed
-            // from the exited set above), so clearing its in-flight key, which
-            // it does not hold, is a harmless no-op.
-            self.engine.clear_tab_runtime(tab_id);
-            if let Some(session_id) = owning {
-                let agent_detached = !self.engine.any_tab_active(&session_id);
-                if agent_detached {
-                    // A clean exit of the session-slot tab is the "user quit the
-                    // agent" signal that cancels auto-reopen; an extra tab (or a
-                    // crash) leaves the auto-reopen intent untouched.
-                    if is_main && *exit_success == Some(true) {
-                        self.engine.mark_session_desired_running(&session_id, false);
-                    }
-                    self.engine
-                        .mark_session_status(&session_id, SessionStatus::Detached);
+        // Core owns the exit teardown now: reap exited agent tabs and companion
+        // terminals, clear their runtime maps, detach agents whose last tab is
+        // gone, close clean-exit extra-tab rows, and fire the session-slot PR
+        // re-check — the SAME `prune_exited_ptys` the web actor consumes, so the
+        // teardown no longer forks per surface. The sweep above already pulled
+        // every retried resume candidate out of `providers`, so a retried
+        // candidate never appears in the result. Each pruned agent carries the
+        // reaped exit-success plus the minimal-output excerpt this surface folds
+        // into its exit-status message (both consumed once at reap, so they ride
+        // out on the value rather than a second read).
+        let pruned = self.engine.prune_exited_ptys();
+        let any_agent_pruned = pruned.iter().any(|p| p.kind == PrunedPtyKind::Agent);
+
+        // Per-tab UI reactions for each pruned agent tab. Core already tore the
+        // tab down; this only surfaces the scoped message and moves focus off a
+        // vanished tab. `rebuild_left_items` runs once after the loop, only when
+        // a tab_closed removed a row (matching the pre-convergence behavior,
+        // which rebuilt only on a row close).
+        let mut rebuild_needed = false;
+        for pty in pruned.iter().filter(|p| p.kind == PrunedPtyKind::Agent) {
+            let Some(TerminalOwner::Session(session_id)) = &pty.owner else {
+                // An orphan tab with no owning session: nothing to surface.
+                continue;
+            };
+            let is_main = pty.id == *session_id;
+            let was_focused_tab = selected_before.as_deref() == Some(session_id.as_str())
+                && focused_tab_before.as_deref() == Some(pty.id.as_str());
+            // The provider descriptor for the "Tab (provider) exited" copy, only
+            // for an extra tab (the session-slot tab shows the workspace exit
+            // message below, not a tab-scoped one).
+            let support_provider =
+                (!is_main).then(|| tab_providers.get(&pty.id).cloned().unwrap_or_default());
+            if pty.tab_closed {
+                if let Some(provider) = &support_provider {
+                    self.set_info(format!("Tab ({provider}) exited cleanly and was closed."));
                 }
-                let was_focused_tab = self.selected_session().is_some_and(|s| s.id == session_id)
-                    && &self.focused_tab_id(&session_id) == tab_id;
-                // A clean exit (code 0) of an extra tab closes the tab itself —
-                // the user deliberately ended that conversation (e.g. /exit),
-                // and the row holds nothing worth keeping (the provider's
-                // conversation history lives in the worktree). Shared rule with
-                // the web's `prune_exited_ptys`: `clean_exit_closes_tab_row`.
-                // A crash keeps the dormant relaunch screen for diagnosis.
-                let tab_closed =
-                    dux_core::engine::clean_exit_closes_tab_row(is_main, *exit_success)
-                        && self.engine.remove_agent_tab_row(tab_id);
-                if tab_closed {
-                    if let Some(provider) = &support_provider {
-                        self.set_info(format!("Tab ({provider}) exited cleanly and was closed."));
-                    }
-                    if was_focused_tab {
-                        // Land on a live sibling; with none left, this falls
-                        // back to the (now dormant) session-slot tab.
-                        let target = self
-                            .engine
-                            .first_live_tab(&session_id)
-                            .unwrap_or_else(|| session_id.clone());
-                        self.set_focused_tab(&session_id, &target);
-                        if self.session_surface == SessionSurface::Agent {
-                            // The surface under the user just vanished: drop
-                            // interactive input and the fullscreen overlay.
-                            // With no live sibling the agent detached, so land
-                            // in the list exactly like a single agent's clean
-                            // exit does.
-                            self.input_target = InputTarget::None;
-                            self.fullscreen_overlay = FullscreenOverlay::None;
-                            self.terminal_selection = None;
-                            self.in_bracket_paste = false;
-                            self.raw_input_buf.clear();
-                            self.raw_input_parser.clear();
-                            self.loading_input_buf.clear();
-                            if agent_detached {
-                                self.focus = FocusPane::Left;
-                            }
-                        }
-                    }
-                    self.rebuild_left_items();
-                } else {
-                    if let Some(provider) = &support_provider {
-                        self.set_info(format!("Tab ({provider}) exited."));
-                    }
-                    // If the user was interactive ON this tab when its CLI
-                    // exited, drop interactive input right now. Leaving
-                    // `input_target` on Agent keeps the raw-input path engaged
-                    // against the pruned provider for another tick and then
-                    // surfaces a misleading "Agent disconnected." error — and
-                    // until that tick, every escape key is swallowed by the
-                    // passthrough. The fullscreen overlay deliberately stays
-                    // up: the dormant-tab relaunch screen is the desired
-                    // post-crash view, and Esc/Tab/Ctrl-g/a click outside all
-                    // dismiss it from here.
-                    if self.input_target == InputTarget::Agent
-                        && self.session_surface == SessionSurface::Agent
-                        && was_focused_tab
-                    {
+                if was_focused_tab {
+                    // Land on a live sibling; with none left, this falls back to
+                    // the (now dormant) session-slot tab.
+                    let target = self
+                        .engine
+                        .first_live_tab(session_id)
+                        .unwrap_or_else(|| session_id.clone());
+                    self.set_focused_tab(session_id, &target);
+                    if self.session_surface == SessionSurface::Agent {
+                        // The surface under the user just vanished: drop
+                        // interactive input and the fullscreen overlay. With no
+                        // live sibling the agent detached, so land in the list
+                        // exactly like a single agent's clean exit does.
                         self.input_target = InputTarget::None;
+                        self.fullscreen_overlay = FullscreenOverlay::None;
                         self.terminal_selection = None;
                         self.in_bracket_paste = false;
                         self.raw_input_buf.clear();
                         self.raw_input_parser.clear();
                         self.loading_input_buf.clear();
+                        if pty.agent_detached {
+                            self.focus = FocusPane::Left;
+                        }
                     }
+                }
+                rebuild_needed = true;
+            } else {
+                if let Some(provider) = &support_provider {
+                    self.set_info(format!("Tab ({provider}) exited."));
+                }
+                // If the user was interactive ON this tab when its CLI exited,
+                // drop interactive input right now. Leaving `input_target` on
+                // Agent keeps the raw-input path engaged against the pruned
+                // provider for another tick and then surfaces a misleading
+                // "Agent disconnected." error — and until that tick, every escape
+                // key is swallowed by the passthrough. The fullscreen overlay
+                // deliberately stays up: the dormant-tab relaunch screen is the
+                // desired post-crash view, and Esc/Tab/Ctrl-g/a click outside all
+                // dismiss it from here.
+                if self.input_target == InputTarget::Agent
+                    && self.session_surface == SessionSurface::Agent
+                    && was_focused_tab
+                {
+                    self.input_target = InputTarget::None;
+                    self.terminal_selection = None;
+                    self.in_bracket_paste = false;
+                    self.raw_input_buf.clear();
+                    self.raw_input_parser.clear();
+                    self.loading_input_buf.clear();
                 }
             }
         }
-        if !exited.is_empty() {
-            // If the currently-viewed session just exited, leave interactive
-            // mode. (A resume-fallback retry already removed its provider before
-            // exit detection, so a retried session never appears in `exited`.)
-            if let Some(current) = self.selected_session()
-                && let Some((_, exit_success, is_minimal, excerpt)) =
-                    exited.iter().find(|(id, _, _, _)| id == &current.id)
+        if rebuild_needed {
+            self.rebuild_left_items();
+        }
+
+        if any_agent_pruned {
+            // If the currently-viewed session's OWN agent (its session-slot tab)
+            // just exited, surface the workspace exit message and leave
+            // interactive mode. (A resume-fallback retry already removed its
+            // provider before the prune, so a retried session never appears.)
+            if let Some(current_id) = self.selected_session().map(|s| s.id.clone())
+                && let Some(pty) = pruned.iter().find(|p| {
+                    p.kind == PrunedPtyKind::Agent
+                        && p.id == current_id
+                        && matches!(&p.owner, Some(TerminalOwner::Session(sid)) if *sid == current_id)
+                })
                 // Don't bounce out of the pane if a live extra tab is focused:
-                // the Main provider exited, but the user is driving an extra tab.
+                // the session-slot provider exited, but the user is driving an
+                // extra tab.
                 && {
-                    let focused = self.focused_tab_id(&current.id);
-                    focused == current.id || !self.engine.providers.contains_key(&focused)
+                    let focused = self.focused_tab_id(&current_id);
+                    focused == current_id || !self.engine.providers.contains_key(&focused)
                 }
             {
                 let key = self.bindings.label_for(Action::ReconnectAgent);
                 if self.session_surface == SessionSurface::Agent {
-                    if *is_minimal && !excerpt.trim().is_empty() {
-                        let provider = self
-                            .engine
-                            .running_provider_for(current)
-                            .as_str()
-                            .to_string();
+                    if pty.is_minimal
+                        && !pty.output_excerpt.trim().is_empty()
+                        && let Some(current) = self.selected_session()
+                    {
+                        let branch = current.branch_name.clone();
+                        let provider =
+                            self.engine.running_provider_for(current).as_str().to_string();
                         logger::error(&format!(
-                            "Agent CLI process for agent \"{}\" ({provider}) exited. Full captured output:\n{}",
-                            current.branch_name, excerpt
+                            "Agent CLI process for agent \"{branch}\" ({provider}) exited. Full captured output:\n{}",
+                            pty.output_excerpt
                         ));
                     }
-                    let status =
-                        agent_exit_status_message(*exit_success, *is_minimal, excerpt, &key);
+                    let status = agent_exit_status_message(
+                        pty.exit_success,
+                        pty.is_minimal,
+                        &pty.output_excerpt,
+                        &key,
+                    );
                     self.input_target = InputTarget::None;
                     self.fullscreen_overlay = FullscreenOverlay::None;
                     self.focus = FocusPane::Left;
-                    if *exit_success == Some(false) {
+                    if pty.exit_success == Some(false) {
                         self.set_error(status);
                     } else {
                         self.set_info(status);
@@ -269,39 +255,22 @@ impl App {
                     ));
                 }
             }
-            // Trigger PR status check for exited session-slot tab agents only (an extra
-            // tab id is not a session id; an extra-tab exit is not an agent exit).
-            for sid in &exited {
-                let tab_id = &sid.0;
-                let is_main =
-                    self.engine.owning_session_for_tab(tab_id).as_deref() == Some(tab_id.as_str());
-                if is_main {
-                    self.engine.spawn_pr_check_for_session(
-                        tab_id,
-                        dux_core::engine::PR_CHECK_MIN_INTERVAL,
-                    );
-                }
-            }
+            // The PR re-check for an exited session-slot tab is now fired inside
+            // `prune_exited_ptys` (the shared exit trigger both surfaces get), so
+            // the TUI no longer fires its own — the redundancy is collapsed.
         }
 
-        let mut exited_terminal_ids = Vec::new();
-        for (terminal_id, terminal) in &mut self.engine.companion_terminals {
-            if terminal.client.is_exited() || terminal.client.try_wait().is_some() {
-                exited_terminal_ids.push(terminal_id.clone());
-            }
-        }
-        for terminal_id in &exited_terminal_ids {
-            self.engine.companion_terminals.remove(terminal_id);
-            // Terminals share `pty_activity`/`pty_input` (keyed by the disjoint
-            // `term-N` id), so clear them via the terminal single-source helper
-            // a bare `remove` above would leak a recycled id's stale activity
-            // (core's `prune_exited_ptys` does the same via `clear_terminal_runtime`).
-            self.engine.clear_terminal_runtime(terminal_id);
-        }
+        // Companion-terminal UI reactions (core already removed the terminals and
+        // cleared their runtime maps).
+        let exited_terminal_ids: Vec<String> = pruned
+            .iter()
+            .filter(|p| p.kind == PrunedPtyKind::Terminal)
+            .map(|p| p.id.clone())
+            .collect();
         if !exited_terminal_ids.is_empty() {
             // If the active terminal just exited, close the overlay.
-            if let Some(ref active_id) = self.active_terminal_id
-                && exited_terminal_ids.contains(active_id)
+            if let Some(active_id) = self.active_terminal_id.clone()
+                && exited_terminal_ids.contains(&active_id)
             {
                 self.active_terminal_id = None;
                 if self.input_target == InputTarget::Terminal {

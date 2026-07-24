@@ -8,6 +8,7 @@ import {
   openCheckoutDefaultBranch,
   openCreateAgent,
   openCreateAgentFromPr,
+  openDeleteProject,
   openProjectInfo,
   openProjectSettings,
   openRemoveProject,
@@ -18,6 +19,7 @@ import {
   Bot,
   Download,
   FolderGit2,
+  FolderX,
   GitBranch,
   GitPullRequest,
   Info,
@@ -92,6 +94,15 @@ export function ProjectMenuItems({ id }: { id: string }) {
             Project settings…
           </DropdownMenuItem>
           <DropdownMenuSeparator />
+          {/* The destructive cascade (also deletes agents' worktrees on disk).
+              Only for a real project — the DeleteProject command 404s on an
+              orphaned ghost, and there is nothing on disk to cascade. Neutral
+              color; the trailing "…" plus the confirm dialog are the danger
+              signal. */}
+          <DropdownMenuItem onClick={() => openDeleteProject(id)}>
+            <FolderX />
+            Delete project…
+          </DropdownMenuItem>
         </>
       )}
       <DropdownMenuItem onClick={() => openRemoveProject(id)}>

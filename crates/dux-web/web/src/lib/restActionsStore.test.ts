@@ -163,6 +163,17 @@ describe("store write actions route to REST", () => {
     expect(actionCalls[0].method).toBe("DELETE")
   })
 
+  it("deleteProject DELETEs the cascade endpoint with delete_worktrees=true", async () => {
+    // The destructive cascade must route to the `?delete_worktrees=true`
+    // variant (WireCommand::DeleteProject) so agents AND their worktrees are
+    // removed; the plain keep-worktrees `removeProject` omits the flag.
+    const mod = await loadStore()
+    mod.deleteProject("p1")
+    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
+    expect(actionCalls[0].url).toBe("/api/v1/projects/p1?delete_worktrees=true")
+    expect(actionCalls[0].method).toBe("DELETE")
+  })
+
   it("toggleSessionAutoReopen PATCHes auto_reopen", async () => {
     const mod = await loadStore()
     mod.toggleSessionAutoReopen("s1", false)
