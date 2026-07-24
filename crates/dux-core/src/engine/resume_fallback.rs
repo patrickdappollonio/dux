@@ -7,10 +7,65 @@
 //! Background and rationale: see
 //! `docs/superpowers/specs/2026-05-31-finish-delete-and-resume-fallback-design.md`.
 
+use std::time::Duration;
+
 use crate::engine::events::EventReaction;
 use crate::engine::{Command, Engine, InFlightKey};
 use crate::model::{AgentSession, ProviderKind, SessionStatus};
 use crate::worker::{AgentLaunchKind, AgentLaunchRequest};
+
+/// Visible-line threshold below which a resumed provider's output counts as
+/// "minimal" (no real conversation): a `--continue` that found nothing prints a
+/// short error and exits. Shared by both detection windows.
+pub const RESUME_MINIMAL_OUTPUT_LINES: usize = 5;
+
+/// What the resume-fallback sweep should do with one resume candidate, decided
+/// purely from its observable state. Pure and unit-tested so the two detection
+/// windows (`--continue` exits empty; a resume hangs past its timeout) live in
+/// one place and `dux serve` gets the same behavior the TUI has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeFallbackDecision {
+    /// The resumed provider EXITED with only minimal output: the resume found no
+    /// prior conversation, so relaunch fresh (window a).
+    RetryExitedMinimal,
+    /// The resumed provider EXITED with real output: it ran a conversation that
+    /// ended normally, so drop the candidate and let the exit-prune path detach
+    /// it (never a fresh relaunch).
+    DropNonMinimalExit,
+    /// The resumed provider is STILL RUNNING but produced no visible output past
+    /// its `resume_wait_timeout_ms` window: treat it as hung and relaunch fresh
+    /// (window b).
+    RetryHungTimeout,
+    /// Healthy (or not yet decidable): leave the candidate alone.
+    Wait,
+}
+
+/// The pure resume-fallback decision. `exited`/`minimal`/`has_output` are the
+/// provider's observable flags; `timeout_ms` is the provider's configured
+/// `resume_wait_timeout_ms` (`None` or `0` disables the hung window); `elapsed`
+/// is how long the resume has been running. No engine or PTY access, so the
+/// whole matrix is unit-tested without spawning a process.
+pub(crate) fn resume_fallback_decision(
+    exited: bool,
+    minimal: bool,
+    has_output: bool,
+    timeout_ms: Option<u64>,
+    elapsed: Duration,
+) -> ResumeFallbackDecision {
+    if exited {
+        return if minimal {
+            ResumeFallbackDecision::RetryExitedMinimal
+        } else {
+            ResumeFallbackDecision::DropNonMinimalExit
+        };
+    }
+    match timeout_ms {
+        Some(ms) if ms > 0 && elapsed >= Duration::from_millis(ms) && !has_output => {
+            ResumeFallbackDecision::RetryHungTimeout
+        }
+        _ => ResumeFallbackDecision::Wait,
+    }
+}
 
 /// Outcome of an attempted resume-fallback retry. Three states because the
 /// caller must react differently to each — collapsing any two corrupts state.
@@ -235,6 +290,104 @@ impl Engine {
             reaction: Box::new(reaction),
         }
     }
+
+    /// Sweep every seeded resume-fallback candidate through both detection
+    /// windows and act on each, returning the launch reactions the caller must
+    /// apply through its own reaction pipeline (the TUI's `apply_reaction`, the
+    /// web loop's `drive_web_launch_followup`). The engine-owned counterpart of
+    /// the two TUI loops (`workers.rs` exit sub-loop + `retry_hung_resume_sessions`),
+    /// so `dux serve` gets the same continue-then-fresh behavior instead of
+    /// showing "Agent exited" on a failed resume and hanging forever on a stuck one.
+    ///
+    /// For each candidate the DECISION is the pure `resume_fallback_decision`
+    /// (owning `has_minimal_output` and the `resume_wait_timeout_ms` window):
+    /// - `RetryExitedMinimal` / `RetryHungTimeout` -> `retry_resume_fallback`
+    ///   with the window-appropriate status message; a `Retried` reaction is
+    ///   collected. The tab's activity/input stamps are cleared too (a retry
+    ///   removes its provider but not those maps).
+    /// - `DropNonMinimalExit` -> drop the candidate so the normal exit-prune
+    ///   path detaches it.
+    /// - `Wait` -> leave it alone.
+    ///
+    /// MUST run before `prune_exited_ptys`: a `RetryExited*` candidate's provider
+    /// must be pulled out of `providers` (by the retry) before the prune would
+    /// otherwise reap it and mark the agent Detached.
+    pub fn sweep_resume_fallbacks(&mut self, pty_size: (u16, u16)) -> Vec<EventReaction> {
+        let mut reactions = Vec::new();
+        // Snapshot the candidate ids: `retry_resume_fallback` mutates the map.
+        let candidates: Vec<String> = self.resume_fallback_candidates.keys().cloned().collect();
+        for tab_id in candidates {
+            let Some(&started_at) = self.resume_fallback_candidates.get(&tab_id) else {
+                continue;
+            };
+            let Some(session_id) = self.owning_session_for_tab(&tab_id) else {
+                // Stale candidate with no owning session: drop it.
+                self.resume_fallback_candidates.remove(&tab_id);
+                continue;
+            };
+            let Some(session) = self.sessions.iter().find(|s| s.id == session_id).cloned() else {
+                self.resume_fallback_candidates.remove(&tab_id);
+                continue;
+            };
+            let provider = self.tab_running_provider(&session, &tab_id);
+            let Some(client) = self.providers.get(&tab_id) else {
+                // A candidate with no live provider is stale (already torn down).
+                self.resume_fallback_candidates.remove(&tab_id);
+                continue;
+            };
+            let timeout_ms =
+                crate::config::provider_config(&self.config, &provider).resume_wait_timeout_ms;
+            let decision = resume_fallback_decision(
+                client.is_exited(),
+                client.has_minimal_output(RESUME_MINIMAL_OUTPUT_LINES),
+                client.has_output(),
+                timeout_ms,
+                started_at.elapsed(),
+            );
+            let proj_name = self.project_name_for_session(&session);
+            let status_message = match decision {
+                ResumeFallbackDecision::RetryExitedMinimal => format!(
+                    "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
+                    session.branch_name,
+                    provider.as_str(),
+                    proj_name,
+                ),
+                ResumeFallbackDecision::RetryHungTimeout => format!(
+                    "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
+                    session.branch_name,
+                    provider.as_str(),
+                    proj_name,
+                ),
+                ResumeFallbackDecision::DropNonMinimalExit => {
+                    // A real conversation ended: drop the candidate, let the
+                    // exit-prune path detach the agent normally.
+                    self.resume_fallback_candidates.remove(&tab_id);
+                    continue;
+                }
+                ResumeFallbackDecision::Wait => continue,
+            };
+            crate::logger::info(&format!(
+                "resume fallback for agent \"{}\": {}",
+                session.branch_name,
+                match decision {
+                    ResumeFallbackDecision::RetryExitedMinimal =>
+                        "resume exited without output, retrying fresh",
+                    _ => "resume produced no visible output within timeout, retrying fresh",
+                }
+            ));
+            if let ResumeFallbackOutcome::Retried { reaction } =
+                self.retry_resume_fallback(&tab_id, pty_size, status_message)
+            {
+                // A retry removes the provider/pin/candidate but not the
+                // activity/input stamps; clear them so a recycled id can't
+                // inherit stale activity (the TUI cleared these by hand before).
+                self.pty_activity.remove(&tab_id);
+                self.pty_input.remove(&tab_id);
+                reactions.push(*reaction);
+            }
+        }
+        reactions
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +446,149 @@ mod tests {
             engine
                 .dormant_tab_launch_request("nope", (24, 80))
                 .is_none()
+        );
+    }
+
+    // The pure resume-fallback DECISION (both detection windows), owned by core
+    // so `dux serve` gets the same continue-then-fresh behavior the TUI has.
+    use super::{ResumeFallbackDecision as D, resume_fallback_decision};
+    use std::time::Duration;
+
+    #[test]
+    fn resume_that_exited_with_minimal_output_relaunches_fresh() {
+        // Window (a): `--continue` found no prior conversation, printed a short
+        // error, and exited. Minimal output after a resume launch => retry fresh.
+        assert_eq!(
+            resume_fallback_decision(true, true, false, Some(3000), Duration::from_secs(1)),
+            D::RetryExitedMinimal,
+        );
+    }
+
+    #[test]
+    fn resume_that_exited_with_real_output_is_dropped_not_retried() {
+        // A non-minimal exit means the resume actually ran a conversation that
+        // then ended; that is a normal exit, so drop the candidate and let the
+        // exit-prune path detach it (never a fresh relaunch).
+        assert_eq!(
+            resume_fallback_decision(true, false, true, Some(3000), Duration::from_secs(1)),
+            D::DropNonMinimalExit,
+        );
+    }
+
+    #[test]
+    fn resume_that_hangs_past_the_timeout_with_no_output_relaunches_fresh() {
+        // Window (b): still running, past `resume_wait_timeout_ms`, produced no
+        // visible output => treat the resume as hung and retry fresh.
+        assert_eq!(
+            resume_fallback_decision(false, true, false, Some(2000), Duration::from_millis(2500)),
+            D::RetryHungTimeout,
+        );
+    }
+
+    /// End to end: a resume candidate whose provider exited with minimal output
+    /// is retried fresh by the sweep (candidate + provider gone, a launch now in
+    /// flight), so `dux serve` (which calls the same sweep) recovers instead of
+    /// showing "Agent exited".
+    #[test]
+    fn sweep_retries_a_minimal_exited_resume_candidate() {
+        use crate::pty::PtyClient;
+        use std::path::Path;
+        use std::time::Instant;
+
+        let (mut engine, tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        // A clean-exiting provider with minimal output (prints one short line).
+        let client = PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "echo x".to_string()],
+            Path::new("."),
+            10,
+            40,
+            100,
+        )
+        .expect("spawn");
+        engine.providers.insert("s1".to_string(), client);
+        engine
+            .resume_fallback_candidates
+            .insert("s1".to_string(), Instant::now());
+
+        // Wait for the child to exit so the sweep sees `is_exited`.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !engine.providers.get("s1").is_some_and(|c| c.is_exited()) {
+            assert!(Instant::now() < deadline, "child never exited");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let reactions = engine.sweep_resume_fallbacks((24, 80));
+        assert_eq!(reactions.len(), 1, "one retry reaction");
+        assert!(
+            !engine.resume_fallback_candidates.contains_key("s1"),
+            "the retried candidate is cleared"
+        );
+        assert!(
+            !engine.providers.contains_key("s1"),
+            "the retry removed the exited provider"
+        );
+        assert!(
+            engine.is_in_flight(&InFlightKey::AgentLaunch("s1".to_string())),
+            "a fresh launch is now in flight"
+        );
+    }
+
+    /// A healthy resume candidate (still running, within its timeout window) is
+    /// left alone by the sweep.
+    #[test]
+    fn sweep_leaves_a_healthy_resume_candidate_alone() {
+        use crate::pty::PtyClient;
+        use std::path::Path;
+        use std::time::Instant;
+
+        let (mut engine, tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        // A long-lived provider (cat blocks on stdin, stays running, no output).
+        let client = PtyClient::spawn("cat", &[], Path::new("."), 10, 40, 100).expect("spawn");
+        engine.providers.insert("s1".to_string(), client);
+        engine
+            .resume_fallback_candidates
+            .insert("s1".to_string(), Instant::now());
+
+        let reactions = engine.sweep_resume_fallbacks((24, 80));
+        assert!(reactions.is_empty(), "no retry for a healthy resume");
+        assert!(
+            engine.resume_fallback_candidates.contains_key("s1"),
+            "the candidate is kept for a later tick"
+        );
+        assert!(
+            engine.providers.contains_key("s1"),
+            "the provider stays live"
+        );
+    }
+
+    #[test]
+    fn a_healthy_resume_waits() {
+        // Still running, within the timeout: leave it alone.
+        assert_eq!(
+            resume_fallback_decision(false, true, false, Some(3000), Duration::from_millis(500)),
+            D::Wait,
+        );
+        // Still running, past the timeout but it HAS produced output: healthy.
+        assert_eq!(
+            resume_fallback_decision(false, false, true, Some(2000), Duration::from_secs(5)),
+            D::Wait,
+        );
+        // Still running, no timeout configured: never treated as hung.
+        assert_eq!(
+            resume_fallback_decision(false, true, false, None, Duration::from_secs(60)),
+            D::Wait,
+        );
+        // Still running, timeout of 0 disables the hung window.
+        assert_eq!(
+            resume_fallback_decision(false, true, false, Some(0), Duration::from_secs(60)),
+            D::Wait,
         );
     }
 

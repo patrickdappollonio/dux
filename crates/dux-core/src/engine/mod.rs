@@ -344,9 +344,9 @@ pub struct Engine {
     /// the engine does not double-emit. Keyed by **session id** (the launch
     /// completion carries the session, the natural correlation handle). The busy
     /// is minted in `reconnect_session`; the final is resolved in
-    /// `drive_web_launch_followup` against a [`WebLaunchOutcome`]. Empty for the
+    /// `drive_web_launch_followup` against a [`LaunchOutcome`]. Empty for the
     /// TUI, which keeps its own op in the App layer.
-    pub pending_web_launch_ops: HashMap<String, HandlerStatusOp<WebLaunchOutcome>>,
+    pub pending_web_launch_ops: HashMap<String, HandlerStatusOp<LaunchOutcome>>,
 
     /// The opaque create-op id minted by the MOST RECENT synchronous
     /// `DispatchCreateAgentRequest` dispatch within the current `apply_wire`
@@ -390,11 +390,13 @@ pub enum CreateLaunchOutcome {
     Failed { message: String },
 }
 
-/// Handler-computed outcome for a web reconnect / force-restart launch op (see
-/// [`Engine::pending_web_launch_ops`]). Mirrors the TUI's reconnect outcome; the
-/// resolver maps it to the final user message, byte-identical to the web's
-/// pre-op `wire_statuses_from_reaction` wording.
-pub enum WebLaunchOutcome {
+/// Handler-computed outcome for a reconnect / force-restart launch op, shared by
+/// BOTH surfaces (the web's [`Engine::pending_web_launch_ops`] and the TUI's
+/// `App::pending_reconnect_ops`). The resolver maps it to the final user message
+/// via [`launch_outcome_final`], the ONE mapper both surfaces call so the wording
+/// cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchOutcome {
     /// Reconnect / force-reconnect succeeded; `status_message` is the success line.
     Ready { status_message: String },
     /// Reconnect failed; `branch_name`/`message` build the reconnect-failure line.
@@ -410,6 +412,30 @@ pub enum WebLaunchOutcome {
     /// The session vanished between dispatch and launch; the busy is cleared with
     /// no replacement message.
     Missing,
+}
+
+/// Map a [`LaunchOutcome`] to its final user message. The single source shared
+/// by the web reconnect/force-restart op resolver and the anonymous fallback
+/// path (`drive_web_launch_followup`), AND by the TUI's reconnect ops, so the
+/// wording is authored exactly once. (Previously the TUI carried a byte-identical
+/// `reconnect_final` copy.)
+pub fn launch_outcome_final(o: &LaunchOutcome) -> Final {
+    match o {
+        LaunchOutcome::Ready { status_message } => Final::info(status_message.clone()),
+        LaunchOutcome::ReconnectFailed {
+            branch_name,
+            message,
+        } => Final::error(format!(
+            "Reconnect failed for agent \"{branch_name}\": {message}"
+        )),
+        LaunchOutcome::ForceReconnectFailed {
+            branch_name,
+            message,
+        } => Final::error(format!(
+            "Fresh restart failed for agent \"{branch_name}\": {message}"
+        )),
+        LaunchOutcome::Missing => Final::clear(),
+    }
 }
 
 /// Handler-computed outcome for a web async worktree-deletion op (see
@@ -2332,6 +2358,114 @@ impl Engine {
         }
     }
 
+    /// Build the plan for reconnecting (relaunching) an agent session, the
+    /// single source both surfaces call so the guards, the resume decision, and
+    /// the status message are computed once. `force` is the force-reconnect
+    /// (always-fresh) path. `pty_size` is the surface's launch size (the TUI's
+    /// last known size; `(24, 80)` for the web).
+    ///
+    /// A returned `Launch` has ALREADY applied the pre-dispatch mutations (the
+    /// force teardown via `clear_tab_runtime`, and detaching any agent holding
+    /// the same worktree's live PTY); the caller only dispatches the request.
+    /// The `AlreadyConnected`/`WorktreeMissing` variants apply no mutations.
+    ///
+    /// The resume decision uses `tab_resume_decision` (collision-aware) for both
+    /// the request and the announced `resume`, so a surface never announces a
+    /// resume that the dispatch downgrades to fresh.
+    pub fn reconnect_plan(
+        &mut self,
+        session_id: &str,
+        force: bool,
+        pty_size: (u16, u16),
+    ) -> anyhow::Result<ReconnectPlan> {
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
+
+        // Check order mirrors the surfaces: normal reconnect refuses while a
+        // provider is live; force skips that (it kills the provider). Both then
+        // guard the worktree.
+        if !force && self.providers.contains_key(&session.id) {
+            return Ok(ReconnectPlan::AlreadyConnected {
+                message: format!("Agent \"{}\" is already connected.", session.branch_name),
+            });
+        }
+        if !std::path::Path::new(&session.worktree_path).exists() {
+            return Ok(ReconnectPlan::WorktreeMissing {
+                message: format!(
+                    "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
+                    session.branch_name
+                ),
+            });
+        }
+
+        if force {
+            // Kill the existing provider and clear ALL resume state (routed
+            // through the single-source `clear_tab_runtime`, so the in-flight
+            // `AgentLaunch` key goes too) so the relaunch is genuinely fresh.
+            self.clear_tab_runtime(&session.id);
+        }
+        // Detach any other session holding the same worktree's live PTY.
+        let detached_label = self
+            .detach_conflicting_worktree_session(&session.worktree_path, &session.id)
+            .map(|detached| detached.label);
+
+        // The one resume decision: collision-aware, used for BOTH the request and
+        // the announced message. Force never resumes.
+        let resume = if force {
+            false
+        } else {
+            self.tab_resume_decision(&session, &session.id, &session.provider, true)
+        };
+        let mut msg = self.agent_reconnect_status_message(&session, resume);
+        if let Some(detached) = &detached_label {
+            msg.push_str(&format!(
+                " Agent \"{}\" was detached to avoid worktree conflicts.",
+                detached,
+            ));
+        }
+        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
+            && project.default_provider != session.provider
+        {
+            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
+                "current project provider"
+            } else {
+                "current global default provider"
+            };
+            msg.push_str(&format!(
+                " Note: this agent uses {}. Your {provider_label} is {}.",
+                session.provider.as_str(),
+                project.default_provider.as_str(),
+            ));
+        }
+
+        let branch_name = session.branch_name.clone();
+        let kind = if force {
+            crate::worker::AgentLaunchKind::ForceReconnect {
+                status_message: msg,
+            }
+        } else {
+            crate::worker::AgentLaunchKind::Reconnect {
+                status_message: msg,
+            }
+        };
+        let request = self.build_agent_launch_request(session, resume, pty_size, kind);
+        let busy_message = if force {
+            format!("Starting fresh agent \"{branch_name}\"...")
+        } else {
+            format!("Launching agent \"{branch_name}\"...")
+        };
+        Ok(ReconnectPlan::Launch {
+            request: Box::new(request),
+            busy_message,
+            resume,
+            detached_label,
+        })
+    }
+
     /// Provider currently driving the session's live PTY, if any. After an
     /// in-place provider swap while the agent is still running, this returns
     /// the *original* provider until the user exits and relaunches — so the
@@ -2345,6 +2479,21 @@ impl Engine {
 
     pub fn should_resume_session(&self, session: &AgentSession) -> bool {
         self.should_resume_provider(session, &session.provider)
+    }
+
+    /// The provider a new tab (added with no explicit provider arg) defaults to:
+    /// the owning project's `default_provider`, falling back to the global config
+    /// default only when the project is missing. The single-source rule both
+    /// Rust surfaces call (the web `create_agent_tab`, the TUI new-tab flow) so
+    /// the "+" quick-add and its picker's "default" marker cannot disagree with
+    /// what launches. (The web TS mirror `defaultProviderForSession` reads the
+    /// already-resolved `default_provider` off the spine's project.)
+    pub fn default_provider_for_new_tab(&self, project_id: &str) -> ProviderKind {
+        self.projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.default_provider.clone())
+            .unwrap_or_else(|| self.config.default_provider())
     }
 
     /// Whether a tab launching `session` with `provider` may resume that
@@ -2798,6 +2947,62 @@ impl Engine {
             session.last_focused_tab = normalized;
         }
         Ok(())
+    }
+}
+
+/// The outcome of [`Engine::reconnect_plan`]: everything a surface needs to
+/// relaunch (or refuse to relaunch) an agent, with the resume decision and the
+/// status message computed ONCE in core. Both the TUI's
+/// `reconnect_selected_session`/`force_reconnect_agent` and the web wire
+/// `reconnect_session` build from this so neither recomputes the resume
+/// decision (which used to diverge: the TUI announced resume via the
+/// collision-blind `should_resume_session` while the dispatch re-gated via
+/// `tab_resume_decision`).
+///
+/// A `Launch` plan has already applied the pre-dispatch mutations (force teardown
+/// and any conflicting-worktree detach); the caller only dispatches `request`.
+pub enum ReconnectPlan {
+    /// Normal reconnect refused: a provider is already live. The caller shows
+    /// `message` and does nothing else.
+    AlreadyConnected { message: String },
+    /// The session's worktree is gone. The caller surfaces `message` as an error
+    /// (the TUI as a status error, the web as a 400).
+    WorktreeMissing { message: String },
+    /// Relaunch: dispatch `request` and surface `busy_message` as the pending
+    /// status. `resume` is the collision-aware decision the request carries, so a
+    /// surface can announce it truthfully. `detached_label` names any conflicting
+    /// same-worktree agent that was detached to make room (already applied).
+    Launch {
+        request: Box<crate::worker::AgentLaunchRequest>,
+        busy_message: String,
+        resume: bool,
+        detached_label: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for ReconnectPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReconnectPlan::AlreadyConnected { message } => f
+                .debug_struct("AlreadyConnected")
+                .field("message", message)
+                .finish(),
+            ReconnectPlan::WorktreeMissing { message } => f
+                .debug_struct("WorktreeMissing")
+                .field("message", message)
+                .finish(),
+            ReconnectPlan::Launch {
+                busy_message,
+                resume,
+                detached_label,
+                ..
+            } => f
+                .debug_struct("Launch")
+                .field("busy_message", busy_message)
+                .field("resume", resume)
+                .field("detached_label", detached_label)
+                .finish_non_exhaustive(),
+        }
     }
 }
 
@@ -4314,6 +4519,58 @@ mod tests {
         );
     }
 
+    /// The single launch-outcome status mapper (shared by the web op resolver
+    /// and the TUI's reconnect ops) maps each variant to its exact final. Before
+    /// this, the TUI carried a byte-identical copy (`reconnect_final`); this pins
+    /// the one core source so the wording cannot drift.
+    #[test]
+    fn launch_outcome_final_maps_each_variant_to_its_message() {
+        assert_eq!(
+            launch_outcome_final(&LaunchOutcome::Ready {
+                status_message: "Resumed claude agent \"x\".".to_string(),
+            }),
+            Final::info("Resumed claude agent \"x\".".to_string()),
+        );
+        assert_eq!(
+            launch_outcome_final(&LaunchOutcome::ReconnectFailed {
+                branch_name: "feat".to_string(),
+                message: "boom".to_string(),
+            }),
+            Final::error("Reconnect failed for agent \"feat\": boom".to_string()),
+        );
+        assert_eq!(
+            launch_outcome_final(&LaunchOutcome::ForceReconnectFailed {
+                branch_name: "feat".to_string(),
+                message: "boom".to_string(),
+            }),
+            Final::error("Fresh restart failed for agent \"feat\": boom".to_string()),
+        );
+        assert_eq!(
+            launch_outcome_final(&LaunchOutcome::Missing),
+            Final::clear()
+        );
+    }
+
+    /// The new-tab default provider resolution is core-owned (both Rust
+    /// surfaces call it): the session's project's `default_provider`, falling
+    /// back to the global config default only when the project is missing.
+    #[test]
+    fn default_provider_for_new_tab_prefers_the_project_then_the_global_default() {
+        let (mut engine, _tmp) = test_engine();
+        engine.config.defaults.provider = "claude".to_string();
+        let mut project = sample_project("p1", "/tmp/p1");
+        project.default_provider = ProviderKind::new("codex");
+        engine.projects.push(project);
+
+        // Project present: its default_provider wins.
+        assert_eq!(engine.default_provider_for_new_tab("p1").as_str(), "codex");
+        // Project missing: fall back to the global config default.
+        assert_eq!(
+            engine.default_provider_for_new_tab("nope").as_str(),
+            "claude"
+        );
+    }
+
     #[test]
     fn change_agent_provider_pins_previous_when_running() {
         let (mut engine, _tmp) = test_engine();
@@ -4644,6 +4901,84 @@ mod tab_ops_tests {
             !engine.tab_resume_decision(&session, &session.id, &session.provider, true),
             "a live same-provider extra tab downgrades the session-slot launch to fresh"
         );
+    }
+
+    /// The reconnect plan's ANNOUNCED resume decision must equal the resume the
+    /// dispatched request actually uses, under a same-provider extra-tab
+    /// collision. Before extraction the TUI announced resume via the
+    /// collision-blind `should_resume_session` while the dispatch re-gated via
+    /// `tab_resume_decision`, so it promised a resume that launched fresh.
+    /// `reconnect_plan` derives BOTH from `tab_resume_decision`, killing the
+    /// divergence for both surfaces.
+    #[test]
+    fn reconnect_plan_announced_resume_matches_the_dispatched_request() {
+        let (mut engine, tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        session.started_providers = vec!["claude".into()];
+        session.provider = ProviderKind::new("claude");
+        engine.sessions.push(session.clone());
+        // A live same-provider extra tab: `should_resume_session` still reports
+        // eligible, but `tab_resume_decision` downgrades to fresh.
+        let tab = support_tab("tab-x", "s1", "claude");
+        engine.agent_tabs.insert(tab.id.clone(), tab);
+        engine.mark_in_flight(InFlightKey::AgentLaunch("tab-x".into()));
+        assert!(
+            engine.should_resume_session(&session),
+            "precondition: the collision-blind check still says resume"
+        );
+
+        let plan = engine
+            .reconnect_plan("s1", false, (24, 80))
+            .expect("plan builds");
+        match plan {
+            ReconnectPlan::Launch {
+                resume, request, ..
+            } => {
+                assert!(
+                    !resume,
+                    "the announced resume must respect the same-provider collision (fresh)"
+                );
+                assert_eq!(
+                    request.resume, resume,
+                    "the dispatched request's resume must equal the announced one"
+                );
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_plan_refuses_an_already_connected_normal_reconnect() {
+        let (mut engine, tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = tmp.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(tmp.path()));
+
+        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+            ReconnectPlan::AlreadyConnected { message } => {
+                assert!(message.contains("already connected"), "{message}");
+            }
+            other => panic!("expected AlreadyConnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_plan_reports_a_missing_worktree() {
+        let (mut engine, _tmp) = test_engine();
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = "/nonexistent/worktree/path".to_string();
+        engine.sessions.push(session);
+
+        match engine.reconnect_plan("s1", false, (24, 80)).expect("plan") {
+            ReconnectPlan::WorktreeMissing { message } => {
+                assert!(message.contains("no longer exists"), "{message}");
+            }
+            other => panic!("expected WorktreeMissing, got {other:?}"),
+        }
     }
 
     #[test]

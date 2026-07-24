@@ -1309,6 +1309,28 @@ pub(crate) fn run_engine_loop(
             let _busy = engine.dispatch_deferred_worktree_removal(removal);
         }
 
+        // Resume-fallback sweep (both detection windows), BEFORE the exit prune:
+        // a `--continue` that came up empty or a resume that hung past its
+        // timeout is relaunched fresh here, so `dux serve` gets the same
+        // continue-then-fresh behavior the TUI has instead of showing "Agent
+        // exited" (the prune below would otherwise reap the exited resume
+        // candidate and mark the agent Detached). Each retry's launch reaction
+        // is surfaced through the same web launch-followup path the drained
+        // reactions use, and a retry mutates the spine.
+        // The web launches at a fixed (24, 80) seed size (the real size arrives
+        // on the first client subscribe/resize), matching the other web launch
+        // sites in this file.
+        for reaction in engine.sweep_resume_fallbacks((24, 80)) {
+            mutation_version = mutation_version.wrapping_add(1);
+            let followup = engine.drive_web_launch_followup(&reaction);
+            for status in followup.statuses {
+                let _ = thread_status_tx.send(status);
+            }
+            for key in followup.clear_keys {
+                thread_status_tx.clear(key);
+            }
+        }
+
         // Reap agent/terminal PTYs whose child process exited so they stop
         // lingering in `providers`/`companion_terminals` and disappear from the
         // spine, broadcasting a status for each so web clients learn.
@@ -2114,12 +2136,10 @@ fn create_agent_tab_inner(
             }
             dux_core::model::ProviderKind::new(p)
         }
-        None => engine
-            .projects
-            .iter()
-            .find(|pr| pr.id == session.project_id)
-            .map(|pr| pr.default_provider.clone())
-            .unwrap_or_else(|| engine.config.default_provider()),
+        // The single-source new-tab default: the owning project's provider,
+        // else the global config default (`Engine::default_provider_for_new_tab`,
+        // shared with the TUI).
+        None => engine.default_provider_for_new_tab(&session.project_id),
     };
     let provider_str = provider.as_str().to_string();
     let tab_id = engine

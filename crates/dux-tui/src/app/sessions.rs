@@ -967,14 +967,11 @@ impl App {
             return Ok(());
         }
 
-        let project_id = session.project_id.clone();
+        // The single-source new-tab default provider (owning project else global
+        // config default), shared with the web via `default_provider_for_new_tab`.
         let default_provider = self
             .engine
-            .projects
-            .iter()
-            .find(|p| p.id == project_id)
-            .map(|p| p.default_provider.clone())
-            .unwrap_or_else(|| self.engine.config.default_provider());
+            .default_provider_for_new_tab(&session.project_id);
         let selected = options
             .iter()
             .position(|option| option.provider == default_provider)
@@ -1060,15 +1057,16 @@ impl App {
 
     /// Build the keyed status op for a reconnect / fresh-restart launch. The
     /// resolver reads the terminal message straight off the launch reaction's
-    /// [`TuiReconnectOutcome`] (the engine computes the success line; the failure
+    /// [`dux_core::engine::LaunchOutcome`] (the engine computes the success line; the failure
     /// arms carry branch + message), so it captures no dispatch-time state and
     /// reproduces the TUI's exact wording for every outcome.
     pub(super) fn build_reconnect_status_op(
         &self,
         busy_message: String,
-    ) -> dux_core::engine::HandlerStatusOp<TuiReconnectOutcome> {
-        dux_core::engine::status_op(busy_message)
-            .resolve_in_handler(|o: &TuiReconnectOutcome| reconnect_final(o))
+    ) -> dux_core::engine::HandlerStatusOp<dux_core::engine::LaunchOutcome> {
+        dux_core::engine::status_op(busy_message).resolve_in_handler(
+            |o: &dux_core::engine::LaunchOutcome| dux_core::engine::launch_outcome_final(o),
+        )
     }
 
     pub(crate) fn dispatch_agent_launch(&mut self, request: AgentLaunchRequest) -> bool {
@@ -2895,152 +2893,62 @@ impl App {
 
     /// Restart the selected agent with a fresh session, bypassing `--continue`
     /// or equivalent resume args. Works on both active and detached agents.
+    /// Routes through the shared `dispatch_reconnect_plan` (`force == true`) so
+    /// the guards, teardown, and message are the single-source `reconnect_plan`.
     pub(crate) fn force_reconnect_agent(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session().cloned() else {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select an agent first.");
             return Ok(());
         };
-        if !Path::new(&session.worktree_path).exists() {
-            self.set_error(format!(
-                "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
-                session.branch_name
-            ));
-            return Ok(());
-        }
-        // Kill existing PTY if the agent is still active. Routed through the
-        // shared `clear_tab_runtime` so the in-flight `AgentLaunch` key is
-        // cleared too — a hand-rolled remove list here used to miss it, which
-        // left a stale in-flight marker that made the `DispatchAgentLaunch`
-        // chokepoint report "already launching" forever.
-        self.engine.clear_tab_runtime(&session.id);
-
-        let detached_label =
-            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
-
         logger::info(&format!(
-            "restarting agent \"{}\" with fresh session (no resume args)",
-            session.branch_name
+            "restarting agent {session_id} with fresh session (no resume args)"
         ));
-        let mut msg = self.engine.agent_reconnect_status_message(&session, false);
-        if let Some(detached) = &detached_label {
-            msg.push_str(&format!(
-                " Agent \"{}\" was detached to avoid worktree conflicts.",
-                detached,
-            ));
-        }
-        if let Some(project) = self
-            .engine
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            && project.default_provider != session.provider
-        {
-            let provider_label = if self
-                .engine
-                .project_uses_explicit_default_provider(&project.id)
-            {
-                "current project provider"
-            } else {
-                "current global default provider"
-            };
-            msg.push_str(&format!(
-                " Note: this agent uses {}. Your {provider_label} is {}.",
-                session.provider.as_str(),
-                project.default_provider.as_str(),
-            ));
-        }
-        let branch_name = session.branch_name.clone();
-        let session_id = session.id.clone();
-        let request = self.agent_launch_request(
-            session,
-            false,
-            AgentLaunchKind::ForceReconnect {
-                status_message: msg,
-            },
-        );
-        if self.dispatch_agent_launch(request) {
-            // Route the busy through a keyed reconnect op so its final (resolved
-            // in the shared launch-ready/failed view handlers) replaces exactly
-            // this spinner instead of relying on most-recent-wins.
-            let op = self
-                .build_reconnect_status_op(format!("Starting fresh agent \"{branch_name}\"..."));
-            self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
-            self.pending_reconnect_ops.insert(session_id, op);
-        }
-        Ok(())
+        self.dispatch_reconnect_plan(&session_id, true)
     }
 
     pub(crate) fn reconnect_selected_session(&mut self) -> Result<()> {
-        let Some(session) = self.selected_session().cloned() else {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select a stopped agent first to reconnect.");
             return Ok(());
         };
-        logger::info(&format!("reconnecting session {}", session.id));
-        if self.engine.providers.contains_key(&session.id) {
-            self.set_info(format!(
-                "Agent \"{}\" is already connected.",
-                session.branch_name
-            ));
-            return Ok(());
-        }
-        if !Path::new(&session.worktree_path).exists() {
-            self.set_error(format!(
-                "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
-                session.branch_name
-            ));
-            return Ok(());
-        }
-        let detached_label =
-            self.detach_conflicting_worktree_session(&session.worktree_path, &session.id);
+        logger::info(&format!("reconnecting session {session_id}"));
+        self.dispatch_reconnect_plan(&session_id, false)
+    }
 
-        let use_resume = self.engine.should_resume_session(&session);
-        let mut msg = self
-            .engine
-            .agent_reconnect_status_message(&session, use_resume);
-        if let Some(detached) = &detached_label {
-            msg.push_str(&format!(
-                " Agent \"{}\" was detached to avoid worktree conflicts.",
-                detached,
-            ));
-        }
-        if let Some(project) = self
-            .engine
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            && project.default_provider != session.provider
-        {
-            let provider_label = if self
-                .engine
-                .project_uses_explicit_default_provider(&project.id)
-            {
-                "current project provider"
-            } else {
-                "current global default provider"
-            };
-            msg.push_str(&format!(
-                " Note: this agent uses {}. Your {provider_label} is {}.",
-                session.provider.as_str(),
-                project.default_provider.as_str(),
-            ));
-        }
-        let branch_name = session.branch_name.clone();
-        let session_id = session.id.clone();
-        let request = self.agent_launch_request(
-            session,
-            use_resume,
-            AgentLaunchKind::Reconnect {
-                status_message: msg,
-            },
-        );
-        if self.dispatch_agent_launch(request) {
-            // Route the busy through a keyed reconnect op so its final (resolved
-            // in the shared launch-ready/failed view handlers) replaces exactly
-            // this spinner instead of relying on most-recent-wins.
-            let op =
-                self.build_reconnect_status_op(format!("Launching agent \"{branch_name}\"..."));
-            self.apply_reaction(dux_core::engine::EventReaction::Status(op.pending_status()));
-            self.pending_reconnect_ops.insert(session_id, op);
+    /// Shared TUI reconnect dispatch: build the single-source
+    /// `Engine::reconnect_plan` (guards, the collision-aware resume decision, the
+    /// message, and the pre-dispatch mutations all in core) and render each
+    /// variant. `reconnect_selected_session` (`force == false`) and
+    /// `force_reconnect_agent` (`force == true`) both route here so neither
+    /// recomputes the resume decision (which used to be announced via the
+    /// collision-blind `should_resume_session` while the dispatch re-gated,
+    /// promising a resume that launched fresh).
+    fn dispatch_reconnect_plan(&mut self, session_id: &str, force: bool) -> Result<()> {
+        let pty_size = self.pty_size_for_launch();
+        match self.engine.reconnect_plan(session_id, force, pty_size)? {
+            dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
+                self.set_info(message);
+            }
+            dux_core::engine::ReconnectPlan::WorktreeMissing { message } => {
+                self.set_error(message);
+            }
+            dux_core::engine::ReconnectPlan::Launch {
+                request,
+                busy_message,
+                ..
+            } => {
+                if self.dispatch_agent_launch(*request) {
+                    // Route the busy through a keyed reconnect op so its final
+                    // (resolved in the shared launch-ready/failed view handlers)
+                    // replaces exactly this spinner instead of most-recent-wins.
+                    let op = self.build_reconnect_status_op(busy_message);
+                    self.apply_reaction(dux_core::engine::EventReaction::Status(
+                        op.pending_status(),
+                    ));
+                    self.pending_reconnect_ops
+                        .insert(session_id.to_string(), op);
+                }
+            }
         }
         Ok(())
     }
@@ -3565,25 +3473,6 @@ impl App {
             .title
             .clone()
             .unwrap_or_else(|| session.branch_name.clone())
-    }
-
-    /// If another session on the same worktree has a running PTY, detach it
-    /// (kill the PTY and mark the session as `Detached`).  Returns the
-    /// human-readable label of the detached session, if any.
-    ///
-    /// Thin view wrapper over `Engine::detach_conflicting_worktree_session`:
-    /// the engine tears down every tab of the conflicting agent (Main + Support)
-    /// via `clear_session_tab_runtime`, clearing all six runtime maps, so no
-    /// caller-side follow-up clear is needed; the App just surfaces the label.
-    pub(crate) fn detach_conflicting_worktree_session(
-        &mut self,
-        worktree_path: &str,
-        exclude_id: &str,
-    ) -> Option<String> {
-        let detached = self
-            .engine
-            .detach_conflicting_worktree_session(worktree_path, exclude_id)?;
-        Some(detached.label)
     }
 
     /// Palette action: tear down the TUI and serve the web UI in the same
@@ -5267,7 +5156,10 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
         mark_active(&mut app, "s1");
 
-        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
+        let label = app
+            .engine
+            .detach_conflicting_worktree_session("/tmp/wt/a", "s2")
+            .map(|d| d.label);
         assert!(label.is_some());
         assert!(!app.engine.providers.contains_key("s1"));
     }
@@ -5280,7 +5172,10 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
         mark_active(&mut app, "s1");
 
-        let label = app.detach_conflicting_worktree_session("/tmp/wt/b", "s2");
+        let label = app
+            .engine
+            .detach_conflicting_worktree_session("/tmp/wt/b", "s2")
+            .map(|d| d.label);
         assert!(label.is_none());
         assert!(app.engine.providers.contains_key("s1"));
     }
@@ -5292,7 +5187,10 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
         mark_active(&mut app, "s1");
 
-        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
+        let label = app
+            .engine
+            .detach_conflicting_worktree_session("/tmp/wt/a", "s1")
+            .map(|d| d.label);
         assert!(label.is_none());
         assert!(app.engine.providers.contains_key("s1"));
     }
@@ -5305,7 +5203,10 @@ mod tests {
         let mut app = test_app_with_sessions(vec![s1, s2], vec![project]);
         mark_active(&mut app, "s1");
 
-        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s2");
+        let label = app
+            .engine
+            .detach_conflicting_worktree_session("/tmp/wt/a", "s2")
+            .map(|d| d.label);
         assert!(label.is_some());
         assert!(!app.engine.providers.contains_key("s1"));
         let s1_session = app.engine.sessions.iter().find(|s| s.id == "s1").unwrap();
@@ -5318,7 +5219,10 @@ mod tests {
         let project = make_project("project-1", "claude");
         let mut app = test_app_with_sessions(vec![s1], vec![project]);
 
-        let label = app.detach_conflicting_worktree_session("/tmp/wt/a", "s1");
+        let label = app
+            .engine
+            .detach_conflicting_worktree_session("/tmp/wt/a", "s1")
+            .map(|d| d.label);
         assert!(label.is_none());
     }
 

@@ -4,7 +4,7 @@ use dux_core::engine::{
     AgentLaunchFailedOutcome, AgentLaunchReadyOutcome, AgentLaunchReadyView,
     BeginDeleteSessionOutcome, BeginDeleteSessionView, DeleteTerminalView, DispatchAgentLaunchView,
     DoDeleteSessionView, EventReaction, FinishDeleteSessionView, ProjectPersistenceOutcome,
-    ProjectPersistenceView, ResumeFallbackOutcome, StatusUpdate, WorktreeRemoval,
+    ProjectPersistenceView, StatusUpdate, WorktreeRemoval,
 };
 
 use super::*;
@@ -77,7 +77,17 @@ impl App {
                 self.apply_reaction(op.resolve(&TuiCheckoutInspectOutcome::Done).into_reaction());
             }
         }
-        self.retry_hung_resume_sessions();
+        // Resume-fallback sweep (both detection windows: a `--continue` that
+        // came up empty, and a resume that hung past its timeout), BEFORE exit
+        // detection so a retried candidate's provider is already gone from
+        // `providers` and never enters the `exited` set below. The DECISION and
+        // the retry are core-owned (`Engine::sweep_resume_fallbacks`, shared with
+        // the web server's actor loop); the TUI only applies the launch
+        // reactions each retry produced.
+        let sweep_size = self.pty_size_for_launch();
+        for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
+            self.apply_reaction(reaction);
+        }
         // Reap PTYs that an individual delete/close SIGTERMed and that have now
         // exited or passed their grace deadline (force-killed + dropped) — the
         // non-blocking background half of graceful close. For a reaped agent whose
@@ -86,7 +96,10 @@ impl App {
         for removal in self.engine.reap_terminating_ptys() {
             let _busy = self.engine.dispatch_deferred_worktree_removal(removal);
         }
-        // Detect PTY exits.
+        // Detect PTY exits (the sweep above already pulled every retried resume
+        // candidate out of `providers`, so `exited` carries only exits handled
+        // by the normal prune path below). `is_minimal`/`output` are captured for
+        // the exit STATUS MESSAGE, not for resume decisions (those are the sweep's).
         let mut exited = Vec::new();
         for (session_id, provider) in &mut self.engine.providers {
             let exit_success = provider.try_wait().map(|status| status.success());
@@ -101,82 +114,12 @@ impl App {
             }
         }
 
-        // For sessions that were spawned with resume_args and exited before
-        // producing any output, retry with regular args (fresh session).
-        // This handles `claude --continue || claude` style fallback.
-        // Sessions whose exit was fully handled by a resume-fallback retry (or
-        // is protected because a launch is already in flight). These must be
-        // skipped by the destructive second loop AND by the post-exit UI/PR
-        // follow-ups below.
-        let mut handled = HashSet::new();
-        // `exited` is keyed by tab id (the `providers` map key). Resume
-        // candidates are seeded per tab, so the fallback is tab-aware: the
-        // session-slot tab resolves to itself, an extra tab via its row.
-        for (tab_id, _, is_minimal, _) in &exited {
-            if !self.engine.resume_fallback_candidates.contains_key(tab_id) {
-                continue;
-            }
-            if !is_minimal {
-                // Non-minimal exit of a resume candidate: preserve today's
-                // behavior — drop the candidate unconditionally and let the
-                // second loop mark it Detached.
-                self.engine.resume_fallback_candidates.remove(tab_id);
-                continue;
-            }
-            let Some(session_id) = self.engine.owning_session_for_tab(tab_id) else {
-                // Owning session gone: drop the stale candidate, fall through.
-                self.engine.resume_fallback_candidates.remove(tab_id);
-                continue;
-            };
-            let Some(session) = self
-                .engine
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .cloned()
-            else {
-                self.engine.resume_fallback_candidates.remove(tab_id);
-                continue;
-            };
-            let provider = self.engine.tab_running_provider(&session, tab_id);
-            let proj_name = self.engine.project_name_for_session(&session);
-            let status_message = format!(
-                "No prior session to resume for agent \"{}\". Started a fresh {} session in project \"{}\".",
-                session.branch_name,
-                provider.as_str(),
-                proj_name,
-            );
-            logger::info(&format!(
-                "resume args exited without output for agent \"{}\", retrying with regular args",
-                session.branch_name
-            ));
-            let pty_size = self.pty_size_for_launch();
-            match self
-                .engine
-                .retry_resume_fallback(tab_id, pty_size, status_message)
-            {
-                ResumeFallbackOutcome::Retried { reaction } => {
-                    self.engine.pty_activity.remove(tab_id);
-                    self.engine.pty_input.remove(tab_id);
-                    self.apply_reaction(*reaction);
-                    handled.insert(tab_id.clone());
-                }
-                ResumeFallbackOutcome::InFlight => {
-                    // Protect: a launch is already in flight; do not let the
-                    // second loop tear this session down.
-                    handled.insert(tab_id.clone());
-                }
-                ResumeFallbackOutcome::NotCandidate => {
-                    // Candidate was removed by another path this tick; fall
-                    // through to normal exit handling.
-                }
-            }
-        }
-
+        // The exit-driven and timeout-driven resume-fallback retries used to live
+        // here (and in `retry_hung_resume_sessions`); both are now the core
+        // `sweep_resume_fallbacks` called at the top of this method, before exit
+        // detection. A retried candidate's provider is already gone, so `exited`
+        // never contains it, so no per-tab "handled" bookkeeping is needed here.
         for (tab_id, exit_success, _, _) in &exited {
-            if handled.contains(tab_id) {
-                continue;
-            }
             // `providers` is keyed by tab id. Resolve the exited PTY's owning
             // session and whether it was the session-slot tab BEFORE mutating. No
             // tab is privileged: the agent detaches only once its LAST live tab is
@@ -284,12 +227,12 @@ impl App {
             }
         }
         if !exited.is_empty() {
-            // If the currently-viewed session just exited (and was not handled
-            // by a resume-fallback retry), leave interactive mode.
+            // If the currently-viewed session just exited, leave interactive
+            // mode. (A resume-fallback retry already removed its provider before
+            // exit detection, so a retried session never appears in `exited`.)
             if let Some(current) = self.selected_session()
                 && let Some((_, exit_success, is_minimal, excerpt)) =
                     exited.iter().find(|(id, _, _, _)| id == &current.id)
-                && !handled.contains(&current.id)
                 // Don't bounce out of the pane if a live extra tab is focused:
                 // the Main provider exited, but the user is driving an extra tab.
                 && {
@@ -332,7 +275,7 @@ impl App {
                 let tab_id = &sid.0;
                 let is_main =
                     self.engine.owning_session_for_tab(tab_id).as_deref() == Some(tab_id.as_str());
-                if is_main && !handled.contains(tab_id) {
+                if is_main {
                     self.engine.spawn_pr_check_for_session(
                         tab_id,
                         dux_core::engine::PR_CHECK_MIN_INTERVAL,
@@ -1311,7 +1254,10 @@ impl App {
                 // — so only the reconnect op needs clearing here), then clear a
                 // still-showing anon launch busy as a final fallback.
                 if let Some(op) = self.pending_reconnect_ops.remove(&outcome.session.id) {
-                    self.apply_reaction(op.resolve(&TuiReconnectOutcome::Missing).into_reaction());
+                    self.apply_reaction(
+                        op.resolve(&dux_core::engine::LaunchOutcome::Missing)
+                            .into_reaction(),
+                    );
                 }
                 if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
                     self.set_info(String::new());
@@ -1331,7 +1277,7 @@ impl App {
                 // instead of resolving the session-slot tab's op with the wrong message.
                 self.resolve_reconnect_op_or(
                     &outcome.tab_id,
-                    TuiReconnectOutcome::Ready { status_message },
+                    dux_core::engine::LaunchOutcome::Ready { status_message },
                 );
                 // The engine flipped the session Active while launching it, so the
                 // flat list must re-partition: a just-reconnected agent leaves the
@@ -1353,7 +1299,7 @@ impl App {
                 }
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    TuiReconnectOutcome::Ready { status_message },
+                    dux_core::engine::LaunchOutcome::Ready { status_message },
                 );
                 // Same re-partition as Reconnect: the resumed agent is Active now.
                 self.rebuild_left_items();
@@ -1380,7 +1326,7 @@ impl App {
                 // stashed (the message is byte-identical either way).
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    TuiReconnectOutcome::ReconnectFailed {
+                    dux_core::engine::LaunchOutcome::ReconnectFailed {
                         branch_name,
                         message,
                     },
@@ -1393,7 +1339,7 @@ impl App {
             } => {
                 self.resolve_reconnect_op_or(
                     &session_id,
-                    TuiReconnectOutcome::ForceReconnectFailed {
+                    dux_core::engine::LaunchOutcome::ForceReconnectFailed {
                         branch_name,
                         message,
                     },
@@ -1434,16 +1380,20 @@ impl App {
     /// session id) against `outcome`, replacing exactly its keyed busy. When no op
     /// is stashed (a launch ready/failed not driven through the reconnect dispatch
     /// sites), fall back to applying the SAME final anonymously via the shared
-    /// [`super::reconnect_final`] mapping, so the wording is byte-identical to the
+    /// [`dux_core::engine::launch_outcome_final`] mapping, so the wording is byte-identical to the
     /// pre-op behavior.
-    fn resolve_reconnect_op_or(&mut self, session_id: &str, outcome: TuiReconnectOutcome) {
+    fn resolve_reconnect_op_or(
+        &mut self,
+        session_id: &str,
+        outcome: dux_core::engine::LaunchOutcome,
+    ) {
         if let Some(op) = self.pending_reconnect_ops.remove(session_id) {
             self.apply_reaction(op.resolve(&outcome).into_reaction());
             return;
         }
         // No op stashed: apply the SAME final anonymously (no key), preserving the
         // pre-op behavior. `reconnect_final` is the single wording source.
-        match super::reconnect_final(&outcome) {
+        match dux_core::engine::launch_outcome_final(&outcome) {
             dux_core::engine::Final::Message { tone, text } => {
                 self.status.set(std::time::Instant::now(), None, tone, text);
             }
@@ -1451,83 +1401,6 @@ impl App {
                 if matches!(self.status.most_recent_tui(), Some((StatusTone::Busy, _))) {
                     self.set_info(String::new());
                 }
-            }
-        }
-    }
-
-    fn retry_hung_resume_sessions(&mut self) {
-        let mut hung = Vec::new();
-
-        // Candidates are keyed by tab id; resolve each tab's owning session and
-        // the provider it is actually running so the timeout uses that provider's
-        // config and the retry rebuilds the right tab.
-        for (tab_id, started_at) in &self.engine.resume_fallback_candidates {
-            let Some(session_id) = self.engine.owning_session_for_tab(tab_id) else {
-                continue;
-            };
-            let Some(session) = self.engine.sessions.iter().find(|s| s.id == session_id) else {
-                continue;
-            };
-            let provider = self.engine.tab_running_provider(session, tab_id);
-            let cfg = provider_config(&self.engine.config, &provider);
-            let Some(timeout_ms) = cfg.resume_wait_timeout_ms.filter(|timeout| *timeout > 0) else {
-                continue;
-            };
-            if started_at.elapsed() < Duration::from_millis(timeout_ms) {
-                continue;
-            }
-            let Some(client) = self.engine.providers.get(tab_id) else {
-                continue;
-            };
-            if client.has_output() {
-                continue;
-            }
-            hung.push(tab_id.clone());
-        }
-
-        for tab_id in hung {
-            let Some(session_id) = self.engine.owning_session_for_tab(&tab_id) else {
-                self.engine.resume_fallback_candidates.remove(&tab_id);
-                continue;
-            };
-            let Some(session) = self
-                .engine
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .cloned()
-            else {
-                // Session vanished between detection and retry; drop any stale
-                // candidate so it can't leak.
-                self.engine.resume_fallback_candidates.remove(&tab_id);
-                continue;
-            };
-            let provider = self.engine.tab_running_provider(&session, &tab_id);
-            let proj_name = self.engine.project_name_for_session(&session);
-            let status_message = format!(
-                "Resume timed out for agent \"{}\" with no visible output. Started a fresh {} session in project \"{}\".",
-                session.branch_name,
-                provider.as_str(),
-                proj_name,
-            );
-            logger::info(&format!(
-                "resume args produced no visible output for agent \"{}\" within timeout, retrying with regular args",
-                session.branch_name
-            ));
-            let pty_size = self.pty_size_for_launch();
-            match self
-                .engine
-                .retry_resume_fallback(&tab_id, pty_size, status_message)
-            {
-                ResumeFallbackOutcome::Retried { reaction } => {
-                    self.engine.pty_activity.remove(&tab_id);
-                    self.engine.pty_input.remove(&tab_id);
-                    self.apply_reaction(*reaction);
-                }
-                // InFlight: a launch is already in progress — leave it alone.
-                // NotCandidate: nothing to retry (engine cleared any stale
-                // candidate). Either way, no further action here.
-                ResumeFallbackOutcome::InFlight | ResumeFallbackOutcome::NotCandidate => {}
             }
         }
     }

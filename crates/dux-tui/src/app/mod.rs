@@ -290,13 +290,13 @@ pub struct App {
     /// `AgentLaunchFailedOutcome` reactions that produce the final all carry the
     /// session id. The matching ready (Reconnect / ResumeFallback / SessionMissing)
     /// or failed (Reconnect / ForceReconnect) view pops the op and resolves it
-    /// against the handler-computed [`TuiReconnectOutcome`], reproducing the exact
+    /// against the handler-computed [`dux_core::engine::LaunchOutcome`], reproducing the exact
     /// final wording. Create-kind launches are NOT routed through this map: their
     /// busy/final ride the SHARED engine-side create op
     /// (`Engine::pending_create_ops`), resolved engine-side to a keyed `Status` that
     /// both surfaces apply.
     pub(crate) pending_reconnect_ops:
-        HashMap<String, dux_core::engine::HandlerStatusOp<TuiReconnectOutcome>>,
+        HashMap<String, dux_core::engine::HandlerStatusOp<dux_core::engine::LaunchOutcome>>,
     /// In-flight checkout / branch-inspection status ops. Three TUI dispatches feed
     /// this one map, all keyed by their op's own opaque id and all resolving to a
     /// [`dux_core::engine::Final::Clear`] (the visible final comes from elsewhere —
@@ -396,55 +396,11 @@ pub enum TuiCheckoutInspectOutcome {
     Done,
 }
 
-/// Handler-computed outcome for a reconnect / fresh-restart status op (see
-/// [`App::pending_reconnect_ops`]). The terminal message is fully carried by the
-/// async launch reaction (the engine computes the success `status_message`; the
-/// failure arms carry `branch_name` + `message`), so the resolver reads it from
-/// this outcome rather than capturing dispatch-time state.
-pub enum TuiReconnectOutcome {
-    /// The launch is ready (Reconnect / ResumeFallback). `status_message` is the
-    /// engine-computed success line, shown verbatim.
-    Ready { status_message: String },
-    /// A plain reconnect launch failed; produces the "Reconnect failed …" line.
-    ReconnectFailed {
-        branch_name: String,
-        message: String,
-    },
-    /// A fresh-restart (force-reconnect) launch failed; produces the "Fresh
-    /// restart failed …" line.
-    ForceReconnectFailed {
-        branch_name: String,
-        message: String,
-    },
-    /// The session vanished between dispatch and launch (SessionMissing). Dismiss
-    /// the busy with no replacement message, mirroring the legacy clear.
-    Missing,
-}
-
-/// Map a [`TuiReconnectOutcome`] to its final user message. Shared by the keyed
-/// op resolver (`build_reconnect_status_op`) and the anonymous fallback path
-/// (`resolve_reconnect_op_or`, used when no op was stashed) so the wording cannot
-/// drift between the two.
-pub(crate) fn reconnect_final(o: &TuiReconnectOutcome) -> dux_core::engine::Final {
-    match o {
-        TuiReconnectOutcome::Ready { status_message } => {
-            dux_core::engine::Final::info(status_message.clone())
-        }
-        TuiReconnectOutcome::ReconnectFailed {
-            branch_name,
-            message,
-        } => dux_core::engine::Final::error(format!(
-            "Reconnect failed for agent \"{branch_name}\": {message}"
-        )),
-        TuiReconnectOutcome::ForceReconnectFailed {
-            branch_name,
-            message,
-        } => dux_core::engine::Final::error(format!(
-            "Fresh restart failed for agent \"{branch_name}\": {message}"
-        )),
-        TuiReconnectOutcome::Missing => dux_core::engine::Final::clear(),
-    }
-}
+// The reconnect / fresh-restart status-op outcome is the CORE-owned
+// `dux_core::engine::LaunchOutcome`, and its message mapping is the core-owned
+// `dux_core::engine::launch_outcome_final`, shared byte-for-byte with the web
+// (the TUI's own reconnect-outcome enum and `reconnect_final` mapper were
+// deleted in favor of that single source).
 
 /// Handler-computed outcome for an async worktree-deletion op (see
 /// [`App::pending_delete_ops`]). The completion event only knows whether the git

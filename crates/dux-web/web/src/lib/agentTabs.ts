@@ -115,12 +115,16 @@ export function shouldRefireFocusPut(
 }
 
 // The provider a plain (no-provider-arg) `addTab(session.id)` actually launches:
-// the session's owning project's `default_provider`, mirroring the server's own
-// resolution (`CreateTabBody.provider` omitted → project default). Falls back to
-// the session's own `provider` field only when the owning project can't be found
-// in the spine (should not happen in practice, but keeps the "+" quick-add and
-// its picker's "default" marker from silently disagreeing with what gets
-// launched).
+// the session's owning project's `default_provider`. This is the client-side
+// TWIN of core's `Engine::default_provider_for_new_tab` (the single Rust source
+// both server surfaces call, `crates/dux-core/src/engine/mod.rs`): the spine's
+// `project.default_provider` is already the effective value (an explicit project
+// override, else the global config default resolved server-side), so for a
+// project present in the spine this agrees with the server byte-for-byte. It
+// falls back to the session's own `provider` only when the owning project can't
+// be found in the spine (unreachable in practice, since a session always ships
+// with its project), keeping the "+" quick-add and its picker's "default" marker
+// from silently disagreeing with what gets launched. Pinned by the tests below.
 export function defaultProviderForSession(
   spine: Spine | null,
   session: SessionView,

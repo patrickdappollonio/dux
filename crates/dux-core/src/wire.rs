@@ -38,32 +38,6 @@ pub mod status_keys {
     }
 }
 
-/// Map a [`WebLaunchOutcome`] to its final user message. Shared by the web
-/// reconnect/force-restart op resolver (in `reconnect_session`) and the anonymous
-/// fallback path (`drive_web_launch_followup`, used when no op was stashed — e.g.
-/// a resume-fallback retry or startup auto-reopen, which never go through
-/// `reconnect_session`) so the wording cannot drift between the two. Mirrors the
-/// TUI's `reconnect_final`.
-fn web_launch_final(o: &crate::engine::WebLaunchOutcome) -> crate::engine::Final {
-    use crate::engine::{Final, WebLaunchOutcome};
-    match o {
-        WebLaunchOutcome::Ready { status_message } => Final::info(status_message.clone()),
-        WebLaunchOutcome::ReconnectFailed {
-            branch_name,
-            message,
-        } => Final::error(format!(
-            "Reconnect failed for agent \"{branch_name}\": {message}"
-        )),
-        WebLaunchOutcome::ForceReconnectFailed {
-            branch_name,
-            message,
-        } => Final::error(format!(
-            "Fresh restart failed for agent \"{branch_name}\": {message}"
-        )),
-        WebLaunchOutcome::Missing => Final::clear(),
-    }
-}
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -77,8 +51,7 @@ use crate::engine::{
 use crate::model::{Project, ProjectBranchStatus, ProviderKind};
 use crate::statusline::StatusScope;
 use crate::worker::{
-    AgentLaunchKind, CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction,
-    PullTarget,
+    CreateAgentRequest, NonDefaultBranchAction, ProjectPersistenceAction, PullTarget,
 };
 
 /// A command as received from a generic transport (e.g. the web WebSocket).
@@ -1987,101 +1960,33 @@ impl Engine {
         session_id: &str,
         force: bool,
     ) -> anyhow::Result<Option<WireStatus>> {
-        let session = self
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-
-        // Check order mirrors the TUI exactly: normal reconnect tests
-        // "already connected" first (`reconnect_selected_session`), then the
-        // worktree; force reconnect has no connected-check (it kills the
-        // provider) and only guards the worktree (`force_reconnect_agent`).
-        if !force && self.providers.contains_key(&session.id) {
-            return Ok(Some(WireStatus::new(
-                "info",
-                format!("Agent \"{}\" is already connected.", session.branch_name),
-            )));
-        }
-
-        if !std::path::Path::new(&session.worktree_path).exists() {
-            anyhow::bail!(
-                "Worktree for agent \"{}\" no longer exists. Delete and re-create the agent.",
-                session.branch_name
-            );
-        }
-
-        if force {
-            // Kill the existing provider and clear all resume state so the
-            // relaunch starts genuinely fresh (mirrors `force_reconnect_agent`).
-            // Routed through the shared `clear_tab_runtime` so the in-flight
-            // `AgentLaunch` key is cleared too — hand-rolling this list used to
-            // miss it, leaving a stale in-flight marker that made the
-            // `DispatchAgentLaunch` chokepoint report "already launching" forever.
-            self.clear_tab_runtime(&session.id);
-        }
-
-        // Detach any other session holding the same worktree's live PTY. The
-        // engine method tears down every tab of the conflicting agent (Main +
-        // Support), clearing all six runtime maps and marking it Detached, so no
-        // caller-side follow-up clear is needed.
-        let detached_label = self
-            .detach_conflicting_worktree_session(&session.worktree_path, &session.id)
-            .map(|detached| detached.label);
-
-        let use_resume = if force {
-            false
-        } else {
-            self.tab_resume_decision(&session, &session.id, &session.provider, true)
-        };
-        let mut msg = self.agent_reconnect_status_message(&session, use_resume);
-        if let Some(detached) = &detached_label {
-            msg.push_str(&format!(
-                " Agent \"{}\" was detached to avoid worktree conflicts.",
-                detached,
-            ));
-        }
-        if let Some(project) = self.projects.iter().find(|p| p.id == session.project_id)
-            && project.default_provider != session.provider
-        {
-            let provider_label = if self.project_uses_explicit_default_provider(&project.id) {
-                "current project provider"
-            } else {
-                "current global default provider"
-            };
-            msg.push_str(&format!(
-                " Note: this agent uses {}. Your {provider_label} is {}.",
-                session.provider.as_str(),
-                project.default_provider.as_str(),
-            ));
-        }
-
-        let branch_name = session.branch_name.clone();
-        let kind = if force {
-            AgentLaunchKind::ForceReconnect {
-                status_message: msg,
+        // The guards, the collision-aware resume decision, the status message,
+        // and the pre-dispatch mutations (force teardown + conflicting-worktree
+        // detach) are the single-source `Engine::reconnect_plan`, shared with the
+        // TUI. The web sources no PTY size, so it uses the subscribe-launch
+        // default `(24, 80)` (rows, cols); the focused pane re-attaches via the
+        // subscribe machinery once the new provider comes up.
+        let (request, busy) = match self.reconnect_plan(session_id, force, (24, 80))? {
+            crate::engine::ReconnectPlan::AlreadyConnected { message } => {
+                return Ok(Some(WireStatus::new("info", message)));
             }
-        } else {
-            AgentLaunchKind::Reconnect {
-                status_message: msg,
+            // The TUI surfaces this as a status error; the web surfaces it as a
+            // 400 (its route maps `Err` to a bad-request body), preserving today's
+            // behavior and message.
+            crate::engine::ReconnectPlan::WorktreeMissing { message } => {
+                anyhow::bail!(message);
             }
+            crate::engine::ReconnectPlan::Launch {
+                request,
+                busy_message,
+                ..
+            } => (request, busy_message),
         };
-        // The TUI sources `last_pty_size` from view state; the web has none, so
-        // reuse the subscribe-launch default `(24, 80)` (rows, cols).
-        let request = self.build_agent_launch_request(session, use_resume, (24, 80), kind);
-        let reaction = self.apply(Command::DispatchAgentLaunch {
-            request: Box::new(request),
-        })?;
+        let reaction = self.apply(Command::DispatchAgentLaunch { request })?;
         // `DispatchAgentLaunch` returns a `DispatchAgentLaunchView`, which
         // `wire_status_from_reaction` doesn't surface. Mirror the TUI: on a
         // successful dispatch (`launched`) show the busy status; otherwise
         // surface the view's own status (e.g. "already launching").
-        let busy = if force {
-            format!("Starting fresh agent \"{branch_name}\"...")
-        } else {
-            format!("Launching agent \"{branch_name}\"...")
-        };
         match reaction {
             EventReaction::DispatchAgentLaunchView(view) => {
                 if view.launched {
@@ -2091,8 +1996,8 @@ impl Engine {
                     // counterpart to the TUI's `App.pending_reconnect_ops`. Stashed
                     // by session id (the launch completion carries the session).
                     let op = crate::engine::status_op(busy)
-                        .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| {
-                            web_launch_final(o)
+                        .resolve_in_handler(|o: &crate::engine::LaunchOutcome| {
+                            crate::engine::launch_outcome_final(o)
                         })
                         .with_scope(self.current_origin.clone());
                     let pending = WireStatus::from_update(&op.pending_status());
@@ -3167,7 +3072,7 @@ impl Engine {
                         // reconnect op keyed by the session id, as before.
                         self.resolve_web_launch_op_or(
                             &outcome.tab_id,
-                            crate::engine::WebLaunchOutcome::Ready {
+                            crate::engine::LaunchOutcome::Ready {
                                 status_message: status_message.clone(),
                             },
                         )
@@ -3175,7 +3080,7 @@ impl Engine {
                 }
                 AgentLaunchReadyView::SessionMissing => self.resolve_web_launch_op_or(
                     &outcome.session.id,
-                    crate::engine::WebLaunchOutcome::Missing,
+                    crate::engine::LaunchOutcome::Missing,
                 ),
                 // StartupAutoReopen success is silent (mirrors the TUI). A create
                 // commit/persist-fail final is resolved engine-side, not here.
@@ -3192,7 +3097,7 @@ impl Engine {
                     message,
                 } => self.resolve_web_launch_op_or(
                     session_id,
-                    crate::engine::WebLaunchOutcome::ReconnectFailed {
+                    crate::engine::LaunchOutcome::ReconnectFailed {
                         branch_name: branch_name.clone(),
                         message: message.clone(),
                     },
@@ -3203,7 +3108,7 @@ impl Engine {
                     message,
                 } => self.resolve_web_launch_op_or(
                     session_id,
-                    crate::engine::WebLaunchOutcome::ForceReconnectFailed {
+                    crate::engine::LaunchOutcome::ForceReconnectFailed {
                         branch_name: branch_name.clone(),
                         message: message.clone(),
                     },
@@ -3264,7 +3169,7 @@ impl Engine {
     fn resolve_web_launch_op_or(
         &mut self,
         session_id: &str,
-        outcome: crate::engine::WebLaunchOutcome,
+        outcome: crate::engine::LaunchOutcome,
     ) -> WebFollowupStatuses {
         match self.pending_web_launch_ops.remove(session_id) {
             Some(op) => match op.resolve(&outcome).into_reaction() {
@@ -3278,7 +3183,7 @@ impl Engine {
                 },
                 _ => WebFollowupStatuses::default(),
             },
-            None => match web_launch_final(&outcome) {
+            None => match crate::engine::launch_outcome_final(&outcome) {
                 crate::engine::Final::Message { tone, text } => WebFollowupStatuses {
                     statuses: vec![WireStatus::new(tone.as_wire(), text)],
                     clear_keys: Vec::new(),
@@ -7072,8 +6977,9 @@ mod tests {
 
         // Mint the web launch op as `reconnect_session` would: its opaque id keys
         // the busy and the eventual final.
-        let op = crate::engine::status_op("Launching agent \"feat\"...")
-            .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| web_launch_final(o));
+        let op = crate::engine::status_op("Launching agent \"feat\"...").resolve_in_handler(
+            |o: &crate::engine::LaunchOutcome| crate::engine::launch_outcome_final(o),
+        );
         let op_id = op.id().to_string();
         engine.pending_web_launch_ops.insert("s1".into(), op);
 
@@ -7102,8 +7008,9 @@ mod tests {
         let mut session = sample_session("s1", "p1", "feat");
         session.project_id = "p1".into();
 
-        let op = crate::engine::status_op("Launching agent \"feat\"...")
-            .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| web_launch_final(o));
+        let op = crate::engine::status_op("Launching agent \"feat\"...").resolve_in_handler(
+            |o: &crate::engine::LaunchOutcome| crate::engine::launch_outcome_final(o),
+        );
         let op_id = op.id().to_string();
         engine.pending_web_launch_ops.insert("s1".into(), op);
 
@@ -7124,8 +7031,9 @@ mod tests {
     #[test]
     fn drive_web_launch_followup_reconnect_failure_resolves_op_error() {
         let (mut engine, _tmp) = test_engine();
-        let op = crate::engine::status_op("Launching agent \"feat\"...")
-            .resolve_in_handler(|o: &crate::engine::WebLaunchOutcome| web_launch_final(o));
+        let op = crate::engine::status_op("Launching agent \"feat\"...").resolve_in_handler(
+            |o: &crate::engine::LaunchOutcome| crate::engine::launch_outcome_final(o),
+        );
         let op_id = op.id().to_string();
         engine.pending_web_launch_ops.insert("s1".into(), op);
 
