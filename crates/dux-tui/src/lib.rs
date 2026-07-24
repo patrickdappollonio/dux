@@ -6,7 +6,10 @@ mod clipboard;
 mod config;
 mod config_saver;
 mod diff;
-mod focus;
+// The terminal-focus grace state machine is core-owned (`dux_core::focus`),
+// shared by rule with the web's viewed-ping grace. Re-exported so existing
+// `crate::focus::...` paths keep resolving.
+pub(crate) use dux_core::focus;
 mod keybindings;
 mod raw_input;
 mod server_screen;

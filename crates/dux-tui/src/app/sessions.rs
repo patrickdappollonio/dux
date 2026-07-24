@@ -1106,50 +1106,6 @@ impl App {
         launched
     }
 
-    pub(crate) fn spawn_companion_terminal_for_session(
-        &self,
-        session: &AgentSession,
-    ) -> Result<PtyClient> {
-        let (rows, cols) = if self.last_pty_size != (0, 0) {
-            self.last_pty_size
-        } else {
-            (24, 80)
-        };
-        logger::debug(&format!(
-            "spawning companion terminal {:?} {:?} in {} ({}x{})",
-            self.engine.config.terminal.command,
-            self.engine.config.terminal.args,
-            session.worktree_path,
-            cols,
-            rows,
-        ));
-        let env = self
-            .engine
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .and_then(|project| {
-                crate::config::resolve_agent_env(&self.engine.config.env, &project.env).ok()
-            })
-            .unwrap_or_default();
-        PtyClient::spawn_with_env_opts(
-            &self.engine.config.terminal.command,
-            &self.engine.config.terminal.args,
-            Path::new(&session.worktree_path),
-            rows,
-            cols,
-            self.engine.config.ui.agent_scrollback_lines,
-            dux_core::pty::PtySpawnOptions {
-                env: &env,
-                // A companion is a plain shell, not an agent, so it never scans
-                // for OSC/bell signals, but it still gets the terminal identity so
-                // a shell sees the same terminal an agent would.
-                track_agent_signals: false,
-                identity: &self.engine.resolved_identity(),
-            },
-        )
-    }
-
     pub(crate) fn show_agent_surface(&mut self) {
         self.focus = FocusPane::Center;
         self.center_mode = CenterMode::Agent;
@@ -1169,32 +1125,22 @@ impl App {
             return Ok(());
         };
 
-        let client = self.spawn_companion_terminal_for_session(&session)?;
-        let terminal_id = self.next_terminal_id();
-        let count = self.session_terminal_count(&session.id) + 1;
-        let label = if count == 1 {
-            session
-                .title
-                .clone()
-                .unwrap_or_else(|| session.branch_name.clone())
-        } else {
-            let base = session
-                .title
-                .clone()
-                .unwrap_or_else(|| session.branch_name.clone());
-            format!("{base} ({count})")
+        // Route through the shared core creator so the id mint, the "Terminal N"
+        // identity label, and the monotonic `sort_order` stamp are single-sourced
+        // with the web. The TUI used to hand-insert here with `sort_order: 1`,
+        // which made the default drag order nondeterministic (HashMap iteration
+        // order) and never assigned the identity label.
+        let (rows, cols) = self.pty_size_for_launch();
+        let terminal_id = match self
+            .engine
+            .create_companion_terminal(&session.id, rows, cols)
+        {
+            Ok((id, _label)) => id,
+            Err(e) => {
+                self.set_error(format!("Could not launch terminal: {e:#}"));
+                return Ok(());
+            }
         };
-        self.engine.companion_terminals.insert(
-            terminal_id.clone(),
-            CompanionTerminal {
-                owner: TerminalOwner::Session(session.id.clone()),
-                label,
-                foreground_cmd: None,
-                client,
-                sort_order: 1,
-                created_at: chrono::Utc::now(),
-            },
-        );
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
@@ -1204,46 +1150,6 @@ impl App {
             session.branch_name
         ));
         Ok(())
-    }
-
-    /// Spawns the PTY for a project terminal: the configured terminal command
-    /// at the project's repo root, with the resolved global-plus-project
-    /// environment. Mirrors `spawn_companion_terminal_for_session`, with the
-    /// project (not a session worktree) as the working directory.
-    pub(crate) fn spawn_project_terminal_for_project(
-        &self,
-        project: &Project,
-    ) -> Result<PtyClient> {
-        let (rows, cols) = if self.last_pty_size != (0, 0) {
-            self.last_pty_size
-        } else {
-            (24, 80)
-        };
-        logger::debug(&format!(
-            "spawning project terminal {:?} {:?} in {} ({}x{})",
-            self.engine.config.terminal.command,
-            self.engine.config.terminal.args,
-            project.path,
-            cols,
-            rows,
-        ));
-        let env = crate::config::resolve_agent_env(&self.engine.config.env, &project.env)
-            .unwrap_or_default();
-        PtyClient::spawn_with_env_opts(
-            &self.engine.config.terminal.command,
-            &self.engine.config.terminal.args,
-            Path::new(&project.path),
-            rows,
-            cols,
-            self.engine.config.ui.agent_scrollback_lines,
-            dux_core::pty::PtySpawnOptions {
-                env: &env,
-                // Same shell semantics as a session-owned companion: no agent
-                // signal scanning, but the full terminal identity.
-                track_agent_signals: false,
-                identity: &self.engine.resolved_identity(),
-            },
-        )
     }
 
     /// Always spawns a new project terminal at the given project's repo root.
@@ -1257,25 +1163,16 @@ impl App {
             ));
             return Ok(());
         }
-        let client = self.spawn_project_terminal_for_project(project)?;
-        let terminal_id = self.next_terminal_id();
-        let count = self.project_terminal_count(&project.id) + 1;
-        let label = if count == 1 {
-            project.name.clone()
-        } else {
-            format!("{} ({count})", project.name)
+        // Shared core creator (see `show_companion_terminal`): single-sources the
+        // id, the "Terminal N" label, and the deterministic `sort_order`.
+        let (rows, cols) = self.pty_size_for_launch();
+        let terminal_id = match self.engine.create_project_terminal(&project.id, rows, cols) {
+            Ok((id, _label)) => id,
+            Err(e) => {
+                self.set_error(format!("Could not launch project terminal: {e:#}"));
+                return Ok(());
+            }
         };
-        self.engine.companion_terminals.insert(
-            terminal_id.clone(),
-            CompanionTerminal {
-                owner: TerminalOwner::Project(project.id.clone()),
-                label,
-                foreground_cmd: None,
-                client,
-                sort_order: 1,
-                created_at: chrono::Utc::now(),
-            },
-        );
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();
@@ -1366,29 +1263,18 @@ impl App {
             return Ok(());
         };
 
-        let client = self.spawn_companion_terminal_for_session(&session)?;
-        let terminal_id = self.next_terminal_id();
-        let count = self.session_terminal_count(&session.id) + 1;
-        let base = session
-            .title
-            .clone()
-            .unwrap_or_else(|| session.branch_name.clone());
-        let label = if count == 1 {
-            base
-        } else {
-            format!("{base} ({count})")
+        // Shared core creator (see `show_companion_terminal`).
+        let (rows, cols) = self.pty_size_for_launch();
+        let terminal_id = match self
+            .engine
+            .create_companion_terminal(&session.id, rows, cols)
+        {
+            Ok((id, _label)) => id,
+            Err(e) => {
+                self.set_error(format!("Could not launch terminal: {e:#}"));
+                return Ok(());
+            }
         };
-        self.engine.companion_terminals.insert(
-            terminal_id.clone(),
-            CompanionTerminal {
-                owner: TerminalOwner::Session(session.id.clone()),
-                label,
-                foreground_cmd: None,
-                client,
-                sort_order: 1,
-                created_at: chrono::Utc::now(),
-            },
-        );
         self.active_terminal_id = Some(terminal_id);
         self.terminal_return_to_list = true;
         self.show_companion_terminal_surface();

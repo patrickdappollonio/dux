@@ -11,8 +11,31 @@
 //! reports (`ESC [ I` / `ESC [ O`). It is deliberately free of I/O so the exact
 //! grace semantics can be unit tested with explicit `Instant`/`Duration`
 //! arithmetic, honoring the "wall-clock, not tick counts" tenet.
+//!
+//! Core-owned: the TUI drives this from crossterm focus events, and the pure
+//! [`within_attention_grace`] predicate is the cross-language twin of the web's
+//! `withinAttentionGrace` (`crates/dux-web/web/src/lib/viewedPing.ts`), pinned by
+//! shared test vectors so the two surfaces' grace math cannot drift.
 
 use std::time::{Duration, Instant};
+
+/// Whether `elapsed` since a genuine refocus/hidden->visible transition is still
+/// within the attention grace window. `None` elapsed means no transition has been
+/// observed (fail open, no grace); a `grace` of zero disables the delay. The
+/// boundary is exclusive (`elapsed < grace`): at or past the boundary the grace
+/// has expired.
+///
+/// This is the core-owned DECISION shared, by rule, with the web's
+/// `withinAttentionGrace` in `crates/dux-web/web/src/lib/viewedPing.ts` (a
+/// cross-language twin pinned by shared test vectors). The web works in raw
+/// milliseconds; the semantics (undefined-since -> false, grace<=0 -> false,
+/// elapsed<grace -> true) are identical.
+pub fn within_attention_grace(elapsed: Option<Duration>, grace: Duration) -> bool {
+    match elapsed {
+        Some(elapsed) => grace > Duration::ZERO && elapsed < grace,
+        None => false,
+    }
+}
 
 /// Terminal-window focus as reported by the host via DEC mode 1004.
 ///
@@ -92,12 +115,10 @@ impl TerminalFocus {
         if !self.focused {
             return false;
         }
-        if let Some(regained_at) = self.regained_at
-            && now.duration_since(regained_at) < grace
-        {
-            return false;
-        }
-        true
+        // Suppress while still inside the grace window after a genuine refocus.
+        // The grace math is the shared `within_attention_grace` (twin of the web).
+        let elapsed = self.regained_at.map(|at| now.duration_since(at));
+        !within_attention_grace(elapsed, grace)
     }
 }
 
@@ -184,6 +205,30 @@ mod tests {
         focus.on_focus_gained(t1);
         assert!(!focus.should_stamp_viewed(t1 + grace - Duration::from_millis(1), grace));
         assert!(focus.should_stamp_viewed(t1 + grace, grace));
+    }
+
+    // ── SHARED VECTORS with viewedPing.test.ts `withinAttentionGrace` ──────────
+    // The web works in raw ms; these cases mirror it verbatim (a change to the
+    // grace math in one language that is not mirrored fails a test on the other).
+    #[test]
+    fn within_attention_grace_semantics() {
+        let grace = Duration::from_millis(3000);
+        // No transition observed yet: not in grace (fail open).
+        assert!(!within_attention_grace(None, grace));
+        // Zero grace disables the delay.
+        assert!(!within_attention_grace(
+            Some(Duration::from_millis(1)),
+            Duration::ZERO
+        ));
+        // Inside the window suppresses; the boundary is exclusive.
+        assert!(within_attention_grace(
+            Some(Duration::from_millis(2999)),
+            grace
+        ));
+        assert!(!within_attention_grace(
+            Some(Duration::from_millis(3000)),
+            grace
+        ));
     }
 
     #[test]

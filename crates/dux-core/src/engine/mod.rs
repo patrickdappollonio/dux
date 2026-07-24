@@ -3874,7 +3874,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         // First refresh runs and stamps the timestamp.
@@ -5476,7 +5476,7 @@ mod resource_monitor_targets_tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (terminal_id, _label) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("create project terminal");
 
         let targets = engine.resource_monitor_targets();

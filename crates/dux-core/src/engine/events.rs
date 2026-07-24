@@ -2705,7 +2705,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
         assert!(
             engine
@@ -2744,10 +2744,10 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("session terminal");
         let (project_tid, _) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("project terminal");
 
         engine
@@ -4065,10 +4065,10 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (t1, _) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("terminal on p1");
         let (t2, _) = engine
-            .create_project_terminal("p2")
+            .create_project_terminal("p2", 24, 80)
             .expect("terminal on p2");
 
         let action = ProjectPersistenceAction::Remove {
@@ -4109,10 +4109,10 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (t1, _) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("terminal on p1");
         let (t2, _) = engine
-            .create_project_terminal("p2")
+            .create_project_terminal("p2", 24, 80)
             .expect("terminal on p2");
 
         let action = ProjectPersistenceAction::Delete {

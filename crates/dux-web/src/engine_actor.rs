@@ -1905,14 +1905,16 @@ fn handle_request(
             let _ = reply.send(res);
         }
         EngineRequest::CreateTerminal(session_id, reply) => {
+            // Headless spawn: seed a default 24x80 and let the first attaching
+            // client resize the PTY to its real viewport.
             let res = engine
-                .create_companion_terminal(&session_id)
+                .create_companion_terminal(&session_id, 24, 80)
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
         }
         EngineRequest::CreateProjectTerminal(project_id, reply) => {
             let res = engine
-                .create_project_terminal(&project_id)
+                .create_project_terminal(&project_id, 24, 80)
                 .map_err(|e| e.to_string());
             let _ = reply.send(res);
         }
@@ -2594,7 +2596,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
         let (handle, join) = spawn_engine_thread(engine);
 
@@ -3091,7 +3093,7 @@ mod tests {
         engine.config.terminal.command = "true".to_string();
         engine.config.terminal.args = vec![];
         engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         let (tx, mut rx) = broadcast::channel::<SpineChange>(64);

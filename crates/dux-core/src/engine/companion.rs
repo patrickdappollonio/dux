@@ -24,7 +24,12 @@ impl Engine {
     /// resolved environment (global env merged with the owning project's env).
     /// This is the headless equivalent of the TUI's
     /// `spawn_companion_terminal_for_session` + insert.
-    pub fn create_companion_terminal(&mut self, session_id: &str) -> Result<(String, String)> {
+    pub fn create_companion_terminal(
+        &mut self,
+        session_id: &str,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(String, String)> {
         let session = self
             .sessions
             .iter()
@@ -45,6 +50,8 @@ impl Engine {
             TerminalOwner::Session(session_id.to_string()),
             Path::new(&session.worktree_path),
             &env,
+            rows,
+            cols,
         )
     }
 
@@ -56,7 +63,12 @@ impl Engine {
     /// env), owned by the project instead of a session. It deliberately does NOT
     /// run the project's `startup_command` (that is worktree provisioning for
     /// new agents, not a shell rc).
-    pub fn create_project_terminal(&mut self, project_id: &str) -> Result<(String, String)> {
+    pub fn create_project_terminal(
+        &mut self,
+        project_id: &str,
+        rows: u16,
+        cols: u16,
+    ) -> Result<(String, String)> {
         let project = self
             .projects
             .iter()
@@ -78,6 +90,8 @@ impl Engine {
             TerminalOwner::Project(project_id.to_string()),
             Path::new(&project.path),
             &env,
+            rows,
+            cols,
         )
     }
 
@@ -88,17 +102,23 @@ impl Engine {
         owner: TerminalOwner,
         cwd: &Path,
         env: &[(String, String)],
+        rows: u16,
+        cols: u16,
     ) -> Result<(String, String)> {
         // A companion terminal is a plain shell, not an agent, so it opts out of
         // agent-signal tracking: its bytes are never scanned for OSC/bell
         // attention signals (which it does not consume) and it can never raise a
         // spurious attention flag.
+        //
+        // `rows`/`cols` come from the caller so a TUI spawn matches the visible
+        // pane on the first frame (no initial reflow of the shell); headless web
+        // callers pass a default size and rely on the client's first resize.
         let client = PtyClient::spawn_with_env_opts(
             &self.config.terminal.command,
             &self.config.terminal.args,
             cwd,
-            24,
-            80,
+            rows,
+            cols,
             self.config.ui.agent_scrollback_lines,
             crate::pty::PtySpawnOptions {
                 env,
@@ -155,7 +175,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let (terminal_id, label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         assert_eq!(terminal_id, "term-1");
@@ -189,10 +209,10 @@ mod tests {
 
         let before = chrono::Utc::now();
         let (first, _) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("first terminal");
         let (second, _) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("second terminal");
         let after = chrono::Utc::now();
 
@@ -225,7 +245,9 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
 
-        let (id, _) = engine.create_companion_terminal("s1").expect("terminal");
+        let (id, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("terminal");
 
         // Idle shell prompt: no foreground app, no streaming, no typing -> idle.
         engine
@@ -279,7 +301,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let err = engine
-            .create_companion_terminal("missing")
+            .create_companion_terminal("missing", 24, 80)
             .expect_err("missing session should error");
         assert!(
             err.to_string().contains("unknown session"),
@@ -301,7 +323,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let (terminal_id, label) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("create project terminal");
 
         assert_eq!(terminal_id, "term-1");
@@ -323,7 +345,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let err = engine
-            .create_project_terminal("missing")
+            .create_project_terminal("missing", 24, 80)
             .expect_err("missing project should error");
         assert!(
             err.to_string().contains("unknown project"),
@@ -341,7 +363,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let err = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect_err("path-missing project should error");
         assert!(
             err.to_string().contains("does not exist on disk"),

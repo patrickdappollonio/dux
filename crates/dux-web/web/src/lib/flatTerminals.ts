@@ -73,12 +73,14 @@ export function assembleFlatTerminals(
   return out
 }
 
-// A terminal's colored state word, mirroring the agent row's `stateWord` priority
-// but with only the three states a terminal can have (no detached/exited/attention):
-// typing outranks running outranks idle. The busy word is "Running" (a terminal
-// runs a process; agents say "Working"), but the colors reuse the exact tokens the
-// agent word uses so the two never drift: the soft-violet typing token, the
-// active-green busy color, muted for idle.
+// A terminal's colored state word. TWIN of the core-owned
+// `dux_core::row_state::terminal_row_state` (the DECISION); pinned by shared
+// vectors (`flatTerminals.test.ts` mirrors `row_state.rs`). Only the three states
+// a terminal can have (no detached/exited/attention): typing outranks running
+// outranks idle. The busy word is "Running" (a terminal runs a process; agents
+// say "Working"), but the colors reuse the exact tokens the agent word uses so the
+// two never drift: the soft-violet typing token, the active-green busy color,
+// muted for idle.
 export function terminalStateWord(terminal: TerminalView): StateWord {
   if (terminal.typing) return { label: "Typing", className: "text-dux-typing" }
   if (terminal.working) return { label: "Running", className: "text-green-500" }

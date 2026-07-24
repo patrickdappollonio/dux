@@ -79,6 +79,8 @@ function project(over: Partial<ProjectView> & { id: string }): ProjectView {
   } as ProjectView
 }
 
+// SHARED VECTORS with dux-core `row_state.rs` `terminal_row_state`: the
+// typing > running > idle priority is mirrored there.
 describe("terminalStateWord", () => {
   it("prefers typing over working, styled through the typing token", () => {
     const word = terminalStateWord(term({ id: "t", working: true, typing: true }))

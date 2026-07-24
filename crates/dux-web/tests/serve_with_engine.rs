@@ -109,7 +109,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
     // Create a live companion terminal BEFORE serving so we can prove the
     // ReturnToTui path preserves running PTYs (the engine is never dropped).
     let (terminal_id, _label) = engine
-        .create_companion_terminal("s1")
+        .create_companion_terminal("s1", 24, 80)
         .expect("create terminal");
     assert!(
         engine.companion_terminals.contains_key(&terminal_id),
@@ -213,7 +213,7 @@ async fn serve_with_engine_returns_to_tui_and_closes_the_port() {
 async fn serve_with_engine_quit_process_shuts_down_ptys() {
     let (mut engine, _tmp) = build_engine();
     let (terminal_id, _label) = engine
-        .create_companion_terminal("s1")
+        .create_companion_terminal("s1", 24, 80)
         .expect("create terminal");
     assert!(!engine.companion_terminals[&terminal_id].client.is_exited());
 
@@ -284,7 +284,7 @@ async fn return_to_tui_does_not_hang_with_a_subscribed_pty() {
     // A live `cat`-backed companion terminal: writing to it echoes back, which
     // gives us a forwarder binary frame to await.
     let (terminal_id, _label) = engine
-        .create_companion_terminal("s1")
+        .create_companion_terminal("s1", 24, 80)
         .expect("create terminal");
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

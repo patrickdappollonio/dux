@@ -71,6 +71,9 @@ describe("shouldSendViewed", () => {
   })
 })
 
+// SHARED VECTORS with dux-core `focus.rs` `within_attention_grace_semantics`:
+// undefined-since -> false, grace<=0 -> false, elapsed<grace -> true, boundary
+// exclusive. Mirrored there so the grace math cannot drift between surfaces.
 describe("withinAttentionGrace", () => {
   it("is false with no visibleSince (initial load has no grace)", () => {
     expect(withinAttentionGrace(1000, undefined, 3000)).toBe(false)

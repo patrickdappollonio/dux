@@ -42,6 +42,10 @@ export const DEFAULT_ATTENTION_GRACE_SECONDS = 3
  * `graceMs <= 0` disables the grace entirely (today's instant-clear
  * behavior).
  */
+// TWIN of the core-owned `dux_core::focus::within_attention_grace` (the
+// DECISION); pinned by shared vectors (`viewedPing.test.ts` mirrors
+// `focus.rs`'s `within_attention_grace_semantics`). Keep the three cases
+// identical: undefined-since -> false, grace<=0 -> false, elapsed<grace -> true.
 export function withinAttentionGrace(
   now: number,
   visibleSince: number | undefined,

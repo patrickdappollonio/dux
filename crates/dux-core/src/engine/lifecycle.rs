@@ -218,6 +218,14 @@ impl Engine {
             // silently no-op on the wrong key.
             let owning = self.owning_session_for_tab(&tab_id);
             let is_session_slot = owning.as_deref() == Some(tab_id.as_str());
+            // When the AGENT itself exits (its session-slot tab), re-check its PR
+            // now: an exit commonly follows a merge, so the badge would otherwise
+            // stay stale until the next background sync. This is the shared-exit
+            // trigger both surfaces get; the TUI additionally fires it from its own
+            // richer exit loop. Rate-limited and in-flight-guarded inside the spawn.
+            if is_session_slot && let Some(sid) = owning.clone() {
+                self.spawn_pr_check_for_session(&sid, crate::engine::PR_CHECK_MIN_INTERVAL);
+            }
             let (owner, label) = match &owning {
                 Some(sid) => {
                     let branch = self
@@ -824,7 +832,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let (terminal_id, _label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
         assert_eq!(terminal_id, "term-1");
         assert!(engine.companion_terminals.contains_key("term-1"));
@@ -919,6 +927,51 @@ mod tests {
         assert!(
             !engine.pty_input.contains_key("s1"),
             "pruning an exited agent must clear its input stamp"
+        );
+    }
+
+    #[test]
+    fn prune_fires_a_pr_recheck_when_the_agent_exits() {
+        // #25: the shared exit handling (used by the web) must re-check the agent's
+        // PR the moment it exits, because an exit commonly follows a merge and the
+        // badge would otherwise stay stale until the next background sync. The TUI
+        // already fires this from its own exit loop; this closes the web gap.
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = crate::model::GhStatus::Available;
+
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let client = spawn_cat(worktree.path());
+        engine.providers.insert("s1".to_string(), client);
+        engine
+            .providers
+            .get_mut("s1")
+            .unwrap()
+            .write_bytes(b"\x04")
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let pruned = engine.prune_exited_ptys();
+            if pruned.iter().any(|p| p.id == "s1") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "agent provider never exited");
+            sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            engine.pr_last_checked.contains_key("s1"),
+            "an agent exit must trigger a PR re-check (the debounce stamp proves it fired)",
         );
     }
 
@@ -1262,7 +1315,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (terminal_id, _label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
         assert!(engine.companion_terminals.contains_key(&terminal_id));
 
@@ -1481,7 +1534,7 @@ mod tests {
             "trap '' TERM HUP; echo ready; while true; do :; done".to_string(),
         ];
         let (terminal_id, _label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         // Wait until the trap is installed (marker printed) before signalling.
@@ -1626,7 +1679,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (tid, _label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
         assert!(engine.companion_terminals.contains_key(&tid));
 
@@ -1666,7 +1719,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (tid, _) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         // The reader loop suppresses the post-resize redraw burst for 500ms, so
@@ -1712,7 +1765,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (tid, _) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         // A recycled `term-N` id must not inherit stale activity/typing, so both
@@ -1745,10 +1798,10 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (session_tid, _) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("session terminal");
         let (project_tid, _) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("project terminal");
 
         engine.begin_close_session_terminals("s1");
@@ -1776,10 +1829,10 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (session_tid, _) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("session terminal");
         let (project_tid, _) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("project terminal");
 
         engine.begin_close_project_terminals("p1");
@@ -1810,7 +1863,7 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (terminal_id, _label) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("create project terminal");
 
         // Ctrl-d (EOF) makes cat exit.

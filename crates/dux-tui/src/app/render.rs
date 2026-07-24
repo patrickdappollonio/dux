@@ -50,16 +50,17 @@ pub(crate) fn agent_state_word(
     typing: bool,
     needs_attention: bool,
 ) -> &'static str {
-    use crate::model::SessionStatus;
-    if needs_attention {
-        return "Needs you";
-    }
-    match status {
-        SessionStatus::Active if typing => "Typing",
-        SessionStatus::Active if working => "Working",
-        SessionStatus::Active => "Idle",
-        SessionStatus::Detached => "Detached",
-        SessionStatus::Exited => "Exited",
+    // The priority ladder is the core-owned `row_state::agent_row_state`
+    // (cross-language twin of the web's `stateWord`); this surface only maps the
+    // typed state to the TUI's word. The busy state is "Working" for an agent.
+    use dux_core::row_state::RowState;
+    match dux_core::row_state::agent_row_state(status, working, typing, needs_attention) {
+        RowState::NeedsAttention => "Needs you",
+        RowState::Typing => "Typing",
+        RowState::Busy => "Working",
+        RowState::Idle => "Idle",
+        RowState::Detached => "Detached",
+        RowState::Exited => "Exited",
     }
 }
 
@@ -8691,15 +8692,14 @@ fn terminal_row_lines(
     let line1 = ellipsize_spans(spans, text_width);
 
     let muted = theme.provider_label_fg;
-    // Priority mirrors `agent_state_word`, minus the states a live terminal cannot
-    // be in. The busy word is "Running" (a terminal runs a process; it does not
-    // "work" like an agent); agents keep "Working".
-    let word = if typing {
-        "Typing"
-    } else if working {
-        "Running"
-    } else {
-        "Idle"
+    // Priority is the core-owned `row_state::terminal_row_state` (twin of the
+    // web's `terminalStateWord`); this surface only words it. The busy word is
+    // "Running" (a terminal runs a process; it does not "work" like an agent);
+    // agents keep "Working".
+    let word = match dux_core::row_state::terminal_row_state(working, typing) {
+        dux_core::row_state::RowState::Typing => "Typing",
+        dux_core::row_state::RowState::Busy => "Running",
+        _ => "Idle",
     };
     let word_color = if typing {
         theme.session_typing

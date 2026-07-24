@@ -34,6 +34,9 @@ function extraTab(id: string, live: boolean): AgentTabView {
   return { ...tab("codex"), id, has_live_process: live }
 }
 
+// SHARED VECTORS with dux-core `agent_tabs.rs` `branch_drifted`: these cases are
+// mirrored there. A change to the drift rule in one language that is not mirrored
+// fails a test on the other side.
 describe("branchDrift", () => {
   it("flags drift when the current branch differs from the original", () => {
     expect(
@@ -142,6 +145,8 @@ describe("defaultProviderForSession", () => {
   })
 })
 
+// SHARED VECTORS with dux-core `agent_tabs.rs` `tab_labels`: these cases are
+// mirrored there so the disambiguation rule cannot drift between surfaces.
 describe("tabLabels", () => {
   it("leaves distinct providers bare", () => {
     expect(tabLabels([tab("claude"), tab("codex")])).toEqual(["claude", "codex"])

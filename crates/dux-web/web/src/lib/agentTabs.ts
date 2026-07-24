@@ -52,6 +52,10 @@ export function shouldShowTabStrip(
 // trailing " 2", " 3", … for the k-th occurrence of a repeated provider (in tab
 // order). The first occurrence stays bare. Order matches the input (the
 // session-slot tab first).
+//
+// TWIN of dux-core `agent_tabs::tab_labels` (the core-owned rule); pinned by
+// shared vectors (`agentTabs.test.ts` mirrors `agent_tabs.rs`'s tests). Keep the
+// two in lockstep.
 export function tabLabels(tabs: AgentTabView[]): string[] {
   const seen = new Map<string, number>()
   return tabs.map((tab) => {
@@ -67,6 +71,10 @@ export function tabLabels(tabs: AgentTabView[]): string[] {
 // the current `branch_name`. `initial` is passed through so callers that surface
 // the original branch don't re-read it. Shared by the header drift crumb and the
 // agent info dialog so the two never disagree.
+//
+// The `drifted` boolean is the TWIN of dux-core `agent_tabs::branch_drifted`
+// (the core-owned rule); pinned by shared vectors (see `agentTabs.test.ts` /
+// `agent_tabs.rs`). Keep the empty-initial guard identical in both.
 export function branchDrift(
   session: Pick<SessionView, "branch_name" | "initial_branch">,
 ): { drifted: boolean; initial: string } {

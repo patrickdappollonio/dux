@@ -1080,9 +1080,15 @@ mod tests {
     fn terminals_are_ordered_by_sort_order_and_reflect_a_reorder() {
         let (mut engine, _worktree) = engine_with_spawnable_terminals();
 
-        let (t1, _) = engine.create_companion_terminal("s1").expect("term 1");
-        let (t2, _) = engine.create_companion_terminal("s1").expect("term 2");
-        let (t3, _) = engine.create_companion_terminal("s1").expect("term 3");
+        let (t1, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("term 1");
+        let (t2, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("term 2");
+        let (t3, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("term 3");
 
         // Base order is creation order (ascending sort_order stamped at spawn).
         let order: Vec<String> = engine.spine().sessions[0]
@@ -1112,7 +1118,9 @@ mod tests {
         use std::time::Instant;
 
         let (mut engine, _worktree) = engine_with_spawnable_terminals();
-        let (tid, _) = engine.create_companion_terminal("s1").expect("term");
+        let (tid, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("term");
 
         // No activity yet: updated_at falls back to created_at exactly.
         let view = engine.spine().sessions[0].terminals[0].clone();
@@ -1247,7 +1255,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let (terminal_id, label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         let vm = engine.spine();
@@ -1274,7 +1282,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let (terminal_id, label) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("create project terminal");
 
         let vm = engine.spine();
@@ -1306,7 +1314,7 @@ mod tests {
         engine.config.terminal.args = vec![];
 
         let (terminal_id, _label) = engine
-            .create_companion_terminal("s1")
+            .create_companion_terminal("s1", 24, 80)
             .expect("create companion terminal");
 
         // Set the model field directly (the engine's wall-clock-throttled probe

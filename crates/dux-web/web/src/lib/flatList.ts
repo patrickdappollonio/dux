@@ -119,9 +119,11 @@ export interface StateWord {
 }
 
 export function stateWord(session: SessionView): StateWord {
-  // Mirrors the TUI's canonical state-word priority EXACTLY: needs-attention
-  // wins; then for an active agent typing outranks working, working outranks
-  // idle; then the non-active detached/exited words.
+  // TWIN of the core-owned priority ladder `dux_core::row_state::agent_row_state`
+  // (the DECISION); this surface only words and colors it. Pinned by shared
+  // vectors (`flatList.test.ts` mirrors `row_state.rs`'s tests). The order:
+  // needs-attention wins; then for an active agent typing outranks working,
+  // working outranks idle; then the non-active detached/exited words.
   if (session.needs_attention) return { label: "Needs you", className: "text-cyan-100" }
   if (session.status === "active" && session.typing) {
     // The soft-violet typing token, matching the TUI's `#c586e0` typing hue.

@@ -1429,10 +1429,10 @@ mod tests {
         engine.config.terminal.command = "cat".to_string();
         engine.config.terminal.args = vec![];
         let (t1, _) = engine
-            .create_project_terminal("p1")
+            .create_project_terminal("p1", 24, 80)
             .expect("terminal on p1");
         let (t2, _) = engine
-            .create_project_terminal("p2")
+            .create_project_terminal("p2", 24, 80)
             .expect("terminal on p2");
 
         engine

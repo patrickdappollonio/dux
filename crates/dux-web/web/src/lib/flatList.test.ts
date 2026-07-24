@@ -160,6 +160,9 @@ describe("FLAT_SORT_LABELS", () => {
   })
 })
 
+// SHARED VECTORS with dux-core `row_state.rs` `agent_row_state`: the priority
+// ladder (label ordering) is mirrored there. A change to the priority in one
+// language that is not mirrored fails a test on the other side.
 describe("stateWord", () => {
   it("prefers needs-you over typing and working", () => {
     expect(

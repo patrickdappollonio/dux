@@ -14479,6 +14479,45 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::Terminal);
     }
 
+    /// #8 regression: TUI terminal spawn now routes through the shared core
+    /// creator, so every terminal gets a DISTINCT monotonic `sort_order` (the old
+    /// TUI copy hardcoded `sort_order: 1`, leaving the default drag order at the
+    /// mercy of HashMap iteration order) and the canonical "Terminal N" identity
+    /// label (the old copy never assigned one).
+    #[test]
+    fn tui_terminal_spawn_stamps_distinct_sort_order_and_identity_label() {
+        let mut app = test_app(default_bindings());
+
+        app.new_companion_terminal().expect("spawn first terminal");
+        app.new_companion_terminal().expect("spawn second terminal");
+
+        assert_eq!(app.engine.companion_terminals.len(), 2);
+        let mut orders: Vec<u64> = app
+            .engine
+            .companion_terminals
+            .values()
+            .map(|t| t.sort_order)
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(
+            orders,
+            vec![1, 2],
+            "each spawned terminal must get a distinct, monotonic sort_order",
+        );
+        let mut labels: Vec<String> = app
+            .engine
+            .companion_terminals
+            .values()
+            .map(|t| t.label.clone())
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec!["Terminal 1".to_string(), "Terminal 2".to_string()],
+            "each terminal must carry the canonical Terminal N identity label",
+        );
+    }
+
     #[test]
     fn mouse_click_discard_dialog_button_discards_changes() {
         let mut app = test_app(default_bindings());

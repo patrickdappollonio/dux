@@ -832,16 +832,9 @@ pub(crate) struct AgentInfoPrompt {
     pub(crate) lines: Vec<(String, AgentInfoTone)>,
 }
 
-/// True when an agent's `current` branch has drifted from the `initial` branch
-/// it was created on. Guards against an empty `initial` (a legacy row that
-/// predates the `initial_branch` column and was never backfilled, or a
-/// transient pre-persist state) so an empty original never shows a phantom
-/// `(orig: )` drift. This is the single source of drift truth for the TUI,
-/// mirroring the web's `branchDrift()` helper; route every drift check through
-/// it rather than recomputing `current != initial` inline.
-pub(crate) fn branch_drifted(current: &str, initial: &str) -> bool {
-    !initial.is_empty() && current != initial
-}
+// The branch-drift predicate is the core-owned `dux_core::agent_tabs::branch_drifted`
+// (cross-language twin of the web's `branchDrift`, pinned by shared vectors).
+pub(crate) use dux_core::agent_tabs::branch_drifted;
 
 /// The attention glyph's blink rhythm as a pure function of elapsed wall-clock
 /// milliseconds: exactly two quick blinks (two hides), then steady until the
@@ -4157,26 +4150,12 @@ impl App {
         }
     }
 
-    pub(crate) fn next_terminal_id(&mut self) -> String {
-        self.engine.terminal_counter += 1;
-        format!("term-{}", self.engine.terminal_counter)
-    }
-
     /// Returns the number of running companion terminals for a given session.
     pub(crate) fn session_terminal_count(&self, session_id: &str) -> usize {
         self.engine
             .companion_terminals
             .values()
             .filter(|t| matches!(&t.owner, TerminalOwner::Session(sid) if sid == session_id))
-            .count()
-    }
-
-    /// Returns the number of running project terminals for a given project.
-    pub(crate) fn project_terminal_count(&self, project_id: &str) -> usize {
-        self.engine
-            .companion_terminals
-            .values()
-            .filter(|t| matches!(&t.owner, TerminalOwner::Project(pid) if pid == project_id))
             .count()
     }
 
@@ -4388,22 +4367,9 @@ impl App {
     }
 }
 
-/// Disambiguated tab labels: each provider name is used as-is the first time
-/// and suffixed with " 2", " 3", … for repeats, in order. Pure, unit-tested.
-pub(crate) fn tab_labels(providers: &[&str]) -> Vec<String> {
-    let mut seen: HashMap<&str, usize> = HashMap::new();
-    let mut out = Vec::with_capacity(providers.len());
-    for p in providers {
-        let n = seen.entry(*p).or_insert(0);
-        *n += 1;
-        if *n == 1 {
-            out.push((*p).to_string());
-        } else {
-            out.push(format!("{p} {n}"));
-        }
-    }
-    out
-}
+// Disambiguated tab labels are the core-owned `dux_core::agent_tabs::tab_labels`
+// (cross-language twin of the web's `tabLabels`, pinned by shared vectors).
+pub(crate) use dux_core::agent_tabs::tab_labels;
 
 pub(crate) use dux_core::project_browser::load_projects;
 
@@ -4668,18 +4634,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_drifted_guards_empty_initial() {
-        // Real drift: current differs from a non-empty initial.
-        assert!(branch_drifted("agent-tabs", "server-mode"));
-        // No drift when equal.
-        assert!(!branch_drifted("main", "main"));
-        // Empty initial (legacy/never-backfilled row) is NEVER drift, even
-        // though current != "". This is the phantom "(orig: )" guard.
-        assert!(!branch_drifted("main", ""));
-        assert!(!branch_drifted("", ""));
-    }
-
-    #[test]
     fn agent_info_lines_omit_drift_line_when_initial_empty() {
         let mut s = test_session("s1", "p1", 0);
         s.branch_name = "main".into();
@@ -4712,25 +4666,6 @@ mod tests {
             .expect("provider line");
         assert!(provider_diff.0.contains("codex"));
         assert!(provider_diff.0.contains("project default: claude"));
-    }
-
-    #[test]
-    fn tab_labels_disambiguate_duplicate_providers() {
-        assert_eq!(tab_labels(&["claude", "codex"]), vec!["claude", "codex"]);
-        assert_eq!(
-            tab_labels(&["codex", "codex"]),
-            vec!["codex".to_string(), "codex 2".to_string()]
-        );
-        assert_eq!(
-            tab_labels(&["claude", "codex", "codex", "claude"]),
-            vec![
-                "claude".to_string(),
-                "codex".to_string(),
-                "codex 2".to_string(),
-                "claude 2".to_string()
-            ]
-        );
-        assert!(tab_labels(&[]).is_empty());
     }
 
     #[test]
