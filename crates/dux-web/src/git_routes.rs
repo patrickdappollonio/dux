@@ -166,21 +166,18 @@ async fn discard(
     // ("unstage first") and files with nothing to discard, with a message.
     let wt = worktree.clone();
     let p = op.path.clone();
-    let untracked = match tokio::task::spawn_blocking(move || {
-        dux_core::wire::discard_classify(&wt, &p)
-    })
-    .await
-    {
-        Ok(Ok(u)) => u,
-        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("git task failed: {e}"),
-            )
-                .into_response();
-        }
-    };
+    let untracked =
+        match tokio::task::spawn_blocking(move || dux_core::git::discard_classify(&wt, &p)).await {
+            Ok(Ok(u)) => u,
+            Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("git task failed: {e}"),
+                )
+                    .into_response();
+            }
+        };
     let wt = worktree.clone();
     let path = op.path;
     if let Err(r) = run_git(move || dux_core::git::discard_file(&wt, &path, untracked)).await {
@@ -228,9 +225,8 @@ async fn commit(
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    if op.message.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "commit message is empty").into_response();
-    }
+    // Length is a web payload bound (not a git semantic), so it stays a cheap
+    // pre-check here rather than moving into the shared core preflight.
     if op.message.chars().count() > MAX_COMMIT_MSG_LEN {
         return (
             StatusCode::BAD_REQUEST,
@@ -243,6 +239,34 @@ async fn commit(
         Ok(w) => w,
         Err(r) => return r,
     };
+    // The empty-message and nothing-staged refusals are the shared core decision
+    // (`commit_preflight`), read against LIVE git status. This adds the
+    // nothing-staged gate the web previously lacked: a stale commit with nothing
+    // staged used to reach `git commit` and 500 with raw stderr; it now returns a
+    // clean 400. Each surface renders its own copy for these refusals.
+    let wt = worktree.clone();
+    let msg = op.message.clone();
+    let preflight =
+        match tokio::task::spawn_blocking(move || dux_core::git::commit_preflight(&wt, &msg)).await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("git task failed: {e}"),
+                )
+                    .into_response();
+            }
+        };
+    match preflight {
+        dux_core::git::CommitPreflight::EmptyMessage => {
+            return (StatusCode::BAD_REQUEST, "commit message is empty").into_response();
+        }
+        dux_core::git::CommitPreflight::NothingStaged => {
+            return (StatusCode::BAD_REQUEST, "no staged changes to commit").into_response();
+        }
+        dux_core::git::CommitPreflight::Ready => {}
+    }
     let wt = worktree.clone();
     let message = op.message;
     if let Err(r) = run_git(move || dux_core::git::commit(&wt, &message).map(|_| ())).await {

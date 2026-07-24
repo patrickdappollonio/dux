@@ -1677,6 +1677,29 @@ pub fn discard_file(worktree_path: &Path, file_path: &str, is_untracked: bool) -
     Ok(())
 }
 
+/// Classify a discard request against the worktree's LIVE git status and return
+/// whether the target file is untracked. Discard is destructive (it deletes
+/// untracked files and restores tracked ones from HEAD via [`discard_file`]), so
+/// the tracked vs untracked distinction must be derived from `git status` at the
+/// moment of the action, never trusted from a client flag or a snapshot captured
+/// earlier: a file's tracked/untracked state can change between when a UI decides
+/// to offer the discard and when the user confirms it. A file that is currently
+/// STAGED cannot be discarded (unstage it first), and a file with no working-tree
+/// change has nothing to discard; both are reported as an error.
+pub fn discard_classify(worktree_path: &Path, path: &str) -> Result<bool> {
+    let (staged, unstaged) = changed_files(worktree_path)?;
+    // Reject when the file is staged (and has no separate unstaged change). The
+    // TUI and web both surface "Unstage the file first to discard changes." for
+    // this case.
+    if staged.iter().any(|f| f.path == path) && !unstaged.iter().any(|f| f.path == path) {
+        anyhow::bail!("Unstage the file first to discard changes.");
+    }
+    match unstaged.iter().find(|f| f.path == path) {
+        Some(file) => Ok(file.status == "?"),
+        None => anyhow::bail!("No unstaged changes to discard for \"{path}\"."),
+    }
+}
+
 /// Return the text of `git diff --cached` for the given worktree.
 /// Uses `-c color.diff=false` to strip ANSI escapes regardless of user config.
 pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
@@ -1698,6 +1721,42 @@ pub fn staged_diff_text(worktree_path: &Path) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// The typed outcome of [`commit_preflight`]: the single decision both surfaces
+/// share for whether a commit may proceed. The refusal reasons are stable CODES,
+/// not user-facing strings, so each surface renders its own copy (the TUI status
+/// line vs the web 400 body) without the wording being pinned in core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitPreflight {
+    /// The message is empty or whitespace-only.
+    EmptyMessage,
+    /// The message is fine but nothing is staged (live `git status` has no staged
+    /// entry), so `git commit` would fail. Checked against LIVE status rather than
+    /// a cached changed-files list so the decision matches the worktree as it is
+    /// at commit time, not when the commit UI was last refreshed.
+    NothingStaged,
+    /// A real message and at least one staged change: safe to commit.
+    Ready,
+}
+
+/// Decide whether a commit may proceed, from the worktree's LIVE git status.
+/// Both the TUI's commit action and the web commit route call this so they agree
+/// on the empty-message and nothing-staged refusals (the web previously lacked
+/// the nothing-staged gate and let `git commit` fail with raw stderr as a 500).
+/// Surface-specific concerns such as a message length cap are NOT decided here.
+pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight {
+    if message.trim().is_empty() {
+        return CommitPreflight::EmptyMessage;
+    }
+    match changed_files(worktree_path) {
+        Ok((staged, _unstaged)) if staged.is_empty() => CommitPreflight::NothingStaged,
+        // A git-status error is not a preflight refusal: fall through to Ready and
+        // let the actual `git commit` surface the underlying error. Treating a
+        // transient status failure as "nothing staged" would wrongly block a valid
+        // commit.
+        _ => CommitPreflight::Ready,
+    }
 }
 
 pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
@@ -2737,6 +2796,79 @@ mod tests {
     fn commit_all(cwd: &Path, message: &str) {
         run_git(cwd, &["add", "-A"]);
         run_git(cwd, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn commit_preflight_matrix_empty_message_then_nothing_staged_then_ready() {
+        let repo = init_test_repo();
+        let wt = repo.path();
+
+        // Empty (or whitespace-only) message is refused first, before any git IO
+        // decision about staging.
+        assert_eq!(
+            commit_preflight(wt, "   "),
+            CommitPreflight::EmptyMessage,
+            "a whitespace-only message must be refused as empty",
+        );
+
+        // A valid message but nothing staged: live git status has no staged entry.
+        assert_eq!(
+            commit_preflight(wt, "real message"),
+            CommitPreflight::NothingStaged,
+            "a clean worktree has nothing to commit",
+        );
+
+        // Stage a change and the preflight clears.
+        fs::write(wt.join("a.txt"), "hello\n").unwrap();
+        run_git(wt, &["add", "a.txt"]);
+        assert_eq!(
+            commit_preflight(wt, "real message"),
+            CommitPreflight::Ready,
+            "a staged change with a real message is ready to commit",
+        );
+    }
+
+    #[test]
+    fn discard_classify_reflects_live_status_as_the_worktree_changes() {
+        // The classification must track the CURRENT git status, transitioning as
+        // the same path moves between untracked, staged, tracked-and-modified, and
+        // clean. This is the property the discard confirm relies on: it re-reads
+        // this at action time rather than trusting an earlier snapshot.
+        let repo = init_test_repo();
+        let wt = repo.path();
+
+        // Untracked file: classified as untracked (the delete branch).
+        fs::write(wt.join("ghost.txt"), "ghost\n").unwrap();
+        assert!(
+            discard_classify(wt, "ghost.txt").unwrap(),
+            "a brand-new untracked file must classify as untracked",
+        );
+
+        // Once staged, discard is refused (unstage first) rather than classified.
+        run_git(wt, &["add", "ghost.txt"]);
+        let staged_err = discard_classify(wt, "ghost.txt").unwrap_err().to_string();
+        assert!(
+            staged_err.contains("Unstage the file first"),
+            "a staged file must be refused, got: {staged_err}",
+        );
+
+        // A tracked file with an unstaged modification classifies as tracked (the
+        // restore-from-HEAD branch), NOT untracked.
+        fs::write(wt.join("tracked.txt"), "one\n").unwrap();
+        commit_all(wt, "add tracked");
+        fs::write(wt.join("tracked.txt"), "two\n").unwrap();
+        assert!(
+            !discard_classify(wt, "tracked.txt").unwrap(),
+            "a modified tracked file must classify as tracked, not untracked",
+        );
+
+        // A clean/committed path has nothing to discard.
+        commit_all(wt, "commit tracked change");
+        let clean_err = discard_classify(wt, "tracked.txt").unwrap_err().to_string();
+        assert!(
+            clean_err.contains("No unstaged changes to discard"),
+            "a clean tracked file must report nothing to discard, got: {clean_err}",
+        );
     }
 
     #[test]

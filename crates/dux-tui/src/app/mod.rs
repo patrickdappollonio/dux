@@ -1258,7 +1258,12 @@ pub(crate) enum PromptState {
     },
     ConfirmDiscardFile {
         file_path: String,
-        is_untracked: bool,
+        // Deliberately NO tracked/untracked flag here: discard is destructive
+        // (delete an untracked file vs restore a tracked one from HEAD), and the
+        // file's state can change between when this prompt opens and when the user
+        // confirms (an agent may be mutating the worktree). The classification is
+        // therefore re-derived from LIVE git status at confirm time via
+        // `git::discard_classify`, never snapshotted here.
         confirm_selected: bool, // false = Cancel (default), true = Discard
     },
     /// Shown when adding a project whose repo has no commits yet (a fresh

@@ -712,7 +712,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
- "content_inspector",
  "crokey",
  "crossterm",
  "dux-core",

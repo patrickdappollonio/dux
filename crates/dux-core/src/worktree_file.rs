@@ -31,13 +31,6 @@ pub struct WorktreeFile {
     pub read_only: bool,
 }
 
-fn is_text(bytes: &[u8]) -> bool {
-    // Matches the diff engine / TUI `is_renderable_text`: `content_inspector`
-    // catches UTF-8 byte streams that nonetheless carry NULs/control bytes,
-    // which `String::from_utf8` alone would accept and render garbled.
-    bytes.is_empty() || content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
-}
-
 /// Resolve `worktree/rel_path` for READ-only access, bypassing the literal
 /// `.git`-component rejection so `.git/*` files can be opened. Returns
 /// `(abs_path, is_git_dir, is_outside)`.
@@ -223,7 +216,7 @@ pub fn read_file(worktree: &Path, rel_path: &str) -> anyhow::Result<WorktreeFile
         (bytes, is_git_dir)
     };
 
-    if !is_text(&bytes) {
+    if !crate::diff::is_renderable_text(&bytes) {
         return Ok(WorktreeFile {
             path: rel_path.to_string(),
             binary: true,

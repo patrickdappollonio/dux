@@ -30,8 +30,13 @@ pub struct DiffContents {
 /// Whether a byte slice is renderable UTF-8 text (empty counts as text).
 /// `content_inspector` catches UTF-8 byte streams that nonetheless contain
 /// NUL/control bytes, which `String::from_utf8` alone would accept and render
-/// garbled — matching the TUI's `is_renderable_text`.
-fn is_renderable_text(bytes: &[u8]) -> bool {
+/// garbled.
+///
+/// This is the SINGLE binary-vs-text predicate for the whole app: the diff
+/// engine (both sides of a file diff), the editor's working-copy reader
+/// (`worktree_file`), and the TUI's diff renderer all call this so a file is
+/// never classified as binary on one surface and text on another.
+pub fn is_renderable_text(bytes: &[u8]) -> bool {
     bytes.is_empty() || content_inspector::inspect(bytes) == content_inspector::ContentType::UTF_8
 }
 
@@ -118,6 +123,25 @@ pub fn file_diff_contents(worktree: &Path, rel_path: &str) -> anyhow::Result<Dif
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_renderable_text_classifies_empty_utf8_and_binary() {
+        // Empty is text (an added/deleted side renders as all-insert/all-delete).
+        assert!(is_renderable_text(b""));
+        // Plain ASCII / UTF-8 is text, including multi-byte scalars.
+        assert!(is_renderable_text(b"fn main() {}\n"));
+        assert!(is_renderable_text(
+            "caf\u{e9} \u{2014} \u{1f600}".as_bytes()
+        ));
+        // A NUL byte marks the stream binary even though the rest is ASCII: this
+        // is exactly what `String::from_utf8` would wrongly accept and render
+        // garbled, and why the predicate uses content_inspector.
+        assert!(!is_renderable_text(b"text\0more"));
+        // A classic binary signature (PNG header) is not renderable text.
+        assert!(!is_renderable_text(&[
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a
+        ]));
+    }
 
     /// Initialize a git repo in a tempdir with one committed file `a.txt`.
     fn init_repo() -> tempfile::TempDir {

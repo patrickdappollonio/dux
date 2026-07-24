@@ -1362,29 +1362,38 @@ impl App {
             RightSection::CommitInput => return Ok(()),
         };
         let Some(file) = file else { return Ok(()) };
+        // Capture only the path. The tracked/untracked classification that decides
+        // the destructive branch is re-derived from live git status at confirm
+        // time (see `resolve_confirm_discard_file`), so nothing here can go stale.
         self.prompt = PromptState::ConfirmDiscardFile {
             file_path: file.path.clone(),
-            is_untracked: file.status == "?",
             confirm_selected: false,
         };
         Ok(())
     }
 
     fn execute_commit(&mut self) -> Result<()> {
-        if self.engine.staged_files.is_empty() {
-            self.set_error("No staged changes to commit.");
-            return Ok(());
-        }
-        if self.commit_input.text.trim().is_empty() {
-            self.set_error("Enter a commit message first.");
-            return Ok(());
-        }
         let Some(session) = self.selected_session() else {
             self.set_error("Select a session first.");
             return Ok(());
         };
         let worktree = PathBuf::from(&session.worktree_path);
         let message = self.commit_input.text.clone();
+        // Route the empty-message / nothing-staged decision through the shared core
+        // preflight so the TUI and the web agree, and so the nothing-staged check
+        // reads LIVE git status rather than the possibly-stale `staged_files`
+        // cache. Each surface still renders its own copy for the refusals.
+        match git::commit_preflight(&worktree, &message) {
+            git::CommitPreflight::EmptyMessage => {
+                self.set_error("Enter a commit message first.");
+                return Ok(());
+            }
+            git::CommitPreflight::NothingStaged => {
+                self.set_error("No staged changes to commit.");
+                return Ok(());
+            }
+            git::CommitPreflight::Ready => {}
+        }
         let push_key = self.bindings.label_for(Action::PushToRemote);
         let success_message =
             format!("Changes committed successfully. Press {push_key} to push to remote.");
@@ -5213,22 +5222,36 @@ impl App {
     }
 
     fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
-        let (file_path, is_untracked) = match &self.prompt {
-            PromptState::ConfirmDiscardFile {
-                file_path,
-                is_untracked,
-                ..
-            } => (file_path.clone(), *is_untracked),
+        let file_path = match &self.prompt {
+            PromptState::ConfirmDiscardFile { file_path, .. } => file_path.clone(),
             _ => return false,
         };
         self.prompt = PromptState::None;
         if confirm && let Some(session) = self.selected_session() {
             let worktree = PathBuf::from(&session.worktree_path);
-            match git::discard_file(&worktree, &file_path, is_untracked) {
-                Ok(()) => {
-                    self.set_info(format!(
-                        "Discarded unstaged changes to \"{file_path}\" — staged changes, if any, are kept."
-                    ));
+            // Re-classify against LIVE git status at confirm time, then act on that
+            // fresh flag, so the delete-vs-restore decision and the destructive
+            // action agree with the worktree as it is NOW (not as it was when the
+            // prompt opened). This closes a data-loss window: a file that was
+            // untracked at prompt-open but became tracked before confirm would
+            // otherwise be deleted outright instead of restored from HEAD.
+            let is_untracked = match git::discard_classify(&worktree, &file_path) {
+                Ok(u) => u,
+                Err(e) => {
+                    // The live check refused (now staged, or nothing left to
+                    // discard). Surface it and leave the file untouched.
+                    self.set_error(format!("Discard failed: {e}"));
+                    return false;
+                }
+            };
+            let reaction = self.engine.apply(Command::DiscardFile {
+                worktree_path: worktree,
+                path: file_path,
+                is_untracked,
+            });
+            match reaction {
+                Ok(reaction) => {
+                    self.apply_reaction(reaction);
                     self.reload_changed_files();
                 }
                 Err(e) => self.set_error(format!("Discard failed: {e}")),
@@ -14476,7 +14499,6 @@ cyan = "#00ffff"
         }];
         app.prompt = PromptState::ConfirmDiscardFile {
             file_path: "src/main.rs".to_string(),
-            is_untracked: false,
             confirm_selected: true,
         };
         install_confirm_discard_overlay(&mut app);
@@ -14491,6 +14513,122 @@ cyan = "#00ffff"
         )
         .expect("discarded file");
         assert_eq!(contents, "fn main() {}\n");
+    }
+
+    /// Staleness regression: the discard confirm must classify tracked-vs-untracked
+    /// against LIVE git status at confirm time, not trust a flag snapshotted when
+    /// the prompt opened. Here a file is untracked when the prompt opens (so the
+    /// old code snapshots `is_untracked = true`), but becomes tracked-and-clean
+    /// before the user confirms. The old code would `fs::remove_file` it (deleting
+    /// a now-committed file); the correct behavior re-checks live status, finds
+    /// nothing to discard, and leaves the file on disk.
+    #[test]
+    fn discard_confirm_reclassifies_live_and_does_not_delete_a_now_tracked_file() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path).to_path_buf();
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        // Seed one commit so HEAD exists.
+        std::fs::write(worktree.join("seed.txt"), "seed\n").expect("seed");
+        git(&["add", "seed.txt"]);
+        git(&["commit", "-m", "initial"]);
+
+        // A brand-new UNTRACKED file: this is what the changes pane shows as "?".
+        std::fs::write(worktree.join("ghost.txt"), "ghost\n").expect("write ghost");
+        app.engine.unstaged_files = vec![ChangedFile {
+            path: "ghost.txt".into(),
+            status: "?".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+        app.selected_left = 1;
+        app.right_section = RightSection::Unstaged;
+        app.files_index = 0;
+
+        // Open the confirm prompt while the file is still untracked.
+        app.confirm_discard_selected_file()
+            .expect("open discard prompt");
+        assert!(matches!(app.prompt, PromptState::ConfirmDiscardFile { .. }));
+
+        // The worktree changes between prompt-open and confirm: the file is now
+        // committed (tracked and clean), so there is nothing to discard.
+        git(&["add", "ghost.txt"]);
+        git(&["commit", "-m", "track ghost"]);
+
+        app.resolve_confirm_discard_file(true);
+
+        assert!(
+            worktree.join("ghost.txt").exists(),
+            "a file that became tracked-and-clean between prompt-open and confirm must NOT be deleted by discard",
+        );
+    }
+
+    /// Commit refuses an empty message via the shared core preflight (rendered
+    /// with the TUI's own copy).
+    #[test]
+    fn execute_commit_refuses_an_empty_message() {
+        let mut app = test_app(default_bindings());
+        std::fs::create_dir_all(&app.engine.sessions[0].worktree_path).expect("worktree dir");
+        app.selected_left = 1;
+        app.commit_input.text = "   ".to_string();
+
+        app.execute_commit().expect("execute_commit");
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(app.status.text().contains("Enter a commit message first"));
+    }
+
+    /// Commit reads LIVE git status for the nothing-staged refusal, not the cached
+    /// `staged_files` list. A stale non-empty cache used to let the commit proceed
+    /// to `git commit`, which then failed; now the live check refuses cleanly.
+    #[test]
+    fn execute_commit_refuses_nothing_staged_from_live_status_not_the_stale_cache() {
+        let mut app = test_app(default_bindings());
+        let worktree = std::path::Path::new(&app.engine.sessions[0].worktree_path).to_path_buf();
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test User"]);
+        std::fs::write(worktree.join("a.txt"), "seed\n").expect("seed");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-m", "initial"]);
+        // Worktree is now clean (nothing staged), but the in-memory cache is STALE
+        // and still lists a staged file. The old code trusted this cache.
+        app.engine.staged_files = vec![ChangedFile {
+            path: "a.txt".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+        app.selected_left = 1;
+        app.commit_input.text = "a real message".to_string();
+
+        app.execute_commit().expect("execute_commit");
+
+        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Error);
+        assert!(
+            app.status.text().contains("No staged changes to commit"),
+            "the live status check must refuse the commit despite the stale cache, got: {}",
+            app.status.text(),
+        );
     }
 
     #[test]

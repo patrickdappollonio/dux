@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use content_inspector::{ContentType, inspect};
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
@@ -57,7 +56,9 @@ pub fn diff_file(
         });
     }
 
-    if !is_renderable_text(&old_bytes) || !is_renderable_text(&new_bytes) {
+    if !dux_core::diff::is_renderable_text(&old_bytes)
+        || !dux_core::diff::is_renderable_text(&new_bytes)
+    {
         return Ok(binary_diff_output(
             rel_path,
             old_bytes.len(),
@@ -234,10 +235,6 @@ pub fn diff_file(
         lines,
         gutter_width,
     })
-}
-
-fn is_renderable_text(bytes: &[u8]) -> bool {
-    bytes.is_empty() || matches!(inspect(bytes), ContentType::UTF_8)
 }
 
 fn binary_diff_output(

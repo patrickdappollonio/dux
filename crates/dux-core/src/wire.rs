@@ -992,26 +992,6 @@ pub fn delete_session_status_message(
     }
 }
 
-/// Classify a discard request against the worktree's LIVE git status and return
-/// whether the target file is untracked. Discard is destructive (it deletes
-/// untracked files and restores tracked ones from HEAD), so the tracked vs
-/// untracked distinction is derived server-side from `git status` rather than
-/// trusted from the client. Mirrors the TUI's guard: a file that is currently
-/// STAGED cannot be discarded (the TUI tells the user to unstage it first), and
-/// a file with no working-tree change has nothing to discard.
-pub fn discard_classify(worktree_path: &std::path::Path, path: &str) -> anyhow::Result<bool> {
-    let (staged, unstaged) = crate::git::changed_files(worktree_path)?;
-    // Reject when the file is staged. The TUI surfaces "Unstage the file first
-    // to discard changes." for the same case; mirror that wording.
-    if staged.iter().any(|f| f.path == path) && !unstaged.iter().any(|f| f.path == path) {
-        anyhow::bail!("Unstage the file first to discard changes.");
-    }
-    match unstaged.iter().find(|f| f.path == path) {
-        Some(file) => Ok(file.status == "?"),
-        None => anyhow::bail!("No unstaged changes to discard for \"{path}\"."),
-    }
-}
-
 impl Engine {
     /// Reconstruct and dispatch a wire command, returning a wire-safe outcome.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
@@ -3261,7 +3241,7 @@ impl Engine {
             },
             WireCommand::DiscardFile { session_id, path } => {
                 let worktree_path = self.session_worktree(&session_id)?;
-                let is_untracked = discard_classify(&worktree_path, &path)?;
+                let is_untracked = crate::git::discard_classify(&worktree_path, &path)?;
                 Command::DiscardFile {
                     worktree_path,
                     path,

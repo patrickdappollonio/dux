@@ -678,24 +678,22 @@ fn remove_session_worktree(paths: &DuxPaths, session: &crate::model::AgentSessio
         return;
     }
 
-    if worktree.exists() {
-        let _ = std::process::Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(worktree)
-            .output();
-        if worktree.exists() {
-            let _ = fs::remove_dir_all(worktree);
-        }
+    // Route through the shared core removal so the worktree is removed with the
+    // correct `-C <repo>`, the repo's worktree registration is pruned, and the
+    // branch is deleted afterward. The old inline copy ran `git worktree remove`
+    // in the CLI's own cwd (no `-C`), which hit the wrong repo, failed, and left
+    // a stale worktree ref that made the branch undeletable. Continue-on-error is
+    // preserved: a factory reset must press on past any single failure.
+    if let Some(project_path) = session.project_path.as_deref() {
+        let _ = git::remove_worktree(Path::new(project_path), worktree, &session.branch_name);
     }
 
-    if let Some(project_path) = session.project_path.as_deref() {
-        let _ = std::process::Command::new("git")
-            .arg("-C")
-            .arg(project_path)
-            .arg("branch")
-            .arg("-D")
-            .arg(&session.branch_name)
-            .output();
+    // Belt-and-suspenders for the factory-reset guarantee: ensure the directory is
+    // gone even when there is no owning repo to drive git (an orphan with no
+    // `project_path`) or git could not remove it. Core `remove_worktree` never
+    // filesystem-deletes, so this stays the CLI's own last resort.
+    if worktree.exists() {
+        let _ = fs::remove_dir_all(worktree);
     }
 }
 
@@ -981,5 +979,107 @@ mod tests {
                 .expect("session");
             worktree
         }
+    }
+
+    /// Convergence regression: factory-reset worktree removal must prune the
+    /// repo's worktree registration and delete the branch, exactly as core
+    /// `git::remove_worktree` does. The old CLI copy ran `git worktree remove`
+    /// WITHOUT `-C <repo>` (so it hit the wrong repo, failed, and fell back to a
+    /// bare `fs::remove_dir_all`) and never pruned, leaving a stale worktree ref
+    /// that made the branch undeletable. This proves the branch is gone.
+    #[test]
+    fn factory_reset_worktree_removal_prunes_and_deletes_the_branch() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "Test User"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+
+        let worktrees_root = tempdir.path().join("worktrees");
+        fs::create_dir_all(&worktrees_root).expect("worktrees root");
+        let worktree = worktrees_root.join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "branch-wt",
+                worktree.to_str().unwrap(),
+            ],
+        );
+
+        let paths = DuxPaths {
+            config_path: tempdir.path().join("config.toml"),
+            sessions_db_path: tempdir.path().join("sessions.sqlite3"),
+            worktrees_root: worktrees_root.clone(),
+            lock_path: tempdir.path().join("dux.lock"),
+            root: tempdir.path().to_path_buf(),
+        };
+        let now = Utc::now();
+        let session = AgentSession {
+            id: "wt".to_string(),
+            project_id: "proj".to_string(),
+            project_path: Some(repo.to_string_lossy().to_string()),
+            provider: ProviderKind::new("claude"),
+            source_branch: "main".to_string(),
+            branch_name: "branch-wt".to_string(),
+            initial_branch: "branch-wt".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+        };
+
+        remove_session_worktree(&paths, &session);
+
+        assert!(!worktree.exists(), "the worktree directory must be removed");
+        let branches = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "branch",
+                "--list",
+                "branch-wt",
+            ])
+            .output()
+            .expect("git branch --list");
+        assert!(
+            String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+            "the branch must be deleted (a stale worktree ref would keep it undeletable)",
+        );
+        let worktrees = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "list",
+                "--porcelain",
+            ])
+            .output()
+            .expect("git worktree list");
+        assert!(
+            !String::from_utf8_lossy(&worktrees.stdout).contains("wt"),
+            "no stale worktree registration may remain in the repo",
+        );
     }
 }
