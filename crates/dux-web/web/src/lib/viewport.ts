@@ -41,3 +41,30 @@ export function dragScrollLines(
     remainderPx: accumPx - whole * h,
   }
 }
+
+// Convert an accumulated drag into a SINGLE wheel notch to FORWARD to a
+// mouse-tracking alt-screen app (Claude Code, Codex, ...), as opposed to the
+// local `scrollLines()` path above.
+//
+// The difference matters: a physical mouse wheel delivers ONE report per
+// discrete wheel event, spaced across event-loop ticks, and xterm forwards it
+// 1:1 (see `WHEEL_SCROLL_SENSITIVITY`'s note in TerminalPane). A finger drag,
+// by contrast, can cover many rows in a single touch-move; forwarding that as
+// `sgrWheelSeq(scrollLines, ..)` emits a DENSE burst of N reports inside one
+// WebSocket frame with zero inter-notch spacing. That burst is what corrupted
+// the agent's scrollback-pager repaint on a fast flick (duplicated lines that
+// persist, since an alt-screen app has no client-side scrollback and nothing
+// reconnects to re-sync the view). So we CAP the forwarded notch to magnitude
+// one per touch-move, reproducing the desktop wheel's 1:1-per-tick cadence,
+// while still consuming the whole rows the finger travelled so the accumulator
+// never grows and successive moves keep tracking the finger. Pure so it can be
+// unit-tested; the touch handler owns the event plumbing.
+export function dragWheelReport(
+  accumPx: number,
+  rowHeight: number,
+): { notch: number; remainderPx: number } {
+  const { scrollLines, remainderPx } = dragScrollLines(accumPx, rowHeight)
+  // `Math.sign` collapses any multi-row magnitude to -1, 0, or +1 while keeping
+  // the drag direction the local path uses.
+  return { notch: Math.sign(scrollLines), remainderPx }
+}

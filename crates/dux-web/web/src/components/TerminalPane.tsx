@@ -22,7 +22,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { dragScrollLines } from "@/lib/viewport"
+import { dragScrollLines, dragWheelReport } from "@/lib/viewport"
 import { firstFrameResizePlan } from "@/lib/firstFrameResize"
 import { copyToClipboard } from "@/lib/clipboard"
 import { isApplePlatform } from "@/lib/platform"
@@ -897,6 +897,16 @@ export function TerminalPane(props: TerminalPaneProps) {
         if (forwardWheel) {
           // Forward to the full-screen app as wheel events at the finger's cell
           // (most apps ignore the position, but we send a real in-bounds one).
+          // Cap to at most ONE wheel notch per touch-move (`dragWheelReport`):
+          // `dragScrollLines` can return a many-row magnitude on a fast flick, and
+          // `sgrWheelSeq` would then emit that many SGR reports as a dense burst in
+          // a single frame. A mouse-tracking alt-screen app (Claude Code, ...)
+          // survives the desktop wheel's one-report-per-discrete-event cadence but
+          // not that burst — it corrupts the app's scrollback-pager repaint, and
+          // because an alt-screen has no client scrollback and nothing reconnects,
+          // the duplicated lines persist. One notch per move reproduces the
+          // desktop 1:1 cadence while still tracking the finger across moves.
+          const { notch } = dragWheelReport(touchAccum, rowHeight)
           const colWidth = container.clientWidth / term.cols
           const rect = container.getBoundingClientRect()
           const col =
@@ -905,7 +915,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             ) + 1
           const cellRow =
             Math.floor((y - rect.top) / (rowHeight > 0 ? rowHeight : 1)) + 1
-          pty.sendInput(encoder.encode(sgrWheelSeq(scrollLines, col, cellRow)))
+          pty.sendInput(encoder.encode(sgrWheelSeq(notch, col, cellRow)))
         } else {
           term.scrollLines(scrollLines)
         }

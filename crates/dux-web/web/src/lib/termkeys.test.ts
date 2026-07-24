@@ -251,6 +251,28 @@ describe("sgrWheelSeq", () => {
   it("truncates fractional line counts and coordinates", () => {
     expect(sgrWheelSeq(-1.9, 2.8, 4.2)).toBe(`${ESC}[<64;2;4M`)
   })
+
+  // A single notch must be BYTE-IDENTICAL to what xterm.js emits for a physical
+  // wheel event in SGR mode (the proven-good desktop path). xterm's SGR encoder
+  // (@xterm/xterm CoreMouseService) builds a wheel report as `CSI < Cb ; Col ;
+  // Row M` with Cb = 64 | action (action UP=0 -> 64, DOWN=1 -> 65) and the final
+  // byte always `M` for wheel (release is never reported). So the ONLY safe way
+  // to forward a touch drag is one such report per move; the byte shape itself is
+  // correct here. The bug was never the encoding, only the burst of many reports
+  // in one frame that `.repeat()` produces for |lines| > 1 (see the touch handler
+  // and `dragWheelReport`).
+  it("matches xterm's SGR wheel encoding byte-for-byte for a single notch", () => {
+    // xterm: code = 64 | action, final = "M".
+    const xtermWheel = (up: boolean, col: number, row: number) =>
+      `${ESC}[<${64 | (up ? 0 : 1)};${col};${row}M`
+    expect(sgrWheelSeq(-1, 3, 7)).toBe(xtermWheel(true, 3, 7))
+    expect(sgrWheelSeq(1, 3, 7)).toBe(xtermWheel(false, 3, 7))
+  })
+
+  it("emits exactly ONE report for a single notch (no burst)", () => {
+    expect(sgrWheelSeq(-1, 4, 9).match(/M/g)?.length).toBe(1)
+    expect(sgrWheelSeq(1, 4, 9).match(/M/g)?.length).toBe(1)
+  })
 })
 
 describe("sgrClickSeq", () => {
