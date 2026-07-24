@@ -850,6 +850,14 @@ impl WireStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct WireCommandOutcome {
     pub status: Option<WireStatus>,
+    /// Whether a tab-close command (`KillSessionPty` for the session-slot tab,
+    /// `CloseAgentTab` for an extra tab) DETACHED the agent. Computed in core
+    /// with the in-flight-aware `any_tab_active`, so the web reads it directly
+    /// instead of re-deriving detachment from `has_live_process` (a `providers`
+    /// lookup that misses a sibling's in-flight launch). `None` for every other
+    /// command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detached: Option<bool>,
     /// The opaque create-op id, set ONLY for a synchronous create dispatch
     /// (`CreateAgent` / `ForkSession` / `CreateAgentFromWorktree`). A REST create
     /// handler resolves its exact new session by polling
@@ -1049,6 +1057,7 @@ impl Engine {
                 let status = self.rename_session(&session_id, &title)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1056,6 +1065,7 @@ impl Engine {
                 let status = self.reconnect_session(&session_id, force)?;
                 return Ok(WireCommandOutcome {
                     status,
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1063,6 +1073,7 @@ impl Engine {
                 let status = self.rerun_startup_command(&session_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1070,6 +1081,7 @@ impl Engine {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1077,6 +1089,7 @@ impl Engine {
                 let status = self.add_project_checkout_default(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1084,6 +1097,7 @@ impl Engine {
                 let status = self.add_project_create_initial_commit(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status,
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1091,6 +1105,7 @@ impl Engine {
                 let status = self.add_project_init_repo(&path, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1101,6 +1116,7 @@ impl Engine {
                 let status = self.change_agent_provider_wire(&session_id, &provider)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1112,6 +1128,7 @@ impl Engine {
                 let status = self.create_agent_from_pr(&project_id, &pr, name)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1119,6 +1136,7 @@ impl Engine {
                 let status = self.set_changes_pane_visible(visible);
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1126,6 +1144,7 @@ impl Engine {
                 let status = self.set_instance_identity(title, favicon)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1133,6 +1152,7 @@ impl Engine {
                 let status = self.set_settings(patch)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1140,6 +1160,7 @@ impl Engine {
                 let status = self.toggle_randomized_pet_name_default();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1147,6 +1168,7 @@ impl Engine {
                 let status = self.toggle_pr_banner_position();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1154,6 +1176,7 @@ impl Engine {
                 let status = self.set_agent_sort(&sort);
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1161,6 +1184,7 @@ impl Engine {
                 let status = self.toggle_copy_on_select();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1168,6 +1192,7 @@ impl Engine {
                 let status = self.toggle_always_show_tab_strip();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1175,13 +1200,15 @@ impl Engine {
                 let status = self.toggle_github_integration();
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
             WireCommand::KillSessionPty { session_id } => {
-                let status = self.kill_session_pty(&session_id)?;
+                let (status, detached) = self.kill_session_pty(&session_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: Some(detached),
                     created_op_id: None,
                 });
             }
@@ -1189,13 +1216,15 @@ impl Engine {
                 let status = self.detach_agent(&session_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
             WireCommand::CloseAgentTab { session_id, tab_id } => {
-                let status = self.close_agent_tab_wire(&session_id, &tab_id)?;
+                let (status, detached) = self.close_agent_tab_wire(&session_id, &tab_id)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: Some(detached),
                     created_op_id: None,
                 });
             }
@@ -1207,6 +1236,7 @@ impl Engine {
                 let status = self.change_tab_provider_wire(&session_id, &tab_id, &provider)?;
                 return Ok(WireCommandOutcome {
                     status: Some(status),
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1216,6 +1246,7 @@ impl Engine {
                 // toast/status is surfaced (see J3 in the tab-focus-memory plan).
                 return Ok(WireCommandOutcome {
                     status: None,
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1242,6 +1273,7 @@ impl Engine {
                 };
                 return Ok(WireCommandOutcome {
                     status,
+                    detached: None,
                     created_op_id: None,
                 });
             }
@@ -1255,6 +1287,7 @@ impl Engine {
         }
         Ok(WireCommandOutcome {
             status,
+            detached: None,
             created_op_id: None,
         })
     }
@@ -1634,51 +1667,55 @@ impl Engine {
     /// this method's `Err` to 400 — an unknown session is already caught earlier
     /// by `resolve_worktree`'s 404); an agent that is not running is an
     /// idempotent no-op.
-    fn kill_session_pty(&mut self, session_id: &str) -> anyhow::Result<WireStatus> {
+    fn kill_session_pty(&mut self, session_id: &str) -> anyhow::Result<(WireStatus, bool)> {
         let session = self
             .sessions
             .iter()
             .find(|s| s.id == session_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown session: {session_id}"))?;
-        // No live PTY → nothing to kill. Idempotent success so a double-click or
-        // a kill racing a natural exit is not surfaced as an error.
-        if !self.providers.contains_key(&session.id) {
-            return Ok(WireStatus::new(
-                "info",
-                format!("Agent \"{}\" is not running.", session.branch_name),
+        // The teardown decision (SIGKILL the provider, clear every runtime map
+        // including the in-flight `AgentLaunch` key, detach-if-last, and clear
+        // `desired_running` on detach so startup auto-reopen does not relaunch a
+        // deliberately-killed agent) is the single-source `kill_tab_runtime`,
+        // shared with the TUI kill overlay so both surfaces agree.
+        let outcome = self.kill_tab_runtime(&session.id);
+        if !outcome.killed {
+            // No live PTY -> nothing to kill. Idempotent success so a
+            // double-click or a kill racing a natural exit is not an error. The
+            // agent is detached iff nothing of it is live now.
+            let detached = !self.any_tab_active(&session.id);
+            return Ok((
+                WireStatus::new(
+                    "info",
+                    format!("Agent \"{}\" is not running.", session.branch_name),
+                ),
+                detached,
             ));
         }
-        // Drop the provider (SIGKILL) and clear every runtime map keyed by this
-        // tab id in one call — including the in-flight `AgentLaunch` key, which
-        // a hand-rolled list of individual `.remove()` calls previously missed.
-        // A `KillSessionPty` racing an in-flight launch for this tab would
-        // otherwise leave that key set, so `DispatchAgentLaunch` kept reporting
-        // "already launching" for it until restart.
-        self.clear_tab_runtime(&session.id);
-        // No tab is privileged: stopping the session-slot tab detaches the AGENT
-        // only when it was the last live tab. With extra tabs still running this
-        // just closes that one tab and the agent stays Active in the sidebar.
-        if self.any_tab_active(&session.id) {
-            return Ok(WireStatus::new(
+        if !outcome.detached {
+            // A live sibling tab kept the agent attached: this just closed one
+            // tab and the agent stays Active in the sidebar.
+            return Ok((
+                WireStatus::new(
+                    "info",
+                    format!(
+                        "Closed a tab for agent \"{}\". Its other tabs are still running.",
+                        session.branch_name
+                    ),
+                ),
+                false,
+            ));
+        }
+        Ok((
+            WireStatus::new(
                 "info",
                 format!(
-                    "Closed a tab for agent \"{}\". Its other tabs are still running.",
+                    "Closed the last tab for agent \"{}\". It is now detached — reconnect it from the agent menu.",
                     session.branch_name
                 ),
-            ));
-        }
-        self.mark_session_status(&session.id, crate::model::SessionStatus::Detached);
-        // Closing the agent's last live tab means the user no longer wants it
-        // running, so clear desired_running — otherwise the TUI's startup
-        // auto-reopen would relaunch the agent the user just detached.
-        self.mark_session_desired_running(&session.id, false);
-        Ok(WireStatus::new(
-            "info",
-            format!(
-                "Closed the last tab for agent \"{}\". It is now detached — reconnect it from the agent menu.",
-                session.branch_name
             ),
+            true,
         ))
     }
 
@@ -1865,18 +1902,21 @@ impl Engine {
         &mut self,
         session_id: &str,
         tab_id: &str,
-    ) -> anyhow::Result<WireStatus> {
+    ) -> anyhow::Result<(WireStatus, bool)> {
         let provider = self
             .agent_tabs
             .get(tab_id)
             .map(|t| t.provider.as_str().to_string());
-        self.close_tab(session_id, tab_id)?;
-        Ok(WireStatus::new(
-            "info",
-            match provider {
-                Some(p) => format!("Closed the {p} tab."),
-                None => "Closed the tab.".to_string(),
-            },
+        let outcome = self.close_tab(session_id, tab_id)?;
+        Ok((
+            WireStatus::new(
+                "info",
+                match provider {
+                    Some(p) => format!("Closed the {p} tab."),
+                    None => "Closed the tab.".to_string(),
+                },
+            ),
+            outcome.detached,
         ))
     }
 

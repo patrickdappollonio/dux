@@ -2658,7 +2658,7 @@ impl Engine {
     /// in-memory state untouched), then gracefully tear down its PTY and clear all
     /// of its runtime-map entries. The session-slot tab's close is a separate path
     /// (`KillSessionPty`) — this is only for extra tabs (`tab_id != session_id`).
-    pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<()> {
+    pub fn close_tab(&mut self, session_id: &str, tab_id: &str) -> anyhow::Result<CloseTabOutcome> {
         if tab_id == session_id {
             anyhow::bail!("the session-slot tab cannot be closed as an extra tab");
         }
@@ -2687,11 +2687,15 @@ impl Engine {
         self.agent_tabs.remove(tab_id);
         // Closing this tab may have removed the agent's last live process (its
         // session-slot tab already dormant). No tab is privileged, so recompute:
-        // the agent detaches once nothing of it is live/launching.
-        if !self.any_tab_active(session_id) {
+        // the agent detaches once nothing of it is live/launching. `any_tab_active`
+        // is IN-FLIGHT-AWARE, so a sibling mid-launch keeps the agent attached
+        // (the outcome both surfaces consume, instead of re-deriving it from
+        // `has_live_process` (a `providers` lookup that misses in-flight launches).
+        let detached = !self.any_tab_active(session_id);
+        if detached {
             self.mark_session_status(session_id, crate::model::SessionStatus::Detached);
         }
-        Ok(())
+        Ok(CloseTabOutcome { detached })
     }
 
     /// Retarget a tab's provider (effective on its next launch). For the session-slot tab
@@ -2795,6 +2799,16 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// Result of [`Engine::close_tab`]: whether closing the tab DETACHED the agent
+/// (it was the agent's last live tab). Computed with the in-flight-aware
+/// `any_tab_active`, so both surfaces consume this authoritative value instead
+/// of re-deriving detachment from a `providers`-only liveness check that misses
+/// a sibling's in-flight launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseTabOutcome {
+    pub detached: bool,
 }
 
 /// Result of [`Engine::change_agent_provider`]: the data a surface needs to

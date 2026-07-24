@@ -5121,7 +5121,10 @@ impl App {
             }
         } else {
             match self.engine.close_tab(&session_id, &tab_id) {
-                Ok(()) => {
+                // The core `CloseTabOutcome.detached` is authoritative; this
+                // branch's messaging does not distinguish detach, so it is
+                // ignored here (the session-slot close path above reports it).
+                Ok(_) => {
                     // Prefer a live sibling tab so the user lands on something
                     // running; fall back to the session-slot tab only when
                     // nothing else is live. This also resets the snapshot so

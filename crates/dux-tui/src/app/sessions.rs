@@ -1004,51 +1004,18 @@ impl App {
     /// sole live tab of that provider (see `tab_resume_decision`); otherwise fresh.
     pub(crate) fn launch_focused_support_tab(
         &mut self,
-        session_id: &str,
+        _session_id: &str,
         tab_id: &str,
     ) -> Result<()> {
-        let Some(session) = self
-            .engine
-            .sessions
-            .iter()
-            .find(|s| s.id == session_id)
-            .cloned()
-        else {
-            return Ok(());
-        };
-        let provider = self
-            .engine
-            .agent_tabs
-            .get(tab_id)
-            .map(|t| t.provider.clone())
-            .unwrap_or_else(|| session.provider.clone());
+        // Resolution, per-provider resume decision, message wording, and the
+        // request build are the single-source `Engine::dormant_tab_launch_request`
+        // (shared with the web `launch_agent`) so the two surfaces cannot drift.
+        // `None` (unknown tab / gone session) is a silent no-op, matching the
+        // previous early return.
         let pty_size = self.pty_size_for_launch();
-        let resume = self
-            .engine
-            .tab_resume_decision(&session, tab_id, &provider, true);
-        let status_message = if resume {
-            format!(
-                "Resumed the {} conversation in this tab.",
-                provider.as_str()
-            )
-        } else {
-            format!(
-                "Starting a fresh {} session in this tab.",
-                provider.as_str()
-            )
-        };
-        let request = self.engine.build_tab_launch_request(
-            tab_id.to_string(),
-            Some(provider),
-            session,
-            resume,
-            pty_size,
-            AgentLaunchKind::Tab {
-                is_fresh: false,
-                status_message,
-            },
-        );
-        self.dispatch_agent_launch(request);
+        if let Some(request) = self.engine.dormant_tab_launch_request(tab_id, pty_size) {
+            self.dispatch_agent_launch(request);
+        }
         Ok(())
     }
 
@@ -3528,21 +3495,17 @@ impl App {
 
         for target_id in target_ids {
             match target_id {
+                // Both the session-slot tab (Agent) and an extra tab (Tab) tear
+                // down through the single-source `Engine::kill_tab_runtime`: it
+                // SIGKILLs the provider, clears every runtime map (including the
+                // in-flight `AgentLaunch` key a hand-rolled list used to miss),
+                // detaches the agent only when this was its last live tab, and
+                // clears `desired_running` on detach so the startup auto-reopen
+                // pass does not relaunch the agent the user just killed. Killing
+                // an extra tab KEEPS its `agent_tabs` row (the tab goes dormant;
+                // row deletion is `close_tab`'s job).
                 RuntimeTargetId::Agent(session_id) => {
-                    if self.engine.providers.contains_key(session_id) {
-                        // Routed through the shared `clear_tab_runtime` (matching
-                        // the canonical teardown in `Engine::kill_session_pty`) so
-                        // the in-flight `AgentLaunch` key is cleared too — a
-                        // hand-rolled remove list used to miss it and leave a
-                        // stale in-flight marker behind.
-                        self.engine.clear_tab_runtime(session_id);
-                        // No tab is privileged: stopping the session-slot tab
-                        // detaches the agent only when it was the last live tab.
-                        // With extra tabs still running the agent stays Active.
-                        if !self.engine.any_tab_active(session_id) {
-                            self.engine
-                                .mark_session_status(session_id, SessionStatus::Detached);
-                        }
+                    if self.engine.kill_tab_runtime(session_id).killed {
                         killed_agents += 1;
                         if selected_session_id.as_deref() == Some(session_id.as_str()) {
                             selected_agent_killed = true;
@@ -3550,29 +3513,19 @@ impl App {
                     }
                 }
                 RuntimeTargetId::Tab(tab_id) => {
-                    // Kill an extra tab's process but KEEP its `agent_tabs` row:
-                    // the tab becomes dormant (relaunchable). Do not touch the row
-                    // here (that is `close_tab`'s job). The agent still detaches if
-                    // this happened to be its LAST live tab.
-                    if self.engine.providers.contains_key(tab_id) {
-                        // See the Agent branch above: route through
-                        // `clear_tab_runtime` so the in-flight `AgentLaunch` key
-                        // is cleared too, not just the process-tied maps.
-                        self.engine.clear_tab_runtime(tab_id);
-                        if let Some(session_id) = self.engine.owning_session_for_tab(tab_id)
-                            && !self.engine.any_tab_active(&session_id)
-                        {
-                            self.engine
-                                .mark_session_status(&session_id, SessionStatus::Detached);
-                        }
+                    if self.engine.kill_tab_runtime(tab_id).killed {
                         killed_agents += 1;
                     }
                 }
                 RuntimeTargetId::Terminal(terminal_id) => {
+                    // Graceful teardown (SIGTERM + background reap via
+                    // `begin_close_companion_terminal`), matching the shared
+                    // `Command::DeleteTerminal` path and the Terminals tenet: a
+                    // bare `companion_terminals.remove` here hard-SIGKILLed the
+                    // child and skipped `clear_terminal_runtime`.
                     if self
                         .engine
-                        .companion_terminals
-                        .remove(terminal_id)
+                        .begin_close_companion_terminal(terminal_id)
                         .is_some()
                     {
                         killed_terminals += 1;

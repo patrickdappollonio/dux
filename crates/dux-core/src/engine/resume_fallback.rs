@@ -105,6 +105,54 @@ impl Engine {
         }
     }
 
+    /// Build the launch request for reopening a DORMANT extra tab (a tab with a
+    /// row but no live process, e.g. after a restart), the single source both
+    /// surfaces call so the resolution, resume decision, and the fresh/resumed
+    /// wording cannot drift. Returns `None` for an unknown tab or a tab whose
+    /// owning session is gone; the caller dispatches the request through its own
+    /// launch path (the core dispatch chokepoint re-gates resume and refuses a
+    /// closing session, so no surface needs its own guard).
+    ///
+    /// Resume is decided per-provider by `tab_resume_decision`: reopening
+    /// resumes that provider's conversation when this is the sole live/launching
+    /// tab of its provider, otherwise it starts fresh.
+    pub fn dormant_tab_launch_request(
+        &self,
+        tab_id: &str,
+        pty_size: (u16, u16),
+    ) -> Option<AgentLaunchRequest> {
+        let tab = self.agent_tabs.get(tab_id)?;
+        let session = self
+            .sessions
+            .iter()
+            .find(|s| s.id == tab.session_id)?
+            .clone();
+        let provider = tab.provider.clone();
+        let resume = self.tab_resume_decision(&session, tab_id, &provider, true);
+        let status_message = if resume {
+            format!(
+                "Resumed the {} conversation in this tab.",
+                provider.as_str()
+            )
+        } else {
+            format!(
+                "Started a fresh {} conversation in this tab.",
+                provider.as_str()
+            )
+        };
+        Some(self.build_tab_launch_request(
+            tab_id.to_string(),
+            Some(provider),
+            session,
+            resume,
+            pty_size,
+            AgentLaunchKind::Tab {
+                is_fresh: false,
+                status_message,
+            },
+        ))
+    }
+
     /// Attempt a resume-fallback retry for `session_id`. Synchronous: all state
     /// transitions happen inside this one `&mut self` call so no other
     /// `drain_events` tick can observe a half-applied state. See
@@ -194,6 +242,59 @@ mod tests {
     use super::*;
     use crate::engine::test_support::{sample_session, test_engine};
     use std::time::Instant;
+
+    /// The dormant-tab relaunch request is built in ONE core place
+    /// (`dormant_tab_launch_request`) so the fresh-launch wording cannot drift
+    /// between the TUI and the web (it had: "Starting a fresh {} session in this
+    /// tab." vs "Started a fresh {} tab."). The request carries the message
+    /// inside its `AgentLaunchKind::Tab`.
+    #[test]
+    fn dormant_tab_launch_request_builds_a_fresh_tab_launch_with_one_message() {
+        use crate::engine::test_support::sample_tab;
+        use crate::worker::AgentLaunchKind;
+
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat/x"));
+        // An extra, dormant tab (a row but no live provider).
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "codex", 1));
+
+        let request = engine
+            .dormant_tab_launch_request("tab-2", (24, 80))
+            .expect("a dormant extra tab yields a launch request");
+        assert_eq!(request.tab_id, "tab-2");
+        assert_eq!(request.provider.as_str(), "codex");
+        // No live sibling of this provider, so it resumes; the sole live/
+        // launching tab of its provider is eligible per `tab_resume_decision`.
+        match request.kind {
+            AgentLaunchKind::Tab {
+                is_fresh,
+                status_message,
+            } => {
+                assert!(!is_fresh, "dormant relaunch is never the create-fresh kind");
+                // The default test config's codex provider has no resume flag,
+                // so it starts fresh: the single-source fresh wording (which had
+                // drifted "Starting a fresh {} session in this tab." vs "Started
+                // a fresh {} tab." across surfaces).
+                assert_eq!(
+                    status_message,
+                    "Started a fresh codex conversation in this tab."
+                );
+            }
+            other => panic!("expected a Tab launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dormant_tab_launch_request_is_none_for_an_unknown_tab() {
+        let (engine, _tmp) = test_engine();
+        assert!(
+            engine
+                .dormant_tab_launch_request("nope", (24, 80))
+                .is_none()
+        );
+    }
 
     #[test]
     fn retry_returns_in_flight_and_touches_nothing_when_launch_pending() {

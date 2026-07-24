@@ -2696,20 +2696,11 @@ impl App {
             "restoring {} persisted sessions",
             self.engine.sessions.len()
         ));
-        let ids: Vec<(String, bool)> = self
-            .engine
-            .sessions
-            .iter()
-            .map(|s| (s.id.clone(), Path::new(&s.worktree_path).exists()))
-            .collect();
-        for (id, exists) in ids {
-            if exists {
-                self.engine
-                    .mark_session_status(&id, SessionStatus::Detached);
-            } else {
-                self.engine.mark_session_status(&id, SessionStatus::Exited);
-            }
-        }
+        // The Detached/Exited-by-worktree-existence rule is core-owned
+        // (`Engine::normalize_restored_sessions`, the same normalizer the web
+        // bootstrap calls) so the two surfaces cannot drift; the TUI only adds
+        // its startup auto-reopen dispatch on top.
+        self.engine.normalize_restored_sessions();
         self.auto_reopen_eligible_sessions();
     }
 

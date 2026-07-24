@@ -145,20 +145,14 @@ async fn delete_tab(
             )
             .await
         {
-            // `KillSessionPty` only detaches the agent when it was the LAST
-            // live tab; with live siblings the agent keeps running. Derive the
-            // real outcome from whether ANY tab still has a live process after
-            // the kill rather than hardcoding true — persisted session status
-            // is session-slot-scoped (an extra-tab-only-live agent still reads
-            // "detached"), so it is not a reliable liveness signal here.
-            Ok(_) => {
-                let detached = state
-                    .engine
-                    .session(id)
-                    .await
-                    .flatten()
-                    .map(|s| !s.tabs.iter().any(|t| t.has_live_process))
-                    .unwrap_or(true);
+            // `KillSessionPty` only detaches the agent when it was the LAST live
+            // tab. The engine computes that with the IN-FLIGHT-AWARE
+            // `any_tab_active` and returns it on the wire outcome; consume it
+            // directly rather than re-deriving from `has_live_process` (a
+            // `providers`-only check that misses a sibling's in-flight launch,
+            // so a close racing a launch reported `detached: true` wrongly).
+            Ok(outcome) => {
+                let detached = outcome.detached.unwrap_or(true);
                 (StatusCode::OK, Json(DetachedTab { detached })).into_response()
             }
             Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
@@ -181,20 +175,12 @@ async fn delete_tab(
         .await
     {
         // `Engine::close_tab` detaches the agent the same way `KillSessionPty`
-        // does when this happened to be the session's LAST live tab. The
-        // session-slot branch above signals that via `{ "detached": bool }`;
-        // closing an extra tab used to return a bare 204 even when it detached,
-        // an asymmetry a caller could only discover by polling the session
-        // afterward. Compute the same post-close liveness check and return it
-        // here too.
-        Ok(_) => {
-            let detached = state
-                .engine
-                .session(id)
-                .await
-                .flatten()
-                .map(|s| !s.tabs.iter().any(|t| t.has_live_process))
-                .unwrap_or(true);
+        // does when this was the session's LAST live tab, and returns that
+        // in-flight-aware outcome on the wire result. Consume it directly (the
+        // session-slot branch above does the same), instead of re-deriving from
+        // `has_live_process`.
+        Ok(outcome) => {
+            let detached = outcome.detached.unwrap_or(true);
             (StatusCode::OK, Json(DetachedTab { detached })).into_response()
         }
         // A concurrent close removed the row between the ownership check and the

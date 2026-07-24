@@ -2198,12 +2198,6 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
         .get(subscribed_id)
         .cloned()
         .ok_or_else(|| format!("unknown session {subscribed_id}"))?;
-    let session = engine
-        .sessions
-        .iter()
-        .find(|s| s.id == tab.session_id)
-        .cloned()
-        .ok_or_else(|| format!("unknown session {}", tab.session_id))?;
     // Refuse to (re)launch an extra tab into a session that is mid-deletion: its
     // worktree is about to be removed, so spawning a fresh provider there would
     // race `git::remove_worktree`. Mirrors the `closing_sessions` guard in
@@ -2214,26 +2208,14 @@ fn launch_agent(engine: &mut Engine, subscribed_id: &str) -> Result<(), String> 
             tab.session_id
         ));
     }
-    let resume = engine.tab_resume_decision(&session, subscribed_id, &tab.provider, true);
-    let status_message = if resume {
-        format!(
-            "Resumed the {} conversation in this tab.",
-            tab.provider.as_str()
-        )
-    } else {
-        format!("Started a fresh {} tab.", tab.provider.as_str())
-    };
-    let request = engine.build_tab_launch_request(
-        subscribed_id.to_string(),
-        Some(tab.provider.clone()),
-        session,
-        resume,
-        (24, 80),
-        AgentLaunchKind::Tab {
-            is_fresh: false,
-            status_message,
-        },
-    );
+    // Resolution, the per-provider resume decision, the fresh/resumed wording,
+    // and the request build are the single-source `dormant_tab_launch_request`
+    // (shared with the TUI's `launch_focused_support_tab`). The tab was just
+    // resolved above, so `None` is unreachable, but map it to the same
+    // unknown-tab error for safety.
+    let request = engine
+        .dormant_tab_launch_request(subscribed_id, (24, 80))
+        .ok_or_else(|| format!("unknown session {subscribed_id}"))?;
     let reaction = engine
         .apply(Command::DispatchAgentLaunch {
             request: Box::new(request),

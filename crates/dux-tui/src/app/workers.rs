@@ -190,11 +190,17 @@ impl App {
                     .map(|t| t.provider.as_str().to_string())
                     .unwrap_or_default()
             });
-            self.engine.providers.remove(tab_id);
-            self.engine.running_provider_pins.remove(tab_id);
-            self.engine.pty_activity.remove(tab_id);
-            self.engine.pty_input.remove(tab_id);
-            self.engine.resume_fallback_candidates.remove(tab_id);
+            // Tear down EVERY runtime map keyed by this exited tab via the
+            // single-source `clear_tab_runtime` (the same helper core's
+            // `prune_exited_ptys` uses), not a hand-enumerated subset. The old
+            // list dropped providers/pins/activity/input/resume-candidates but
+            // LEAKED `needs_attention`, `pty_progress`, `agent_viewed`, and the
+            // in-flight `AgentLaunch` key (one stranded entry per exited tab on
+            // a long-running session, and a stale flag that could resurface on a
+            // recycled id). This tab is not resume-handled (those were removed
+            // from the exited set above), so clearing its in-flight key, which
+            // it does not hold, is a harmless no-op.
+            self.engine.clear_tab_runtime(tab_id);
             if let Some(session_id) = owning {
                 let agent_detached = !self.engine.any_tab_active(&session_id);
                 if agent_detached {
@@ -343,6 +349,11 @@ impl App {
         }
         for terminal_id in &exited_terminal_ids {
             self.engine.companion_terminals.remove(terminal_id);
+            // Terminals share `pty_activity`/`pty_input` (keyed by the disjoint
+            // `term-N` id), so clear them via the terminal single-source helper
+            // a bare `remove` above would leak a recycled id's stale activity
+            // (core's `prune_exited_ptys` does the same via `clear_terminal_runtime`).
+            self.engine.clear_terminal_runtime(terminal_id);
         }
         if !exited_terminal_ids.is_empty() {
             // If the active terminal just exited, close the overlay.
@@ -1712,6 +1723,72 @@ mod tests {
             "the exited tab should have been pruned"
         );
         app
+    }
+
+    /// #1 regression: the TUI exit-prune teardown must clear EVERY runtime map
+    /// keyed by the exited tab via the single-source `clear_tab_runtime`, not a
+    /// hand-enumerated subset. The old loop dropped providers/pins/activity/
+    /// input but LEAKED `needs_attention`, `pty_progress`, and `agent_viewed`;
+    /// on a long-running session that is one stranded entry per exited tab, and
+    /// a stale attention/progress flag could resurface on a recycled id.
+    #[test]
+    fn exit_prune_clears_the_attention_progress_and_viewed_maps() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        let session_id = app
+            .selected_session()
+            .expect("test_app selects a session")
+            .id
+            .clone();
+        // A clean-exiting session-slot provider (keyed by the session id).
+        let client = crate::pty::PtyClient::spawn(
+            "sh",
+            &["-c".to_string(), "exit 0".to_string()],
+            Path::new("."),
+            10,
+            40,
+            100,
+        )
+        .expect("spawn pty");
+        app.engine.providers.insert(session_id.clone(), client);
+        // Seed the three maps the hand-rolled teardown used to leak.
+        app.engine.needs_attention.insert(session_id.clone());
+        app.engine.pty_progress.insert(
+            session_id.clone(),
+            dux_core::pty::ProgressReport {
+                working: true,
+                at: std::time::Instant::now(),
+            },
+        );
+        app.engine
+            .agent_viewed
+            .insert(session_id.clone(), std::time::Instant::now());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !app
+            .engine
+            .providers
+            .get_mut(&session_id)
+            .is_some_and(|c| c.is_exited() || c.try_wait().is_some())
+        {
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.drain_events();
+
+        assert!(!app.engine.providers.contains_key(&session_id), "pruned");
+        assert!(
+            !app.engine.needs_attention.contains(&session_id),
+            "needs_attention must be cleared on exit prune"
+        );
+        assert!(
+            !app.engine.pty_progress.contains_key(&session_id),
+            "pty_progress must be cleared on exit prune"
+        );
+        assert!(
+            !app.engine.agent_viewed.contains_key(&session_id),
+            "agent_viewed must be cleared on exit prune"
+        );
     }
 
     /// A CLEAN exit (code 0) of the focused extra tab closes the tab itself:

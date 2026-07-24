@@ -52,6 +52,22 @@ pub struct TerminatingPty {
     pub worktree_removal: Option<DeferredWorktreeRemoval>,
 }
 
+/// The result of a user-initiated `Engine::kill_tab_runtime` teardown, so a
+/// surface can drive its focus/status work off the decision instead of
+/// re-deriving it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KillTabRuntimeOutcome {
+    /// True when there was a live provider to kill; `false` is an idempotent
+    /// no-op (already gone).
+    pub killed: bool,
+    /// The session that owns the killed tab (the session-slot tab resolves to
+    /// its own session id), or `None` for an unknown tab.
+    pub session_id: Option<String>,
+    /// True when the kill detached the agent (its last live tab is gone, so the
+    /// session is now `Detached` and its auto-reopen intent cleared).
+    pub detached: bool,
+}
+
 /// A PTY that `prune_exited_ptys` removed because its child process exited.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrunedPty {
@@ -301,6 +317,55 @@ impl Engine {
     /// value only bounds force-kill latency, never blocks the UI.
     fn individual_close_grace(&self) -> std::time::Duration {
         crate::config::shutdown_grace(self.config.shutdown_timeout_seconds)
+    }
+
+    /// Tear down ONE tab's live provider as a deliberate, user-initiated KILL
+    /// (the kill overlay / close-session-slot-tab action), and report what
+    /// happened. The single-source teardown decision shared by the wire
+    /// `kill_session_pty` and the TUI kill overlay, so both surfaces agree.
+    ///
+    /// Behavior, in order:
+    /// - No live provider for `tab_id` -> `killed: false`, nothing changes
+    ///   (idempotent, so a double-tap or a kill racing a natural exit is a
+    ///   no-op, not an error).
+    /// - Otherwise `clear_tab_runtime` drops the provider (SIGKILL via
+    ///   `PtyClient::drop`, the intended semantics of an explicit kill) and
+    ///   clears every runtime map keyed by the tab, INCLUDING the in-flight
+    ///   `AgentLaunch` key a hand-rolled list used to miss.
+    /// - The agent detaches only when this was its LAST live tab
+    ///   (`any_tab_active` is in-flight-aware). On detach the session is marked
+    ///   `Detached` AND `desired_running` is cleared, because a deliberate kill
+    ///   is the "user no longer wants this agent" signal: without clearing it
+    ///   the startup auto-reopen pass would relaunch the agent the user just
+    ///   killed. A surviving sibling leaves `desired_running` untouched (the
+    ///   agent is still wanted running).
+    ///
+    /// This is distinct from `prune_exited_ptys`, which handles NATURAL exits
+    /// and deliberately keeps `desired_running` set on a crash so auto-reopen
+    /// can bring the agent back.
+    pub fn kill_tab_runtime(&mut self, tab_id: &str) -> KillTabRuntimeOutcome {
+        let session_id = self.owning_session_for_tab(tab_id);
+        if !self.providers.contains_key(tab_id) {
+            return KillTabRuntimeOutcome {
+                killed: false,
+                session_id,
+                detached: false,
+            };
+        }
+        self.clear_tab_runtime(tab_id);
+        let detached = match &session_id {
+            Some(sid) if !self.any_tab_active(sid) => {
+                self.mark_session_status(sid, SessionStatus::Detached);
+                self.mark_session_desired_running(sid, false);
+                true
+            }
+            _ => false,
+        };
+        KillTabRuntimeOutcome {
+            killed: true,
+            session_id,
+            detached,
+        }
     }
 
     /// SIGTERM a companion terminal and move it into the terminating set for a
@@ -984,6 +1049,136 @@ mod tests {
         // design, see the tabs tenet), so it can never auto-reopen.
         engine.sessions[0].provider = crate::model::ProviderKind::new("copilot");
         assert!(candidate_ids(&engine).is_empty());
+    }
+
+    /// The user-initiated kill teardown must clear `desired_running` when the
+    /// kill detaches the agent (its last live tab is gone), so the startup
+    /// auto-reopen pass does NOT relaunch an agent the user deliberately
+    /// killed. Tied to the `auto_reopen_candidates` predicate: the killed
+    /// agent must not appear among the candidates afterward.
+    #[test]
+    fn kill_tab_runtime_clears_desired_running_and_drops_the_auto_reopen_candidate() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        // Give the eligible session a live provider on its session-slot tab so
+        // there is something to kill.
+        let worktree = engine.sessions[0].worktree_path.clone();
+        let client = spawn_cat(Path::new(&worktree));
+        engine.providers.insert("s1".to_string(), client);
+        assert_eq!(candidate_ids(&engine), vec!["s1".to_string()]);
+
+        let outcome = engine.kill_tab_runtime("s1");
+        assert!(outcome.killed, "the live provider was killed");
+        assert!(
+            outcome.detached,
+            "the last live tab is gone, so it detached"
+        );
+        let session = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert_eq!(session.status, SessionStatus::Detached);
+        assert!(
+            !session.desired_running,
+            "a deliberate kill must clear the auto-reopen intent"
+        );
+        assert!(
+            candidate_ids(&engine).is_empty(),
+            "a killed agent must not be an auto-reopen candidate"
+        );
+        // Full teardown ran (the single-source clear), not just the provider drop.
+        assert!(!engine.providers.contains_key("s1"));
+    }
+
+    /// Killing one of several live tabs does not detach the agent (a sibling
+    /// stays live), so `desired_running` is left ALONE: the agent is still
+    /// wanted running.
+    #[test]
+    fn kill_tab_runtime_keeps_desired_running_when_a_sibling_stays_live() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        let worktree = engine.sessions[0].worktree_path.clone();
+        engine
+            .providers
+            .insert("s1".to_string(), spawn_cat(Path::new(&worktree)));
+        // An extra tab, also live.
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "claude", 1));
+        engine
+            .providers
+            .insert("tab-2".to_string(), spawn_cat(Path::new(&worktree)));
+
+        let outcome = engine.kill_tab_runtime("s1");
+        assert!(outcome.killed);
+        assert!(!outcome.detached, "a live sibling keeps the agent attached");
+        let session = engine.sessions.iter().find(|s| s.id == "s1").unwrap();
+        assert!(
+            session.desired_running,
+            "an agent with a live tab is still wanted running"
+        );
+    }
+
+    /// #12 regression: closing an extra tab while a SIBLING has an in-flight
+    /// launch must report `detached: false`. The core outcome uses
+    /// `any_tab_active` (in-flight-aware); the web previously re-derived this
+    /// from `has_live_process` (a `providers` lookup only), which misses the
+    /// in-flight launch and wrongly reported the agent detached.
+    #[test]
+    fn close_tab_reports_not_detached_when_a_sibling_launch_is_in_flight() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        // Active so a wrongful detach is observable (sample_session defaults to
+        // Detached, which would mask the mark).
+        engine.sessions[0].status = SessionStatus::Active;
+        // The extra tab we close.
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "claude", 1));
+        engine
+            .session_store
+            .insert_agent_tab(engine.agent_tabs.get("tab-2").unwrap())
+            .unwrap();
+        // A sibling (the session-slot tab) is mid-launch: no provider yet, but an
+        // in-flight AgentLaunch key. `has_live_process` would miss this.
+        engine.mark_in_flight(crate::engine::InFlightKey::AgentLaunch("s1".to_string()));
+
+        let outcome = engine.close_tab("s1", "tab-2").expect("close ok");
+        assert!(
+            !outcome.detached,
+            "a sibling with an in-flight launch keeps the agent attached"
+        );
+        assert_ne!(
+            engine
+                .sessions
+                .iter()
+                .find(|s| s.id == "s1")
+                .unwrap()
+                .status,
+            SessionStatus::Detached,
+            "the agent must not be marked detached while a launch is in flight"
+        );
+    }
+
+    #[test]
+    fn close_tab_reports_detached_when_it_was_the_last_live_tab() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        engine
+            .agent_tabs
+            .insert("tab-2".to_string(), sample_tab("tab-2", "s1", "claude", 1));
+        engine
+            .session_store
+            .insert_agent_tab(engine.agent_tabs.get("tab-2").unwrap())
+            .unwrap();
+        // Nothing else of s1 is live (no provider, no in-flight): closing this
+        // tab leaves the agent with no live tab.
+        let outcome = engine.close_tab("s1", "tab-2").expect("close ok");
+        assert!(
+            outcome.detached,
+            "no live tab remains, so the agent detached"
+        );
+    }
+
+    #[test]
+    fn kill_tab_runtime_reports_not_killed_for_a_tab_with_no_live_provider() {
+        let (mut engine, _tmp, _worktree) = auto_reopen_fixture();
+        let outcome = engine.kill_tab_runtime("s1");
+        assert!(!outcome.killed, "no live provider means nothing was killed");
+        assert!(!outcome.detached);
     }
 
     #[test]
