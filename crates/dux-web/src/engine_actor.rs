@@ -98,6 +98,14 @@ pub enum EngineRequest {
     /// and is served by `/ws/sessions/:id/pty`). Lets the tab PTY socket and tab
     /// REST routes enforce that a `:tab` belongs to its path `:id`.
     TabSession(String, oneshot::Sender<Option<String>>),
+    /// Run the create-agent branch preflight for `(project_id, name)`: does a new
+    /// agent of that name start fresh or attach to an existing branch? Runs a git
+    /// subprocess on the engine thread. `None` means the project is unknown.
+    CreateAgentBranchPlan(
+        String,
+        String,
+        oneshot::Sender<Option<dux_core::git::CreateAgentBranchPlan>>,
+    ),
     /// Resolve a session's worktree path (instant lookup; diff I/O happens
     /// off-thread in the server handler).
     SessionWorktree(String, oneshot::Sender<Option<String>>),
@@ -658,6 +666,28 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::TabSession(tab_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// The create-agent branch preflight for `(project_id, name)`: whether a new
+    /// agent of that name would start fresh or attach to an existing branch.
+    /// `None` when the project is unknown or the engine thread is gone. The create
+    /// route uses this to refuse an unconfirmed existing-branch attach with a
+    /// confirmable 409 (the web's half of the "no silent attach" tenet).
+    pub async fn create_agent_branch_plan(
+        &self,
+        project_id: String,
+        name: String,
+    ) -> Option<dux_core::git::CreateAgentBranchPlan> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::CreateAgentBranchPlan(project_id, name, tx))
             .await
             .is_err()
         {
@@ -1902,6 +1932,19 @@ fn handle_request(
             // so the tabs route 404s it — Main is served by `/ws/sessions/:id/pty`.
             let owner = engine.agent_tabs.get(&tab_id).map(|t| t.session_id.clone());
             let _ = reply.send(owner);
+        }
+        EngineRequest::CreateAgentBranchPlan(project_id, name, reply) => {
+            let plan = engine
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| {
+                    dux_core::git::create_agent_branch_preflight(
+                        std::path::Path::new(&p.path),
+                        &name,
+                    )
+                });
+            let _ = reply.send(plan);
         }
         EngineRequest::SessionWorktree(session_id, reply) => {
             let worktree = engine

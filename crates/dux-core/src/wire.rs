@@ -303,6 +303,12 @@ pub enum WireCommand {
     RemoveProject {
         project_id: String,
     },
+    /// Delete a project by id AND remove its agents' worktrees from disk (the
+    /// destructive counterpart to `RemoveProject`). Guarded and sequenced by
+    /// `Command::DeleteProject`.
+    DeleteProject {
+        project_id: String,
+    },
     /// Create a new agent in a project. `name` may be empty to auto-generate a
     /// branch name; a non-empty name becomes the custom branch/agent name.
     CreateAgent {
@@ -313,6 +319,14 @@ pub enum WireCommand {
         /// default (`defaults.copy_uncommitted_changes_by_default`).
         #[serde(default)]
         copy_uncommitted_changes: Option<bool>,
+        /// Whether the client has CONFIRMED attaching to an existing branch of
+        /// the same name. `false`/absent means "not confirmed": the create runs
+        /// the branch preflight and, if the name matches an existing branch,
+        /// REFUSES with an existing-branch signal so the client can confirm
+        /// (closing the web silent-attach bug). `true` means the client
+        /// confirmed, so the create proceeds and adopts that branch's history.
+        #[serde(default)]
+        use_existing_branch: bool,
     },
     /// Fork an existing agent session into a fresh worktree branched from the
     /// source session's branch. `name` follows the same rules as `CreateAgent`:
@@ -3459,10 +3473,26 @@ impl Engine {
                     project_name,
                 }
             }
+            WireCommand::DeleteProject { project_id } => {
+                // Same display-name resolution as RemoveProject, but this variant
+                // removes the agents' worktrees too. The guards and per-session
+                // sequencing live in `Command::DeleteProject`.
+                let project_name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| crate::sidebar::short_project_id(&project_id));
+                Command::DeleteProject {
+                    project_id,
+                    project_name,
+                }
+            }
             WireCommand::CreateAgent {
                 project_id,
                 name,
                 copy_uncommitted_changes,
+                use_existing_branch,
             } => {
                 let project = self
                     .projects
@@ -3488,10 +3518,32 @@ impl Engine {
                     }
                     Some(trimmed.to_string())
                 };
+                // Defense in depth against a SILENT existing-branch attach (the
+                // web/scripted-client bug): when the caller did NOT confirm and a
+                // user-typed name already names a branch, refuse rather than adopt
+                // that branch's history. The REST layer pre-checks with the same
+                // core preflight and returns a confirmable 409 first, so this bail
+                // is only reached by a client that bypassed that dialog. The
+                // decision is the single-source `git::create_agent_branch_preflight`.
+                if !use_existing_branch
+                    && let Some(name) = &custom_name
+                    && matches!(
+                        crate::git::create_agent_branch_preflight(
+                            std::path::Path::new(&project.path),
+                            name,
+                        ),
+                        crate::git::CreateAgentBranchPlan::ExistingBranch { .. }
+                    )
+                {
+                    anyhow::bail!(
+                        "A branch named \"{name}\" already exists. Creating this agent would \
+                         attach to that branch's history. Confirm to attach, or pick a different name."
+                    );
+                }
                 let request = CreateAgentRequest::NewProject {
                     project,
                     custom_name,
-                    use_existing_branch: false,
+                    use_existing_branch,
                     pull_before_create: self.config.defaults.pull_before_creating_agent_by_default,
                     copy_uncommitted_changes: copy_uncommitted_changes
                         .unwrap_or(self.config.defaults.copy_uncommitted_changes_by_default),
@@ -5272,6 +5324,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: "my-agent".to_string(),
                 copy_uncommitted_changes: None,
+                use_existing_branch: false,
             })
             .expect("dispatch create");
 
@@ -6644,6 +6697,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: "feature-x".to_string(),
                 copy_uncommitted_changes: None,
+                use_existing_branch: false,
             }
         );
     }
@@ -6659,6 +6713,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: "feature-x".to_string(),
                 copy_uncommitted_changes: None,
+                use_existing_branch: false,
             })
             .expect("reconstruct");
         match cmd {
@@ -6684,6 +6739,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: String::new(),
                 copy_uncommitted_changes: None,
+                use_existing_branch: false,
             })
             .expect("reconstruct");
         match cmd {
@@ -6732,6 +6788,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: String::new(),
                 copy_uncommitted_changes: Some(false),
+                use_existing_branch: false,
             })
             .expect("reconstruct");
         match cmd {
@@ -6753,6 +6810,7 @@ mod tests {
             project_id: "ghost".to_string(),
             name: "feature-x".to_string(),
             copy_uncommitted_changes: None,
+            use_existing_branch: false,
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
@@ -6779,6 +6837,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: bad.to_string(),
                 copy_uncommitted_changes: None,
+                use_existing_branch: false,
             });
             let err = result.map(|_| ()).unwrap_err();
             let msg = err.to_string();
@@ -6800,6 +6859,7 @@ mod tests {
                     project_id: "p1".to_string(),
                     name: good.to_string(),
                     copy_uncommitted_changes: None,
+                    use_existing_branch: false,
                 })
                 .unwrap_or_else(|e| panic!("expected {good:?} to be accepted, got: {e}"));
             match cmd {
@@ -6826,6 +6886,7 @@ mod tests {
                 project_id: "p1".to_string(),
                 name: "   ".to_string(),
                 copy_uncommitted_changes: None,
+                use_existing_branch: false,
             })
             .expect("whitespace-only name should reconstruct");
         match cmd {

@@ -41,14 +41,31 @@ impl App {
         };
         logger::info(&format!("attempting to add project {}", path.display()));
 
-        // A freshly `git init`'d repo has an unborn HEAD (no commits), so it
-        // cannot back a worktree. Offer to create an empty initial commit
-        // before registering; the branch-warning path below is moot until the
-        // repo has a commit (the current branch becomes the leading branch).
-        // Only redirect on a CONFIRMED unborn HEAD — fail open on an
-        // indeterminate git result so a transient failure doesn't hijack a
-        // normal add with the commit dialog.
-        if git::repo_commit_state(&path) == git::CommitState::Unborn {
+        // Run the git probes, then let the CORE-owned `add_project_plan` decide
+        // the action + warning (the single-source decision the web's inspect
+        // endpoint also consumes, pinned by the shared vector matrix). The TUI
+        // renders its own dialog copy from the returned typed codes. `validate_`
+        // `project_add_path` above already rejected blocked/non-repo paths, so
+        // only the unborn-commit and branch-warning rungs are reachable here.
+        let branch = git::current_branch_opt(&path)?.unwrap_or_default();
+        let branch_warning = (!branch.is_empty())
+            .then(|| git::branch_warning_kind(&path, &branch))
+            .flatten();
+        let inspection = dux_core::add_project_plan::AddProjectInspection {
+            path_kind: git::repo_path_kind(&path),
+            current_branch: (!branch.is_empty()).then(|| branch.clone()),
+            branch_warning,
+            // A CONFIRMED unborn HEAD needs the initial-commit path; an
+            // indeterminate git result fails OPEN (treated as having commits) so
+            // a transient failure never hijacks a normal add with the commit
+            // dialog. `repo_has_commits` returns true unless the repo is
+            // definitively unborn.
+            has_commits: git::repo_commit_state(&path) != git::CommitState::Unborn,
+        };
+        let plan = dux_core::add_project_plan::add_project_plan(&inspection);
+
+        use dux_core::add_project_plan::{AddProjectAction, AddProjectWarning};
+        if matches!(plan.action, AddProjectAction::NeedsInitialCommit) {
             self.prompt = PromptState::ConfirmCreateInitialCommit {
                 path: path.to_string_lossy().to_string(),
                 name,
@@ -57,23 +74,22 @@ impl App {
             return Ok(());
         }
 
-        let branch = git::current_branch_opt(&path)?.unwrap_or_default();
         let leading_branch =
             leading_branch_for_project(&path, (!branch.is_empty()).then_some(branch.as_str()));
 
-        // A detached HEAD (empty branch string) is not "on a non-default
-        // branch" -- there is no branch to compare. Skip the warning so the
-        // user does not see a misleading Heuristic dialog when adding a
-        // detached-HEAD repo.
-        if let Some(kind) = (!branch.is_empty())
-            .then(|| git::branch_warning_kind(&path, &branch))
-            .flatten()
-        {
-            // Default the checkbox to on for the confident path so hitting
-            // Enter resolves the warning in the way users typically want —
-            // "switch to main, then add". The heuristic path ignores this
-            // field (no checkbox is shown).
-            let checkout_default = matches!(kind, BranchWarningKind::Known { .. });
+        // A non-default-branch warning maps back to the TUI's existing
+        // `BranchWarningKind` for the ConfirmNonDefaultBranch dialog. `None`
+        // (default branch or detached HEAD) falls through to the direct add.
+        let warning_kind = match &plan.warning {
+            AddProjectWarning::NotOnDefaultBranch { default_branch } => {
+                Some(BranchWarningKind::Known {
+                    default_branch: default_branch.clone(),
+                })
+            }
+            AddProjectWarning::NotOnDefaultBranchUnknown => Some(BranchWarningKind::Heuristic),
+            AddProjectWarning::None => None,
+        };
+        if let Some(kind) = warning_kind {
             self.prompt = PromptState::ConfirmNonDefaultBranch {
                 action: NonDefaultBranchAction::AddProject {
                     path: path.to_string_lossy().to_string(),
@@ -83,7 +99,10 @@ impl App {
                 current_branch: branch,
                 kind,
                 focus: ConfirmNonDefaultBranchFocus::Cancel,
-                checkout_default,
+                // Only the known-default warning offers the checkout (the
+                // heuristic path shows no checkbox); `can_checkout_default` is
+                // the core rule.
+                checkout_default: plan.can_checkout_default,
             };
             return Ok(());
         }
@@ -1481,9 +1500,10 @@ impl App {
     }
 
     /// Delete the agent session identified by `session_id`, blocking the
-    /// calling thread for any git work. Used by bulk flows like project
-    /// deletion, where we must complete all removals before the parent
-    /// operation proceeds. User-initiated single-agent deletes go through
+    /// calling thread for any git work. Project deletion now cascades through
+    /// the core `Command::DeleteProject`, so this thin wrapper survives only as
+    /// a synchronous test entry point for the `Command::DoDeleteSession`
+    /// behavior; production single-agent deletes go through
     /// [`begin_delete_session`] so git work runs off the UI thread.
     ///
     /// When `delete_worktree` is true AND no other sessions share the worktree,
@@ -1491,6 +1511,7 @@ impl App {
     /// the session record is preserved so the caller can retry without losing
     /// the agent. When `delete_worktree` is false, the worktree and branch
     /// are always preserved.
+    #[cfg(test)]
     pub(crate) fn do_delete_session(
         &mut self,
         session_id: &str,
@@ -2794,100 +2815,21 @@ impl App {
             return Ok(());
         };
 
-        // Refuse if any of this project's sessions have an async worktree
-        // removal in-flight. `do_delete_session` runs git synchronously and
-        // would race the worker, potentially leaving the project deletion
-        // half-finished. The user must wait for the worker to complete (or
-        // fail) before retrying.
-        let pending_in_project =
-            self.engine.sessions.iter().any(|s| {
-                s.project_id == project.id && self.engine.pending_deletions.contains(&s.id)
-            });
-        if pending_in_project {
-            self.set_error(
-                "Cannot delete project while agent worktree removals are in progress. \
-                 Wait for them to finish, then try again.",
-            );
-            return Ok(());
-        }
-
-        // Refuse the WHOLE project delete up front if any tab of any of its
-        // sessions has a launch in flight. `do_delete_session`'s per-session guard
-        // would soft-refuse (Ok(None)) that one session, but the loop below ignores
-        // the soft-refuse and would then report "Deleted project and all its
-        // agents" while silently leaving that session (and its worktree) behind.
-        let launching_in_project = self.engine.sessions.iter().any(|s| {
-            s.project_id == project.id
-                && self.engine.tab_ids_for_session(&s.id).iter().any(|id| {
-                    self.engine
-                        .is_in_flight(&dux_core::engine::InFlightKey::AgentLaunch(id.clone()))
-                })
-        });
-        if launching_in_project {
-            self.set_error(
-                "Cannot delete project while an agent tab is still launching. \
-                 Wait a moment, then try again.",
-            );
-            return Ok(());
-        }
-
+        // The whole delete (guards for in-flight worktree removals / launching
+        // tabs, the per-session cascade with worktree removal, and the project
+        // record + config removal) is owned by the core `Command::DeleteProject`
+        // so the TUI and the web can never disagree on the sequencing. This path
+        // is synchronous exactly as before (the cascade runs `git worktree remove`
+        // inline), so no async status op is needed.
         logger::info(&format!("deleting project {}", project.path));
-        let session_ids = self
-            .engine
-            .sessions
-            .iter()
-            .filter(|session| session.project_id == project.id)
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>();
-        for session_id in session_ids {
-            if let Some(index) = self
-                .engine
-                .sessions
-                .iter()
-                .position(|session| session.id == session_id)
-            {
-                self.selected_left = self
-                    .left_items()
-                    .iter()
-                    .position(
-                        |item| matches!(item, LeftItem::Session(session_index) if *session_index == index),
-                    )
-                    .unwrap_or(self.selected_left);
-                // When deleting a project we also remove each agent's
-                // worktree — the project itself is going away, so leaving
-                // orphaned worktrees around would be surprising.
-                self.do_delete_session(&session_id, true)?;
-            }
-        }
-        let project_name = project.name.clone();
-        let success_name = project_name.clone();
-        let db_fail_name = project_name.clone();
-        let op = dux_core::engine::status_op(format!(
-            "Finishing deletion for project \"{project_name}\" after removing its agents..."
-        ))
-        .resolve_in_handler(move |o: &PersistFinalOutcome| match o {
-            PersistFinalOutcome::Saved => dux_core::engine::Final::info(format!(
-                "Deleted project \"{success_name}\" and all its agents"
-            )),
-            PersistFinalOutcome::DbFailed(error) => dux_core::engine::Final::error(format!(
-                "Could not finish deleting project \"{db_fail_name}\" from the database: {error}"
-            )),
-            PersistFinalOutcome::ConfigWriteFailed(err) => dux_core::engine::Final::error(format!(
-                "Project was deleted from the database, but config.toml could not be updated: {err}"
-            )),
-        });
-        let pending = op.pending_status();
-        let op_id = op.id().to_string();
-        self.pending_persist_ops.insert(op_id.clone(), op);
-        let reaction = self.engine.apply(Command::PersistProject {
-            action: Box::new(ProjectPersistenceAction::Delete {
-                project_id: project.id.clone(),
-                project_name: project.name.clone(),
-            }),
-            status_op_id: Some(op_id),
+        let reaction = self.engine.apply(Command::DeleteProject {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
         })?;
         self.apply_reaction(reaction);
-        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+        // The cascade mutated engine.sessions/projects synchronously; refresh the
+        // cache (and fix the selection) so render never indexes a stale row.
+        self.rebuild_left_items();
         Ok(())
     }
 

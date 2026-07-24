@@ -4,7 +4,7 @@ import { toast } from "sonner"
 import { sanitizeAgentName } from "./agentName"
 import { git } from "./git"
 import { projectsApi, type PatchProjectBody } from "./projectsApi"
-import { sessionsApi, SessionsApiError } from "./sessionsApi"
+import { existingBranchConflict, sessionsApi, SessionsApiError } from "./sessionsApi"
 
 import { ordersMatch } from "./reorder"
 import { sortedSessionIds, type SortKey } from "./sortSessions"
@@ -234,6 +234,17 @@ export interface DuxState {
   // (closed). Confirmed via ConfirmForceReconnectDialog because a forced
   // reconnect abandons the provider's current conversation for a fresh one.
   forceReconnectTarget: string | null
+  // The pending existing-branch attach confirmation, or null (closed). The
+  // server refused an unconfirmed create whose name matches an existing branch;
+  // this carries the retry params so the confirm re-POSTs with
+  // `use_existing_branch: true`. Confirmed via ConfirmUseExistingBranchDialog so
+  // an agent never silently adopts an existing branch's history.
+  existingBranchTarget: {
+    projectId: string
+    name: string
+    copyChanges: boolean | undefined
+    location: "local" | "remote"
+  } | null
   addProjectOpen: boolean
   // Why the picker was opened: "add" (the default) or "init" (the split
   // button's "Initialize a repository…" entry). The intent's ONLY effect is a
@@ -523,6 +534,7 @@ let state: DuxState = {
   projectInfoTarget: null,
   agentInfoTarget: null,
   forceReconnectTarget: null,
+  existingBranchTarget: null,
   addProjectOpen: false,
   addProjectIntent: "add",
   browsePath: "",
@@ -3025,6 +3037,7 @@ export function createAgent(
   projectId: string,
   name: string,
   copyUncommittedChanges?: boolean,
+  useExistingBranch?: boolean,
 ): void {
   sessionsApi
     .create({
@@ -3032,8 +3045,38 @@ export function createAgent(
       project_id: projectId,
       name,
       copy_uncommitted_changes: copyUncommittedChanges,
+      use_existing_branch: useExistingBranch,
     })
-    .catch((e) => toastCreateError(e, "Could not create the agent."))
+    .catch((e) => {
+      // The server refused an unconfirmed existing-branch attach: open the
+      // confirmation instead of toasting, so the user can consent (or cancel)
+      // rather than silently adopting that branch's history.
+      const conflict = existingBranchConflict(e)
+      if (conflict) {
+        setState({
+          existingBranchTarget: {
+            projectId,
+            name,
+            copyChanges: copyUncommittedChanges,
+            location: conflict.location,
+          },
+        })
+        return
+      }
+      toastCreateError(e, "Could not create the agent.")
+    })
+}
+
+/** Confirm the pending existing-branch attach: re-create with the flag set. */
+export function confirmCreateWithExistingBranch(): void {
+  const target = state.existingBranchTarget
+  if (!target) return
+  setState({ existingBranchTarget: null })
+  createAgent(target.projectId, target.name, target.copyChanges, true)
+}
+
+export function closeExistingBranch(): void {
+  setState({ existingBranchTarget: null })
 }
 
 // Flat-list display controls (shared desktop + mobile), plus the New-agent

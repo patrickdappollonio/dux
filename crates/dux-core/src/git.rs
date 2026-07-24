@@ -42,6 +42,31 @@ pub enum BranchLocation {
     Remote,
 }
 
+/// The create-agent branch preflight decision: whether creating an agent named
+/// `name` in a project would start a genuinely FRESH branch or ATTACH to an
+/// EXISTING branch's history. The single-source decision both surfaces consume
+/// so neither silently attaches without consent: the TUI resolves an
+/// `ExistingBranch` through its confirm dialog, and the web refuses an
+/// unconfirmed attach and surfaces the same confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreateAgentBranchPlan {
+    /// No branch of that name exists (local or remote): a new branch is created.
+    Fresh,
+    /// A branch of that name already exists; attaching would adopt its history.
+    ExistingBranch { location: BranchLocation },
+}
+
+/// Inspect whether creating an agent named `name` in the repo at `repo_path`
+/// would attach to an existing branch. Wraps [`branch_exists`] into the typed
+/// [`CreateAgentBranchPlan`] both surfaces branch on. Blocking (a git
+/// subprocess), so callers should run it off the UI thread / in the actor.
+pub fn create_agent_branch_preflight(repo_path: &Path, name: &str) -> CreateAgentBranchPlan {
+    match branch_exists(repo_path, name) {
+        Some(location) => CreateAgentBranchPlan::ExistingBranch { location },
+        None => CreateAgentBranchPlan::Fresh,
+    }
+}
+
 enum DiffStat {
     Text(usize, usize),
     Binary,
@@ -3348,6 +3373,31 @@ mod tests {
         assert_eq!(
             branch_exists(repo.path(), "feature-x"),
             Some(BranchLocation::Local)
+        );
+    }
+
+    /// #10: the create-agent branch preflight (the single-source decision both
+    /// surfaces consume): a name matching no existing branch is Fresh, and a
+    /// name matching a local branch is ExistingBranch (so the surface can ask
+    /// for consent before attaching to that branch's history).
+    #[test]
+    fn create_agent_branch_preflight_reports_fresh_for_a_new_name() {
+        let repo = init_test_repo();
+        assert_eq!(
+            create_agent_branch_preflight(repo.path(), "brand-new"),
+            CreateAgentBranchPlan::Fresh
+        );
+    }
+
+    #[test]
+    fn create_agent_branch_preflight_reports_existing_branch_with_location() {
+        let repo = init_test_repo();
+        let _wt = add_worktree(repo.path(), "feature-x");
+        assert_eq!(
+            create_agent_branch_preflight(repo.path(), "feature-x"),
+            CreateAgentBranchPlan::ExistingBranch {
+                location: BranchLocation::Local
+            }
         );
     }
 

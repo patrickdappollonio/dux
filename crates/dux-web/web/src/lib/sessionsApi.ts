@@ -21,23 +21,71 @@ import type {
 } from "./types"
 
 // A failed sessions REST call. `status` is the HTTP status (0 for a network/
-// transport failure with no response); `message` is the parsed server detail.
+// transport failure with no response); `message` is the parsed server detail;
+// `body` is the parsed JSON error body when the server returned one (used by the
+// existing-branch 409 to carry the structured confirm payload).
 export class SessionsApiError extends Error {
   readonly status: number
+  readonly body: unknown
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, body: unknown = null) {
     super(message)
     this.name = "SessionsApiError"
     this.status = status
+    this.body = body
   }
 }
 
-// The discriminated create body the server matches on `kind`.
+// The discriminated create body the server matches on `kind`. `new` carries an
+// optional `use_existing_branch`: when the name matches an existing branch and
+// this is not set, the server refuses with a confirmable 409; the client then
+// re-sends with it true after the user confirms (see `ExistingBranchConflict`).
 export type CreateSessionBody =
-  | { kind: "new"; project_id: string; name?: string; copy_uncommitted_changes?: boolean }
+  | {
+      kind: "new"
+      project_id: string
+      name?: string
+      copy_uncommitted_changes?: boolean
+      use_existing_branch?: boolean
+    }
   | { kind: "fork"; session_id: string; name?: string }
   | { kind: "from_worktree"; project_id: string; worktree_path: string; name?: string }
   | { kind: "from_pr"; project_id: string; pr: string; name?: string }
+
+// The parsed body of the server's existing-branch refusal (409). Present on a
+// `SessionsApiError` when the server asks the client to confirm attaching a new
+// agent to an existing branch's history rather than silently adopting it.
+export interface ExistingBranchConflict {
+  name: string
+  location: "local" | "remote"
+}
+
+/** Extract the existing-branch conflict from a create error, or null. */
+export function existingBranchConflict(e: unknown): ExistingBranchConflict | null {
+  if (
+    e instanceof SessionsApiError &&
+    e.status === 409 &&
+    e.body !== null &&
+    typeof e.body === "object" &&
+    "existing_branch" in e.body
+  ) {
+    const eb = (e.body as { existing_branch: unknown }).existing_branch
+    if (
+      eb !== null &&
+      typeof eb === "object" &&
+      "name" in eb &&
+      "location" in eb &&
+      typeof (eb as { name: unknown }).name === "string"
+    ) {
+      const loc = (eb as { location: unknown }).location
+      return {
+        name: (eb as { name: string }).name,
+        location: loc === "remote" ? "remote" : "local",
+      }
+    }
+  }
+  return null
+}
 
 // PATCH body for a session. Every field is optional; an omitted field is left
 // untouched. Setting `provider` triggers a pending reconnect server-side.
@@ -45,6 +93,18 @@ export interface PatchSessionBody {
   title?: string
   provider?: string
   auto_reopen?: boolean
+}
+
+// Parse a response body as JSON, returning null for an empty string or invalid
+// JSON. Used to attach the server's structured error payload (e.g. the
+// existing-branch 409) without letting a non-JSON body throw.
+function parseJsonOrNull(text: string): unknown {
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 async function request<T>(
@@ -75,7 +135,15 @@ async function request<T>(
   }
   if (!resp.ok) {
     const detail = (await resp.text().catch(() => "")).trim()
-    throw new SessionsApiError(detail || `request failed (${resp.status})`, resp.status)
+    // Attach the parsed JSON body when the server sent one (e.g. the
+    // existing-branch 409's structured confirm payload); otherwise `body` is null
+    // and callers fall back to the text `message`.
+    const parsed = parseJsonOrNull(detail)
+    throw new SessionsApiError(
+      detail || `request failed (${resp.status})`,
+      resp.status,
+      parsed,
+    )
   }
   // 204 No Content (delete) and empty bodies have nothing to parse.
   if (resp.status === 204) return undefined as T

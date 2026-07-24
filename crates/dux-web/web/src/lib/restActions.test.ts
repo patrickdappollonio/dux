@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { setConnectionId } from "./connection"
 import { ProjectsApiError, projectsApi } from "./projectsApi"
-import { SessionsApiError, sessionsApi } from "./sessionsApi"
+import { SessionsApiError, existingBranchConflict, sessionsApi } from "./sessionsApi"
 
 // Wire-level coverage for the Phase 4 REST action clients: each verb hits the
 // exact endpoint with the right method/body, stamps the per-connection id as
@@ -183,6 +183,44 @@ describe("sessionsApi", () => {
     const fetchMock = stubOkFetch(200)
     await sessionsApi.reconnect("s1", false)
     expect(lastCall(fetchMock).headers["x-connection-id"]).toBeUndefined()
+  })
+
+  // #10: the existing-branch 409 carries a structured JSON body; the client
+  // parses it onto the error so the store can open the confirm dialog instead
+  // of silently swallowing the 409.
+  it("parses the existing-branch 409 body into a typed conflict", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 409,
+        text: async () =>
+          JSON.stringify({ existing_branch: { name: "feature-x", location: "local" } }),
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+    const err = await sessionsApi
+      .create({ kind: "new", project_id: "p1", name: "feature-x" })
+      .catch((e) => e)
+    expect(err).toBeInstanceOf(SessionsApiError)
+    const conflict = existingBranchConflict(err)
+    expect(conflict).toEqual({ name: "feature-x", location: "local" })
+  })
+
+  it("returns null from existingBranchConflict for a plain 409", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 409,
+        text: async () => "create already in flight",
+        headers: { get: () => null },
+      })) as unknown as typeof fetch,
+    )
+    const err = await sessionsApi
+      .create({ kind: "new", project_id: "p1" })
+      .catch((e) => e)
+    expect(existingBranchConflict(err)).toBeNull()
   })
 })
 

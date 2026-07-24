@@ -246,16 +246,31 @@ async fn inspect_path(
             _ => "repo",
         };
         let branch = dux_core::git::current_branch_opt(repo).map_err(|e| format!("{e:#}"))?;
-        let warning = match branch.as_deref() {
-            Some(b) => dux_core::git::branch_warning_kind(repo, b).map(|kind| match kind {
-                dux_core::worker::BranchWarningKind::Known { default_branch } => {
-                    BranchWarningView::Known { default_branch }
-                }
-                dux_core::worker::BranchWarningKind::Heuristic => BranchWarningView::Heuristic,
-            }),
-            None => None, // detached HEAD: no "not on default branch" warning
-        };
         let has_commits = dux_core::git::repo_has_commits(repo);
+        // Derive the branch WARNING from the CORE-owned `add_project_plan` (the
+        // single-source decision the TUI's add_project also consumes, pinned by
+        // the shared vector matrix). The reply `kind` still comes from
+        // `RepoPathKind` (bare vs repo) and `has_commits` drives the client's
+        // initial-commit offer; only the warning selection is the shared
+        // decision. A detached HEAD carries no branch_warning.
+        let branch_warning = branch
+            .as_deref()
+            .and_then(|b| dux_core::git::branch_warning_kind(repo, b));
+        let inspection = dux_core::add_project_plan::AddProjectInspection {
+            path_kind: kind.clone(),
+            current_branch: branch.clone(),
+            branch_warning,
+            has_commits,
+        };
+        let warning = match dux_core::add_project_plan::add_project_plan(&inspection).warning {
+            dux_core::add_project_plan::AddProjectWarning::NotOnDefaultBranch {
+                default_branch,
+            } => Some(BranchWarningView::Known { default_branch }),
+            dux_core::add_project_plan::AddProjectWarning::NotOnDefaultBranchUnknown => {
+                Some(BranchWarningView::Heuristic)
+            }
+            dux_core::add_project_plan::AddProjectWarning::None => None,
+        };
         Ok::<_, String>(InspectReply {
             kind: reply_kind,
             repo_root: None,

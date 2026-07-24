@@ -8,6 +8,7 @@
 //! - `POST   /api/v1/projects`                 — add (body `{path, name?,
 //!   checkout_default?}`); `Idempotency-Key` honored.
 //! - `DELETE /api/v1/projects/:id`             — remove (does not touch the checkout).
+//!   With `?delete_worktrees=true` it deletes the agents' worktrees too.
 //! - `PATCH  /api/v1/projects/:id`             — update settings (provider /
 //!   auto_reopen / startup_command / env), tri-state per field.
 //! - `POST   /api/v1/projects/reorder`         — persist order (literal segment).
@@ -18,7 +19,7 @@ use std::collections::BTreeMap;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{patch, post},
@@ -32,6 +33,7 @@ use crate::rest_common::{
     provider_is_configured, scope_from_headers,
 };
 use crate::server::AppState;
+use crate::session_actions::outcome_is_error;
 
 /// The gated project-action routes. The literal `/reorder` segment is registered
 /// alongside `:id`; axum's matcher prefers static segments over `:id`. (The
@@ -166,11 +168,21 @@ struct CreatedRef {
     id: String,
 }
 
-// ── Remove ───────────────────────────────────────────────────────────────────
+// ── Remove / Delete ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct RemoveProjectQuery {
+    /// When true, also remove every agent's worktree from disk (routes to the
+    /// destructive `DeleteProject`). Defaults to false (keep the worktrees, plain
+    /// `RemoveProject`) so a missing query parameter never deletes user data.
+    #[serde(default)]
+    delete_worktrees: bool,
+}
 
 async fn remove_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<RemoveProjectQuery>,
     headers: HeaderMap,
 ) -> Response {
     if !id_within_bound(&id) {
@@ -179,15 +191,31 @@ async fn remove_project(
     if !project_exists(&state, &id).await {
         return unknown_project();
     }
+    // `delete_worktrees` selects the destructive variant, which cascades every
+    // agent's worktree off disk; the default keeps the worktrees.
+    let command = if q.delete_worktrees {
+        WireCommand::DeleteProject { project_id: id }
+    } else {
+        WireCommand::RemoveProject { project_id: id }
+    };
     match state
         .engine
-        .apply_wire_scoped(
-            WireCommand::RemoveProject { project_id: id },
-            scope_from_headers(&headers, &state.connections),
-        )
+        .apply_wire_scoped(command, scope_from_headers(&headers, &state.connections))
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        // An `Ok` error-toned status means the delete was REFUSED, not performed
+        // (a tab is still launching, or an async worktree removal is in flight).
+        // Report 409 with the message rather than a misleading 204 "deleted".
+        Ok(outcome) => {
+            if outcome_is_error(&outcome) {
+                let msg = outcome
+                    .status
+                    .map(|s| s.message)
+                    .unwrap_or_else(|| "project delete refused".to_string());
+                return (StatusCode::CONFLICT, msg).into_response();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
@@ -581,6 +609,75 @@ mod tests {
             before,
             "a born repo must not gain a second commit"
         );
+    }
+
+    /// Add a committed repo as a project through the same router and return its id.
+    async fn add_project_and_id(app: &axum::Router, path: &str) -> String {
+        let resp = app.clone().oneshot(post_add(path, false)).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        json["id"].as_str().expect("created id").to_string()
+    }
+
+    fn delete_project_req(id: &str, delete_worktrees: bool) -> Request<Body> {
+        let uri = if delete_worktrees {
+            format!("/api/v1/projects/{id}?delete_worktrees=true")
+        } else {
+            format!("/api/v1/projects/{id}")
+        };
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn delete_project_with_worktrees_flag_removes_the_project_and_keeps_the_source_checkout()
+    {
+        // The `?delete_worktrees=true` branch routes to `DeleteProject`, which
+        // removes the agents' worktrees but must NEVER touch the source checkout.
+        // With no agents there is nothing to remove, so this asserts the route is
+        // wired (204, project gone) and the safety property (source dir intact).
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let id = add_project_and_id(&app, &path).await;
+
+        let resp = app
+            .clone()
+            .oneshot(delete_project_req(&id, true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+        assert!(
+            repo.path().join(".git").exists(),
+            "the source checkout must survive a project delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_delete_removes_the_project_and_keeps_worktrees() {
+        // The default DELETE (no flag) routes to `RemoveProject` and returns 204.
+        let repo = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo.path());
+        let path = repo.path().to_string_lossy().to_string();
+
+        let (_tmp, app) = router_no_auth();
+        let id = add_project_and_id(&app, &path).await;
+
+        let resp = app
+            .clone()
+            .oneshot(delete_project_req(&id, false))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+        assert!(repo.path().join(".git").exists());
     }
 
     #[tokio::test]

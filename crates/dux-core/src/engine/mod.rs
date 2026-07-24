@@ -750,6 +750,7 @@ impl Engine {
                 | Command::UpdateMacros { .. }
                 | Command::PersistProject { .. }
                 | Command::RemoveProject { .. }
+                | Command::DeleteProject { .. }
         )
     }
 

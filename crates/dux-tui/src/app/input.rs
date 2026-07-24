@@ -3508,12 +3508,16 @@ impl App {
                     }
 
                     // For fresh project agents, check whether the branch already
-                    // exists locally or on the remote before creating a new one.
-                    // PR-based agents intentionally skip this prompt because the
-                    // PR head branch is expected to exist upstream.
+                    // exists locally or on the remote before creating a new one,
+                    // via the single-source `git::create_agent_branch_preflight`
+                    // (shared with the web's create route). PR-based agents
+                    // intentionally skip this prompt because the PR head branch is
+                    // expected to exist upstream.
                     if let CreateAgentRequest::NewProject { project, .. } = &request {
                         let repo_path = std::path::PathBuf::from(&project.path);
-                        if let Some(location) = git::branch_exists(&repo_path, &name) {
+                        if let git::CreateAgentBranchPlan::ExistingBranch { location } =
+                            git::create_agent_branch_preflight(&repo_path, &name)
+                        {
                             set_create_agent_request_custom_name(&mut request, name.clone());
                             self.prompt = PromptState::ConfirmUseExistingBranch {
                                 request,

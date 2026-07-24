@@ -75,6 +75,20 @@ pub enum Command {
         project_name: String,
     },
 
+    /// Delete a project AND cascade-delete its agents' records + runtime,
+    /// REMOVING their worktrees from disk (the destructive counterpart to
+    /// `RemoveProject`, which keeps worktrees). Each session goes through the
+    /// Wave-1 `do_delete_session` path (`delete_worktree == true`), so the kill,
+    /// worktree removal, and record cleanup stay single-source. Guards the whole
+    /// project up front against an in-flight async worktree removal or a
+    /// launching tab, so a partial delete can never report success while
+    /// stranding a session. Like `RemoveProject`, the project-record + config
+    /// removal keep the same tolerance for a ghost id.
+    DeleteProject {
+        project_id: String,
+        project_name: String,
+    },
+
     /// Spawn the create-agent worker. Returns `EventReaction::Status(Error)` if
     /// another create is already in flight; otherwise marks `InFlightKey::CreateAgent`,
     /// spawns the worker, and returns `EventReaction::Status(Busy(busy_message))`.
@@ -503,6 +517,81 @@ impl Engine {
                 }
                 Ok(EventReaction::Status(StatusUpdate::info(format!(
                     "Removed project \"{project_name}\"{detail}. Worktrees were kept on disk."
+                ))))
+            }
+
+            Command::DeleteProject {
+                project_id,
+                project_name,
+            } => {
+                // Guard the WHOLE project up front. do_delete_session soft-refuses
+                // (Ok(None)) per session on either condition, but the loop below
+                // would then report success while silently leaving that session and
+                // its worktree behind, so refuse the entire delete instead.
+                if self
+                    .sessions
+                    .iter()
+                    .any(|s| s.project_id == project_id && self.pending_deletions.contains(&s.id))
+                {
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Cannot delete project \"{project_name}\" while agent worktree removals are in progress. Wait for them to finish, then try again."
+                    ))));
+                }
+                if self.sessions.iter().any(|s| {
+                    s.project_id == project_id
+                        && self
+                            .tab_ids_for_session(&s.id)
+                            .iter()
+                            .any(|id| self.is_in_flight(&InFlightKey::AgentLaunch(id.clone())))
+                }) {
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Cannot delete project \"{project_name}\" while an agent tab is still launching. Wait a moment, then try again."
+                    ))));
+                }
+                // A ghost id (orphaned sessions, no config-backed project) was never
+                // written to config, so it needs no config rewrite below.
+                let was_real = self.projects.iter().any(|p| p.id == project_id);
+                // Cascade every session through the Wave-1 delete path with worktree
+                // removal. A git failure (a worktree that cannot be removed) aborts
+                // the whole delete via `?`, leaving the rest of the project intact
+                // rather than half-deleted.
+                let session_ids: Vec<String> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.project_id == project_id)
+                    .map(|s| s.id.clone())
+                    .collect();
+                let mut removed = 0usize;
+                for id in &session_ids {
+                    if self.do_delete_session(id, true)?.is_some() {
+                        removed += 1;
+                    }
+                }
+                // The session rows are already gone (each do_delete_session removed
+                // its own); this drops the project row and any leftover PR rows in a
+                // single transaction, tolerating a ghost id.
+                self.session_store.remove_project_records(&project_id)?;
+                // Close the project's own project terminals gracefully, exactly as
+                // RemoveProject does (SIGTERM, then the background reaper).
+                self.begin_close_project_terminals(&project_id);
+                // Drop the project from memory synchronously so a concurrent
+                // CreateAgent cannot attach a new session mid-removal.
+                self.projects.retain(|p| p.id != project_id);
+                let detail = match removed {
+                    0 => String::new(),
+                    1 => " and its agent".to_string(),
+                    n => format!(" and its {n} agents"),
+                };
+                // Keep portable config in sync. Only a real project needs it; the DB
+                // delete already committed, so a config-write failure is reported but
+                // does not undo the removal.
+                if was_real && let Err(e) = self.persist_projects_to_config() {
+                    return Ok(EventReaction::Status(StatusUpdate::error(format!(
+                        "Deleted \"{project_name}\"{detail} from dux, but updating config.toml failed: {e}. The project may reappear on restart. Check the file is writable."
+                    ))));
+                }
+                Ok(EventReaction::Status(StatusUpdate::info(format!(
+                    "Deleted project \"{project_name}\"{detail}. Worktrees were removed."
                 ))))
             }
 
@@ -1366,6 +1455,109 @@ mod tests {
             "another project's terminal must be untouched"
         );
         assert!(engine.projects.iter().all(|p| p.id != "p1"));
+    }
+
+    #[test]
+    fn delete_project_removes_its_sessions_worktrees_and_project() {
+        // The worktree-deleting project delete (distinct from RemoveProject, which
+        // keeps worktrees) cascades every session through the Wave-1
+        // `do_delete_session` path, then drops the project row + memory. We use a
+        // non-existent worktree path so `git::remove_worktree` takes its
+        // already-gone Ok branch without needing a real git checkout (the worktree
+        // removal itself is covered by do_delete_session's own tests).
+        let (mut engine, tmp) = test_engine();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        engine
+            .projects
+            .push(sample_project("p1", proj.to_str().unwrap()));
+        let mut session = sample_session("s1", "p1", "feat/x");
+        session.worktree_path = tmp.path().join("wt-gone").to_str().unwrap().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let reaction = engine
+            .apply(Command::DeleteProject {
+                project_id: "p1".to_string(),
+                project_name: "p1".to_string(),
+            })
+            .expect("delete project");
+
+        match reaction {
+            EventReaction::Status(status) => {
+                assert_eq!(status.tone, StatusTone::Info, "expected a success status");
+                assert!(
+                    status.message.contains("its agent"),
+                    "message should mention the removed agent: {}",
+                    status.message
+                );
+            }
+            _ => panic!("expected a Status reaction"),
+        }
+        assert!(
+            engine.projects.iter().all(|p| p.id != "p1"),
+            "project must be gone from memory"
+        );
+        assert!(
+            engine.sessions.iter().all(|s| s.id != "s1"),
+            "session must be gone from memory"
+        );
+    }
+
+    #[test]
+    fn delete_project_refuses_while_a_session_delete_is_pending() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session);
+        engine.pending_deletions.insert("s1".to_string());
+
+        let reaction = engine
+            .apply(Command::DeleteProject {
+                project_id: "p1".to_string(),
+                project_name: "p1".to_string(),
+            })
+            .expect("apply returns Ok");
+
+        match reaction {
+            EventReaction::Status(status) => {
+                assert_eq!(status.tone, StatusTone::Error);
+            }
+            _ => panic!("expected an error Status"),
+        }
+        assert!(
+            engine.projects.iter().any(|p| p.id == "p1"),
+            "the project must be untouched when the pending guard fires"
+        );
+        assert!(engine.sessions.iter().any(|s| s.id == "s1"));
+    }
+
+    #[test]
+    fn delete_project_refuses_while_a_tab_is_launching() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/tmp/p1"));
+        let session = sample_session("s1", "p1", "feat/x");
+        engine.sessions.push(session);
+        // The session-slot tab id equals the session id; mark its launch in flight.
+        engine.mark_in_flight(InFlightKey::AgentLaunch("s1".to_string()));
+
+        let reaction = engine
+            .apply(Command::DeleteProject {
+                project_id: "p1".to_string(),
+                project_name: "p1".to_string(),
+            })
+            .expect("apply returns Ok");
+
+        match reaction {
+            EventReaction::Status(status) => {
+                assert_eq!(status.tone, StatusTone::Error);
+            }
+            _ => panic!("expected an error Status"),
+        }
+        assert!(
+            engine.projects.iter().any(|p| p.id == "p1"),
+            "the project must be untouched when the launch guard fires"
+        );
     }
 
     #[test]

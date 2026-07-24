@@ -72,6 +72,12 @@ enum CreateSessionBody {
         name: String,
         #[serde(default)]
         copy_uncommitted_changes: Option<bool>,
+        /// The client's CONFIRMATION that attaching to an existing branch of the
+        /// same name is intended. Absent/false makes the server run the branch
+        /// preflight and refuse (409) an unconfirmed existing-branch attach, so
+        /// the client can show a confirmation and re-POST with this set.
+        #[serde(default)]
+        use_existing_branch: bool,
     },
     Fork {
         session_id: String,
@@ -99,9 +105,11 @@ impl CreateSessionBody {
                 project_id,
                 name,
                 copy_uncommitted_changes,
+                use_existing_branch,
             } => WireCommand::CreateAgent {
                 project_id,
                 name,
+                use_existing_branch,
                 copy_uncommitted_changes,
             },
             CreateSessionBody::Fork { session_id, name } => {
@@ -151,6 +159,38 @@ async fn create_session(
         && let Some(Some(session)) = state.engine.session(prev_id).await
     {
         return (StatusCode::OK, Json(session)).into_response();
+    }
+
+    // Existing-branch consent (the "no silent attach" tenet): for a `new` create
+    // with a user-typed name that the client has NOT confirmed, run the shared
+    // core branch preflight. If it names an existing branch, refuse with a
+    // confirmable 409 carrying the branch name + location, so the client shows a
+    // confirmation and re-POSTs with `use_existing_branch: true` rather than
+    // silently adopting that branch's history. (The wire command enforces the
+    // same refusal as defense in depth for a client that skips this dialog.)
+    if let CreateSessionBody::New {
+        project_id,
+        name,
+        use_existing_branch: false,
+        ..
+    } = &body
+        && !name.trim().is_empty()
+        && let Some(dux_core::git::CreateAgentBranchPlan::ExistingBranch { location }) = state
+            .engine
+            .create_agent_branch_plan(project_id.clone(), name.trim().to_string())
+            .await
+    {
+        let location = match location {
+            dux_core::git::BranchLocation::Local => "local",
+            dux_core::git::BranchLocation::Remote => "remote",
+        };
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "existing_branch": { "name": name.trim(), "location": location }
+            })),
+        )
+            .into_response();
     }
 
     // The from-PR create resolves differently: its create op is minted later
@@ -602,8 +642,9 @@ fn engine_unavailable() -> Response {
 }
 
 /// Whether a wire outcome carried an error-toned status (a soft refusal returned
-/// as `Ok`, e.g. the create in-flight guard).
-fn outcome_is_error(outcome: &WireCommandOutcome) -> bool {
+/// as `Ok`, e.g. the create in-flight guard). Shared with `project_actions` so
+/// the project delete's refusal maps to 409 the same way a session delete's does.
+pub(crate) fn outcome_is_error(outcome: &WireCommandOutcome) -> bool {
     outcome
         .status
         .as_ref()
@@ -616,6 +657,8 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    use tempfile::TempDir;
 
     use crate::test_support::router_no_auth;
 
@@ -651,5 +694,127 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    /// Boot a router whose engine has ONE project pointing at a real git repo
+    /// that already has a branch named `existing_branch`. The project is declared
+    /// in config.toml so the bootstrap reconciliation adopts it into the engine.
+    fn router_with_project_and_branch(existing_branch: &str) -> (TempDir, axum::Router, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        run_git(&repo, &["config", "user.email", "t@t"]);
+        run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        run_git(&repo, &["branch", existing_branch]);
+
+        let paths = dux_core::config::DuxPaths {
+            root: tmp.path().to_path_buf(),
+            config_path: tmp.path().join("config.toml"),
+            sessions_db_path: tmp.path().join("sessions.sqlite3"),
+            worktrees_root: tmp.path().join("worktrees"),
+            lock_path: tmp.path().join("dux.lock"),
+        };
+        std::fs::create_dir_all(&paths.worktrees_root).unwrap();
+        std::fs::write(
+            &paths.config_path,
+            format!(
+                "[[projects]]\nid = \"p1\"\npath = \"{}\"\nname = \"Repo\"\n",
+                repo.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let engine = crate::bootstrap::bootstrap_engine(&paths).unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        (tmp, crate::server::router(handle), "p1".to_string())
+    }
+
+    async fn post_create(app: &axum::Router, body: serde_json::Value) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// #10: an unconfirmed create whose name matches an existing branch is
+    /// REFUSED with a confirmable 409 carrying the branch info, instead of
+    /// silently attaching to that branch's history.
+    #[tokio::test]
+    async fn create_refuses_unconfirmed_existing_branch_attach() {
+        let (_tmp, app, project_id) = router_with_project_and_branch("feature-x");
+        let resp = post_create(
+            &app,
+            serde_json::json!({
+                "kind": "new",
+                "project_id": project_id,
+                "name": "feature-x",
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["existing_branch"]["name"], "feature-x");
+        assert_eq!(json["existing_branch"]["location"], "local");
+    }
+
+    /// A create for a FRESH name (no matching branch) is not refused by the
+    /// preflight (it proceeds to dispatch).
+    #[tokio::test]
+    async fn create_does_not_refuse_a_fresh_name() {
+        let (_tmp, app, project_id) = router_with_project_and_branch("feature-x");
+        let resp = post_create(
+            &app,
+            serde_json::json!({
+                "kind": "new",
+                "project_id": project_id,
+                "name": "brand-new-name",
+            }),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a fresh name must not hit the existing-branch refusal"
+        );
+    }
+
+    /// A CONFIRMED create (`use_existing_branch: true`) is not refused by the
+    /// preflight even when the name matches an existing branch.
+    #[tokio::test]
+    async fn create_allows_confirmed_existing_branch_attach() {
+        let (_tmp, app, project_id) = router_with_project_and_branch("feature-x");
+        let resp = post_create(
+            &app,
+            serde_json::json!({
+                "kind": "new",
+                "project_id": project_id,
+                "name": "feature-x",
+                "use_existing_branch": true,
+            }),
+        )
+        .await;
+        assert_ne!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a confirmed attach must pass the preflight"
+        );
     }
 }
