@@ -1077,9 +1077,15 @@ mod tests {
             ])
             .output()
             .expect("git worktree list");
+        // Match the removed worktree's FULL path, never the bare "wt" dir name:
+        // `git worktree list` always names the main worktree, whose path is the
+        // random tempfile dir, and a 2-char substring like "wt" matches that
+        // random path by chance (a rare-but-real CI flake). The full path is
+        // unique to the removed registration, so its absence is the real signal.
+        let removed_registration = worktree.to_string_lossy();
         assert!(
-            !String::from_utf8_lossy(&worktrees.stdout).contains("wt"),
-            "no stale worktree registration may remain in the repo",
+            !String::from_utf8_lossy(&worktrees.stdout).contains(removed_registration.as_ref()),
+            "no stale worktree registration for the removed path may remain in the repo",
         );
     }
 }
