@@ -5,7 +5,9 @@ import {
   displayedSessionOrder,
   FLAT_SORT_LABELS,
   partitionQuiet,
+  quietTailForcedOpen,
   sortMainSessions,
+  sortQuietTail,
   stateWord,
 } from "@/lib/flatList"
 import type { SessionView } from "@/lib/types"
@@ -150,6 +152,65 @@ describe("displayedSessionOrder", () => {
       "hot",
       "parked",
     ])
+  })
+})
+
+// The quiet (inactive) tail is ordered MOST-RECENTLY-ACTIVE-FIRST
+// (Reverse(updated_at)) in the "active" sort mode, matching the TUI's
+// build_left_items; every other mode leaves the tail verbatim. SHARED VECTORS
+// with dux-core `flat_list.rs`.
+describe("sortQuietTail", () => {
+  const quiet = [
+    makeSession({
+      id: "old",
+      status: "detached",
+      updated_at: "2026-07-17T10:00:00Z",
+    }),
+    makeSession({
+      id: "newest",
+      status: "exited",
+      updated_at: "2026-07-17T14:00:00Z",
+    }),
+    makeSession({
+      id: "mid",
+      status: "detached",
+      updated_at: "2026-07-17T12:00:00Z",
+    }),
+  ]
+
+  it("orders the tail most-recently-active-first in active mode", () => {
+    expect(sortQuietTail(quiet, "active").map((s) => s.id)).toEqual([
+      "newest",
+      "mid",
+      "old",
+    ])
+  })
+
+  it("leaves the tail verbatim in every non-active mode", () => {
+    for (const key of ["manual", "name", "updated", "created"] as const) {
+      expect(sortQuietTail(quiet, key).map((s) => s.id)).toEqual([
+        "old",
+        "newest",
+        "mid",
+      ])
+    }
+  })
+})
+
+// SHARED VECTORS with dux-core `quiet_tail.rs` `quiet_tail_forced_open`: the
+// forced-open decision, keyed on the NORMALIZED query, mirrored there.
+describe("quietTailForcedOpen", () => {
+  it("forces open only for an undismissed, hitting, non-empty query", () => {
+    expect(quietTailForcedOpen("", null, true)).toBe(false)
+    expect(quietTailForcedOpen("vim", null, true)).toBe(true)
+    expect(quietTailForcedOpen("vim", null, false)).toBe(false)
+    expect(quietTailForcedOpen("vim", "vim", true)).toBe(false)
+    expect(quietTailForcedOpen("nvim", "vim", true)).toBe(true)
+  })
+
+  it("keeps the tail dismissed for the same normalized query", () => {
+    // The caller normalizes, so "vim ", " VIM" all arrive as "vim".
+    expect(quietTailForcedOpen("vim", "vim", true)).toBe(false)
   })
 })
 

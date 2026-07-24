@@ -1853,6 +1853,21 @@ impl AgentSortMode {
         }
     }
 
+    /// Map to the core-owned ordering enum consumed by
+    /// `dux_core::flat_list::order_sessions`. The TUI keeps `AgentSortMode` for its
+    /// config/UI concerns (labels, cycle); the core enum owns only the ordering.
+    pub(crate) fn to_flat_sort_mode(self) -> dux_core::flat_list::FlatSortMode {
+        use dux_core::flat_list::FlatSortMode;
+        match self {
+            AgentSortMode::Active => FlatSortMode::Active,
+            AgentSortMode::Updated => FlatSortMode::Updated,
+            AgentSortMode::Created => FlatSortMode::Created,
+            AgentSortMode::NameAsc => FlatSortMode::NameAsc,
+            AgentSortMode::NameDesc => FlatSortMode::NameDesc,
+            AgentSortMode::Manual => FlatSortMode::Manual,
+        }
+    }
+
     /// The `config.ui.agent_sort` string for this mode (the shared wire value).
     pub(crate) fn as_config_str(&self) -> &'static str {
         match self {
@@ -1893,22 +1908,13 @@ impl AgentSortMode {
 /// (removed-project) sessions are plain `Session` rows here; the renderer marks
 /// them inline.
 ///
-/// The returned `LeftItem::Session(index)` values are indices into `sessions`
-/// (unchanged meaning): this reorders WHICH indices appear in WHICH order for
-/// display, and never mutates `sessions` itself. The active/inactive partition
-/// always preserves incoming order first, then the buckets are ordered by the
-/// display `sort_mode`. The ACTIVE (main) bucket is sorted by the comparator in
-/// every mode; the INACTIVE tail is ordered ONLY under `Active` mode and stays
-/// verbatim otherwise, matching the web (which never sorts its dormant tail):
-///
-/// - `Active`: the active bucket floats `is_hot` indices up (a stable float
-///   keeping incoming order within each group); the inactive bucket is ordered by
-///   most recently updated (`Reverse(updated_at)`).
-/// - `Updated` / `Created` / `NameAsc` / `NameDesc`: the ACTIVE bucket is sorted by
-///   that comparator; the inactive tail stays in verbatim incoming order (the web
-///   leaves its dormant tail unsorted, so sorting it here would diverge).
-/// - `Manual`: both buckets verbatim (the stored global order, the web's
-///   drag-reorder order). The TUI displays this but never offers it.
+/// The ORDERING is the core-owned `dux_core::flat_list::order_sessions` (the
+/// cross-language twin of the web's `flatList.ts`); this function only wraps the
+/// ordered indices into `LeftItem`s and inserts the collapsible toggle. The
+/// returned `LeftItem::Session(index)` values are indices into `sessions`
+/// (unchanged meaning); `sessions` is never mutated. See `flat_list.rs` for the
+/// per-mode rules (in `Active` the inactive tail sorts most-recently-active-first;
+/// every other mode leaves the tail verbatim).
 ///
 /// `is_hot(index)` reports whether the session at that index is working or needs
 /// attention (used only by `Active`).
@@ -1925,76 +1931,22 @@ pub(crate) fn build_left_items(
     is_hot: &dyn Fn(usize) -> bool,
     is_visible: &dyn Fn(usize) -> bool,
 ) -> Vec<LeftItem> {
-    let mut active: Vec<usize> = Vec::new();
-    let mut inactive: Vec<usize> = Vec::new();
-    for (index, session) in sessions.iter().enumerate() {
-        if !is_visible(index) {
-            continue;
-        }
-        match session.status {
-            crate::model::SessionStatus::Detached | crate::model::SessionStatus::Exited => {
-                inactive.push(index)
-            }
-            _ => active.push(index),
-        }
-    }
+    // The ORDERING (partition, bucket sort, and the Active-mode inactive-tail
+    // recency rule) is the core-owned `flat_list::order_sessions` (cross-language
+    // twin of the web's `flatList.ts`); this surface only wraps the ordered
+    // indices into `LeftItem`s and inserts the collapsible toggle.
+    let order = dux_core::flat_list::order_sessions(
+        sessions,
+        sort_mode.to_flat_sort_mode(),
+        is_hot,
+        is_visible,
+    );
 
-    // Case-insensitive name key: title-or-branch lowercased. Rust's `str::cmp` on
-    // this lowercased key matches the web's code-point comparison in
-    // `sortSessions.ts` (UTF-8 byte order equals code-point order).
-    let name_key = |index: usize| -> String {
-        let s = &sessions[index];
-        s.title.as_deref().unwrap_or(&s.branch_name).to_lowercase()
-    };
-    // Comparator-based ordering shared by both buckets for the non-Active modes.
-    // `sort_by` / `sort_by_key` are stable, so equal keys keep incoming order.
-    let order_bucket = |bucket: &mut Vec<usize>| match sort_mode {
-        AgentSortMode::Updated => {
-            bucket.sort_by_key(|&i| std::cmp::Reverse(sessions[i].updated_at))
-        }
-        AgentSortMode::Created => {
-            bucket.sort_by_key(|&i| std::cmp::Reverse(sessions[i].created_at))
-        }
-        AgentSortMode::NameAsc => bucket.sort_by_key(|&i| name_key(i)),
-        AgentSortMode::NameDesc => bucket.sort_by_key(|&i| std::cmp::Reverse(name_key(i))),
-        // Active and Manual do not use the shared comparator.
-        AgentSortMode::Active | AgentSortMode::Manual => {}
-    };
-
-    match sort_mode {
-        AgentSortMode::Active => {
-            // Stable float: hot indices rise above the rest, each group keeping
-            // incoming order. Matches the web's `activeFirstSessions`.
-            let mut hot: Vec<usize> = Vec::new();
-            let mut rest: Vec<usize> = Vec::new();
-            for &i in &active {
-                if is_hot(i) {
-                    hot.push(i);
-                } else {
-                    rest.push(i);
-                }
-            }
-            active = hot;
-            active.extend(rest);
-            // The collapsed tail sorts most-recent-updated first.
-            inactive.sort_by_key(|&i| std::cmp::Reverse(sessions[i].updated_at));
-        }
-        AgentSortMode::Manual => {
-            // Both buckets stay verbatim (incoming order).
-        }
-        _ => {
-            // Only the ACTIVE bucket sorts by the comparator; the inactive tail
-            // stays verbatim to match the web, which never sorts its dormant
-            // tail. Sorting it here would silently diverge the two surfaces.
-            order_bucket(&mut active);
-        }
-    }
-
-    let mut items: Vec<LeftItem> = active.into_iter().map(LeftItem::Session).collect();
-    if !inactive.is_empty() {
+    let mut items: Vec<LeftItem> = order.active.into_iter().map(LeftItem::Session).collect();
+    if !order.inactive.is_empty() {
         items.push(LeftItem::InactiveToggle);
         if !inactive_collapsed {
-            items.extend(inactive.into_iter().map(LeftItem::Session));
+            items.extend(order.inactive.into_iter().map(LeftItem::Session));
         }
     }
     items
@@ -3485,13 +3437,15 @@ impl App {
     /// exact query. Pure derivation; `inactive_collapsed` is never consulted or
     /// mutated here.
     fn inactive_tail_forced_open(&self) -> bool {
-        let Some(query) = self.active_filter_query() else {
-            return false;
-        };
-        if self.inactive_search_dismissed.as_deref() == Some(query.as_str()) {
-            return false;
-        }
-        self.visible_inactive_count() > 0
+        // The decision is the core-owned `quiet_tail::quiet_tail_forced_open`
+        // (cross-language twin of the web's `quietTailForcedOpen`), keyed on the
+        // NORMALIZED query so a whitespace/case variant of a dismissed query does
+        // not resurrect the tail. `active_filter_query` already normalizes.
+        dux_core::quiet_tail::quiet_tail_forced_open(
+            self.active_filter_query().as_deref(),
+            self.inactive_search_dismissed.as_deref(),
+            self.visible_inactive_count() > 0,
+        )
     }
 
     /// Enter agent-list filter mode: seed an empty query and rebuild the list.

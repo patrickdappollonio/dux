@@ -1,8 +1,9 @@
-// Pure comparators backing the shared agent-list display sort. These mirror the
-// TUI's `build_left_items` comparators EXACTLY (dux-tui/src/app/mod.rs), so a
-// mode set on either surface produces the same order. The sort mode is the shared
-// `config.ui.agent_sort` preference; this helper turns a mode into the ordered id
-// list the flat list renders. Kept React-free so it's trivially unit-testable.
+// Pure comparators backing the shared agent-list display sort. TWIN of the
+// core-owned ordering in `dux_core::flat_list::order_sessions` (the DECISION),
+// pinned by shared vectors, so a mode set on either surface produces the same
+// order. The sort mode is the shared `config.ui.agent_sort` preference; this
+// helper turns a mode into the ordered id list the flat list renders. Kept
+// React-free so it's trivially unit-testable.
 
 import type { SessionView } from "./types"
 

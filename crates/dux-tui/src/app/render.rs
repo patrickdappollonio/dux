@@ -1320,7 +1320,11 @@ impl App {
         };
 
         // Collect terminal display info for rendering.
-        // Show the foreground command if one is running, otherwise the session label.
+        // The middle field is the resolved DISPLAY TITLE (None when idle -> the row
+        // reads a plain "Terminal"): the foreground app name, normalized and
+        // collision-disambiguated ("vim (#N)") through the shared core rule
+        // `terminal_title` so the sidebar, the Kill overlay, and the web all agree
+        // when two same-owner terminals run the same app.
         // Each row carries an owner-derived display name (the agent's branch or
         // the project's name) so a generic engine label like "Terminal 3" is
         // never ambiguous between an agent terminal and a project terminal.
@@ -1351,7 +1355,28 @@ impl App {
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| pid.clone()),
                 };
-                ((*id).clone(), t.foreground_cmd.clone(), owner_name)
+                // Idle (foreground normalizes to nothing) -> None -> "Terminal".
+                // Running -> the collision-resolved title, disambiguated against
+                // the OTHER same-owner terminals' foregrounds.
+                let display_title = if dux_core::terminal_title::terminal_foreground_display(
+                    t.foreground_cmd.as_deref(),
+                )
+                .is_some()
+                {
+                    let siblings: Vec<Option<&str>> = terminal_items
+                        .iter()
+                        .filter(|(other_id, other)| other_id != id && other.owner == t.owner)
+                        .map(|(_, other)| other.foreground_cmd.as_deref())
+                        .collect();
+                    Some(dux_core::terminal_title::terminal_title(
+                        &t.label,
+                        t.foreground_cmd.as_deref(),
+                        &siblings,
+                    ))
+                } else {
+                    None
+                };
+                ((*id).clone(), display_title, owner_name)
             })
             .collect();
 
@@ -8649,7 +8674,9 @@ fn terminal_row_lines(
     typing: bool,
     working: bool,
     spinner: char,
-    fg_cmd: Option<&str>,
+    // The resolved display title (already normalized + collision-disambiguated by
+    // the shared `terminal_title` rule), or `None` when the terminal is idle.
+    display_title: Option<&str>,
     owner_name: &str,
     text_width: u16,
     elapsed_ms: u128,
@@ -8665,12 +8692,13 @@ fn terminal_row_lines(
         crate::theme::DOT_GLYPH.to_string()
     };
     let base_color = theme.session_active;
-    // Something running (a non-empty foreground command) names the row; an idle
+    // A running terminal names the row with its display title (the foreground app,
+    // with a "(#N)" ordinal when a same-owner sibling runs the same app); an idle
     // terminal reads a plain "Terminal" (the owner on line two and row order
     // distinguish several idle terminals, so the "Terminal N" number is not
     // surfaced here).
-    let primary = match fg_cmd {
-        Some(cmd) if !cmd.is_empty() => cmd,
+    let primary = match display_title {
+        Some(title) if !title.is_empty() => title,
         _ => "Terminal",
     };
     // The label shimmers while the terminal is Running (a live cue that replaces

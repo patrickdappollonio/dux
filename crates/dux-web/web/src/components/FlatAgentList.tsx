@@ -65,7 +65,12 @@ import {
 } from "@/components/ui/empty"
 import { agentRowVisual } from "@/lib/agentRow"
 import { defaultProviderForSession } from "@/lib/agentTabs"
-import { matchCharRange, matchesSessionQuery, matchesTerminalQuery } from "@/lib/agentSearch"
+import {
+  matchCharRange,
+  matchesSessionQuery,
+  matchesTerminalQuery,
+  normalizeQuery,
+} from "@/lib/agentSearch"
 import { changesCountFor } from "@/lib/agentVitals"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { clipboardWorktree } from "@/lib/flatClipboard"
@@ -73,7 +78,9 @@ import {
   displayedSessionOrder,
   FLAT_SORT_LABELS,
   partitionQuiet,
+  quietTailForcedOpen,
   sortMainSessions,
+  sortQuietTail,
   stateWord,
   type FlatSortKey,
 } from "@/lib/flatList"
@@ -731,9 +738,10 @@ function TerminalsSection({
 // section renders open so the results are visible, and it falls back to the
 // manual `open` state the moment the query stops matching. The one override:
 // a user who collapses the section WHILE a matching query is active has made
-// an explicit call, so that dismissal wins, keyed to the exact query text and
-// expiring the moment the query changes (`prevQuery` tracks the transition via
-// React's adjust-state-on-input-change pattern, no effect pass needed).
+// an explicit call, so that dismissal wins, keyed to the NORMALIZED query (the
+// core `quiet_tail` rule) and expiring the moment the normalized query changes
+// (`prevQuery` tracks the transition via React's adjust-state-on-input-change
+// pattern, no effect pass needed).
 function QuietTail({
   sessions,
   projectName,
@@ -750,24 +758,28 @@ function QuietTail({
   searchHit: boolean
 }) {
   const [open, setOpen] = useState(false)
-  // The query under which the user explicitly collapsed a search-expanded
-  // tail; inert once the query text changes.
+  // The NORMALIZED query under which the user explicitly collapsed a
+  // search-expanded tail; inert once the normalized query changes. Keying on the
+  // normalized query (not the raw text) matches what the filter actually matches
+  // on, so a whitespace/case variant of the same query does not resurrect a tail
+  // the user just dismissed. Twin of the core `quiet_tail` rule.
+  const normalizedQuery = normalizeQuery(query)
   const [dismissedQuery, setDismissedQuery] = useState<string | null>(null)
-  const [prevQuery, setPrevQuery] = useState(query)
-  if (query !== prevQuery) {
-    setPrevQuery(query)
-    if (dismissedQuery !== null && dismissedQuery !== query) {
+  const [prevQuery, setPrevQuery] = useState(normalizedQuery)
+  if (normalizedQuery !== prevQuery) {
+    setPrevQuery(normalizedQuery)
+    if (dismissedQuery !== null && dismissedQuery !== normalizedQuery) {
       setDismissedQuery(null)
     }
   }
-  const forcedOpen = searchHit && dismissedQuery !== query
+  const forcedOpen = quietTailForcedOpen(normalizedQuery, dismissedQuery, searchHit)
   const effectiveOpen = forcedOpen || open
   const toggle = () => {
     if (effectiveOpen) {
       // Collapsing: when the search is holding the section open, record the
-      // dismissal for this query; the base state collapses too, so clearing
-      // the query lands on the state the user last chose.
-      if (forcedOpen) setDismissedQuery(query)
+      // dismissal for this normalized query; the base state collapses too, so
+      // clearing the query lands on the state the user last chose.
+      if (forcedOpen) setDismissedQuery(normalizedQuery)
       setOpen(false)
     } else {
       setDismissedQuery(null)
@@ -884,12 +896,15 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   // provider/owner.
   const { main, quiet } = partitionQuiet(coreSessions)
   const sortedMain = sortMainSessions(main, agentSort)
+  // The quiet tail is recency-ordered in "active" mode (verbatim otherwise),
+  // matching the TUI and the drag baseline in `displayedSessionOrder`.
+  const sortedQuiet = sortQuietTail(quiet, agentSort)
 
   const query = agentSearch
   const visibleMain = sortedMain.filter((s) =>
     matchesSessionQuery(s, projectName(s.project_id), query),
   )
-  const visibleQuiet = quiet.filter((s) =>
+  const visibleQuiet = sortedQuiet.filter((s) =>
     matchesSessionQuery(s, projectName(s.project_id), query),
   )
 

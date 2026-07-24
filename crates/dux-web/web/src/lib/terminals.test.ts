@@ -13,6 +13,7 @@ function term(overrides: Partial<TerminalView>): TerminalView {
   }
 }
 
+// SHARED VECTORS with dux-core `terminal_title.rs` `foreground_normalization`.
 describe("terminalForeground", () => {
   it("is null when no foreground command is running", () => {
     expect(terminalForeground(term({ foreground_cmd: null }))).toBeNull()
@@ -57,6 +58,7 @@ describe("terminalForeground", () => {
   })
 })
 
+// SHARED VECTORS with dux-core `terminal_title.rs` `title_idle_running_and_collision`.
 describe("terminalTitle", () => {
   it("shows just the label when idle", () => {
     expect(terminalTitle(term({ foreground_cmd: null }), [])).toBe("Terminal 1")

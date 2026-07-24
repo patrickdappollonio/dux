@@ -8,6 +8,10 @@
 // that list readable: which agents are "quiet" (dormant) and collapse into a
 // tail, how the main list is ordered, and how a drag persists given the server
 // only knows per-project session order plus a global project order.
+//
+// The ORDERING (main-bucket sort + the Active-mode recency-sorted quiet tail) is
+// a TWIN of the core-owned `dux_core::flat_list::order_sessions`, pinned by
+// shared vectors (`flatList.test.ts` mirrors `flat_list.rs`).
 
 import { sortedSessionIds, type SortKey as BaseSortKey } from "@/lib/sortSessions"
 import type { SessionView } from "@/lib/types"
@@ -34,6 +38,23 @@ export const FLAT_SORT_LABELS: Record<FlatSortKey, string> = {
 // that collapses into the Quiet tail instead of hogging the main list.
 export function isQuietSession(session: SessionView): boolean {
   return session.status !== "active"
+}
+
+// Whether the Quiet tail should render forced-open for the current search. TWIN
+// of the core-owned `dux_core::quiet_tail::quiet_tail_forced_open` (the DECISION),
+// pinned by shared vectors. `normalizedQuery` is the trimmed/lowercased query
+// (empty means no active search); `dismissedQuery` is the NORMALIZED query under
+// which the user last collapsed the search-expanded tail; `hasQuietHit` is
+// whether the query matches a dormant row. Keying on the normalized query means a
+// whitespace/case variant of a dismissed query does NOT resurrect the tail.
+export function quietTailForcedOpen(
+  normalizedQuery: string,
+  dismissedQuery: string | null,
+  hasQuietHit: boolean,
+): boolean {
+  if (normalizedQuery === "") return false
+  if (dismissedQuery === normalizedQuery) return false
+  return hasQuietHit
 }
 
 // Split the sessions into the always-visible MAIN list (active agents) and the
@@ -83,6 +104,23 @@ export function sortMainSessions(
     .filter((session): session is SessionView => session !== undefined)
 }
 
+// Order the QUIET (inactive) tail for display. In "active" mode the tail sorts
+// MOST-RECENTLY-ACTIVE-FIRST (Reverse(updated_at)), matching the TUI's
+// build_left_items / the core-owned `flat_list::order_sessions`; every other mode
+// leaves the tail VERBATIM (only "active" reorders the tail, so the surfaces
+// agree). TWIN of the core ordering, pinned by shared vectors.
+export function sortQuietTail(
+  sessions: SessionView[],
+  key: FlatSortKey,
+): SessionView[] {
+  if (key !== "active") return sessions.slice()
+  const order = sortedSessionIds(sessions, "updated")
+  const byId = new Map(sessions.map((session) => [session.id, session]))
+  return order
+    .map((id) => byId.get(id))
+    .filter((session): session is SessionView => session !== undefined)
+}
+
 // NOTE: agent order is now a single GLOBAL flat order (agents are independent of
 // project grouping). A drag is a plain `moveItem` over the complete session id
 // list, sent via `reorderAgents` — see FlatAgentList's handleDragEnd. The old
@@ -105,7 +143,12 @@ export function displayedSessionOrder(
 ): string[] {
   if (key === "manual") return sessions.map((session) => session.id)
   const { main, quiet } = partitionQuiet(sessions)
-  return [...sortMainSessions(main, key), ...quiet].map((session) => session.id)
+  // The tail rides below the main list, ordered by `sortQuietTail` (recency in
+  // "active" mode, verbatim otherwise) so the persisted drag baseline matches
+  // exactly what the screen shows.
+  return [...sortMainSessions(main, key), ...sortQuietTail(quiet, key)].map(
+    (session) => session.id,
+  )
 }
 
 // The colored STATE WORD shown on a row's second line, the honest, field-backed

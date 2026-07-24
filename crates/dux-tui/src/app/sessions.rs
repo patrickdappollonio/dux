@@ -3098,20 +3098,14 @@ impl App {
                     format!("at the repo root of project \"{project_name}\"")
                 }
             };
-            let foreground = terminal
-                .foreground_cmd
-                .clone()
-                .map(|cmd| {
-                    let trimmed = cmd.trim();
-                    trimmed
-                        .strip_prefix("TERM ")
-                        .or_else(|| trimmed.strip_prefix("term "))
-                        .unwrap_or(trimmed)
-                        .to_string()
-                })
-                .filter(|cmd| !cmd.trim().is_empty())
-                .unwrap_or_else(|| "shell".to_string());
-            let label = foreground;
+            // Normalize the foreground through the shared core rule (trim + strip
+            // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,
+            // and the web all agree on the app name. None (idle shell) reads
+            // "shell" in this list.
+            let label = dux_core::terminal_title::terminal_foreground_display(
+                terminal.foreground_cmd.as_deref(),
+            )
+            .unwrap_or_else(|| "shell".to_string());
             let context = context_owner;
             let search_text = format!(
                 "{} {} {} {}",

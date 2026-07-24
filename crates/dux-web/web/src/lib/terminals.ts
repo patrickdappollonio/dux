@@ -1,13 +1,11 @@
 import type { TerminalView } from "@/lib/types"
 
-// The terminal's NORMALIZED foreground command, or null when the shell itself
-// is in the foreground (idle). Normalization ports the TUI's Kill-Running
-// overlay order exactly (crates/dux-tui/src/app/sessions.rs:~2235): trim
+// The terminal's NORMALIZED foreground command, or null when the shell itself is
+// in the foreground (idle). TWIN of the core-owned
+// `dux_core::terminal_title::terminal_foreground_display` (the DECISION), pinned
+// by shared vectors (`terminals.test.ts` mirrors `terminal_title.rs`). Trim
 // first, strip a leading "TERM "/"term " prefix off the trimmed string, then
-// discard the result only if it is empty/blank. (The TUI's left pane renders
-// the raw command verbatim — render.rs:~691; we apply the normalization on
-// both reads here because it only affects pathological comm names and keeps
-// one helper.)
+// discard the result only if it is empty/blank.
 export function terminalForeground(t: TerminalView): string | null {
   const raw = t.foreground_cmd
   if (raw == null) return null
@@ -37,8 +35,11 @@ function terminalNumber(label: string): number | null {
 // another terminal in `siblings` runs the same app, both would read identically,
 // so we disambiguate with the terminal's own counter number ("vim (#1)",
 // "vim (#2)"). `siblings` is the set of terminals shown together (one session's
-// terminals on the web); it includes `t` itself, which we skip by id. The TUI
-// left pane applies the identical rule (crates/dux-tui/src/app/render.rs).
+// terminals on the web); it includes `t` itself, which we skip by id. TWIN of the
+// core-owned `dux_core::terminal_title::terminal_title` (the DECISION), which the
+// TUI sidebar and Kill overlay also call; pinned by shared vectors. The core fn
+// takes the OTHER siblings' foregrounds (self already excluded); here we pass all
+// and skip by id, but the RULE is identical.
 export function terminalTitle(
   t: TerminalView,
   siblings: readonly TerminalView[],
