@@ -26,6 +26,7 @@
 
 use super::*;
 
+use crate::app::components::render_scroll_marker;
 use crate::app::render::centered_rect_exact;
 use dux_core::release_notes::ReleaseNotes;
 use dux_core::welcome_screen::WelcomeScreen;
@@ -601,14 +602,7 @@ pub(crate) fn render_modal(
 
     let lines = content_lines(prompt, content.width, &colors);
     let total = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    render_scrollable(
-        frame,
-        content,
-        scroll_marker_rect(area, content),
-        lines,
-        prompt.scroll,
-        &colors,
-    );
+    render_scrollable(frame, area, content, lines, prompt.scroll, &colors);
 
     Paragraph::new(Line::from(Span::styled(
         "─".repeat(sep.width as usize),
@@ -636,29 +630,16 @@ pub(crate) fn render_modal(
     }
 }
 
-/// Where the scroll-direction marker goes: the modal's right BORDER column, on
-/// the content pane's last row.
+/// The scrollable content pane, plus the shared one-cell direction marker in the
+/// modal's border column (see [`crate::app::components::scroll_marker`], which
+/// owns the geometry and the glyph table for every scrollable surface) when
+/// there is more to see.
 ///
-/// It is deliberately NOT the bottom-right cell of the content pane, which is
-/// where the mock put it. That cell is not safe: [`wrap`] emits a word too long
-/// to break as a line WIDER than the wrap width, and the `Paragraph` then fills
-/// the pane's full width — so a marker there would silently eat a character of
-/// real prose, on the very row the reader is heading toward. The border column is
-/// chrome by construction, so no content cell can collide with it.
-/// `content` is always inside `area`'s border ring (the renderer derives it from
-/// `Block::inner`), so the border column is always to the right of it.
-pub(crate) fn scroll_marker_rect(area: Rect, content: Rect) -> Rect {
-    let x = area.x + area.width.saturating_sub(1);
-    let y = content.y + content.height.saturating_sub(1);
-    Rect::new(x, y, 1, 1)
-}
-
-/// The scrollable content pane, plus a one-cell direction marker (in the modal's
-/// border column, see [`scroll_marker_rect`]) when there is more to see.
+/// `outer` is the modal, `area` the content pane inside its border ring.
 fn render_scrollable(
     frame: &mut Frame,
+    outer: Rect,
     area: Rect,
-    marker_cell: Rect,
     lines: Vec<Line<'static>>,
     scroll: u16,
     colors: &FirstLoadColors,
@@ -670,20 +651,7 @@ fn render_scrollable(
     let slice: Vec<Line> = lines.into_iter().skip(offset).take(visible).collect();
     Paragraph::new(slice).render(area, frame.buffer_mut());
 
-    if max_scroll > 0 && area.width > 0 && area.height > 0 {
-        let marker = if offset == 0 {
-            "↓"
-        } else if offset >= max_scroll {
-            "↑"
-        } else {
-            "↕"
-        };
-        Paragraph::new(Line::from(Span::styled(
-            marker,
-            Style::default().fg(colors.accent),
-        )))
-        .render(marker_cell, frame.buffer_mut());
-    }
+    render_scroll_marker(frame, outer, area, offset, visible, total, colors.accent);
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,6 +1050,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::components::scroll_marker_rect;
     use crate::app::test_support::{default_bindings, test_app};
     use dux_core::first_load::{FirstLoad, FirstLoadPlan, NotesOutcome};
     use ratatui::Terminal;

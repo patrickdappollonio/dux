@@ -1,6 +1,6 @@
 use super::components::{
     Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, button_state_for,
-    shared_button_width,
+    render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
@@ -1745,6 +1745,12 @@ impl App {
 
         let w = content_area.width.max(1) as usize;
 
+        // The offset actually DRAWN, which is the outer `scroll` clamped to the
+        // wrapped extent. Both wrapping paths below produce it, and the scroll
+        // marker is rendered once from it after the branch, so the two paths
+        // cannot drift into disagreeing about what the marker says.
+        let drawn_scroll;
+
         if gutter_width > 0 {
             // Gutter-aware wrapping: continuation lines are indented to align
             // with the content column past the gutter.
@@ -1755,6 +1761,7 @@ impl App {
                 .last_diff_visual_lines
                 .saturating_sub(content_area.height);
             let scroll = scroll.min(max_scroll);
+            drawn_scroll = scroll;
 
             Paragraph::new(wrapped)
                 .scroll((scroll, 0))
@@ -1773,12 +1780,28 @@ impl App {
                 .last_diff_visual_lines
                 .saturating_sub(content_area.height);
             let scroll = scroll.min(max_scroll);
+            drawn_scroll = scroll;
 
             Paragraph::new((*lines).clone())
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0))
                 .render(content_area, frame.buffer_mut());
         }
+
+        // Scroll marker in the pane's right border column, on the content
+        // pane's last row. Units are wrapped VISUAL lines (what the diff already
+        // measures with), never the logical line count. The cell lies outside
+        // `content_area`, which is also `mouse_layout.agent_term`, so text
+        // selection is untouched.
+        render_scroll_marker(
+            frame,
+            area,
+            content_area,
+            drawn_scroll as usize,
+            content_area.height as usize,
+            self.last_diff_visual_lines as usize,
+            self.theme.hint_key_fg,
+        );
 
         // Hint bar with top border (same style as agent terminal).
         if hint_area.height > 0 {
@@ -3105,29 +3128,18 @@ impl App {
         hints
     }
 
-    fn render_help(&mut self, frame: &mut Frame) {
-        self.render_dim_overlay(frame);
-        let area = centered_rect(72, 70, frame.area());
-        self.clear_overlay_area(frame, area);
-
-        let outer_block = self.themed_overlay_block("Help");
-        let inner = outer_block.inner(area);
-        outer_block.render(area, frame.buffer_mut());
-
-        if inner.height < 3 || inner.width < 4 {
-            return;
-        }
-
-        let hint_height = 2;
-        let [content_area, hint_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
-            .areas(inner);
-        self.overlay_layout.active = OverlayMouseLayout::Help;
-
+    /// The help overlay's content, as unwrapped logical lines.
+    ///
+    /// Split out from [`Self::render_help`] so the wrap can be tested against
+    /// ratatui's own `Wrap { trim: false }` on the REAL content: the renderer
+    /// pre-wraps these lines itself (see the call site for why), and the only
+    /// way to know that pre-wrapping did not change the page's appearance is to
+    /// paint both and compare.
+    ///
+    /// `content_width` sizes the full-width section banners, nothing else.
+    fn help_content_lines(&self, content_width: usize) -> Vec<Line<'static>> {
         // Build help content lines.
-        let mut lines: Vec<Line> = Vec::new();
-        let content_width = content_area.width as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
 
         let banner_style = Style::default()
             .fg(self.theme.help_banner_fg)
@@ -3136,7 +3148,7 @@ impl App {
         let body_style = Style::default().fg(self.theme.help_body_fg);
 
         // Helper: push a full-width banner line.
-        let push_banner = |lines: &mut Vec<Line>, title: &str, width: usize| {
+        let push_banner = |lines: &mut Vec<Line<'static>>, title: &str, width: usize| {
             let padding = width.saturating_sub(title.chars().count() + 3);
             let text = format!(" {title}{}", " ".repeat(padding));
             if !lines.is_empty() {
@@ -3208,7 +3220,7 @@ impl App {
             for (key, desc) in bindings {
                 let padding = 14usize.saturating_sub(key.len() + 2);
                 let mut spans = vec![Span::raw("  ")];
-                spans.extend(self.theme.key_badge_default(key));
+                spans.extend(owned_key_badge(&self.theme, key));
                 spans.push(Span::raw(" ".repeat(padding)));
                 spans.push(Span::styled(
                     desc.to_string(),
@@ -3233,7 +3245,7 @@ impl App {
             let desc = "Hold Ctrl and press X (e.g. Ctrl-p)";
             let padding = 14usize.saturating_sub(key.len() + 2);
             let mut spans = vec![Span::raw("  ")];
-            spans.extend(self.theme.key_badge_default(key));
+            spans.extend(owned_key_badge(&self.theme, key));
             spans.push(Span::raw(" ".repeat(padding)));
             spans.push(Span::styled(
                 desc,
@@ -3359,8 +3371,47 @@ impl App {
             ]));
         }
 
+        lines
+    }
+
+    fn render_help(&mut self, frame: &mut Frame) {
+        self.render_dim_overlay(frame);
+        let area = centered_rect(72, 70, frame.area());
+        self.clear_overlay_area(frame, area);
+
+        let outer_block = self.themed_overlay_block("Help");
+        let inner = outer_block.inner(area);
+        outer_block.render(area, frame.buffer_mut());
+
+        if inner.height < 3 || inner.width < 4 {
+            return;
+        }
+
+        let hint_height = 2;
+        let [content_area, hint_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
+            .areas(inner);
+        self.overlay_layout.active = OverlayMouseLayout::Help;
+
+        let lines = self.help_content_lines(content_area.width as usize);
+
+        // Wrap the content HERE rather than letting the `Paragraph` do it with
+        // `Wrap { trim: false }`.
+        //
+        // This is the fix for a real bug: the clamp below is built from the line
+        // count, but a wrapping paragraph renders MORE rows than it has lines and
+        // does not report how many. On an 80-column terminal the help pane's
+        // content column is ~55 wide while its keybinding rows run to 70+, so
+        // they wrapped and the bottom of the page was simply unreachable — the
+        // whole Reference section included. Pre-wrapping makes `wrapped.len()`
+        // the RENDERED height by construction (every line is at most
+        // `content_area.width` wide, so it occupies exactly one row), instead of
+        // a guess that has to match ratatui's internal algorithm.
+        let wrapped = wrap_styled_lines(&lines, content_area.width as usize);
+
         // Track content size for scroll clamping in input handler.
-        let total_lines = lines.len() as u16;
+        let total_lines = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
         self.last_help_lines = total_lines;
         self.last_help_height = content_area.height;
 
@@ -3368,10 +3419,22 @@ impl App {
         let max_scroll = total_lines.saturating_sub(content_area.height);
         let scroll = self.help_scroll.unwrap_or(0).min(max_scroll);
 
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
+        Paragraph::new(wrapped)
             .scroll((scroll, 0))
             .render(content_area, frame.buffer_mut());
+
+        // Scroll marker in the modal's right border column, on the content
+        // pane's last row — above the hint bar's own top border. Units are
+        // wrapped rows, which is exactly what the clamp above uses.
+        render_scroll_marker(
+            frame,
+            area,
+            content_area,
+            scroll as usize,
+            content_area.height as usize,
+            total_lines as usize,
+            self.theme.hint_key_fg,
+        );
 
         // Hint bar with top border (same pattern as diff view).
         if hint_area.height > 0 {
@@ -3510,6 +3573,21 @@ impl App {
                     list_area,
                     frame.buffer_mut(),
                     &mut state,
+                );
+                // Scroll marker in the list block's right border column. This is
+                // an ITEM-offset surface, not a line-offset one: a `ListState`
+                // offset counts whole items and never clips the top one, so the
+                // unit here is items — `state.offset()` (read AFTER the render,
+                // which is what scrolls it to the selection), the list viewport
+                // in rows (one row per item here), and the command count.
+                render_scroll_marker(
+                    frame,
+                    list_area,
+                    list_inner,
+                    state.offset(),
+                    list_inner.height as usize,
+                    commands.len(),
+                    self.theme.hint_key_fg,
                 );
                 self.overlay_layout.active = OverlayMouseLayout::Command {
                     input: input_inner,
@@ -8777,6 +8855,21 @@ fn terminal_row_lines(
     (Line::from(line1), Line::from(line2))
 }
 
+/// The theme's key badge with OWNED content.
+///
+/// `Theme::key_badge_default` borrows the key label, which is fine for spans
+/// built and rendered in one breath. The help content is built into
+/// `Line<'static>` so it can be pre-wrapped and measured before it is drawn, and
+/// the labels it badges are `String`s owned by a local, so those spans have to
+/// own their text.
+fn owned_key_badge(theme: &Theme, key: &str) -> Vec<Span<'static>> {
+    theme
+        .key_badge_default(key)
+        .into_iter()
+        .map(|span| Span::styled(span.content.into_owned(), span.style))
+        .collect()
+}
+
 fn companion_terminal_status_meta(status: CompanionTerminalStatus) -> (&'static str, &'static str) {
     match status {
         CompanionTerminalStatus::NotLaunched => ("○", "not launched"),
@@ -11613,5 +11706,459 @@ mod tests {
             "an Agent row merely titled \"TOTAL\" must NOT render bold: \
              classification must key off `kind`, not the label string"
         );
+    }
+
+    // ── scrolling: the bottom must be reachable, and say so ───────────────
+
+    /// Every row of `buf` as a string, in order. Rendered text only: styles are
+    /// irrelevant to reachability.
+    fn buffer_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        (buf.area.y..buf.area.y + buf.area.height)
+            .map(|y| {
+                (buf.area.x..buf.area.x + buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_help_overlay_bottom_is_reachable_at_a_narrow_width() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // 80 columns is the case that broke: the help pane is
+        // `centered_rect(72, 70, ..)`, so its content column is ~55 wide while
+        // help lines run to 70+ (a key badge plus a description up to 53
+        // characters). They wrap, and a clamp built from the count of LOGICAL
+        // lines then stops short of the wrapped bottom.
+        let mut app = test_app(default_bindings());
+        app.help_scroll = Some(0);
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        // Scroll as far as the input handler will allow — this is what the
+        // ScrollToBottom key does with the numbers the renderer recorded.
+        let max = app
+            .last_help_lines
+            .saturating_sub(app.last_help_height.max(1));
+        app.help_scroll = Some(max);
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        // The last thing in the help content is the GitHub integration row,
+        // whose description ends in the palette command name. With
+        // `github_integration_enabled` false (the test engine's default) that
+        // tail is stable.
+        let rows = buffer_rows(terminal.backend().buffer());
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("(toggle-github-integration)")),
+            "scrolled to the maximum, the LAST line of help content must be on \
+             screen; got:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// Pre-wrapping the help page must not change how it LOOKS, only how many
+    /// rows it admits to being. Measured on the real content, at the widths that
+    /// wrap it: paint the same lines with ratatui's `Wrap { trim: false }` (what
+    /// the overlay used to do) and with our pre-wrap, and compare every cell.
+    #[test]
+    fn pre_wrapping_the_help_page_paints_what_wrap_did() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let app = test_app(default_bindings());
+        for width in [40u16, 55, 72, 100] {
+            let lines = app.help_content_lines(width as usize);
+            // Tall enough that neither rendering is clipped at the bottom.
+            let height = u16::try_from(lines.len() * 3).unwrap_or(u16::MAX).max(10);
+
+            let mut legacy = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            legacy
+                .draw(|frame| {
+                    Paragraph::new(lines.clone())
+                        .wrap(Wrap { trim: false })
+                        .render(frame.area(), frame.buffer_mut());
+                })
+                .expect("render frame");
+
+            let wrapped = wrap_styled_lines(&lines, width as usize);
+            let mut ours = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            ours.draw(|frame| {
+                Paragraph::new(wrapped.clone()).render(frame.area(), frame.buffer_mut());
+            })
+            .expect("render frame");
+
+            let before = buffer_rows(legacy.backend().buffer());
+            let after = buffer_rows(ours.backend().buffer());
+            for (y, (want, got)) in before.iter().zip(after.iter()).enumerate() {
+                assert_eq!(
+                    want.trim_end(),
+                    got.trim_end(),
+                    "help row {y} at width {width} changed appearance\n  was: {want:?}\n  now: {got:?}"
+                );
+            }
+            // ...and at the narrow widths the wrap really did happen, or the
+            // comparison would prove nothing. At 100 columns nothing wraps, which
+            // is itself worth pinning: a wide terminal's help page is untouched.
+            if width < 100 {
+                assert!(
+                    wrapped.len() > lines.len(),
+                    "width {width} must wrap the help content"
+                );
+            } else {
+                assert_eq!(
+                    wrapped.len(),
+                    lines.len(),
+                    "nothing should wrap at {width} columns"
+                );
+            }
+        }
+    }
+
+    /// Every scroll-direction glyph the shared marker can draw.
+    const MARKERS: [&str; 3] = ["↓", "↑", "↕"];
+
+    /// The single marker glyph inside `rect`, or `None`. Panics if there are
+    /// several: a surface must never draw two.
+    fn marker_in(buf: &ratatui::buffer::Buffer, rect: Rect) -> Option<String> {
+        let mut found: Vec<(u16, u16, String)> = Vec::new();
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                let symbol = buf[(x, y)].symbol().to_string();
+                if MARKERS.contains(&symbol.as_str()) {
+                    found.push((x, y, symbol));
+                }
+            }
+        }
+        assert!(
+            found.len() <= 1,
+            "expected at most one scroll marker in {rect:?}, found {found:?}"
+        );
+        found.pop().map(|(_, _, symbol)| symbol)
+    }
+
+    /// The help overlay's rects: the modal, its content pane, and the border
+    /// column the marker is allowed to use. Mirrors `render_help`'s layout.
+    fn help_rects(frame: Rect) -> (Rect, Rect, Rect) {
+        let area = centered_rect(72, 70, frame);
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width - 2,
+            area.height.saturating_sub(2),
+        );
+        let content = Rect::new(inner.x, inner.y, inner.width, inner.height - 2);
+        let border_column = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
+        (area, content, border_column)
+    }
+
+    /// Render the help overlay at `size` with `scroll` applied, and hand back the
+    /// app plus the frame buffer.
+    fn help_frame(size: (u16, u16), scroll: u16) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.help_scroll = Some(scroll);
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    #[test]
+    fn the_help_overlay_marker_points_the_way_at_top_middle_and_bottom() {
+        let frame = Rect::new(0, 0, 80, 40);
+        let (_, content, border_column) = help_rects(frame);
+
+        // Top: only down.
+        let (app, buf) = help_frame((80, 40), 0);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+        let max = app
+            .last_help_lines
+            .saturating_sub(app.last_help_height.max(1));
+        assert!(
+            max > 1,
+            "the fixture must overflow for this test to mean anything"
+        );
+
+        // Middle: both ways.
+        let (_, buf) = help_frame((80, 40), max / 2);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+
+        // Bottom: only up.
+        let (_, buf) = help_frame((80, 40), max);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+
+        // And in no case did it land where content lives.
+        for scroll in [0, max / 2, max] {
+            let (_, buf) = help_frame((80, 40), scroll);
+            assert_eq!(
+                marker_in(&buf, content),
+                None,
+                "the marker must stay in the border column, off the content pane"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_overlay_shows_no_marker_when_everything_fits() {
+        // A terminal roomy enough that the whole help page fits unwrapped: with
+        // nothing off-screen there is nothing to point at, and a marker would be
+        // a lie.
+        let (app, buf) = help_frame((200, 200), 0);
+        assert!(
+            app.last_help_lines <= app.last_help_height,
+            "fixture must actually fit: {} lines in {} rows",
+            app.last_help_lines,
+            app.last_help_height
+        );
+        let (_, _, border_column) = help_rects(Rect::new(0, 0, 200, 200));
+        assert_eq!(marker_in(&buf, border_column), None);
+    }
+
+    /// Open the command palette with `filter` typed and `selected` highlighted,
+    /// render, and return the app and buffer.
+    fn palette_frame(
+        size: (u16, u16),
+        filter: &str,
+        selected: usize,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let mut input = crate::app::text_input::TextInput::new();
+        for ch in filter.chars() {
+            input.insert_char(ch);
+        }
+        app.prompt = PromptState::Command { input, selected };
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The palette list's inner rect and the border column beside it, taken from
+    /// the layout the renderer itself recorded rather than re-derived.
+    fn palette_rects(app: &App) -> (Rect, Rect) {
+        match app.overlay_layout.active {
+            OverlayMouseLayout::Command { list, .. } => {
+                (list, Rect::new(list.x + list.width, list.y, 1, list.height))
+            }
+            ref other => panic!("expected the palette layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_command_palette_marker_tracks_the_item_offset() {
+        // The palette is a LIST: its offset counts whole items, not rows of
+        // wrapped text, and that is the unit the marker must be fed.
+        let (app, buf) = palette_frame((120, 40), "", 0);
+        let (list, border_column) = palette_rects(&app);
+        let items = match app.overlay_layout.active {
+            OverlayMouseLayout::Command { items, .. } => items,
+            _ => unreachable!(),
+        };
+        assert!(
+            items > list.height as usize + 1,
+            "the palette must overflow its list for this test to mean anything: \
+             {items} commands in {} rows",
+            list.height
+        );
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+        assert_eq!(
+            marker_in(&buf, list),
+            None,
+            "a marker inside the list would sit on a command's own row"
+        );
+
+        // Selecting an item just past the viewport scrolls the list by one, which
+        // is the middle.
+        let (app, buf) = palette_frame((120, 40), "", list.height as usize);
+        let (_, border_column) = palette_rects(&app);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+
+        // Selecting the last command scrolls to the end.
+        let (app, buf) = palette_frame((120, 40), "", items - 1);
+        let (_, border_column) = palette_rects(&app);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+    }
+
+    #[test]
+    fn the_command_palette_shows_no_marker_when_the_filtered_list_fits() {
+        // A filter narrow enough that every match is on screen.
+        let (app, buf) = palette_frame((120, 40), "toggle-github", 0);
+        let (list, border_column) = palette_rects(&app);
+        let items = match app.overlay_layout.active {
+            OverlayMouseLayout::Command { items, .. } => items,
+            _ => unreachable!(),
+        };
+        assert!(
+            items > 0 && items <= list.height as usize,
+            "fixture must fit: {items} commands in {} rows",
+            list.height
+        );
+        assert_eq!(marker_in(&buf, border_column), None);
+    }
+
+    /// Put the center pane in diff mode with `count` synthetic lines and render.
+    fn diff_frame(
+        size: (u16, u16),
+        count: usize,
+        gutter_width: usize,
+        scroll: u16,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Center;
+        let lines: Vec<Line<'static>> = (0..count)
+            .map(|i| {
+                if gutter_width > 0 {
+                    Line::from(vec![
+                        Span::raw(format!("{:>4}│", i + 1)),
+                        Span::raw(format!(" line {i}")),
+                    ])
+                } else {
+                    Line::from(format!("line {i}"))
+                }
+            })
+            .collect();
+        app.center_mode = CenterMode::Diff {
+            lines: Arc::new(lines),
+            scroll,
+            gutter_width,
+            worktree_path: "/tmp/does-not-matter".to_string(),
+            rel_path: "src/main.rs".to_string(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The diff pane's content rect (which is also the text-selection surface)
+    /// and the border column beside it.
+    fn diff_rects(app: &App) -> (Rect, Rect) {
+        let content = app
+            .mouse_layout
+            .agent_term
+            .expect("the diff records its content area for text selection");
+        (
+            content,
+            Rect::new(content.x + content.width, content.y, 1, content.height),
+        )
+    }
+
+    #[test]
+    fn the_diff_marker_points_the_way_on_both_wrapping_paths() {
+        // Both branches of `render_diff` must produce a marker, and the same
+        // one: the gutter-aware path and ratatui's own wrapping path.
+        for gutter_width in [0usize, 6] {
+            let (app, buf) = diff_frame((120, 40), 400, gutter_width, 0);
+            let (content, border_column) = diff_rects(&app);
+            assert!(
+                app.last_diff_visual_lines > content.height,
+                "the fixture must overflow (gutter {gutter_width})"
+            );
+            assert_eq!(
+                marker_in(&buf, border_column).as_deref(),
+                Some("↓"),
+                "at the top of the diff (gutter {gutter_width})"
+            );
+
+            let max = app.last_diff_visual_lines - content.height;
+            let (app, buf) = diff_frame((120, 40), 400, gutter_width, max / 2);
+            let (_, border_column) = diff_rects(&app);
+            assert_eq!(
+                marker_in(&buf, border_column).as_deref(),
+                Some("↕"),
+                "in the middle of the diff (gutter {gutter_width})"
+            );
+
+            let (app, buf) = diff_frame((120, 40), 400, gutter_width, max);
+            let (content, border_column) = diff_rects(&app);
+            assert_eq!(
+                marker_in(&buf, border_column).as_deref(),
+                Some("↑"),
+                "at the bottom of the diff (gutter {gutter_width})"
+            );
+            assert_eq!(
+                marker_in(&buf, content),
+                None,
+                "the marker must never sit on a diff row (gutter {gutter_width})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_diff_gets_no_marker() {
+        for gutter_width in [0usize, 6] {
+            let (app, buf) = diff_frame((120, 40), 3, gutter_width, 0);
+            let (content, border_column) = diff_rects(&app);
+            assert!(app.last_diff_visual_lines <= content.height, "fixture fits");
+            assert_eq!(marker_in(&buf, border_column), None);
+        }
+    }
+
+    #[test]
+    fn the_diff_marker_leaves_text_selection_geometry_untouched() {
+        // `mouse_layout.agent_term` is the drag-to-select surface. The marker
+        // lands in the border column OUTSIDE it, so a short diff (no marker) and
+        // a long one (marker) must record the same rect, and the marker cell must
+        // never be inside it.
+        for gutter_width in [0usize, 6] {
+            let (short, _) = diff_frame((120, 40), 3, gutter_width, 0);
+            let (long, _) = diff_frame((120, 40), 400, gutter_width, 7);
+            let short_rect = short.mouse_layout.agent_term.expect("selection surface");
+            let long_rect = long.mouse_layout.agent_term.expect("selection surface");
+            assert_eq!(
+                short_rect, long_rect,
+                "drawing a scroll marker must not resize the selection surface"
+            );
+
+            let cell = crate::app::components::scroll_marker_rect(
+                centered_diff_pane_area(&long),
+                long_rect,
+            );
+            assert!(
+                cell.x >= long_rect.x + long_rect.width,
+                "the marker cell {cell:?} is inside the selection surface {long_rect:?}"
+            );
+            assert!(
+                cell.y >= long_rect.y && cell.y < long_rect.y + long_rect.height,
+                "the marker must stay on the content pane's rows"
+            );
+        }
+    }
+
+    /// The diff pane's outer rect, reconstructed from the content rect it
+    /// recorded: the block's border ring is one cell on each side.
+    fn centered_diff_pane_area(app: &App) -> Rect {
+        let content = app.mouse_layout.agent_term.expect("selection surface");
+        // The content pane is the block's inner area minus the two hint rows at
+        // the bottom, so the outer pane is one cell out on the left/top and two
+        // rows taller at the bottom plus the border.
+        Rect::new(
+            content.x - 1,
+            content.y - 1,
+            content.width + 2,
+            content.height + 2 + 2,
+        )
     }
 }
