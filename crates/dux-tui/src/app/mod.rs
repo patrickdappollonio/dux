@@ -189,6 +189,12 @@ pub struct App {
     /// elapsed time instead of `tick_count` keeps animation speed constant
     /// regardless of how fast the event loop is running.
     pub(crate) start_time: Instant,
+    /// The one-shot "this modal is refusing to close" cue, armed by an outside
+    /// click on a modal whose outside-click policy is
+    /// [`overlay_dismiss::OutsideClickPolicy::Blink`]. `None` means no cue is
+    /// running; see [`RefusalBlink`] for why it also remembers which modal
+    /// armed it.
+    pub(crate) refusal_blink: Option<RefusalBlink>,
     pub(crate) readonly_nudge_tick: Option<u64>,
     /// Whether the flat list's "Inactive" tail (detached/exited agents) is
     /// collapsed. Starts collapsed, matching the web. Replaces the old
@@ -903,6 +909,27 @@ pub(crate) fn attention_blink_phase(elapsed_ms: u128) -> bool {
         600..=799 => false, // blink 2: hide
         _ => true,          // leading show, the gap between blinks, and the hold
     }
+}
+
+/// A running "this modal is refusing to close" cue.
+///
+/// Wall-clock only: the phase is a function of `started.elapsed()`, never of
+/// `tick_count`, so the cue runs at the same speed whatever the frame cadence
+/// is (the animations tenet). It expires by itself once the elapsed time passes
+/// [`overlay_dismiss::REFUSAL_BLINK_MS`], which is what guarantees it ends at
+/// rest instead of freezing mid-cycle.
+///
+/// `prompt` records WHICH modal armed the cue. Without it a blink armed on one
+/// modal would keep flashing a different modal opened within the cue's lifetime
+/// (dismiss the refusing modal by Esc, open another straight away, and the new
+/// one would inherit the flash). The two `EditMacros` arms share a discriminant,
+/// so a blink on the macro editor can bleed onto the delete-confirm raised out
+/// of it inside the same 800ms; that is a deliberate non-problem, since the user
+/// only gets there by opening the confirm themselves.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RefusalBlink {
+    pub(crate) started: Instant,
+    pub(crate) prompt: std::mem::Discriminant<PromptState>,
 }
 
 /// Build the body lines of the Agent Info modal from a session: name, provider,
@@ -2324,6 +2351,7 @@ impl App {
             theme,
             tick_count: 0,
             start_time: Instant::now(),
+            refusal_blink: None,
             readonly_nudge_tick: None,
             inactive_collapsed: true,
             inactive_search_dismissed: None,
@@ -2883,11 +2911,20 @@ impl App {
         attention_blink_phase(self.start_time.elapsed().as_millis())
     }
 
-    /// Whether any sidebar row currently has a live animation: a working agent or
-    /// terminal (spinner + name shimmer) or an attention blink. The run loop
-    /// polls faster while this is true so those animations render smoothly, and
-    /// falls back to the lazy cadence when everything is quiet.
+    /// Whether anything on screen currently has a live animation: a working
+    /// agent or terminal (spinner + name shimmer), an attention blink, or the
+    /// one-shot modal refusal cue. The run loop polls faster while this is true
+    /// so those animations render smoothly, and falls back to the lazy cadence
+    /// when everything is quiet.
+    ///
+    /// The refusal cue is time-bounded, so it stops answering `true` on its own
+    /// and the loop goes lazy again the moment the cue is over. (Kept under the
+    /// historical `any_row_animating` name because the run loop's only question
+    /// is "must I redraw at animation cadence?", and the answer is one flag.)
     pub(crate) fn any_row_animating(&self) -> bool {
+        if self.refusal_blink_running() {
+            return true;
+        }
         let attention_on = self.engine.config.ui.attention_indicator;
         let agents = self.engine.sessions.iter().any(|s| {
             matches!(s.status, crate::model::SessionStatus::Active)

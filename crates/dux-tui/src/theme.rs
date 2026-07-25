@@ -121,6 +121,21 @@ pub struct Theme {
     pub hint_dim_desc_fg: Color,
     pub hint_bar_bg: Color,
     pub overlay_border: Color,
+    /// Border ring of a modal that is REFUSING an outside click, flashed for the
+    /// duration of the one-shot cue in `app::overlay_dismiss` and then dropped
+    /// back to `overlay_border`.
+    ///
+    /// A dedicated slot rather than a reuse, and the reason is measured, not
+    /// aesthetic: `overlay_border` defaults to the theme's `border_focused`,
+    /// which in several themes (all three `ayu` variants) is the very same
+    /// colour as `warning_fg`, and in most of the rest is the same colour as
+    /// `session_attention` / `prompt_cursor`. Every candidate for reuse is
+    /// therefore invisible against the ring it is supposed to replace in at
+    /// least one shipped theme. Defaults to the theme's error colour — the one
+    /// family that collides with `border_focused` in none of them — because a
+    /// refusal reads as "no", and it is verified distinct for every loadable
+    /// theme by `the_modal_refusal_flash_is_visible_in_every_loadable_theme`.
+    pub overlay_border_refused: Color,
     pub overlay_bg: Color,
     pub overlay_dim_bg: Color,
     pub prompt_cursor: Color,
@@ -414,6 +429,7 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
 
     // Overlays
     theme.register_default_token("dux.overlay_border", border_focused);
+    theme.register_default_token("dux.overlay_border_refused", error);
     theme.register_default_token("dux.overlay_bg", bg_panel);
     theme.register_default_token("dux.overlay_dim_bg", bg_base);
     theme.register_default_token("dux.overlay_dim_fg", text_dim);
@@ -555,6 +571,7 @@ impl Theme {
             hint_dim_desc_fg: pick("dux.hint_dim_desc_fg"),
             hint_bar_bg: pick("dux.hint_bar_bg"),
             overlay_border: pick("dux.overlay_border"),
+            overlay_border_refused: pick("dux.overlay_border_refused"),
             overlay_bg: pick("dux.overlay_bg"),
             overlay_dim_bg: pick("dux.overlay_dim_bg"),
             prompt_cursor: pick("dux.prompt_cursor"),
@@ -734,6 +751,44 @@ impl Theme {
 mod tests {
     use super::*;
 
+    /// A modal that refuses an outside click flashes its border ring from
+    /// `overlay_border` to `overlay_border_refused` (see
+    /// `app::overlay_dismiss`). That cue is invisible in any theme where the
+    /// two happen to be the same colour, so assert the difference across every
+    /// theme dux can actually load rather than assuming it.
+    ///
+    /// This is not hypothetical. The cue originally reused `warning_fg`, and
+    /// this test is what caught that all three `ayu` themes give `warning_fg`
+    /// and `overlay_border` the same value — the refusal would have been
+    /// invisible for those users.
+    #[test]
+    fn the_modal_refusal_flash_is_visible_in_every_loadable_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+        let listings = discover_available(&paths);
+        assert!(
+            listings.len() > 1,
+            "expected the bundled theme plus built-ins, got {}",
+            listings.len()
+        );
+        for listing in listings {
+            let theme = load(&listing.id, &paths)
+                .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
+            assert_ne!(
+                theme.overlay_border_refused, theme.overlay_border,
+                "theme {} would render the refusal flash invisibly",
+                listing.id
+            );
+        }
+    }
+
     /// Snapshot of the original `Theme::default_dark()` palette, kept here as
     /// an oracle so the bundled dux-dark TOML can be verified field-for-field
     /// against the pre-Opaline behavior. One deliberate exception:
@@ -798,6 +853,7 @@ mod tests {
             hint_dim_desc_fg: Color::Rgb(100, 100, 100),
             hint_bar_bg: Color::Rgb(25, 25, 25),
             overlay_border: Color::Cyan,
+            overlay_border_refused: Color::Red,
             overlay_bg: Color::Rgb(20, 20, 20),
             overlay_dim_bg: Color::Rgb(10, 10, 10),
             prompt_cursor: Color::Cyan,
@@ -904,6 +960,7 @@ mod tests {
         assert_field!(hint_dim_desc_fg);
         assert_field!(hint_bar_bg);
         assert_field!(overlay_border);
+        assert_field!(overlay_border_refused);
         assert_field!(overlay_bg);
         assert_field!(overlay_dim_bg);
         assert_field!(prompt_cursor);

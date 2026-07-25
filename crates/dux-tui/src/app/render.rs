@@ -8567,7 +8567,21 @@ impl App {
             )))
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
-            .border_style(Style::default().fg(self.theme.overlay_border))
+            // The border ring doubles as the modal's refusal cue: while the
+            // one-shot blink armed by an outside click on a modal that cannot
+            // be dismissed (see `overlay_dismiss`) is in a highlight phase, the
+            // ring flashes `overlay_border_refused`. Reusing the border rather
+            // than adding an overlay keeps the cue on the one element that
+            // already outlines "this window", and nothing inside the modal
+            // moves. `refusal_blink_highlight` is false once the cue is over,
+            // so the ring returns to `overlay_border` and stays there.
+            .border_style(if self.refusal_blink_highlight() {
+                Style::default()
+                    .fg(self.theme.overlay_border_refused)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.overlay_border)
+            })
             // Modals are presented after a `Clear.render(..)` which resets the
             // popup cells to `Color::Reset`. Filling the block with overlay_bg
             // means the modal interior — borders, surrounding chrome, the gap

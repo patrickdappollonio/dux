@@ -11,6 +11,13 @@
 //!
 //! The geometry comes from [`OverlayMouseLayoutState::frame`], recorded during
 //! render because a modal's rect does not survive the frame it was painted in.
+//!
+//! Not every modal may be dismissed this way. Nine of them hold unsaved free
+//! text or a built-up selection, so the policy answers their outside click with
+//! a REFUSAL instead: a short, self-terminating blink of the modal's border
+//! ring, armed here and painted by `themed_overlay_block`. The click is still
+//! answered, just not with a close — which is the point, since a swallowed
+//! click teaches the user nothing.
 
 use super::input::contains_point;
 use super::*;
@@ -20,8 +27,38 @@ use super::*;
 pub(super) enum OutsideClickPolicy {
     /// Dismiss, through the variant's real cancel path.
     Cancel,
-    /// Swallow the click and leave the modal open.
+    /// Refuse, visibly: leave the modal open, touch nothing the user typed, and
+    /// blink the modal's frame so the refusal is not silent.
+    Blink,
+    /// Swallow the click. Reserved for [`PromptState::None`], where there is no
+    /// modal to dismiss and nothing to blink.
     Ignore,
+}
+
+/// How long the refusal cue lasts, in milliseconds, measured from the click.
+///
+/// The cue MUST end, and end at rest: past this point
+/// [`refusal_blink_highlight_phase`] is `false` forever, so the modal renders
+/// byte-identically to one that never blinked, and
+/// [`refusal_blink_is_running`] is `false`, so the run loop drops back to its
+/// lazy poll instead of spinning at 30fps over a finished animation.
+pub(super) const REFUSAL_BLINK_MS: u128 = 800;
+
+/// The on/off pattern of the refusal cue: highlight, off, highlight, off, done.
+///
+/// Deliberately the same 200ms phase length as [`attention_blink_phase`], so the
+/// app has ONE blink cadence rather than two that almost match. The difference
+/// is that this one is a one-shot: the attention blink loops forever on a 2s
+/// cycle because the condition it reports persists, while a refused click is an
+/// event that is over once it has been acknowledged.
+pub(super) fn refusal_blink_highlight_phase(elapsed_ms: u128) -> bool {
+    refusal_blink_is_running(elapsed_ms) && !matches!(elapsed_ms % 400, 200..=399)
+}
+
+/// Whether the cue is still running, and therefore whether the run loop must
+/// keep polling at animation cadence.
+pub(super) fn refusal_blink_is_running(elapsed_ms: u128) -> bool {
+    elapsed_ms < REFUSAL_BLINK_MS
 }
 
 /// True only for a left-button PRESS that landed outside a recorded modal rect.
@@ -49,7 +86,7 @@ pub(super) fn click_outside_frame(frame: Option<Rect>, mouse: &MouseEvent) -> bo
 /// error here forcing a deliberate decision about its outside-click behaviour.
 /// Do not add a catch-all arm.
 pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
-    use OutsideClickPolicy::{Cancel, Ignore};
+    use OutsideClickPolicy::{Blink, Cancel, Ignore};
     match prompt {
         // Nothing open: nothing to dismiss.
         PromptState::None => Ignore,
@@ -95,12 +132,11 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
 
         // Everything below holds unsaved free text the user typed, or a
         // multi-step selection they built up, so a stray click must not throw
-        // it away.
-        //
-        // PHASE 2 REPLACES THE SWALLOW WITH A VISUAL REFUSAL (a "blink" of the
-        // modal frame) rather than with a dismissal. Do not "simplify" these to
-        // `Cancel`: the swallow is the current, deliberate answer, and the
-        // planned answer is a cue, not a close.
+        // it away. It does not swallow the click either: the modal blinks its
+        // frame so the user can see the click landed and was refused, rather
+        // than learning nothing and clicking again harder. Do not "simplify"
+        // these to `Cancel` — the answer to an outside click here is a cue, not
+        // a close.
         PromptState::EditMacros { .. }
         | PromptState::BrowseProjects { .. }
         | PromptState::ConfigureStartupCommand { .. }
@@ -109,11 +145,49 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::RenameSession { .. }
         | PromptState::PullRequestInput { .. }
         | PromptState::NameNewAgent { .. }
-        | PromptState::KillRunning(_) => Ignore,
+        | PromptState::KillRunning(_) => Blink,
     }
 }
 
 impl App {
+    /// Arm — or RE-arm — the refusal cue on the modal that is open right now.
+    ///
+    /// Unconditionally overwrites any cue already running, so a user who clicks
+    /// outside twice sees the cue twice instead of the second click being
+    /// swallowed by the first cue's tail. That is the whole reason this is a
+    /// plain assignment and not a `get_or_insert_with`.
+    pub(crate) fn start_refusal_blink(&mut self) {
+        self.refusal_blink = Some(RefusalBlink {
+            started: Instant::now(),
+            prompt: std::mem::discriminant(&self.prompt),
+        });
+    }
+
+    /// Milliseconds since the cue was armed, or `None` when no cue is armed or
+    /// the modal that armed it is no longer the one on screen.
+    fn refusal_blink_elapsed_ms(&self) -> Option<u128> {
+        let blink = self.refusal_blink?;
+        (blink.prompt == std::mem::discriminant(&self.prompt))
+            .then(|| blink.started.elapsed().as_millis())
+    }
+
+    /// Whether the refusal cue is still running. Read by
+    /// [`App::any_row_animating`], which is what keeps the run loop redrawing
+    /// at animation cadence for exactly as long as the cue lasts.
+    pub(crate) fn refusal_blink_running(&self) -> bool {
+        self.refusal_blink_elapsed_ms()
+            .is_some_and(refusal_blink_is_running)
+    }
+
+    /// Whether the cue is in a highlight phase right now — the one thing the
+    /// renderer asks. False both between the two flashes and forever after the
+    /// cue ends, which is what makes the settled modal byte-identical to one
+    /// that never blinked.
+    pub(crate) fn refusal_blink_highlight(&self) -> bool {
+        self.refusal_blink_elapsed_ms()
+            .is_some_and(refusal_blink_highlight_phase)
+    }
+
     /// Cancel the open prompt through the SAME path its Esc key uses, and
     /// report whether anything was cancelled.
     ///
@@ -242,21 +316,27 @@ impl App {
         true
     }
 
-    /// The mouse-side entry point: dismiss the open prompt when this event is
-    /// an outside click and the prompt's policy says to.
+    /// The mouse-side entry point: answer an outside click the way the open
+    /// prompt's policy says to — dismiss it, or refuse it visibly — and report
+    /// whether anything was dismissed.
     ///
     /// Called from the ONE place in `handle_prompt_mouse` where the hit-test
     /// has already returned `None`, so it can never preempt a button, a list
     /// row, a checkbox, a text input, or a modal's deliberate blank
-    /// misclick-safe spacer row.
+    /// misclick-safe spacer row. That also means a click INSIDE a refusing
+    /// modal never arms the cue: it was handled by the control it hit.
     pub(super) fn dismiss_prompt_on_outside_click(&mut self, mouse: &MouseEvent) -> bool {
         if !click_outside_frame(self.overlay_layout.frame.get(), mouse) {
             return false;
         }
-        if outside_click_policy(&self.prompt) != OutsideClickPolicy::Cancel {
-            return false;
+        match outside_click_policy(&self.prompt) {
+            OutsideClickPolicy::Cancel => self.cancel_prompt(),
+            OutsideClickPolicy::Blink => {
+                self.start_refusal_blink();
+                false
+            }
+            OutsideClickPolicy::Ignore => false,
         }
-        self.cancel_prompt()
     }
 }
 
@@ -360,6 +440,400 @@ mod tests {
         }
     }
 
+    /// Every modal that refuses an outside click, paired with the text (or
+    /// built-up selection) whose loss is the reason it refuses. Built from the
+    /// app so the two variants that carry real project/request payloads can use
+    /// the seeded fixture project.
+    fn refusing_prompts(app: &App) -> Vec<(&'static str, PromptState)> {
+        let project = app.engine.projects[0].clone();
+        vec![
+            (
+                "EditMacros",
+                PromptState::EditMacros {
+                    entries: vec![(
+                        "greet".to_string(),
+                        "hello".to_string(),
+                        crate::config::MacroSurface::Agent,
+                    )],
+                    selected: 0,
+                    editing: None,
+                    pending_delete: None,
+                },
+            ),
+            (
+                "BrowseProjects",
+                PromptState::BrowseProjects {
+                    current_dir: PathBuf::from("/tmp"),
+                    entries: Vec::new(),
+                    loading: false,
+                    selected: 0,
+                    filter: TextInput::new(),
+                    searching: false,
+                    editing_path: false,
+                    path_input: TextInput::with_text("half-typed-path".to_string()),
+                    tab_completions: Vec::new(),
+                    tab_index: 0,
+                },
+            ),
+            (
+                "ConfigureStartupCommand",
+                PromptState::ConfigureStartupCommand {
+                    project_id: project.id.clone(),
+                    project_name: project.name.clone(),
+                    input: TextInput::with_text("half-typed-name".to_string()),
+                },
+            ),
+            (
+                "ConfigureProjectEnv",
+                PromptState::ConfigureProjectEnv {
+                    project_id: project.id.clone(),
+                    project_name: project.name.clone(),
+                    input: TextInput::with_text("half-typed-name".to_string()),
+                },
+            ),
+            (
+                "ConfigureGlobalEnv",
+                PromptState::ConfigureGlobalEnv {
+                    project_name: project.name.clone(),
+                    input: TextInput::with_text("half-typed-name".to_string()),
+                },
+            ),
+            ("RenameSession", rename_session_prompt()),
+            (
+                "PullRequestInput",
+                PromptState::PullRequestInput {
+                    project,
+                    input: TextInput::with_text("half-typed-name".to_string()),
+                },
+            ),
+            ("NameNewAgent", name_new_agent_prompt(app)),
+            (
+                "KillRunning",
+                PromptState::KillRunning(KillRunningPrompt {
+                    runtimes: Vec::new(),
+                    list: SearchableList::new(),
+                    selected_ids: std::collections::HashSet::new(),
+                    focus: KillRunningFocus::List,
+                }),
+            ),
+        ]
+    }
+
+    fn name_new_agent_prompt(app: &App) -> PromptState {
+        PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("half-typed-name".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus: NameNewAgentFocus::Input,
+        }
+    }
+
+    /// The one piece of user work each refusing modal is holding, read back out
+    /// of the live prompt so a test can prove the refusal touched none of it.
+    fn held_text(prompt: &PromptState) -> String {
+        match prompt {
+            PromptState::EditMacros { entries, .. } => format!("{entries:?}"),
+            PromptState::BrowseProjects { path_input, .. } => path_input.text.clone(),
+            PromptState::ConfigureStartupCommand { input, .. }
+            | PromptState::ConfigureProjectEnv { input, .. }
+            | PromptState::ConfigureGlobalEnv { input, .. }
+            | PromptState::RenameSession { input, .. }
+            | PromptState::PullRequestInput { input, .. }
+            | PromptState::NameNewAgent { input, .. } => input.text.clone(),
+            PromptState::KillRunning(prompt) => format!("{:?}", prompt.selected_ids),
+            other => panic!("not a refusing modal: {other:?}"),
+        }
+    }
+
+    /// Wind an armed cue back in time, so a test can observe a later phase of
+    /// it without sleeping. Wall-clock, so this is all it takes.
+    fn advance_blink(app: &mut App, by_ms: u64) {
+        let blink = app
+            .refusal_blink
+            .as_mut()
+            .expect("a cue must be armed before it can be advanced");
+        blink.started -= Duration::from_millis(by_ms);
+    }
+
+    fn render_to_buffer(app: &mut App) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(TERM.0, TERM.1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        terminal.backend().buffer().clone()
+    }
+
+    // ───────────────────────── the refusal cue ─────────────────────────
+
+    #[test]
+    fn refusal_blink_phase_flashes_twice_then_ends_at_rest() {
+        // Flash one.
+        assert!(refusal_blink_highlight_phase(0));
+        assert!(refusal_blink_highlight_phase(199));
+        assert!(!refusal_blink_highlight_phase(200));
+        assert!(!refusal_blink_highlight_phase(399));
+        // Flash two.
+        assert!(refusal_blink_highlight_phase(400));
+        assert!(refusal_blink_highlight_phase(599));
+        assert!(!refusal_blink_highlight_phase(600));
+        assert!(!refusal_blink_highlight_phase(799));
+        // Over. It must stay over forever, never wrap into a third flash.
+        assert!(refusal_blink_is_running(799));
+        assert!(!refusal_blink_is_running(REFUSAL_BLINK_MS));
+        for elapsed in [800, 801, 1_000, 5_000, 60_000, 86_400_000] {
+            assert!(
+                !refusal_blink_highlight_phase(elapsed),
+                "the cue restarted itself at {elapsed}ms"
+            );
+            assert!(!refusal_blink_is_running(elapsed));
+        }
+    }
+
+    #[test]
+    fn policy_blinks_for_every_modal_holding_unsaved_work() {
+        let app = test_app(default_bindings());
+        for (name, prompt) in refusing_prompts(&app) {
+            assert_eq!(
+                outside_click_policy(&prompt),
+                OutsideClickPolicy::Blink,
+                "{name} must refuse visibly, not silently"
+            );
+        }
+        // Ignore is now reserved for "no modal is open".
+        assert_eq!(
+            outside_click_policy(&PromptState::None),
+            OutsideClickPolicy::Ignore
+        );
+    }
+
+    #[test]
+    fn outside_click_blinks_every_refusing_modal_and_keeps_its_work() {
+        for (name, prompt) in refusing_prompts(&test_app(default_bindings())) {
+            let mut app = test_app(default_bindings());
+            app.prompt = prompt;
+            let kind = prompt_kind(&app);
+            let work = held_text(&app.prompt);
+            let baseline = render_to_buffer(&mut app);
+            assert!(
+                !app.refusal_blink_running(),
+                "{name} blinked before a click"
+            );
+
+            app.handle_mouse(left_down(0, 0));
+
+            assert_eq!(prompt_kind(&app), kind, "{name} was dismissed");
+            assert_eq!(held_text(&app.prompt), work, "{name} lost the user's work");
+            assert!(app.refusal_blink_running(), "{name} refused silently");
+            assert!(
+                app.refusal_blink_highlight(),
+                "{name} armed a cue that starts invisible"
+            );
+            // State is not the cue: prove the refusal actually reaches the
+            // screen for THIS modal, and then leaves no trace behind.
+            assert_ne!(
+                render_to_buffer(&mut app),
+                baseline,
+                "{name} armed a cue that renders nothing"
+            );
+            advance_blink(&mut app, REFUSAL_BLINK_MS as u64);
+            assert_eq!(
+                render_to_buffer(&mut app),
+                baseline,
+                "{name} did not settle back to its unblinked frame"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cue_settles_back_to_a_frame_that_never_blinked() {
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_session_prompt();
+        let baseline = render_to_buffer(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+        assert_ne!(
+            render_to_buffer(&mut app),
+            baseline,
+            "the first flash never showed"
+        );
+        advance_blink(&mut app, 450);
+        assert_ne!(
+            render_to_buffer(&mut app),
+            baseline,
+            "the second flash never showed"
+        );
+
+        // Past the cue's duration the modal must be indistinguishable from one
+        // that was never clicked: no frozen-bright, no frozen-dim.
+        advance_blink(&mut app, REFUSAL_BLINK_MS as u64);
+        assert_eq!(
+            render_to_buffer(&mut app),
+            baseline,
+            "the cue froze instead of settling back to rest"
+        );
+        assert!(!app.refusal_blink_running());
+    }
+
+    #[test]
+    fn a_second_outside_click_restarts_the_cue() {
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_session_prompt();
+        render(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+        // Wind on to the dark tail of the cue, where a swallowed second click
+        // would leave the modal looking untouched.
+        advance_blink(&mut app, 700);
+        assert!(app.refusal_blink_running());
+        assert!(!app.refusal_blink_highlight());
+
+        render(&mut app);
+        app.handle_mouse(left_down(0, 0));
+
+        assert!(
+            app.refusal_blink_highlight(),
+            "the second click was swallowed instead of re-flashing"
+        );
+        // And it is a genuine restart, not an extension of the first cue.
+        advance_blink(&mut app, 799);
+        assert!(app.refusal_blink_running());
+        advance_blink(&mut app, 1);
+        assert!(!app.refusal_blink_running());
+    }
+
+    #[test]
+    fn a_dismissing_modal_still_dismisses_and_never_blinks() {
+        let mut app = test_app(default_bindings());
+        app.prompt = agent_info_prompt();
+        render(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+
+        assert!(matches!(app.prompt, PromptState::None));
+        assert!(
+            !app.refusal_blink_running(),
+            "a modal that dismissed also blinked"
+        );
+        assert!(app.refusal_blink.is_none());
+    }
+
+    #[test]
+    fn the_nested_macro_delete_confirm_dismisses_without_blinking() {
+        // The one variant that is a refusing modal and a dismissing modal at
+        // once, depending on `pending_delete`.
+        let mut app = test_app(default_bindings());
+        app.prompt = edit_macros_with_pending_delete();
+        render(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+
+        assert!(matches!(
+            app.prompt,
+            PromptState::EditMacros {
+                pending_delete: None,
+                ..
+            }
+        ));
+        assert!(!app.refusal_blink_running());
+    }
+
+    #[test]
+    fn the_run_loop_animates_while_the_cue_runs_and_goes_quiet_after() {
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_session_prompt();
+        render(&mut app);
+        assert!(
+            !app.any_row_animating(),
+            "fixture must start with nothing animating, or this proves nothing"
+        );
+
+        app.handle_mouse(left_down(0, 0));
+        assert!(app.any_row_animating(), "the cue would never be redrawn");
+
+        // The dark half of a flash still needs the fast cadence: the next
+        // flash is coming.
+        advance_blink(&mut app, 300);
+        assert!(app.any_row_animating());
+
+        advance_blink(&mut app, 500);
+        assert!(
+            !app.any_row_animating(),
+            "a finished cue kept the run loop hot"
+        );
+    }
+
+    #[test]
+    fn a_click_inside_a_refusing_modal_reaches_its_controls_and_does_not_blink() {
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_session_prompt();
+        render(&mut app);
+        let checkbox = match app.overlay_layout.active {
+            OverlayMouseLayout::RenameSession { checkbox, .. } => {
+                checkbox.expect("the rename dialog paints its checkbox")
+            }
+            ref other => panic!("expected the rename layout, got {other:?}"),
+        };
+        let before = match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => *rename_branch,
+            other => panic!("expected the rename prompt, got {other:?}"),
+        };
+
+        app.handle_mouse(left_down(checkbox.rect.x, checkbox.rect.y));
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                rename_branch,
+                input,
+                ..
+            } => {
+                assert_ne!(*rename_branch, before, "the checkbox did not toggle");
+                assert_eq!(input.text, "half-typed-name");
+            }
+            other => panic!("expected the rename prompt to survive, got {other:?}"),
+        }
+        assert!(
+            !app.refusal_blink_running(),
+            "a click INSIDE the modal was treated as a refusal"
+        );
+    }
+
+    #[test]
+    fn a_click_inside_a_refusing_modal_still_reaches_its_text_field() {
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_session_prompt();
+        render(&mut app);
+        let input = match app.overlay_layout.active {
+            OverlayMouseLayout::RenameSession { input, .. } => input,
+            ref other => panic!("expected the rename layout, got {other:?}"),
+        };
+
+        // Click a couple of characters into the field: the caret must move
+        // there, and nothing may blink.
+        app.handle_mouse(left_down(input.x + 4, input.y));
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                input,
+                focus: RenameSessionFocus::Input,
+                ..
+            } => {
+                assert_eq!(input.text, "half-typed-name");
+                assert_eq!(input.cursor, 4);
+            }
+            other => panic!("expected the rename input to take the click, got {other:?}"),
+        }
+        assert!(!app.refusal_blink_running());
+    }
+
     // ─────────────────────────── the pure policy ───────────────────────────
 
     #[test]
@@ -411,10 +885,10 @@ mod tests {
         );
         assert_eq!(
             outside_click_policy(&rename_session_prompt()),
-            OutsideClickPolicy::Ignore
+            OutsideClickPolicy::Blink
         );
-        // The macro editor is Ignore, but the delete-confirm nested inside it
-        // is a confirmation and dismisses.
+        // The macro editor blinks, but the delete-confirm nested inside it is a
+        // confirmation and dismisses.
         assert_eq!(
             outside_click_policy(&edit_macros_with_pending_delete()),
             OutsideClickPolicy::Cancel
@@ -426,7 +900,7 @@ mod tests {
                 editing: None,
                 pending_delete: None,
             }),
-            OutsideClickPolicy::Ignore
+            OutsideClickPolicy::Blink
         );
     }
 
@@ -459,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn outside_click_is_ignored_for_an_unsaved_text_modal() {
+    fn outside_click_is_refused_by_an_unsaved_text_modal() {
         let mut app = test_app(default_bindings());
         app.prompt = rename_session_prompt();
         render(&mut app);

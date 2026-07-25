@@ -112,6 +112,9 @@ ansi_darkgray = "#808080"
 
 # ── Overlays / modals ────────────────────────────────────────────────
 "dux.overlay_border"       = "ansi_cyan"
+# Flashed over dux.overlay_border while a modal refuses an outside click
+# because it is holding unsaved work. Must contrast with dux.overlay_border.
+"dux.overlay_border_refused" = "ansi_red"
 "dux.overlay_bg"           = "#141414"
 "dux.overlay_dim_bg"       = "#0a0a0a"
 "dux.overlay_dim_fg"       = "ansi_darkgray"
