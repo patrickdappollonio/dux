@@ -589,10 +589,17 @@ fn draw_modal(f: &mut Frame, area: Rect, notes: &Notes, ui: &Ui) {
 
 fn welcome_lines(width: u16, accent: Color) -> Vec<Line<'static>> {
     let w = width.saturating_sub(1) as usize;
-    let mut lines = vec![Line::from(Span::styled(
-        TAGLINE.to_string(),
-        Style::default().fg(NAME_FG).add_modifier(Modifier::BOLD),
-    ))];
+    // WRAP the tagline. As one span it is silently clipped: 72 chars into the
+    // 50-column prose column, cutting off at "...and a real term".
+    let mut lines: Vec<Line> = wrap(TAGLINE, w)
+        .into_iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                l,
+                Style::default().fg(NAME_FG).add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
     lines.push(Line::from(""));
     for para in welcome_paragraphs() {
         for l in wrap(&para, w) {
@@ -631,10 +638,17 @@ fn welcome_lines(width: u16, accent: Color) -> Vec<Line<'static>> {
 
 fn whats_new_lines(notes: &Notes, width: u16, accent: Color) -> Vec<Line<'static>> {
     let w = width.saturating_sub(1) as usize;
-    let mut lines = vec![Line::from(Span::styled(
-        notes.headline.clone(),
-        Style::default().fg(NAME_FG).add_modifier(Modifier::BOLD),
-    ))];
+    // WRAP for the same reason as the tagline: release headlines routinely
+    // exceed the prose column and would clip mid-word.
+    let mut lines: Vec<Line> = wrap(&notes.headline, w)
+        .into_iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                l,
+                Style::default().fg(NAME_FG).add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
     lines.push(Line::from(""));
 
     for para in &notes.paragraphs {
@@ -674,6 +688,14 @@ fn render_scrollable(
     scroll: u16,
     accent: Color,
 ) {
+    // Reserve the last column for the scroll marker so it never paints over
+    // prose. It previously overwrote the final character of the bottom row,
+    // which is the line the reader is heading toward.
+    let area = if lines.len() > area.height as usize {
+        Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+    } else {
+        area
+    };
     let total = lines.len();
     let vis = area.height as usize;
     let max_scroll = total.saturating_sub(vis);
@@ -695,7 +717,7 @@ fn render_scrollable(
                 Style::default().fg(accent),
             ))),
             Rect::new(
-                area.x + area.width.saturating_sub(1),
+                area.x + area.width, // the reserved column, just past the prose
                 area.y + area.height.saturating_sub(1),
                 1,
                 1,
@@ -874,6 +896,29 @@ mod tests {
         // Narrow terminal: prose wins.
         assert!(!shows_art(67));
         assert!(!shows_art(40));
+    }
+
+    #[test]
+    fn the_tagline_wraps_instead_of_clipping_in_the_prose_column() {
+        // Regression: at the 90-column target the prose column is 50 wide and the
+        // tagline is 72 chars, so rendering it as one span cut it off mid-word.
+        let prose_cols = 50usize;
+        assert!(
+            TAGLINE.chars().count() > prose_cols,
+            "only meaningful while the tagline overflows"
+        );
+        let lines = welcome_lines(prose_cols as u16, ACCENT);
+        assert!(
+            lines.len() > 1,
+            "the tagline must occupy more than one line"
+        );
+        for l in &lines {
+            let w: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            assert!(
+                w <= prose_cols,
+                "line would be clipped at {prose_cols}: {l:?}"
+            );
+        }
     }
 
     #[test]
