@@ -551,7 +551,8 @@ pub struct UiConfig {
     /// Suppress the AUTOMATIC what's-new screen after an upgrade, AND the
     /// startup fetch of the release notes that feeds it (so nothing touches the
     /// network on launch). Default false. Opening the release notes deliberately
-    /// still works, and may still fetch, because the user asked for it.
+    /// still works and ALWAYS fetches: this flag governs the automatic screen,
+    /// not what that screen is allowed to contain.
     pub disable_release_notes: bool,
     pub pr_banner_position: String,
     /// The web agent-list sort mode, persisted so a chosen order (and the manual

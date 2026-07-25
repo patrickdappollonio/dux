@@ -106,8 +106,8 @@ suppresses only the **automatic** appearance:
   itself. Opening it deliberately still works.
 - `disable_release_notes` stops the what's-new screen from showing itself **and**
   skips the launch-time fetch entirely, so nothing touches the network at startup.
-  Opening the release notes deliberately still works, and may still fetch, because
-  you asked for it.
+  Opening the release notes yourself still works, and still fetches them: the
+  setting controls the automatic screen, not what that screen is allowed to show.
 
 Turning either one off still moves your seen-version marker forward rather than
 pinning you at an old version. Switch `disable_release_notes` back on later and you

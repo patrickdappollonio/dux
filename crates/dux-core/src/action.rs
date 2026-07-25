@@ -152,8 +152,9 @@ pub enum Action {
     ShowWelcomeScreen,
     /// Open the what's-new screen for the running version on demand, fetching the
     /// release notes if they are not cached. Palette-only (no default
-    /// keybinding). Works even when `[ui] disable_release_notes` is set, and may
-    /// fetch, because the user asked for it.
+    /// keybinding). Works even when `[ui] disable_release_notes` is set, and
+    /// fetches regardless: that flag governs the automatic screen, not this one's
+    /// contents.
     ShowReleaseNotes,
     // Manual reordering (the TUI equivalent of the web's drag-to-reorder). Each
     // moves the selected agent/terminal in the sidebar and switches the sort to

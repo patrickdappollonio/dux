@@ -432,7 +432,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "disable_release_notes",
             comment: Some(CommentSource::Static(
-                "# Stop dux from showing (and fetching) the what's-new screen by itself.\n# When the running version differs from the last one you saw, dux fetches\n# the newest release notes from GitHub in the background and shows a short\n# summary once. Only the newest release is ever shown, however many you\n# skipped. If the fetch fails, nothing is shown and nothing is recorded, so\n# the notes get another chance on your next launch.\n# Set to true and dux makes no network request at startup and shows no\n# what's-new screen on its own. Opening the release notes deliberately still\n# works, and may still fetch them, because you asked for it.",
+                "# Stop dux from showing (and fetching) the what's-new screen by itself.\n# When the running version differs from the last one you saw, dux fetches\n# the newest release notes from GitHub in the background and shows a short\n# summary once. Only the newest release is ever shown, however many you\n# skipped. If the fetch fails, nothing is shown and nothing is recorded, so\n# the notes get another chance on your next launch.\n# Set to true and dux makes no network request at startup and shows no\n# what's-new screen on its own. Opening the release notes yourself still works\n# and still fetches them: this setting controls the automatic screen, not what\n# the screen is allowed to show you.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.disable_release_notes),
         },

@@ -202,7 +202,7 @@ disable_automated_welcome_screen = false  # suppress the first-run welcome scree
 disable_release_notes            = false  # suppress the what's-new screen and the launch-time fetch
 ```
 
-Each one suppresses only the *automatic* appearance. `disable_release_notes` additionally skips the startup network request entirely. Opening either screen deliberately still works, and the release-notes command may still fetch, because you asked for it. In the web UI both are rows in the cog menu's **Preferences…** dialog, phrased the positive way round.
+Each one suppresses only the *automatic* appearance. `disable_release_notes` additionally skips the startup network request entirely. Opening either screen yourself still works, and the release-notes command still fetches: the setting controls the automatic screen, not what the screen is allowed to show. In the web UI both are rows in the cog menu's **Preferences…** dialog, phrased the positive way round.
 
 ### Command Palette
 
