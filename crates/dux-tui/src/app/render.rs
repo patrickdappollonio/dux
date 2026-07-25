@@ -6066,10 +6066,11 @@ impl App {
             }
             PromptState::FirstLoad(prompt) => {
                 self.render_dim_overlay(frame);
-                // Height = the duck's 15 rows plus the border ring, the button
-                // row, and its rule. The duck is the tallest element, so it sets
-                // the modal's height; `centered_rect_exact` clamps on a short
-                // terminal.
+                // Height comes from the BODY's row target (floored so the duck is
+                // never clipped) plus the border ring, the button row and its
+                // rule; `centered_rect_exact` clamps on a short terminal. See
+                // `first_load::MIN_BODY_ROWS` for why the body sets it and not
+                // the duck.
                 let area = first_load::modal_area(frame.area());
                 self.clear_overlay_area(frame, area);
                 let rendered = first_load::render_modal(frame, area, prompt, &self.theme);

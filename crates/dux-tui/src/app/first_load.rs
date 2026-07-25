@@ -503,16 +503,31 @@ pub(crate) fn button_row(
 
 /// Rows the modal spends on chrome: the border ring (2), the blank the content
 /// pane naturally leaves, the button rule (1), and the button row (1), plus a
-/// row of breathing space. Added to the duck's height, which is the tallest
-/// element and therefore sets the modal's height.
+/// row of breathing space.
 const CHROME_ROWS: u16 = 6;
+
+/// Rows the BODY wants, and what actually sets the modal's height.
+///
+/// The duck used to set it, at 15 rows, which left the prose pane 17 rows. Both
+/// screens carry more than that — the welcome has a wrapped tagline, four
+/// paragraphs and three numbered steps; a release has a headline, its intro and
+/// its feature titles — so both opened already scrolled, and on the welcome that
+/// meant step 3 of a three-step "how to start" guide was below the fold on the
+/// first screen a new user ever sees.
+///
+/// 24 rows shows appreciably more of both before any scrolling. It is a target,
+/// not a demand: [`centered_rect_exact`] clamps to the terminal, so a short
+/// window simply gets less and the scroll marker says so.
+const MIN_BODY_ROWS: u16 = 24;
 
 /// Where the modal sits. Deliberately one function so the renderer and any test
 /// asking "did the duck fit?" agree on the geometry.
+///
+/// The height is the taller of the body target and the duck, so the art can
+/// never be clipped by a body that wants fewer rows than the duck occupies.
 pub(crate) fn modal_area(area: Rect) -> Rect {
-    let height = u16::try_from(DUCK.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(CHROME_ROWS);
+    let duck_rows = u16::try_from(DUCK.len()).unwrap_or(u16::MAX);
+    let height = duck_rows.max(MIN_BODY_ROWS).saturating_add(CHROME_ROWS);
     centered_rect_exact(MODAL_COLS, height, area)
 }
 
@@ -1080,6 +1095,14 @@ mod tests {
         FirstLoadColors::from_theme(&Theme::default_dark())
     }
 
+    /// Terminal size for tests that need the content to OVERFLOW its pane.
+    ///
+    /// `MIN_BODY_ROWS` deliberately makes the modal tall enough that the welcome
+    /// fits without scrolling on a roomy terminal, so a scroll test cannot rely
+    /// on the default fixture overflowing at 120x40 any more; it has to squeeze
+    /// the terminal so the modal clamps and the content genuinely runs off.
+    const OVERFLOW_TERM: (u16, u16) = (120, 18);
+
     fn render_prompt_to_string(app: &mut App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -1113,6 +1136,36 @@ mod tests {
         assert!(!shows_art(67), "one column short and the prose wins");
         assert!(!shows_art(40));
         assert!(!shows_art(0));
+    }
+
+    #[test]
+    fn the_body_sets_the_height_and_the_duck_only_floors_it() {
+        let duck_rows = u16::try_from(DUCK.len()).unwrap_or(u16::MAX);
+        assert!(
+            MIN_BODY_ROWS > duck_rows,
+            "the body target must exceed the duck, or the duck is back to \
+             setting the height and both screens open scrolled again"
+        );
+
+        // On a roomy terminal the modal gets the full target.
+        let roomy = modal_area(Rect::new(0, 0, 200, 60));
+        assert_eq!(roomy.height, MIN_BODY_ROWS + CHROME_ROWS);
+
+        // The prose pane is what the extra rows are FOR: body rows are the
+        // modal minus the border ring, the button rule and the button row.
+        let prose_rows = roomy.height - 2 - 1 - 1;
+        assert!(
+            prose_rows >= duck_rows,
+            "prose pane {prose_rows} is shorter than the duck it sits beside"
+        );
+
+        // A short terminal clamps instead of overflowing.
+        let cramped = modal_area(Rect::new(0, 0, 80, 12));
+        assert!(
+            cramped.height <= 12,
+            "modal is {} rows in a 12-row terminal",
+            cramped.height
+        );
     }
 
     #[test]
@@ -1967,7 +2020,7 @@ mod tests {
     #[test]
     fn end_still_scrolls_to_the_bottom_so_nothing_is_lost() {
         let mut app = app_with_welcome();
-        let _ = render_prompt_to_string(&mut app, 120, 40);
+        let _ = render_prompt_to_string(&mut app, OVERFLOW_TERM.0, OVERFLOW_TERM.1);
         let max = app
             .last_first_load_lines
             .saturating_sub(app.last_first_load_height.max(1));
@@ -2060,7 +2113,7 @@ mod tests {
     fn the_scroll_keys_scroll_the_content_and_clamp_to_the_rendered_extent() {
         let mut app = app_with_welcome();
         // The extent is a render output, so render once to establish it.
-        let _ = render_prompt_to_string(&mut app, 120, 40);
+        let _ = render_prompt_to_string(&mut app, OVERFLOW_TERM.0, OVERFLOW_TERM.1);
         let max = app
             .last_first_load_lines
             .saturating_sub(app.last_first_load_height.max(1));
@@ -2092,7 +2145,7 @@ mod tests {
     #[test]
     fn the_wheel_scrolls_the_content() {
         let mut app = app_with_welcome();
-        let _ = render_prompt_to_string(&mut app, 120, 40);
+        let _ = render_prompt_to_string(&mut app, OVERFLOW_TERM.0, OVERFLOW_TERM.1);
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 10,
