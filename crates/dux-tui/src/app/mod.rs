@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::{Write as _, stdout};
 use std::path::{Path, PathBuf};
@@ -1640,14 +1641,37 @@ impl MouseLayoutState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct OverlayMouseLayoutState {
     pub(crate) active: OverlayMouseLayout,
+    /// Outer rect of the TOPMOST modal painted this frame, or `None` when no
+    /// modal was painted. Recorded by the one chokepoint every modal passes
+    /// through, [`App::clear_overlay_area`], and read on a LATER event by the
+    /// click-outside dismissal engine (see [`super::overlay_dismiss`]).
+    ///
+    /// Two properties are load-bearing:
+    ///
+    /// * It FAILS CLOSED. `None` means "no dismissal", never "dismiss on any
+    ///   click": a prompt can be open while a fullscreen overlay is up, in
+    ///   which case `render_overlay` returns before `render_prompt` and no rect
+    ///   is recorded, yet the mouse still routes to prompt handling. A
+    ///   zero-sized `Rect` sentinel would be a silent trap here, so the
+    ///   `Option` is deliberate.
+    /// * Last write wins, which is what makes nested modals work: the macro
+    ///   editor paints its popup and THEN its nested delete-confirm paints a
+    ///   smaller rect, so `frame` ends up as the modal actually on top.
+    ///
+    /// A [`Cell`] rather than a plain field because the recording happens from
+    /// `&self`: `render_prompt` matches on `&self.prompt` and paints from
+    /// inside those arms, so a `&mut self` chokepoint is not expressible there
+    /// (measured: 30 borrow-checker errors across the render arms).
+    pub(crate) frame: Cell<Option<Rect>>,
 }
 
 impl OverlayMouseLayoutState {
     pub(crate) fn reset(&mut self) {
         self.active = OverlayMouseLayout::None;
+        self.frame.set(None);
     }
 }
 
@@ -1742,7 +1766,10 @@ pub(crate) enum OverlayMouseLayout {
         offset: usize,
     },
     StartupCommandLogs {
-        area: Rect,
+        // No outer `area` here: the modal's outer rect is recorded once, for
+        // every modal, in `OverlayMouseLayoutState::frame` (the click-outside
+        // dismissal engine's store), so a per-variant copy would be a second
+        // source of truth for the same rect.
         list: Rect,
         body: Rect,
         items: usize,
@@ -2029,6 +2056,7 @@ pub(crate) fn build_left_items(
 mod components;
 mod first_load;
 mod input;
+mod overlay_dismiss;
 mod render;
 mod reorder;
 mod sessions;

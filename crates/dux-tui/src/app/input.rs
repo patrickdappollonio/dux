@@ -262,7 +262,7 @@ impl ButtonPressedTarget {
     }
 }
 
-fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
+pub(super) fn contains_point(rect: Rect, column: u16, row: u16) -> bool {
     rect.width > 0
         && rect.height > 0
         && column >= rect.x
@@ -3076,7 +3076,13 @@ impl App {
                 return Ok(false);
             }
             match self.bindings.lookup(&key, BindingScope::Dialog) {
-                Some(Action::CloseOverlay) => self.prompt = PromptState::None,
+                // Esc takes the same path as the Close BUTTON rather than
+                // blanking the prompt itself, so the two dismissal routes
+                // cannot drift (and so the outside-click engine, which calls
+                // the same resolve, is honestly at parity with Esc).
+                Some(Action::CloseOverlay) => {
+                    return Ok(self.resolve_config_reload_failed(false));
+                }
                 Some(Action::ToggleSelection) => {
                     *focus = match *focus {
                         ConfigReloadFailedFocus::Close => ConfigReloadFailedFocus::Apply,
@@ -5030,7 +5036,7 @@ impl App {
         *scroll = next.min(max);
     }
 
-    fn resolve_add_project_failed(&mut self) -> bool {
+    pub(super) fn resolve_add_project_failed(&mut self) -> bool {
         let return_prompt = match std::mem::replace(&mut self.prompt, PromptState::None) {
             PromptState::AddProjectFailed { return_prompt, .. } => *return_prompt,
             other => {
@@ -5226,7 +5232,7 @@ impl App {
         }
     }
 
-    fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_agent(&mut self, confirm: bool) -> bool {
         let (session_id, delete_worktree) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
@@ -5245,7 +5251,7 @@ impl App {
         false
     }
 
-    fn resolve_confirm_delete_terminal(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_delete_terminal(&mut self, confirm: bool) -> bool {
         let terminal_id = match &self.prompt {
             PromptState::ConfirmDeleteTerminal { terminal_id, .. } => terminal_id.clone(),
             _ => return false,
@@ -5257,7 +5263,7 @@ impl App {
         false
     }
 
-    fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_close_tab(&mut self, confirm: bool) -> bool {
         let (session_id, tab_id, is_main) = match &self.prompt {
             PromptState::ConfirmCloseTab {
                 session_id,
@@ -5320,7 +5326,7 @@ impl App {
         false
     }
 
-    fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_kill_running(&mut self, confirm: bool) -> bool {
         let confirm_prompt = match &self.prompt {
             PromptState::ConfirmKillRunning(confirm_prompt) => confirm_prompt.clone(),
             _ => return false,
@@ -5374,14 +5380,14 @@ impl App {
         false
     }
 
-    fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_quit(&mut self, confirm: bool) -> bool {
         if matches!(self.prompt, PromptState::ConfirmQuit { .. }) {
             self.prompt = PromptState::None;
         }
         confirm
     }
 
-    fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_discard_file(&mut self, confirm: bool) -> bool {
         let file_path = match &self.prompt {
             PromptState::ConfirmDiscardFile { file_path, .. } => file_path.clone(),
             _ => return false,
@@ -5525,7 +5531,7 @@ impl App {
         false
     }
 
-    fn resolve_confirm_use_existing_branch(&mut self, confirm: bool) -> bool {
+    pub(super) fn resolve_confirm_use_existing_branch(&mut self, confirm: bool) -> bool {
         let old_prompt = std::mem::replace(&mut self.prompt, PromptState::None);
         let PromptState::ConfirmUseExistingBranch {
             mut request,
@@ -5751,6 +5757,13 @@ impl App {
                 _ => {}
             }
         }
+        // The two overlays below consume every mouse event they see, which
+        // would swallow an outside click before it could reach the shared
+        // dismissal chokepoint at the bottom of this function. Skip their local
+        // handling for a press that landed outside the modal (and only then) so
+        // the engine — not a per-modal copy of it — decides what happens.
+        let outside_press =
+            overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse);
         if let PromptState::ResourceMonitor {
             scroll_offset,
             selected_row,
@@ -5758,6 +5771,7 @@ impl App {
             rows,
             ..
         } = &mut self.prompt
+            && !outside_press
         {
             let visual = build_visual_rows(rows, expanded);
             let max_row = visual.len().saturating_sub(1);
@@ -5801,6 +5815,7 @@ impl App {
             lines,
             scroll_offset,
         } = &mut self.prompt
+            && !outside_press
         {
             // Scroll wheel navigates history without logging.
             match mouse.kind {
@@ -5844,17 +5859,13 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::StartupCommandLogs(_))
-            && let OverlayMouseLayout::StartupCommandLogs { area, body, .. } =
-                self.overlay_layout.active
+            && let OverlayMouseLayout::StartupCommandLogs { body, .. } = self.overlay_layout.active
         {
+            // The click-outside dismissal that used to be hand-rolled here now
+            // comes from the shared engine at the bottom of this function (this
+            // variant's policy is `Cancel`); only the in-modal drag/scroll
+            // handling stays local.
             match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left)
-                    if !contains_point(area, mouse.column, mouse.row) =>
-                {
-                    self.prompt = PromptState::None;
-                    self.startup_log_selection = None;
-                    return false;
-                }
                 MouseEventKind::Down(MouseButton::Left)
                 | MouseEventKind::Drag(MouseButton::Left)
                 | MouseEventKind::Up(MouseButton::Left)
@@ -5894,6 +5905,16 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let Some(target) = self.prompt_mouse_target(mouse.column, mouse.row) else {
+                    // The hit-test found nothing, so this press is either
+                    // outside the modal or on inert padding inside it. THIS is
+                    // the only place the click-outside dismissal may run:
+                    // gating it on "nothing was hit" makes it structurally
+                    // impossible to preempt a button, a row, a checkbox, a text
+                    // input, or a modal's deliberate blank misclick-safe
+                    // spacer. `dismiss_prompt_on_outside_click` returns whether
+                    // it dismissed; either way the click is consumed and the
+                    // app never exits here.
+                    self.dismiss_prompt_on_outside_click(&mouse);
                     return false;
                 };
                 if let Some(button) = ButtonPressedTarget::from_prompt_target(target) {
@@ -6281,7 +6302,7 @@ impl App {
         }
     }
 
-    fn resolve_config_reload_failed(&mut self, apply: bool) -> bool {
+    pub(super) fn resolve_config_reload_failed(&mut self, apply: bool) -> bool {
         let recover = matches!(
             &self.prompt,
             PromptState::ConfigReloadFailed {
@@ -7708,7 +7729,6 @@ not_a_real_action = ["x"]
 
     fn install_startup_command_logs_overlay(app: &mut App, items: usize) {
         app.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
-            area: Rect::new(10, 3, 80, 18),
             list: Rect::new(12, 5, 30, 12),
             body: Rect::new(44, 5, 40, 12),
             items,
@@ -15236,9 +15256,21 @@ cyan = "#00ffff"
 
     #[test]
     fn startup_command_logs_click_outside_closes_modal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
-        install_startup_command_logs_overlay(&mut app, 1);
+        // This modal's outside-click dismissal is no longer hand-rolled in
+        // `handle_prompt_mouse`; it comes from the shared engine, which reads
+        // the modal rect RECORDED DURING RENDER. So this test has to render:
+        // `install_startup_command_logs_overlay` alone leaves no rect and the
+        // engine (correctly) fails closed.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
 
@@ -15247,11 +15279,30 @@ cyan = "#00ffff"
 
     #[test]
     fn startup_command_logs_click_inside_does_not_close_modal() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
-        install_startup_command_logs_overlay(&mut app, 1);
+        // Renders for the same reason as the outside-click test above: without a
+        // recorded rect the dismissal engine cannot fire at all, so an
+        // install-only fixture would prove nothing about a click INSIDE.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rect = app
+            .overlay_layout
+            .frame
+            .get()
+            .expect("the rendered modal records its outer rect");
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 45, 6));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x + 1,
+            rect.y + 1,
+        ));
 
         assert!(matches!(app.prompt, PromptState::StartupCommandLogs(_)));
     }

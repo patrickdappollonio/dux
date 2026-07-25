@@ -5038,7 +5038,6 @@ impl App {
                     ))
                     .render(frame, close_area, &self.theme);
                 self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
-                    area,
                     list: list_inner,
                     body: body_inner,
                     items: visible_indices.len(),
@@ -8301,7 +8300,7 @@ impl App {
             area.width,
             3,
         );
-        self.clear_overlay_area(frame, bar_area);
+        self.clear_overlay_bar_area(frame, bar_area);
 
         let mut bottom_spans = vec![Span::raw(" ")];
         for (key, desc) in &[("Enter", "done"), ("Esc", "cancel")] {
@@ -8374,7 +8373,7 @@ impl App {
             area.width,
             total_h,
         );
-        self.clear_overlay_area(frame, bar_area);
+        self.clear_overlay_bar_area(frame, bar_area);
 
         // Split into input area (top) and list area (bottom).
         let [input_area, list_area] = Layout::default()
@@ -8502,7 +8501,28 @@ impl App {
     ///
     /// Fullscreen surfaces (the agent and terminal fullscreen overlays) want
     /// `app_bg` instead of `overlay_bg` and stay open-coded.
+    ///
+    /// This is also where the modal's outer rect is RECORDED for the
+    /// click-outside dismissal engine (`overlay_dismiss`): a modal rect is a
+    /// render-local value that is gone by the time a click arrives, so the one
+    /// chokepoint every modal already passes through is what stores it. Last
+    /// write wins, so a nested modal (painted after its parent) is the rect
+    /// that ends up stored — see [`OverlayMouseLayoutState::frame`].
+    ///
+    /// Use [`Self::clear_overlay_bar_area`] instead for a strip that is NOT a
+    /// modal of its own.
     fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
+        self.overlay_layout.frame.set(Some(area));
+        self.clear_overlay_bar_area(frame, area);
+    }
+
+    /// Paint `area` as a modal surface WITHOUT claiming it as the topmost
+    /// modal's outer rect. For sub-strips that live inside another surface (the
+    /// fullscreen log viewer's search bar, the agent pane's macro bar): they
+    /// are not dismissible modals, and recording them would hand the dismissal
+    /// engine a rect that is smaller than — or unrelated to — the modal the
+    /// user sees, turning clicks inside the real modal into dismissals.
+    fn clear_overlay_bar_area(&self, frame: &mut Frame, area: Rect) {
         Clear.render(area, frame.buffer_mut());
         frame
             .buffer_mut()
