@@ -30,6 +30,9 @@
 //! Once the plan resolves the server emits a `config.changed` event so any
 //! already-connected client refetches `/api/v1/bootstrap` and finds the pending
 //! screen. Clients that connect later simply read it out of their first bootstrap.
+//! DISMISSAL emits the same event, for the mirror-image reason: with two browsers
+//! open, the one that did not dismiss must be told to refetch, or its dialog would
+//! stay up long after the screen was settled everywhere else.
 
 use std::sync::{Arc, Mutex};
 
@@ -165,9 +168,21 @@ pub fn spawn_first_load_resolver(
                             // loudness, and it keeps "explicit failure over
                             // silent waiting" honest for an operator reading
                             // dux.log.
-                            dux_core::logger::warn(&format!(
-                                "[server] no what's-new screen this launch: {err}"
-                            ));
+                            //
+                            // The SEVERITY branches on the same `is_definitive()`
+                            // the response-code choice uses: a definitive answer
+                            // (GitHub simply has no release for this tag, e.g. a
+                            // locally built tagged binary) is expected and
+                            // unactionable, so it is info. Only a transient
+                            // failure (offline, timeout, rate limit) is a warning,
+                            // which keeps the warn stream meaning "look at this".
+                            let message =
+                                format!("[server] no what's-new screen this launch: {err}");
+                            if resolver_failure_is_actionable(err) {
+                                dux_core::logger::warn(&message);
+                            } else {
+                                dux_core::logger::info(&message);
+                            }
                         }
                         if plan.mark_seen {
                             mark_seen_logging_failure(&engine, &inputs.running).await;
@@ -177,6 +192,19 @@ pub fn spawn_first_load_resolver(
             }
         }
     });
+}
+
+/// Whether a startup-resolver fetch failure is worth an operator's attention (a
+/// `warn`) rather than a routine note (an `info`).
+///
+/// A DEFINITIVE failure is expected and unactionable: GitHub simply has no
+/// release for this tag, which is the normal shape of a locally built tagged
+/// binary. Nothing an operator does changes it, so warning about it only teaches
+/// them to ignore the warn stream. Only a TRANSIENT failure (offline, DNS,
+/// timeout, rate limit) is something they might act on. This is the same
+/// `is_definitive()` split the on-demand handler uses to choose 404 vs 502.
+fn resolver_failure_is_actionable(err: &release_notes::FetchError) -> bool {
+    !err.is_definitive()
 }
 
 /// Stamp the version, logging (never toasting) a failure. Called only from the
@@ -206,6 +234,13 @@ async fn dismiss_first_load(State(state): State<AppState>) -> Response {
     match state.engine.mark_version_seen(version).await {
         Ok(()) => {
             state.first_load.set_pending(None);
+            // Tell every OTHER connected client the screen is settled, mirroring
+            // the two emit sites in `spawn_first_load_resolver`. `config.changed`
+            // is the only event that drives a bootstrap refetch, so without this
+            // a second browser tab keeps its dialog open indefinitely after the
+            // first one dismissed — which contradicts the module contract above
+            // that a dismissal settles the screen everywhere.
+            state.event_bus.emit(crate::server::config_changed_event());
             StatusCode::OK.into_response()
         }
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
@@ -243,16 +278,9 @@ async fn get_release_notes(State(state): State<AppState>, headers: HeaderMap) ->
             .with_scope(scope.clone()),
     );
 
-    let api_base = state.first_load.api_base.clone();
-    let root = inputs.state_root.clone();
-    let running = inputs.running.clone();
-    let fetched = tokio::task::spawn_blocking(move || {
-        release_notes::load_release_notes_from(&api_base, &root, &running)
-    })
-    .await;
-
     // EVERY path below must post a final on the same key, or the client strands a
-    // Busy toast at Infinity.
+    // Busy toast at Infinity. Declared before the permit wait so the bail-out
+    // path below can resolve the Busy too.
     let final_status = |tone: &str, message: String| {
         state.engine.emit_status(
             WireStatus::new(tone, message)
@@ -260,6 +288,36 @@ async fn get_release_notes(State(state): State<AppState>, headers: HeaderMap) ->
                 .with_scope(scope.clone()),
         );
     };
+
+    // Bounded by `state.release_notes_semaphore`
+    // (`[server] release_notes_max_concurrency`), for the same reason
+    // `/files/tree` is bounded: the fetch below runs on a `spawn_blocking`
+    // thread, every browser tab can trigger it from the app menu, and a burst
+    // must not exhaust the server's blocking-thread pool. A request beyond the
+    // limit WAITS for a permit rather than being rejected — the notes are
+    // cached with a six-hour TTL, so a waiter usually answers from cache the
+    // moment it gets in. `None` means the config value is 0 (unlimited): skip
+    // the permit entirely.
+    let _permit = match &state.release_notes_semaphore {
+        Some(sem) => match Arc::clone(sem).acquire_owned().await {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let message =
+                    "the release-notes concurrency semaphore closed unexpectedly".to_string();
+                final_status("error", message.clone());
+                return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
+            }
+        },
+        None => None,
+    };
+
+    let api_base = state.first_load.api_base.clone();
+    let root = inputs.state_root.clone();
+    let running = inputs.running.clone();
+    let fetched = tokio::task::spawn_blocking(move || {
+        release_notes::load_release_notes_from(&api_base, &root, &running)
+    })
+    .await;
 
     match fetched {
         Ok(Ok(notes)) => {
@@ -308,6 +366,28 @@ mod tests {
         // Dismissal drops it, so a later bootstrap in the same launch is clean.
         state.set_pending(None);
         assert!(state.pending().is_none());
+    }
+
+    /// The resolver's failure log must not cry wolf: a definitive "GitHub has no
+    /// release for this tag" is the routine shape of a locally built tagged
+    /// binary and is unactionable, so it is an info. A transient failure is the
+    /// only one an operator might act on, so it stays a warning — which is what
+    /// keeps the warn stream meaning "look at this".
+    #[test]
+    fn only_a_transient_resolver_failure_is_worth_a_warning() {
+        let definitive = release_notes::FetchError::NoSuchRelease {
+            tag: "v9.9.9".to_string(),
+        };
+        assert!(
+            !resolver_failure_is_actionable(&definitive),
+            "an unpublished tag is expected and unactionable: it must log as info"
+        );
+
+        let transient = release_notes::FetchError::Transient(anyhow::anyhow!("connection refused"));
+        assert!(
+            resolver_failure_is_actionable(&transient),
+            "offline/timeout/rate-limit is retryable and worth an operator's eye"
+        );
     }
 
     /// The dev-build fallback is the one behavioural branch in `load_notes`. It

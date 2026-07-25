@@ -114,6 +114,16 @@ impl Server {
 /// no file at all, the true fresh-install shape) and `seed_last_seen` seeds the
 /// SQLite row a previous launch would have left behind.
 async fn boot(config: &str, seed_last_seen: Option<&str>, api_base: &str) -> Server {
+    boot_with(config, seed_last_seen, api_base, |p| p).await
+}
+
+/// `boot`, plus a hook to tune the router params (the concurrency cap below).
+async fn boot_with(
+    config: &str,
+    seed_last_seen: Option<&str>,
+    api_base: &str,
+    tune: impl FnOnce(RouterParams) -> RouterParams,
+) -> Server {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let paths = DuxPaths {
@@ -137,7 +147,7 @@ async fn boot(config: &str, seed_last_seen: Option<&str>, api_base: &str) -> Ser
     let app = build_app(
         handle,
         Router::new(),
-        RouterParams::plain_http().with_release_notes_api_base(api_base),
+        tune(RouterParams::plain_http().with_release_notes_api_base(api_base)),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -445,4 +455,83 @@ async fn an_unreachable_github_answers_502_and_never_empty_notes() {
     );
     let body = resp.text().await.expect("body");
     assert!(!body.trim().is_empty(), "an error must carry a reason");
+}
+
+/// The on-demand read is bounded by `[server] release_notes_max_concurrency`, and
+/// like the `/files/tree` cap it must WAIT for a permit rather than reject: at
+/// capacity 1, two concurrently fired reads must BOTH succeed, serialized onto the
+/// single permit. An unbounded handler would let a burst of clicks pile blocking
+/// HTTPS fetches onto the server's blocking-thread pool.
+#[tokio::test]
+async fn the_on_demand_read_at_capacity_one_waits_instead_of_rejecting() {
+    let github = FakeGithub::serving_release("v0.6.0");
+    let server = boot_with("", None, &github.base_url, |p| {
+        p.with_release_notes_max_concurrency(1)
+    })
+    .await;
+
+    let url = server.url("/api/v1/release-notes");
+    let (a, b) = tokio::join!(get_json(&url), get_json(&url));
+    assert_eq!(a.0, 200, "the first read must succeed: {}", a.1);
+    assert_eq!(
+        b.0, 200,
+        "the contended read must WAIT for the permit, never be refused: {}",
+        b.1
+    );
+    assert_eq!(a.1["version"], "v0.6.0");
+    assert_eq!(b.1["version"], "v0.6.0");
+}
+
+/// A dismissal in ONE browser tab must settle the screen in every other open tab.
+/// `config.changed` is the only event that drives a client bootstrap refetch, so
+/// without it a second tab keeps its dialog up indefinitely — which would break
+/// the promise that dismissal is shared. Proven with a receiver that is already
+/// subscribed to `/ws/events` BEFORE the dismissal is posted.
+#[tokio::test]
+async fn dismissing_tells_every_other_open_client_through_config_changed() {
+    use futures_util::{SinkExt, StreamExt};
+
+    let server = boot("", None, OFFLINE_BASE).await;
+    await_pending_screen(&server).await;
+
+    // The other tab, already listening on the coarse `config` topic — the topic
+    // `config.changed` is delivered on, and the one the real client holds.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws/events", server.addr))
+        .await
+        .expect("subscribe to /ws/events");
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        r#"{"subscribe":["config"]}"#.into(),
+    ))
+    .await
+    .expect("send the subscribe frame");
+
+    // Drain anything already in flight (the resolver's own emissions), so the
+    // frame asserted on below can only be the dismissal's.
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(50), ws.next()).await;
+    }
+
+    let resp = reqwest::Client::new()
+        .post(server.url("/api/v1/first-load/dismiss"))
+        .send()
+        .await
+        .expect("dismiss");
+    assert_eq!(resp.status(), 200);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw = false;
+    while !saw && Instant::now() < deadline {
+        if let Ok(Some(Ok(frame))) =
+            tokio::time::timeout(Duration::from_millis(200), ws.next()).await
+            && let Ok(text) = frame.into_text()
+        {
+            saw = text.contains("\"config.changed\"");
+        }
+    }
+    assert!(
+        saw,
+        "a dismissal must emit config.changed so an already-open tab refetches \
+         the bootstrap and closes its dialog"
+    );
 }

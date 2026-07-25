@@ -123,6 +123,23 @@ pub struct App {
     /// themselves come back here. `Some` means a fetch is in flight, which is
     /// what stops the palette command from starting a second one.
     pub(crate) notes_fetch_rx: Option<mpsc::Receiver<NotesFetched>>,
+    /// Notes that arrived while the user had a DIFFERENT modal open.
+    /// `PromptState` is a single slot, so showing the what's-new screen the
+    /// instant the fetch lands would discard whatever the user was typing. The
+    /// notes are parked here (with `pending_first_load` left un-consumed and the
+    /// version deliberately UNSTAMPED, per the stamp-on-dismissal contract) and
+    /// re-offered on a later tick once the prompt slot is free.
+    pub(crate) deferred_first_load_notes: Option<Box<dux_core::release_notes::ReleaseNotes>>,
+    /// "Someone is now explicitly waiting on the in-flight release-notes fetch."
+    ///
+    /// Shared with the worker thread, because the fetch's `NotesFetchPurpose` is
+    /// baked into its status closures by `move` at spawn time and cannot be
+    /// changed from here afterwards. `show-release-notes` sets it when it finds a
+    /// fetch already running, and both the failure closure and
+    /// `apply_notes_fetch` read it so the user's explicit request fails loudly
+    /// instead of being swallowed by the automatic path's silence. A fresh `Arc`
+    /// is minted per fetch, so the flag can never be stale.
+    pub(crate) notes_fetch_explicit_request: Arc<AtomicBool>,
     pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
     pub(crate) status: KeyedStatusController,
@@ -2221,6 +2238,8 @@ impl App {
             last_first_load_lines: 0,
             pending_first_load: None,
             notes_fetch_rx: None,
+            deferred_first_load_notes: None,
+            notes_fetch_explicit_request: Arc::new(AtomicBool::new(false)),
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
             status,

@@ -92,6 +92,15 @@ pub struct AppState {
     /// `ws_*_semaphore` connection caps, this bounds a small, fast unit of
     /// background work, not a long-lived connection.
     pub tree_list_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    /// Bounds concurrent release-notes fetches (`GET /api/v1/release-notes`)
+    /// (`[server] release_notes_max_concurrency`). Same shape and rationale as
+    /// [`tree_list_semaphore`]: the fetch is a blocking HTTPS round trip on a
+    /// `spawn_blocking` thread and every browser tab can ask for it, so a burst
+    /// must not exhaust the blocking pool. `None` when the configured value is
+    /// `0` (unlimited): the route skips acquiring a permit. A request beyond the
+    /// limit WAITS (`acquire_owned().await`) rather than being rejected — and
+    /// with the six-hour notes cache the waiter usually answers from cache.
+    pub release_notes_semaphore: Option<Arc<tokio::sync::Semaphore>>,
     /// The web-layer event bus: resource-change signals (`/ws/events`) plus the
     /// per-topic interest refcount that drives the changed-files poller.
     pub event_bus: Arc<EventBus>,
@@ -219,6 +228,12 @@ pub struct RouterParams {
     /// paths override it from config via
     /// [`with_tree_list_max_concurrency`]. `0` means unlimited.
     pub tree_list_max_concurrency: u32,
+    /// Cap on concurrent release-notes fetches
+    /// (`[server] release_notes_max_concurrency`). Defaults to
+    /// [`dux_core::config::DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY`]; the serve
+    /// paths override it from config via
+    /// [`with_release_notes_max_concurrency`]. `0` means unlimited.
+    pub release_notes_max_concurrency: u32,
     /// The IPs the server actually bound to. When non-empty, `build_app` wraps
     /// the router with the Host allowlist (DNS-rebinding defense). An empty vec
     /// disables the guard; used by tests that do not exercise the host guard.
@@ -252,6 +267,7 @@ impl RouterParams {
             max_websocket_tabs_per_agent: dux_core::config::DEFAULT_MAX_WEBSOCKET_TABS_PER_AGENT,
             search_index_max_files: dux_core::config::DEFAULT_SEARCH_INDEX_MAX_FILES,
             tree_list_max_concurrency: dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY,
+            release_notes_max_concurrency: dux_core::config::DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
             release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
@@ -281,6 +297,14 @@ impl RouterParams {
     /// configured value (not just the default) bounds `/files/tree`.
     pub fn with_tree_list_max_concurrency(mut self, max_concurrency: u32) -> Self {
         self.tree_list_max_concurrency = max_concurrency;
+        self
+    }
+
+    /// Set the concurrent release-notes-fetch cap from `[server]
+    /// release_notes_max_concurrency`. The serve paths call this so the
+    /// configured value (not just the default) bounds `/api/v1/release-notes`.
+    pub fn with_release_notes_max_concurrency(mut self, max_concurrency: u32) -> Self {
+        self.release_notes_max_concurrency = max_concurrency;
         self
     }
 
@@ -450,6 +474,14 @@ pub fn build_app(
         } else {
             Some(Arc::new(tokio::sync::Semaphore::new(
                 params.tree_list_max_concurrency as usize,
+            )))
+        },
+        // Same `0 = unlimited` convention as `tree_list_semaphore` above.
+        release_notes_semaphore: if params.release_notes_max_concurrency == 0 {
+            None
+        } else {
+            Some(Arc::new(tokio::sync::Semaphore::new(
+                params.release_notes_max_concurrency as usize,
             )))
         },
         event_bus,

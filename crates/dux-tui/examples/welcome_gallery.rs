@@ -286,27 +286,44 @@ fn flush(para: &mut String, out: &mut Vec<String>) {
 /// Removes the Markdown syntax the modal cannot render, keeping the readable
 /// text. Char-based throughout: release prose is full of multi-byte punctuation
 /// and byte slicing would panic mid-character.
+///
+/// Kept in lockstep with `dux_core::release_notes::strip_inline_markup`, including
+/// its FORWARD-ONLY `]` cursor: the naive rescan-per-`[` version is quadratic, and
+/// a known-quadratic copy must not sit in the tree. See that function for the
+/// invariants.
 fn strip_inline_markup(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
+    let mut next_close: Option<usize> = None;
+    let mut scan_pos = 0usize;
     while i < chars.len() {
         match chars[i] {
             '*' | '`' | '_' => {}
             '[' => {
                 // `[text](url)` — keep `text`, drop the target.
-                let mut j = i + 1;
-                let mut text = String::new();
-                while j < chars.len() && chars[j] != ']' {
-                    text.push(chars[j]);
-                    j += 1;
+                if next_close.is_none_or(|j| j < i) {
+                    // Resume where the scan left off, never at `i` alone.
+                    let mut j = scan_pos.max(i);
+                    while j < chars.len() && chars[j] != ']' {
+                        j += 1;
+                    }
+                    if j < chars.len() {
+                        next_close = Some(j);
+                        scan_pos = j + 1;
+                    } else {
+                        next_close = None;
+                        scan_pos = chars.len();
+                    }
                 }
-                if j < chars.len() && chars.get(j + 1) == Some(&'(') {
+                if let Some(j) = next_close
+                    && chars.get(j + 1) == Some(&'(')
+                {
                     let mut k = j + 2;
                     while k < chars.len() && chars[k] != ')' {
                         k += 1;
                     }
-                    out.push_str(&text);
+                    out.extend(chars[i + 1..j].iter());
                     i = k + 1;
                     continue;
                 }

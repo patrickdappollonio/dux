@@ -97,27 +97,56 @@ fn flush(para: &mut String, out: &mut Vec<String>) {
 /// text: `*`, `` ` ``, and `_` are dropped, and `[text](url)` keeps `text`.
 ///
 /// Char-based throughout (see [`parse_release_body`]).
+///
+/// The `]` lookahead is cached behind a FORWARD-ONLY cursor (`next_close` plus a
+/// never-decreasing `scan_pos`), so a run of unmatched `[` costs one pass over
+/// the string instead of one pass PER bracket. Semantics are unchanged: only the
+/// FIRST `]` after the bracket is considered, the next char must be `(` for it to
+/// count as a link, and anything else emits a literal `[`.
 fn strip_inline_markup(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
+    // The first `]` at or after `scan_pos`, and how far the `]` scan has reached.
+    // `scan_pos` never decreases, which is what bounds the total scanning work to
+    // O(n) no matter how many unmatched brackets appear or how far away the `]`
+    // sits.
+    let mut next_close: Option<usize> = None;
+    let mut scan_pos = 0usize;
     while i < chars.len() {
         match chars[i] {
             '*' | '`' | '_' => {}
             '[' => {
                 // `[text](url)` — keep `text`, drop the target.
-                let mut j = i + 1;
-                let mut text = String::new();
-                while j < chars.len() && chars[j] != ']' {
-                    text.push(chars[j]);
-                    j += 1;
+                if next_close.is_none_or(|j| j < i) {
+                    // Resume from wherever the scan left off; never restart at
+                    // `i` alone, or the work becomes quadratic again. Anything
+                    // between the last known `]` and `i` is already behind the
+                    // bracket, so skipping it cannot change the answer.
+                    let mut j = scan_pos.max(i);
+                    while j < chars.len() && chars[j] != ']' {
+                        j += 1;
+                    }
+                    if j < chars.len() {
+                        next_close = Some(j);
+                        scan_pos = j + 1;
+                    } else {
+                        // No `]` remains anywhere; the cursor parks at the end so
+                        // every later bracket resolves in constant time.
+                        next_close = None;
+                        scan_pos = chars.len();
+                    }
                 }
-                if j < chars.len() && chars.get(j + 1) == Some(&'(') {
+                if let Some(j) = next_close
+                    && chars.get(j + 1) == Some(&'(')
+                {
                     let mut k = j + 2;
                     while k < chars.len() && chars[k] != ')' {
                         k += 1;
                     }
-                    out.push_str(&text);
+                    // Materialized only for a real link, so the total text copied
+                    // is bounded by the input: a match jumps `i` past `k`.
+                    out.extend(chars[i + 1..j].iter());
                     i = k + 1;
                     continue;
                 }
@@ -674,6 +703,99 @@ mod tests {
         // body, and the important property — no panic, no byte slicing — holds.
         assert_eq!(strip_inline_markup("[t]("), "t");
         assert_eq!(strip_inline_markup("see [t](http and more"), "see t");
+    }
+
+    /// The ORIGINAL quadratic `strip_inline_markup`, kept verbatim in the tests
+    /// as the byte-identity oracle for the cached-cursor rewrite. It rescans
+    /// forward for `]` from scratch at every `[`, which is exactly the cost the
+    /// rewrite removes; the OUTPUT must stay the same character for character.
+    fn strip_inline_markup_reference(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '*' | '`' | '_' => {}
+                '[' => {
+                    let mut j = i + 1;
+                    let mut text = String::new();
+                    while j < chars.len() && chars[j] != ']' {
+                        text.push(chars[j]);
+                        j += 1;
+                    }
+                    if j < chars.len() && chars.get(j + 1) == Some(&'(') {
+                        let mut k = j + 2;
+                        while k < chars.len() && chars[k] != ')' {
+                            k += 1;
+                        }
+                        out.push_str(&text);
+                        i = k + 1;
+                        continue;
+                    }
+                    out.push('[');
+                }
+                c => out.push(c),
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn stripping_markup_is_byte_identical_to_the_pre_cursor_implementation() {
+        // Every shape the cached forward cursor could plausibly disagree on: a
+        // well-formed link, brackets nested inside a link's text, unmatched `[`
+        // runs with no `]` at all, many `[` resolved by ONE late `]` that is not
+        // a link, many `[` followed by `](` with no closing `)`, a `]` before
+        // any `[`, adjacent links, and the real release body fixture.
+        let cases: Vec<String> = vec![
+            String::new(),
+            "no markup at all".to_string(),
+            "[text](https://x.dev)".to_string(),
+            "a [nested [inner] text](https://x.dev) b".to_string(),
+            "[[[[[".to_string(),
+            "[a[b]c".to_string(),
+            "[text] not a link".to_string(),
+            "] stray close [then](url)".to_string(),
+            "[a](1)[b](2)[c](3)".to_string(),
+            "[t](".to_string(),
+            "see [t](http and more".to_string(),
+            "**環境変数** ░██ `コード` [リンク](https://x.dev) 🦆_ok_".to_string(),
+            "[".repeat(64) + "]",
+            "[".repeat(64) + "](",
+            "[".repeat(64) + "](x) tail",
+            "[".repeat(64),
+            format!("{}]{}", "[".repeat(32), "[".repeat(32)),
+            SAMPLE.to_string(),
+        ];
+        for case in &cases {
+            assert_eq!(
+                strip_inline_markup(case),
+                strip_inline_markup_reference(case),
+                "output drifted from the reference for {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stripping_markup_is_linear_not_quadratic() {
+        // A run of unmatched `[` is the adversarial shape: the old code rescanned
+        // to the end of the string for every one of them. Measured at 64,000
+        // characters in an UNOPTIMIZED test build (which is how this test runs):
+        // 27.7s before the forward cursor, 2.8ms after; 1,000,000 characters now
+        // take 45ms. In release it is 0.45ms and 7ms. The 300ms bound is ~100x
+        // the measured linear time — generous enough not to flake on slow CI —
+        // and ~90x under the old quadratic time, which blew past it by four
+        // orders of magnitude.
+        let input = "[".repeat(64_000);
+        let start = std::time::Instant::now();
+        let out = strip_inline_markup(&input);
+        let elapsed = start.elapsed();
+        assert_eq!(out.chars().count(), 64_000, "every `[` is kept literally");
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "strip_inline_markup looks quadratic again: 64k unmatched brackets took {elapsed:?}"
+        );
     }
 
     #[test]

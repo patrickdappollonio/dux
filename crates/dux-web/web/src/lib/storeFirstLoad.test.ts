@@ -47,6 +47,11 @@ const SAMPLE_NOTES = {
 let bootstrapBody: Bootstrap = makeBootstrap()
 let dismissCalls = 0
 let dismissShouldFail = false
+// Milliseconds the dismiss POST takes to answer. Non-zero lets a test order the
+// dismissal AFTER a `config.changed` refetch, which is the only way to actually
+// land inside the reopen race (with an instantly-resolving mock the POST's
+// `.then` always wins).
+let dismissDelayMs = 0
 let notesCalls = 0
 let notesShouldFail = false
 
@@ -64,6 +69,9 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   if (u.includes("/api/v1/first-load/dismiss")) {
     dismissCalls++
     expect(init?.method).toBe("POST")
+    if (dismissDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, dismissDelayMs))
+    }
     if (dismissShouldFail) {
       return {
         ok: false,
@@ -133,6 +141,7 @@ beforeEach(() => {
   bootstrapBody = makeBootstrap()
   dismissCalls = 0
   dismissShouldFail = false
+  dismissDelayMs = 0
   notesCalls = 0
   notesShouldFail = false
   toastError.mockClear()
@@ -208,24 +217,98 @@ describe("the automatic first-load offer", () => {
     expect(mod.getSnapshot().firstLoad).toBeNull()
   })
 
-  it("dismisses on close, and a later refetch cannot pop it back up", async () => {
+  it("dismisses on close, and a refetch racing the in-flight dismissal cannot pop it back up", async () => {
+    // A slow dismissal, so the refetch below genuinely lands BEFORE the POST
+    // answers. With an instant mock the POST's `.then` always wins and the race
+    // window never opens, which is exactly how this test used to pass vacuously.
+    dismissDelayMs = 50
     bootstrapBody = makeBootstrap({ pending_first_load: welcomePending })
     const mod = await loadStore()
     await vi.waitFor(() => expect(mod.getSnapshot().firstLoad).not.toBeNull())
 
     mod.closeFirstLoad()
     expect(mod.getSnapshot().firstLoad).toBeNull()
+
+    // THE RACE, exercised for real: fire `config.changed` WITHOUT first awaiting
+    // the dismiss POST, so the refetch lands while the write is still in flight
+    // and still carries the (not yet cleared) pending screen. The re-open guard
+    // must already be set synchronously, or the just-dismissed dialog reopens
+    // over the user's work. Awaiting the POST first would sidestep the very
+    // window this test exists to cover.
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    expect(mod.getSnapshot().firstLoad).toBeNull()
+
     await vi.waitFor(() => expect(dismissCalls).toBe(1))
     await vi.waitFor(() =>
       expect(mod.getSnapshot().firstLoadDismissed).toBe(true),
     )
-
-    // A `config.changed` refetch races the server's clear and still carries the
-    // pending screen. It must NOT reappear over the user's work.
-    mod.eventsSocket.onEvent({ event: "config.changed" })
-    await vi.waitFor(() => expect(mod.getSnapshot().bootstrap).not.toBeNull())
+    // Let the refetch settle, then confirm the screen stayed closed throughout.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mod.getSnapshot().bootstrap).not.toBeNull()
     expect(mod.getSnapshot().firstLoad).toBeNull()
     expect(dismissCalls).toBe(1)
+  })
+
+  // Fix 10's client half: dismissing in ANOTHER browser tab makes the server emit
+  // `config.changed` with a now-null pending screen. This tab must CLOSE its
+  // automatic dialog on that, or it stays up forever after the screen was settled.
+  it("closes an open automatic screen when a refetch shows the server cleared it", async () => {
+    bootstrapBody = makeBootstrap({ pending_first_load: welcomePending })
+    const mod = await loadStore()
+    await vi.waitFor(() => expect(mod.getSnapshot().firstLoad).not.toBeNull())
+    expect(mod.getSnapshot().firstLoad?.automatic).toBe(true)
+
+    // The other tab dismissed: the server cleared its pending screen and emitted.
+    bootstrapBody = makeBootstrap()
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+
+    await vi.waitFor(() => expect(mod.getSnapshot().firstLoad).toBeNull())
+    // Closing on someone else's dismissal must not post a SECOND dismissal.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(dismissCalls).toBe(0)
+  })
+
+  it("never yanks away an ON-DEMAND screen the user opened themselves", async () => {
+    const mod = await loadStore()
+    mod.openWelcomeScreen()
+    expect(mod.getSnapshot().firstLoad?.automatic).toBe(false)
+
+    // A refetch with no pending screen (the steady state) must leave a dialog the
+    // user deliberately opened alone.
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(mod.getSnapshot().firstLoad?.screen).toBe("welcome")
+    expect(mod.getSnapshot().firstLoad?.automatic).toBe(false)
+  })
+
+  // Fix 9: the offer is made only from `applyBootstrap`, and it bails when a
+  // dialog is already up. Without a retry on close, a real pending screen that
+  // arrived while the user had an on-demand dialog open is dropped for good.
+  it("re-offers a pending screen that arrived while an on-demand dialog was open", async () => {
+    const mod = await loadStore()
+
+    // The user opens the welcome screen from the app menu themselves.
+    mod.openWelcomeScreen()
+    expect(mod.getSnapshot().firstLoad?.automatic).toBe(false)
+
+    // Meanwhile the server's resolver publishes the real what's-new screen. The
+    // offer is dropped, because a dialog is up.
+    bootstrapBody = makeBootstrap({ pending_first_load: whatsNewPending })
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() =>
+      expect(mod.getSnapshot().bootstrap?.pending_first_load).toBeTruthy(),
+    )
+    expect(mod.getSnapshot().firstLoad?.automatic).toBe(false)
+
+    // Closing the on-demand dialog dismisses nothing, and the dropped offer is
+    // retried — so this tab still gets its screen.
+    mod.closeFirstLoad()
+    await vi.waitFor(() =>
+      expect(mod.getSnapshot().firstLoad?.screen).toBe("whats_new"),
+    )
+    expect(mod.getSnapshot().firstLoad?.automatic).toBe(true)
+    // The on-demand close posted no dismissal, and the re-offer did not either.
+    expect(dismissCalls).toBe(0)
   })
 
   it("does not re-offer over an already-open dialog, so a refetch cannot reset the user's scroll", async () => {

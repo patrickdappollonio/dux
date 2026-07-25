@@ -57,5 +57,8 @@ state), `dux.log` (logs, the first place to look when something misbehaves), and
 
 - [Configuration](/docs/configuration): the config file, where it lives, and how
   it expands environment variables.
+- [First run & what's new](/docs/first-run-and-whats-new): the welcome screen a
+  fresh install gets, the what's-new screen after an update, and how to turn either
+  automatic screen off.
 - [Managing Themes](/docs/themes): switch the look, or build your own.
 - [Custom CLI Agents](/docs/custom-agents): teach dux to drive any CLI you like.

@@ -186,6 +186,24 @@ See an agent going down the wrong path? Fork it. dux creates a new worktree with
 
 Point dux at any folder. A git repository joins the workspace as-is; a plain folder gets an offer to become one: dux runs `git init`, seeds a commented starter `.gitignore` for the dependency and build directories it finds (`node_modules`, `target`, and friends), creates an empty initial commit, and registers the project. Your existing files are left untouched (untracked). Folders inside an existing repository are refused with a pointer to the repository root, so projects never nest inside each other's history. In the web UI the picker can even create a new folder first, which makes starting a brand-new project from a phone entirely shell-free.
 
+### First Run and What's New
+
+The first time dux launches on a machine, it opens a one-time welcome screen instead of an empty sidebar: what a project is, what an agent is (its own git worktree, its own branch-style name), the fact that any AI CLI can be a provider, and the real path to your config file on this machine, which was written fully commented so you never have to leave it. Two buttons: add your first project, or go read the website.
+
+After an update, dux shows a **What's new** screen for the release you just moved to: that release's headline, its opening paragraphs, and its feature titles, plus a button to the full notes on GitHub. dux asks GitHub for the tag it is actually running, not for whatever is newest, so you never get shown features you don't have. The notes come from GitHub's public API at launch, unauthenticated and on a background worker, and are cached on disk next to your config. If the fetch can't get through, dux shows nothing and stays quiet: a failure that might clear up (offline, timeout, rate limit) leaves the version unrecorded, so the notes are waiting on a later launch that has a network. A development build never auto-shows the what's-new screen, since there's no published release to describe.
+
+Closed one too fast? Both screens are reachable on demand: `show-welcome-screen` and `show-release-notes` in the command palette, or **Welcome screen…** and **What's new…** in the web UI's cog menu. The version you've seen is stored once and shared, so dismissing on either surface settles it for both.
+
+Both automatic screens are opt-out:
+
+```toml
+[ui]
+disable_automated_welcome_screen = false  # suppress the first-run welcome screen
+disable_release_notes            = false  # suppress the what's-new screen and the launch-time fetch
+```
+
+Each one suppresses only the *automatic* appearance. `disable_release_notes` additionally skips the startup network request entirely. Opening either screen deliberately still works, and the release-notes command may still fetch, because you asked for it. In the web UI both are rows in the cog menu's **Preferences…** dialog, phrased the positive way round.
+
 ### Command Palette
 
 Press the palette key and you get fuzzy-searchable access to every action in dux, including features that don't have dedicated keybindings. Sort agents, toggle UI elements, open the resource monitor, rename sessions, edit macros, and more. If you forget a keybinding, just open the palette.

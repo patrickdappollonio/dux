@@ -218,6 +218,10 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         last_first_load_lines: 0,
         pending_first_load: None,
         notes_fetch_rx: None,
+        deferred_first_load_notes: None,
+        notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )),
         fullscreen_overlay: FullscreenOverlay::None,
         startup_log_viewer: None,
         status: KeyedStatusController::with_clear_after(std::time::Duration::ZERO),

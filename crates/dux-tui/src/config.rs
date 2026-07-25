@@ -747,6 +747,22 @@ fn config_schema() -> Vec<ConfigEntry> {
             )),
             value_fn: |c| FieldValue::Usize(c.server.tree_list_max_concurrency as usize),
         },
+        ConfigEntry::Field {
+            key: "release_notes_max_concurrency",
+            comment: Some(CommentSource::Static(
+                "# Maximum number of release-notes fetches the web server may run at once.\n\
+                 # The app menu's \"What's new...\" entry asks GitHub for this version's\n\
+                 # release notes, and that is a blocking HTTPS round trip run off the\n\
+                 # server's async reactor, so a burst of clicks (or several browser tabs\n\
+                 # asking at the same time) could otherwise tie up the blocking-thread pool\n\
+                 # that git operations and file reads also use. A request beyond the limit\n\
+                 # waits for a free slot rather than being refused, and because the notes\n\
+                 # are cached for six hours the waiter usually answers straight from cache.\n\
+                 # Small on purpose: every caller gets the same answer. Set to 0 to disable\n\
+                 # the bound entirely.",
+            )),
+            value_fn: |c| FieldValue::Usize(c.server.release_notes_max_concurrency as usize),
+        },
         ConfigEntry::Blank,
         ConfigEntry::Keys,
         ConfigEntry::Blank,
@@ -1341,6 +1357,7 @@ mod tests {
         assert!(rendered.contains("max_websocket_tab_connections = 64"));
         assert!(rendered.contains("search_index_max_files = 50000"));
         assert!(rendered.contains("tree_list_max_concurrency = 8"));
+        assert!(rendered.contains("release_notes_max_concurrency = 2"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that

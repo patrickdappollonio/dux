@@ -3538,6 +3538,10 @@ mod tests {
             last_first_load_lines: 0,
             pending_first_load: None,
             notes_fetch_rx: None,
+            deferred_first_load_notes: None,
+            notes_fetch_explicit_request: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
             status: crate::statusline::KeyedStatusController::with_clear_after(
@@ -4626,6 +4630,30 @@ mod tests {
         assert!(
             app.status.message().contains("Web server stopped"),
             "resume should arrive with the agents-kept-running message"
+        );
+
+        // The first-load gate is pinned INSIDE the `SessionRestore::Restore`
+        // guard. `test_engine_with_sessions` opens a brand-new store, so this
+        // engine has NO `last_seen_version` — the fresh-install shape that would
+        // otherwise show the welcome screen (and, on an upgrade, dispatch the
+        // release-notes fetch). A web-server→TUI flip must show neither, and must
+        // not stamp the version: the user may still be looking at that screen in
+        // the browser, and stamping here would consume it for both surfaces.
+        // These assertions pass today; they fail the moment `begin_first_load`
+        // moves out of the guard.
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a resume must not open a first-load screen, got {:?}",
+            app.prompt
+        );
+        assert!(
+            app.pending_first_load.is_none(),
+            "a resume must not dispatch the release-notes fetch"
+        );
+        assert_eq!(
+            app.engine.session_store.last_seen_version().unwrap(),
+            None,
+            "a resume must not stamp the running version as seen"
         );
     }
 

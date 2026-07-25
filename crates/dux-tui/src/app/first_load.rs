@@ -713,6 +713,52 @@ pub(crate) struct NotesFetched {
     pub(crate) purpose: NotesFetchPurpose,
 }
 
+/// The keyed busy→final status for one release-notes fetch.
+///
+/// Split out of [`App::spawn_release_notes_fetch`] so the failure branch is
+/// testable without a network round trip, and so the ESCALATION flag has one
+/// documented reader. `explicit_waiting` is the shared
+/// `App::notes_fetch_explicit_request`: the closure below is invoked inside the
+/// worker at genuine failure time (`op.resolve`), so it sees a request that
+/// arrived after the spawn.
+fn notes_status_op(
+    purpose: NotesFetchPurpose,
+    explicit_waiting: Arc<AtomicBool>,
+) -> dux_core::engine::StatusOp<ReleaseNotes, dux_core::release_notes::FetchError> {
+    dux_core::engine::status_op("Fetching the dux release notes from GitHub...")
+        .on_success(|_: &ReleaseNotes| {
+            // The modal IS the visible result, so no second message.
+            dux_core::engine::Final::clear()
+        })
+        // The asymmetry below is DELIBERATE; do not "fix" the quiet branch into
+        // an error. CLAUDE.md's "prefer explicit failure over silent waiting"
+        // governs operations the USER initiated. An unsolicited background
+        // version check is not one: raising an error status here would put a
+        // failure toast on screen at every launch on a plane, a train, a
+        // locked-down network, or whenever GitHub is having a bad hour — pure
+        // noise about something the user never asked for and cannot act on. The
+        // core gate already guarantees a retry (a transient failure does NOT
+        // mark the version seen, so the notes reappear on a launch with
+        // network), and the reason is always written to dux.log. The explicit
+        // `show-release-notes` path fails loudly, which is where the tenet
+        // actually applies — INCLUDING when the user asked while an automatic
+        // fetch was already running, which is what `explicit_waiting` carries.
+        .on_failure(
+            move |err: &dux_core::release_notes::FetchError| match purpose {
+                NotesFetchPurpose::Automatic
+                    if !explicit_waiting.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
+                    dux_core::engine::Final::clear()
+                }
+                // The user asked, so say what happened.
+                _ => dux_core::engine::Final::error(format!(
+                    "Could not load the dux release notes: {err}. Check your network and try the \
+                     show-release-notes command again."
+                )),
+            },
+        )
+}
+
 impl App {
     /// Record the running version as seen.
     ///
@@ -787,39 +833,29 @@ impl App {
         let worker_tx = self.engine.worker_tx.clone();
         let (tx, rx) = mpsc::channel();
         self.notes_fetch_rx = Some(rx);
+        // A fresh flag per fetch, so a request awaited on an earlier fetch can
+        // never escalate this one. An EXPLICIT fetch starts already-escalated.
+        let explicit_waiting = Arc::new(AtomicBool::new(purpose == NotesFetchPurpose::Explicit));
+        self.notes_fetch_explicit_request = Arc::clone(&explicit_waiting);
 
-        let op = dux_core::engine::status_op("Fetching the dux release notes from GitHub...")
-            .on_success(|_: &ReleaseNotes| {
-                // The modal IS the visible result, so no second message.
-                dux_core::engine::Final::clear()
-            })
-            // The asymmetry below is DELIBERATE; do not "fix" the quiet branch into
-            // an error. CLAUDE.md's "prefer explicit failure over silent waiting"
-            // governs operations the USER initiated. An unsolicited background
-            // version check is not one: raising an error status here would put a
-            // failure toast on screen at every launch on a plane, a train, a
-            // locked-down network, or whenever GitHub is having a bad hour — pure
-            // noise about something the user never asked for and cannot act on. The
-            // core gate already guarantees a retry (a transient failure does NOT
-            // mark the version seen, so the notes reappear on a launch with
-            // network), and the reason is always written to dux.log. The explicit
-            // `show-release-notes` path fails loudly, which is where the tenet
-            // actually applies.
-            .on_failure(move |err: &dux_core::release_notes::FetchError| match purpose {
-                NotesFetchPurpose::Automatic => dux_core::engine::Final::clear(),
-                // The user asked, so say what happened.
-                NotesFetchPurpose::Explicit => dux_core::engine::Final::error(format!(
-                    "Could not load the dux release notes: {err}. Check your network and try the \
-                     show-release-notes command again."
-                )),
-            });
+        let op = notes_status_op(purpose, Arc::clone(&explicit_waiting));
         let pending = op.pending_status();
 
         thread::spawn(move || {
             let result = dux_core::release_notes::load_release_notes(&root, &version);
             let outcome = dux_core::release_notes::outcome_of(&result);
             if let Err(err) = &result {
-                logger::warn(&format!("release-notes fetch failed: {err}"));
+                // The automatic path is deliberately silent on screen, so this
+                // log line is the operator's only signal — which means the warn
+                // stream must stay actionable. A definitive `NoSuchRelease` is
+                // routine (a dev, local, or CI-tagged build simply has no
+                // published release) and nothing can be done about it.
+                let line = format!("release-notes fetch failed: {err}");
+                if err.is_definitive() {
+                    logger::info(&line);
+                } else {
+                    logger::warn(&line);
+                }
             }
             let resolved = op.resolve(&result);
             let _ = worker_tx.send(WorkerEvent::StatusOpCompleted { resolved });
@@ -836,6 +872,10 @@ impl App {
     /// Fold a finished release-notes fetch into the UI. Called from
     /// `drain_events` each tick.
     pub(crate) fn drain_notes_fetch(&mut self) {
+        // A fetch that landed while the user had another modal open parked its
+        // notes instead of stealing the slot. `drain_events` calls this every
+        // tick, so this is the re-offer point.
+        self.offer_deferred_first_load();
         let Some(rx) = self.notes_fetch_rx.as_ref() else {
             return;
         };
@@ -846,11 +886,60 @@ impl App {
         self.apply_notes_fetch(fetched);
     }
 
+    /// Re-offer a first-load screen whose notes landed while the user had another
+    /// modal open. A no-op until the prompt slot is free, and it never refetches:
+    /// the notes were kept, and the plan was never consumed.
+    pub(crate) fn offer_deferred_first_load(&mut self) {
+        if !matches!(self.prompt, PromptState::None) || self.deferred_first_load_notes.is_none() {
+            return;
+        }
+        let Some(notes) = self.deferred_first_load_notes.take() else {
+            return;
+        };
+        let Some(plan) = self.pending_first_load.take() else {
+            // The plan was consumed elsewhere (a reload, or a screen the user
+            // opened by hand), so there is nothing left to offer.
+            return;
+        };
+        // The notes are in hand, which is exactly `NotesOutcome::Fetched`; folding
+        // it through core keeps the stamp decision in one place.
+        let plan =
+            dux_core::first_load::after_fetch(plan, dux_core::first_load::NotesOutcome::Fetched);
+        self.prompt = PromptState::FirstLoad(FirstLoadPrompt::whats_new(*notes, plan.mark_seen));
+    }
+
     /// The pure-ish half of [`Self::drain_notes_fetch`], so the fold is testable
     /// without a worker thread.
     pub(crate) fn apply_notes_fetch(&mut self, fetched: NotesFetched) {
-        match fetched.purpose {
+        // An explicit request that arrived while THIS (automatic) fetch was
+        // already running escalates it: the user asked, so the result is theirs
+        // to see and its failure is theirs to hear. The flag is the same one the
+        // worker's failure closure read.
+        let purpose = if self
+            .notes_fetch_explicit_request
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            NotesFetchPurpose::Explicit
+        } else {
+            fetched.purpose
+        };
+        match purpose {
             NotesFetchPurpose::Automatic => {
+                // PEEK, do not take: a modal the user opened during the fetch
+                // window owns the single `PromptState` slot, and replacing it
+                // would throw away in-progress input. Park the notes with the
+                // plan still pending and stamp NOTHING — the stamp belongs to a
+                // dismissal of a screen that was actually shown, and stamping a
+                // never-shown screen would discard this version's notes forever.
+                if !matches!(self.prompt, PromptState::None)
+                    && self.pending_first_load.is_some()
+                    && fetched.result.is_ok()
+                {
+                    if let Ok(notes) = fetched.result {
+                        self.deferred_first_load_notes = Some(Box::new(notes));
+                    }
+                    return;
+                }
                 let plan = self.pending_first_load.take();
                 let Some(plan) = plan else {
                     // The plan was consumed elsewhere (a reload, or a screen the
@@ -903,6 +992,13 @@ impl App {
     /// a development build to the newest release.
     pub(crate) fn show_release_notes_command(&mut self) -> Result<()> {
         if self.notes_fetch_rx.is_some() {
+            // The running fetch may have been dispatched as AUTOMATIC, whose
+            // failure branch is silent. Tell it that someone is waiting, so a
+            // transient failure reports instead of silently dropping this
+            // request. The flag is shared with the worker thread, which is the
+            // only way to reach a decision already baked in by `move` at spawn.
+            self.notes_fetch_explicit_request
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             self.set_info(
                 "Already loading the dux release notes from GitHub. They will open when they arrive.",
             );
@@ -1492,6 +1588,182 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some(dux_core::display_version())
+        );
+    }
+
+    // ── a late fetch must not clobber a modal the user opened ────────────
+
+    /// The palette, with a half-typed command in it: the shape of the
+    /// in-progress input a late fetch would otherwise throw away. `PromptState`
+    /// is a single slot, so writing the what's-new screen into it destroys this.
+    fn half_typed_palette() -> PromptState {
+        let mut input = TextInput::new();
+        input.insert_char('n');
+        input.insert_char('e');
+        input.insert_char('w');
+        PromptState::Command { input, selected: 0 }
+    }
+
+    fn palette_text(prompt: &PromptState) -> Option<String> {
+        match prompt {
+            PromptState::Command { input, .. } => Some(input.text.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_late_fetch_never_replaces_a_modal_the_user_opened() {
+        let mut app = test_app(default_bindings());
+        app.pending_first_load = Some(FirstLoadPlan {
+            screen: FirstLoad::WhatsNew,
+            mark_seen: true,
+        });
+        app.prompt = half_typed_palette();
+
+        app.apply_notes_fetch(NotesFetched {
+            result: Ok(sample_notes()),
+            outcome: NotesOutcome::Fetched,
+            purpose: NotesFetchPurpose::Automatic,
+        });
+
+        assert_eq!(
+            palette_text(&app.prompt).as_deref(),
+            Some("new"),
+            "the user's in-progress modal must survive the fetch landing"
+        );
+        assert_eq!(
+            app.engine.session_store.last_seen_version().unwrap(),
+            None,
+            "nothing was shown, so nothing may be stamped"
+        );
+        assert!(
+            app.pending_first_load.is_some(),
+            "the plan must stay pending so the screen can still be offered"
+        );
+        assert!(
+            app.deferred_first_load_notes.is_some(),
+            "the fetched notes must be stashed so no refetch is needed"
+        );
+    }
+
+    #[test]
+    fn a_deferred_screen_is_offered_once_the_users_modal_closes() {
+        let mut app = test_app(default_bindings());
+        app.pending_first_load = Some(FirstLoadPlan {
+            screen: FirstLoad::WhatsNew,
+            mark_seen: true,
+        });
+        app.prompt = half_typed_palette();
+        app.apply_notes_fetch(NotesFetched {
+            result: Ok(sample_notes()),
+            outcome: NotesOutcome::Fetched,
+            purpose: NotesFetchPurpose::Automatic,
+        });
+
+        // A later tick with the modal still open changes nothing.
+        app.drain_notes_fetch();
+        assert!(palette_text(&app.prompt).is_some(), "still the palette");
+
+        // The user closes their modal; the next tick offers the screen.
+        app.prompt = PromptState::None;
+        app.drain_notes_fetch();
+        assert!(
+            matches!(app.prompt, PromptState::FirstLoad(_)),
+            "the deferred screen must be offered on a later tick, got {:?}",
+            app.prompt
+        );
+        assert!(
+            app.deferred_first_load_notes.is_none() && app.pending_first_load.is_none(),
+            "the deferred state is consumed once the screen is on screen"
+        );
+        assert_eq!(
+            app.engine.session_store.last_seen_version().unwrap(),
+            None,
+            "the stamp still waits for the dismissal"
+        );
+
+        app.dismiss_first_load_prompt();
+        assert_eq!(
+            app.engine
+                .session_store
+                .last_seen_version()
+                .unwrap()
+                .as_deref(),
+            Some(dux_core::display_version()),
+            "the stamp lands only on dismissal"
+        );
+    }
+
+    // ── an explicit request must fail loudly ─────────────────────────────
+
+    #[test]
+    fn an_explicit_request_escalates_an_in_flight_automatic_fetch() {
+        // The in-flight fetch's failure closure was built for the AUTOMATIC path,
+        // which is silent. A user who asks while it is running must still be told
+        // when it fails: the escalation flag is shared with the running thread.
+        let flag = Arc::new(AtomicBool::new(false));
+        let op = notes_status_op(NotesFetchPurpose::Automatic, flag.clone());
+        flag.store(true, Ordering::SeqCst);
+        let resolved = op.resolve(&Err(dux_core::release_notes::FetchError::Transient(
+            anyhow::anyhow!("connection refused"),
+        )));
+        match resolved.outcome {
+            dux_core::engine::Final::Message { tone, text } => {
+                assert_eq!(tone, dux_core::statusline::StatusTone::Error);
+                assert!(text.contains("connection refused"), "{text}");
+            }
+            other => panic!("an escalated failure must surface an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unescalated_automatic_failure_stays_silent() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let op = notes_status_op(NotesFetchPurpose::Automatic, flag);
+        let resolved = op.resolve(&Err(dux_core::release_notes::FetchError::Transient(
+            anyhow::anyhow!("offline"),
+        )));
+        assert_eq!(
+            resolved.outcome,
+            dux_core::engine::Final::clear(),
+            "an unsolicited background check must not toast a failure"
+        );
+    }
+
+    #[test]
+    fn the_explicit_command_marks_an_in_flight_fetch_as_awaited() {
+        let mut app = test_app(default_bindings());
+        // Stand in for a fetch in flight: a channel whose sender is still alive.
+        let (tx, rx) = mpsc::channel::<NotesFetched>();
+        app.notes_fetch_rx = Some(rx);
+        app.show_release_notes_command().expect("command runs");
+        assert!(
+            app.notes_fetch_explicit_request.load(Ordering::SeqCst),
+            "the running fetch must learn that someone is now waiting on it"
+        );
+        drop(tx);
+    }
+
+    #[test]
+    fn an_escalated_automatic_fetch_takes_the_explicit_path() {
+        let mut app = test_app(default_bindings());
+        app.pending_first_load = Some(FirstLoadPlan {
+            screen: FirstLoad::WhatsNew,
+            mark_seen: true,
+        });
+        app.notes_fetch_explicit_request
+            .store(true, Ordering::SeqCst);
+        app.apply_notes_fetch(NotesFetched {
+            result: Ok(sample_notes()),
+            outcome: NotesOutcome::Fetched,
+            purpose: NotesFetchPurpose::Automatic,
+        });
+        assert!(matches!(app.prompt, PromptState::FirstLoad(_)));
+        app.dismiss_first_load_prompt();
+        assert_eq!(
+            app.engine.session_store.last_seen_version().unwrap(),
+            None,
+            "an explicit look must not consume a pending upgrade's notes"
         );
     }
 

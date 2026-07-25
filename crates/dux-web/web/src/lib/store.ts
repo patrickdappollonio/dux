@@ -3549,7 +3549,16 @@ export function closeCustomizeWebapp(): void {
 // `config.changed` refetch — hence the three guards below, each of which is the
 // difference between "shown once" and "pops up while you work".
 function offerAutomaticFirstLoad(pending: PendingFirstLoad | null): void {
-  if (pending === null) return
+  if (pending === null) {
+    // The server has no pending screen. If THIS tab is showing the AUTOMATIC one,
+    // it has been settled elsewhere — another browser tab dismissed it, and the
+    // server emitted `config.changed` precisely so we find out. Close ours rather
+    // than leaving a dialog up over a screen nobody owes an acknowledgement for.
+    // Scoped to `automatic`: an on-demand dialog the user opened themselves is
+    // never yanked away by a background refetch.
+    if (state.firstLoad?.automatic) setState({ firstLoad: null })
+    return
+  }
   // Already dismissed in this browser session: the server clears its pending
   // screen on dismissal, but a refetch that raced the clear would otherwise
   // re-open what the user just closed.
@@ -3627,25 +3636,37 @@ export function openReleaseNotes(): void {
 // dismisses nothing.
 //
 // The close is optimistic and unconditional — a failed dismissal must not trap
-// the user behind a modal — but `firstLoadDismissed` is set only on success, so a
-// failed write leaves the screen genuinely pending for the next load rather than
-// silently swallowing it.
+// the user behind a modal — and the re-open guard is set SYNCHRONOUSLY, in the
+// same `setState` that clears the dialog, then ROLLED BACK if the write fails. It
+// cannot wait for the POST to resolve: a `config.changed` arriving in that window
+// re-runs `applyBootstrap` → `offerAutomaticFirstLoad`, whose guards would both
+// pass, and the just-dismissed dialog would reopen. The rollback is what keeps the
+// failure behaviour honest — a failed write leaves the screen genuinely pending
+// for the next load rather than silently swallowing it.
 export function closeFirstLoad(): void {
   const open = state.firstLoad
-  setState({ firstLoad: null })
-  if (open === null || !open.automatic) return
-  firstLoadApi
-    .dismiss()
-    .then(() => {
-      setState({ firstLoadDismissed: true })
-    })
-    .catch((e) => {
-      toast.error(
-        e instanceof Error
-          ? e.message
-          : "Could not record this screen as seen; it may appear again.",
-      )
-    })
+  if (open === null) return
+  if (!open.automatic) {
+    setState({ firstLoad: null })
+    // Nothing to dismiss — but the offer may have been DROPPED while this dialog
+    // was up: `offerAutomaticFirstLoad` runs only from `applyBootstrap` and bails
+    // when a dialog is already open, and nothing else retries it. Re-check the
+    // last bootstrap now that the slot is free, or a real pending screen that
+    // landed mid-read is lost for this tab's whole session.
+    offerAutomaticFirstLoad(state.bootstrap?.pending_first_load ?? null)
+    return
+  }
+  setState({ firstLoad: null, firstLoadDismissed: true })
+  firstLoadApi.dismiss().catch((e) => {
+    // The durable record was not written, so this launch's screen is still
+    // pending: drop the guard again so the next bootstrap can re-offer it.
+    setState({ firstLoadDismissed: false })
+    toast.error(
+      e instanceof Error
+        ? e.message
+        : "Could not record this screen as seen; it may appear again.",
+    )
+  })
 }
 
 // Persist the instance identity (browser tab title + favicon colour). The

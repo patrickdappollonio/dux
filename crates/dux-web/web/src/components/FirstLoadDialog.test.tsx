@@ -201,6 +201,19 @@ describe("FirstLoadDialog", () => {
       expect(screen.getByText("https://getdux.app")).toBeTruthy()
     })
 
+    it("dismisses the screen when the website link is used, so the version is recorded", () => {
+      seed({ screen: "welcome" })
+      render(<FirstLoadDialog />)
+
+      fireEvent.click(
+        within(footer()).getByRole("link", { name: /visit the website/i }),
+      )
+      // The TUI dismisses and THEN opens the URL. Without this, a user who
+      // follows the link and closes the tab records nothing and sees the same
+      // screen next launch.
+      expect(closeFirstLoad).toHaveBeenCalledOnce()
+    })
+
     it("says so rather than rendering an empty frame when an older server sends no copy", () => {
       seed({ screen: "welcome" })
       mockState = { ...mockState, bootstrap: {} as Bootstrap }
@@ -253,6 +266,20 @@ describe("FirstLoadDialog", () => {
         within(footer()).getByRole("button", { name: /^close$/i }),
       )
       expect(closeFirstLoad).toHaveBeenCalledOnce()
+    })
+
+    it("dismisses the screen when the full-notes link is used, matching the TUI", () => {
+      seed({ screen: "whats_new", notes: NOTES })
+      render(<FirstLoadDialog />)
+
+      const open = within(footer()).getByRole("link", {
+        name: /open full notes/i,
+      })
+      fireEvent.click(open)
+      expect(closeFirstLoad).toHaveBeenCalledOnce()
+      // And it is still a real link: the handler must not have replaced the
+      // navigation, only preceded it.
+      expect(open.getAttribute("href")).toBe(NOTES.html_url)
     })
 
     it("shows a real loading state and keeps the notes link genuinely inert until they arrive", () => {

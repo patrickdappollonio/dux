@@ -191,6 +191,14 @@ function WelcomeContent({ bootstrap }: { bootstrap: Bootstrap | null }) {
  * the variant's `disabled:pointer-events-none`) does not match `<a>` — so it
  * stays clickable and navigates. When there is no URL we therefore render a real
  * disabled `<button>`, which is inert for real.
+ *
+ * Using the link DISMISSES the screen, matching the TUI, which closes the screen
+ * and then opens the URL so the version is always recorded. Without this, a user
+ * who clicks "Open full notes" or "Visit the website" and then closes the tab
+ * records nothing and sees the same screen next launch. Base UI's render prop
+ * merges this `onClick` onto the custom `<a>` (which carries none of its own), so
+ * the handler runs before the browser's native new-tab navigation and the link
+ * still opens. The sibling "Add a project" button does the same thing.
  */
 function LinkButton({
   href,
@@ -212,6 +220,7 @@ function LinkButton({
     <Button
       variant={variant}
       className="max-md:w-full"
+      onClick={() => closeFirstLoad()}
       render={
         <a href={href} target="_blank" rel="noopener noreferrer">
           {children}

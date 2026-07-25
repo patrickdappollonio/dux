@@ -209,6 +209,17 @@ pub const DEFAULT_SEARCH_INDEX_MAX_FILES: usize = 50_000;
 /// convention used by the `max_websocket_*_connections` family.
 pub const DEFAULT_TREE_LIST_MAX_CONCURRENCY: u32 = 8;
 
+/// Default cap on concurrent release-notes fetches (see
+/// [`crate::release_notes::load_release_notes_from`]). Each one is a blocking
+/// HTTPS round trip to the GitHub API run off the async reactor, and every
+/// browser tab can ask for it from the app menu. Small on purpose: the answer
+/// is cached with a six-hour TTL and identical for every caller, so a handful
+/// of in-flight fetches is already more than the work needs. `0` disables the
+/// bound entirely (unlimited concurrency), matching
+/// [`DEFAULT_TREE_LIST_MAX_CONCURRENCY`] rather than the `0 = block
+/// everything` convention of the `max_websocket_*_connections` family.
+pub const DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY: u32 = 2;
+
 /// Default seconds to wait for SIGTERMed agents/terminals to exit before
 /// force-killing them on shutdown. Shared by the top-level
 /// [`Config::shutdown_timeout_seconds`] (TUI quit) and
@@ -403,6 +414,17 @@ pub struct ServerConfig {
     /// background work, not a long-lived connection. `0` disables the bound
     /// entirely. Default 8. Takes effect on the next server restart.
     pub tree_list_max_concurrency: u32,
+    /// Maximum number of release-notes fetches (`GET /api/v1/release-notes`,
+    /// behind the app menu's "What's new…") the web server may run
+    /// concurrently. Each one is a blocking HTTPS round trip to the GitHub API
+    /// run off the async reactor (`spawn_blocking`); this protects the server's
+    /// blocking-thread pool from a burst of clicks (or several browser tabs)
+    /// starving other blocking work like git operations and file reads. A
+    /// request beyond the limit WAITS for a free slot rather than being
+    /// rejected, and since the notes are cached with a six-hour TTL the waiter
+    /// usually returns immediately from cache. `0` disables the bound entirely.
+    /// Default 2. Takes effect on the next server restart.
+    pub release_notes_max_concurrency: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -738,6 +760,7 @@ impl Default for ServerConfig {
             shutdown_timeout_seconds: DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
             search_index_max_files: DEFAULT_SEARCH_INDEX_MAX_FILES,
             tree_list_max_concurrency: DEFAULT_TREE_LIST_MAX_CONCURRENCY,
+            release_notes_max_concurrency: DEFAULT_RELEASE_NOTES_MAX_CONCURRENCY,
         }
     }
 }
