@@ -25,5 +25,6 @@ tempfile.workspace = true
 uuid.workspace = true
 walkdir = "2"
 alacritty_terminal = "0.26.0"
+ureq = "3.3.0"
 
 [dev-dependencies]

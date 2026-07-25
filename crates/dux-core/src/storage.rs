@@ -19,6 +19,10 @@ pub struct StoredPr {
     pub url: String,
 }
 
+/// The `app_state` key holding the last dux version whose first-load screen was
+/// shown. One key, one meaning; see [`SessionStore::last_seen_version`].
+const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
+
 pub struct SessionStore {
     conn: Connection,
 }
@@ -282,7 +286,58 @@ impl SessionStore {
             create index if not exists idx_agent_tabs_session on agent_tabs(session_id);
             "#,
         )?;
+        // Small key/value bag for whole-app derived state that belongs to no
+        // session and no project, and that must be SHARED by the TUI and the
+        // web (see `last_seen_version`: dismissing the what's-new screen in one
+        // surface dismisses it in the other). Additive and backward compatible:
+        // existing databases start with zero rows. Keep it deliberately small —
+        // per-entity state belongs in its own purpose-built table, exactly like
+        // `changes_rev`.
+        self.conn.execute_batch(
+            r#"
+            create table if not exists app_state (
+                key text primary key,
+                value text not null
+            );
+            "#,
+        )?;
         Ok(())
+    }
+
+    /// Read one [`app_state`](Self::set_app_state) value.
+    pub fn app_state(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("select value from app_state where key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        Ok(match rows.next()? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        })
+    }
+
+    /// Write one app-wide value, replacing any previous value for the key.
+    pub fn set_app_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "insert into app_state(key, value) values(?1, ?2) \
+             on conflict(key) do update set value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// The dux version whose first-load screen the user last saw, or `None` when
+    /// dux has never shown one (the very first launch).
+    ///
+    /// Derived UI state, so it lives here and never in portable config. Shared
+    /// by both surfaces on purpose: see [`crate::first_load`].
+    pub fn last_seen_version(&self) -> Result<Option<String>> {
+        self.app_state(LAST_SEEN_VERSION_KEY)
+    }
+
+    /// Record `version` as seen, so its what's-new screen does not reappear.
+    pub fn set_last_seen_version(&self, version: &str) -> Result<()> {
+        self.set_app_state(LAST_SEEN_VERSION_KEY, version)
     }
 
     /// Insert a new extra tab row.
@@ -1240,6 +1295,68 @@ mod tests {
         let loaded = store.load_agent_tabs().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, "t1");
+    }
+
+    #[test]
+    fn last_seen_version_round_trips_through_a_real_database_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+
+        // A brand new database has never seen a version: that is what makes the
+        // very first launch show the welcome screen.
+        {
+            let store = SessionStore::open(&db).unwrap();
+            assert_eq!(store.last_seen_version().unwrap(), None);
+            store.set_last_seen_version("v0.6.0").unwrap();
+            assert_eq!(
+                store.last_seen_version().unwrap(),
+                Some("v0.6.0".to_string())
+            );
+            // Setting it again replaces rather than duplicating (upsert on the key).
+            store.set_last_seen_version("v0.7.0").unwrap();
+            assert_eq!(
+                store.last_seen_version().unwrap(),
+                Some("v0.7.0".to_string())
+            );
+        }
+
+        // Reopening the SAME file keeps the value: dismissing on one surface is
+        // remembered by the other, and across restarts.
+        {
+            let store = SessionStore::open(&db).unwrap();
+            assert_eq!(
+                store.last_seen_version().unwrap(),
+                Some("v0.7.0".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn app_state_is_a_generic_key_value_table() {
+        let store = test_store();
+        assert_eq!(store.app_state("nope").unwrap(), None);
+        store.set_app_state("k", "v").unwrap();
+        store.set_app_state("other", "w").unwrap();
+        assert_eq!(store.app_state("k").unwrap(), Some("v".to_string()));
+        assert_eq!(store.app_state("other").unwrap(), Some("w".to_string()));
+        // Keys are independent and values are replaced in place.
+        store.set_app_state("k", "v2").unwrap();
+        assert_eq!(store.app_state("k").unwrap(), Some("v2".to_string()));
+        assert_eq!(store.app_state("other").unwrap(), Some("w".to_string()));
+    }
+
+    #[test]
+    fn migrate_is_idempotent_for_app_state() {
+        // `migrate()` runs on every open; a second open must not fail or wipe
+        // the row (there is no migration-versioning table in this project).
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        SessionStore::open(&db)
+            .unwrap()
+            .set_app_state("k", "v")
+            .unwrap();
+        let store = SessionStore::open(&db).unwrap();
+        assert_eq!(store.app_state("k").unwrap(), Some("v".to_string()));
     }
 
     fn stored_pr(session_id: &str, pr_number: u64) -> StoredPr {

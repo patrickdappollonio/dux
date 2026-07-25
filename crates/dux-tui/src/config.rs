@@ -423,6 +423,20 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Bool(c.ui.attention_on_bell),
         },
         ConfigEntry::Field {
+            key: "disable_automated_welcome_screen",
+            comment: Some(CommentSource::Static(
+                "# Stop dux from showing the welcome screen by itself.\n# On the very first launch of a fresh install, dux shows a short welcome:\n# what a project is, what an agent is, and the three steps to get going.\n# It appears exactly once, and it needs no network.\n# Set to true to never have it appear on its own. Opening it deliberately\n# still works, because that is you asking rather than dux deciding.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.disable_automated_welcome_screen),
+        },
+        ConfigEntry::Field {
+            key: "disable_release_notes",
+            comment: Some(CommentSource::Static(
+                "# Stop dux from showing (and fetching) the what's-new screen by itself.\n# When the running version differs from the last one you saw, dux fetches\n# the newest release notes from GitHub in the background and shows a short\n# summary once. Only the newest release is ever shown, however many you\n# skipped. If the fetch fails, nothing is shown and nothing is recorded, so\n# the notes get another chance on your next launch.\n# Set to true and dux makes no network request at startup and shows no\n# what's-new screen on its own. Opening the release notes deliberately still\n# works, and may still fetch them, because you asked for it.",
+            )),
+            value_fn: |c| FieldValue::Bool(c.ui.disable_release_notes),
+        },
+        ConfigEntry::Field {
             key: "pr_banner_position",
             comment: Some(CommentSource::Static(
                 "# Position of the PR banner in the agent pane: \"top\" or \"bottom\".\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
@@ -1293,6 +1307,10 @@ mod tests {
         assert!(rendered.contains("always_show_tab_strip = false"));
         assert!(rendered.contains("attention_indicator = true"));
         assert!(rendered.contains("attention_on_bell = true"));
+        // The two first-load screens are on by default, so both opt-outs render
+        // false. Keep the negative names exactly as spelled.
+        assert!(rendered.contains("disable_automated_welcome_screen = false"));
+        assert!(rendered.contains("disable_release_notes = false"));
         assert!(rendered.contains("staged_pane_height_pct = "));
         assert!(rendered.contains("commit_pane_height_pct = "));
         assert!(rendered.contains("[capabilities]"));

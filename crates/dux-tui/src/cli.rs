@@ -140,6 +140,23 @@ fn run_diff_raw(_current_raw: &str, current: &Config) -> Result<()> {
 }
 
 fn run_diff_summary(current: &Config) -> Result<()> {
+    let changes = collect_config_changes(current);
+    if changes.is_empty() {
+        println!("config matches defaults — no differences");
+    } else {
+        for line in &changes {
+            println!("  {line}");
+        }
+    }
+    Ok(())
+}
+
+/// Every setting whose current value differs from the default, as display lines.
+///
+/// Extracted from the printer so it can be tested: this list is maintained by
+/// hand, and a key that is missing from it is a key `dux config diff` silently
+/// ignores. When you add a config key, add it here too.
+fn collect_config_changes(current: &Config) -> Vec<String> {
     let defaults = Config::default();
     let mut changes = Vec::new();
 
@@ -281,6 +298,18 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         "ui.attention_on_bell",
         defaults.ui.attention_on_bell,
         current.ui.attention_on_bell,
+    );
+    diff_bool(
+        &mut changes,
+        "ui.disable_automated_welcome_screen",
+        defaults.ui.disable_automated_welcome_screen,
+        current.ui.disable_automated_welcome_screen,
+    );
+    diff_bool(
+        &mut changes,
+        "ui.disable_release_notes",
+        defaults.ui.disable_release_notes,
+        current.ui.disable_release_notes,
     );
     diff_str(
         &mut changes,
@@ -469,14 +498,7 @@ fn run_diff_summary(current: &Config) -> Result<()> {
         ));
     }
 
-    if changes.is_empty() {
-        println!("config matches defaults — no differences");
-    } else {
-        for line in &changes {
-            println!("  {line}");
-        }
-    }
-    Ok(())
+    changes
 }
 
 // ---------------------------------------------------------------------------
@@ -815,6 +837,38 @@ mod tests {
     use crate::config::{self, Config};
     use crate::keybindings::RuntimeBindings;
     use crate::model::{AgentSession, ProviderKind, SessionStatus};
+
+    #[test]
+    fn config_diff_reports_nothing_for_a_default_config() {
+        assert!(
+            collect_config_changes(&Config::default()).is_empty(),
+            "{:#?}",
+            collect_config_changes(&Config::default())
+        );
+    }
+
+    #[test]
+    fn config_diff_reports_the_first_load_screen_opt_outs() {
+        // Both keys are hand-registered in `collect_config_changes`; a key that
+        // is missing there is one `dux config diff` silently ignores.
+        let mut config = Config::default();
+        config.ui.disable_automated_welcome_screen = true;
+        config.ui.disable_release_notes = true;
+
+        // Match the EXACT rendered line, not a substring of the key: a
+        // `contains("ui.disable_release_notes")` check also matches a typo'd
+        // `ui.disable_release_notes_xyz`, which makes the test useless as a guard.
+        let changes = collect_config_changes(&config);
+        assert!(
+            changes.contains(&"ui.disable_automated_welcome_screen: false -> true".to_string()),
+            "{changes:#?}"
+        );
+        assert!(
+            changes.contains(&"ui.disable_release_notes: false -> true".to_string()),
+            "{changes:#?}"
+        );
+        assert_eq!(changes.len(), 2, "nothing else should have changed");
+    }
 
     #[test]
     fn reset_rejects_unknown_flags() {

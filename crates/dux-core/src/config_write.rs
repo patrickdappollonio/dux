@@ -309,6 +309,18 @@ fn apply_patches(doc: &mut DocumentMut, config: &Config) {
         config.ui.attention_indicator,
     );
     patch_table_bool(doc, "ui", "attention_on_bell", config.ui.attention_on_bell);
+    patch_table_bool(
+        doc,
+        "ui",
+        "disable_automated_welcome_screen",
+        config.ui.disable_automated_welcome_screen,
+    );
+    patch_table_bool(
+        doc,
+        "ui",
+        "disable_release_notes",
+        config.ui.disable_release_notes,
+    );
     patch_table_str(
         doc,
         "ui",
@@ -819,6 +831,31 @@ mod tests {
         let rendered = render_config_plain(&config);
         let parsed: Config = toml::from_str(&rendered).expect("re-parse");
         assert!(!parsed.ui.compose_bar);
+    }
+
+    #[test]
+    fn first_load_screen_opt_outs_default_off_and_round_trip() {
+        // Both screens are on by default, so both DISABLE flags default false.
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert!(!parsed.ui.disable_automated_welcome_screen);
+        assert!(!parsed.ui.disable_release_notes);
+
+        // A user-set true survives a regenerate: without the `patch_table_bool`
+        // lines the key would be absent and silently fall back to false, which
+        // would re-enable a screen the user turned off.
+        let config = Config {
+            ui: crate::config::UiConfig {
+                disable_automated_welcome_screen: true,
+                disable_release_notes: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let rendered = render_config_plain(&config);
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert!(parsed.ui.disable_automated_welcome_screen);
+        assert!(parsed.ui.disable_release_notes);
     }
 
     #[test]

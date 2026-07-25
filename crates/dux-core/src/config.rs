@@ -521,6 +521,16 @@ pub struct UiConfig {
     /// terminal_bell mode) but can occasionally ring for mundane reasons, so this
     /// switch turns it off independently of `attention_indicator`. Default true.
     pub attention_on_bell: bool,
+    /// Suppress the AUTOMATIC first-run welcome screen. Default false (the
+    /// screen shows once, on the very first launch of a fresh install). Opening
+    /// the welcome screen deliberately still works when this is true: the flag
+    /// governs what dux does on its own, not what the user asks for.
+    pub disable_automated_welcome_screen: bool,
+    /// Suppress the AUTOMATIC what's-new screen after an upgrade, AND the
+    /// startup fetch of the release notes that feeds it (so nothing touches the
+    /// network on launch). Default false. Opening the release notes deliberately
+    /// still works, and may still fetch, because the user asked for it.
+    pub disable_release_notes: bool,
     pub pr_banner_position: String,
     /// The web agent-list sort mode, persisted so a chosen order (and the manual
     /// drag order it enables) survives restarts and is shared across clients:
@@ -757,6 +767,8 @@ impl Default for UiConfig {
             always_show_tab_strip: false,
             attention_indicator: true,
             attention_on_bell: true,
+            disable_automated_welcome_screen: false,
+            disable_release_notes: false,
             pr_banner_position: "bottom".to_string(),
             agent_sort: "active".to_string(),
             theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
@@ -1240,6 +1252,8 @@ impl Default for Config {
                 always_show_tab_strip: false,
                 attention_indicator: true,
                 attention_on_bell: true,
+                disable_automated_welcome_screen: false,
+                disable_release_notes: false,
                 pr_banner_position: "bottom".to_string(),
                 agent_sort: "active".to_string(),
                 theme: crate::theme::DEFAULT_THEME_NAME.to_string(),
