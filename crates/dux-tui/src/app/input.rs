@@ -56,6 +56,20 @@ fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
     }
 }
 
+/// Horizontal arrows belong to a text field's caret, never to a dialog's
+/// selection.
+///
+/// `Action::ToggleSelection` is bound by default to `Left`/`Right` as well as
+/// `h`/`l`/`Tab`/`Shift-Tab`, which is right for the button-only confirmation
+/// dialogs that make up almost every Dialog-scope consumer. The two modals
+/// that pair a single-line text input with checkboxes must suppress the
+/// binding lookup for these keys, exactly as they already suppress it for
+/// plain characters, so the arrows reach the field. Modified arrows
+/// (`Alt`/`Ctrl`) are covered too: the field maps those to word movement.
+fn is_horizontal_arrow(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Left | KeyCode::Right)
+}
+
 /// Treat both crossterm's `BackTab` and explicit `Tab + Shift` as reverse-tab.
 /// Some terminals deliver one form, some the other.
 fn is_reverse_tab(key: KeyEvent) -> bool {
@@ -3572,7 +3586,9 @@ impl App {
         if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
-            let action = if is_plain_char {
+            // Plain characters type; horizontal arrows move the caret. Both
+            // belong to the text field, so neither consults the bindings.
+            let action = if is_plain_char || is_horizontal_arrow(key) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
@@ -3723,7 +3739,9 @@ impl App {
         {
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
                 && !key.modifiers.contains(KeyModifiers::CONTROL);
-            let action = if is_plain_char {
+            // Plain characters type; horizontal arrows move the caret. Both
+            // belong to the text field, so neither consults the bindings.
+            let action = if is_plain_char || is_horizontal_arrow(key) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
@@ -8339,6 +8357,81 @@ not_a_real_action = ["x"]
     }
 
     #[test]
+    fn rename_arrows_move_the_caret_and_leave_the_checkbox_alone() {
+        // Left/Right are part of the shared ToggleSelection key set, but this
+        // modal owns a single-line text field: the arrows must reach it.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("agent".to_string()),
+            rename_branch: true,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                input,
+                rename_branch,
+                ..
+            } => {
+                assert_eq!(input.cursor, 4, "Left should move the caret one char back");
+                assert!(
+                    *rename_branch,
+                    "Left must not toggle the rename-branch checkbox"
+                );
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                input,
+                rename_branch,
+                ..
+            } => {
+                assert_eq!(input.cursor, 5, "Right should move the caret forward");
+                assert!(
+                    *rename_branch,
+                    "Right must not toggle the rename-branch checkbox"
+                );
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_h_and_l_still_type_into_the_field() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text(String::new()),
+            rename_branch: true,
+        };
+
+        for c in ['h', 'l'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                input,
+                rename_branch,
+                ..
+            } => {
+                assert_eq!(input.text, "hl");
+                assert!(*rename_branch, "typing must not touch the checkbox");
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn open_rename_session_initializes_rename_branch_true() {
         let mut app = test_app(default_bindings());
 
@@ -9330,6 +9423,135 @@ not_a_real_action = ["x"]
                 assert!(!*confirm_selected);
             }
             other => panic!("expected use-existing-branch prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_new_agent_arrows_move_the_caret_and_leave_focus_alone() {
+        // Left/Right belong to the shared ToggleSelection key set, which this
+        // modal reads as "cycle focus". The field is a single-line text input,
+        // so the arrows must reach it instead.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("agent".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, focus, .. } => {
+                assert_eq!(input.cursor, 4, "Left should move the caret one char back");
+                assert_eq!(
+                    *focus,
+                    NameNewAgentFocus::Input,
+                    "Left must not move focus off the field"
+                );
+            }
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, focus, .. } => {
+                assert_eq!(input.cursor, 5, "Right should move the caret forward");
+                assert_eq!(
+                    *focus,
+                    NameNewAgentFocus::Input,
+                    "Right must not move focus off the field"
+                );
+            }
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_new_agent_tab_cycles_forward_and_shift_tab_cycles_backward() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("agent".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        let focus_now = |app: &App| match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => *focus,
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(focus_now(&app), NameNewAgentFocus::RandomizedNameCheckbox);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(focus_now(&app), NameNewAgentFocus::CopyChangesCheckbox);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(focus_now(&app), NameNewAgentFocus::Input);
+
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(
+            focus_now(&app),
+            NameNewAgentFocus::CopyChangesCheckbox,
+            "Shift-Tab should cycle backward"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(focus_now(&app), NameNewAgentFocus::RandomizedNameCheckbox);
+    }
+
+    #[test]
+    fn name_new_agent_h_and_l_still_type_into_the_field() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text(String::new()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus: NameNewAgentFocus::Input,
+        };
+
+        for c in ['h', 'l'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .unwrap();
+        }
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, focus, .. } => {
+                assert_eq!(input.text, "hl");
+                assert_eq!(*focus, NameNewAgentFocus::Input);
+            }
+            other => panic!("expected NameNewAgent, got {other:?}"),
         }
     }
 
