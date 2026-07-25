@@ -34,7 +34,16 @@ pub fn routes() -> Router<AppState> {
 
 async fn get_bootstrap(State(state): State<AppState>) -> Response {
     match state.engine.bootstrap().await {
-        Some(view) => Json(view).into_response(),
+        Some(mut view) => {
+            // The pending first-load screen is web-server state, not engine
+            // state: the gate runs once per LAUNCH and the answer is parked in
+            // `AppState` (see `first_load_routes`). The engine's projection
+            // always leaves this `None`, so injecting it here is what lets a
+            // browser connecting at any point in the server's life still receive
+            // the screen.
+            view.pending_first_load = state.first_load.pending();
+            Json(view).into_response()
+        }
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
             "the engine is unavailable; retry shortly",

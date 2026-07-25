@@ -299,6 +299,12 @@ struct UiSettingsPatch {
     attention_indicator: Option<bool>,
     attention_on_bell: Option<bool>,
     pr_banner_position: Option<String>,
+    /// Suppresses the AUTOMATIC first-run welcome screen only; the app menu's
+    /// on-demand entry still opens it.
+    disable_automated_welcome_screen: Option<bool>,
+    /// Suppresses the AUTOMATIC what's-new screen only; the app menu's on-demand
+    /// entry still opens it.
+    disable_release_notes: Option<bool>,
 }
 
 /// The `[capabilities]` half of a settings-PATCH body. Same optional/
@@ -401,6 +407,8 @@ async fn set_settings(
                 .defaults
                 .enable_randomized_pet_name_by_default,
             default_provider: body.defaults.provider,
+            disable_automated_welcome_screen: body.ui.disable_automated_welcome_screen,
+            disable_release_notes: body.ui.disable_release_notes,
         }),
     )
     .await
@@ -855,7 +863,9 @@ mod tests {
                         "attention_grace_seconds": 11,
                         "attention_indicator": false,
                         "attention_on_bell": false,
-                        "pr_banner_position": "top"
+                        "pr_banner_position": "top",
+                        "disable_automated_welcome_screen": true,
+                        "disable_release_notes": true
                     },
                     "capabilities": {
                         "web_notifications": true,
@@ -890,6 +900,8 @@ mod tests {
             "hyperlinks = false",
             "enable_randomized_pet_name_by_default = true",
             "provider = \"codex\"",
+            "disable_automated_welcome_screen = true",
+            "disable_release_notes = true",
         ] {
             assert!(
                 raw.contains(expected),

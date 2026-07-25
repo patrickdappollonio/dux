@@ -569,11 +569,29 @@ pub fn load_or_fetch_tag(
 ///   build never auto-shows the what's-new screen), and it is deliberately
 ///   uncached: there is no stable key to file it under.
 pub fn load_release_notes(root: &Path, running_version: &str) -> Result<ReleaseNotes, FetchError> {
+    load_release_notes_from(crate::urls::GITHUB_API_BASE, root, running_version)
+}
+
+/// [`load_release_notes`] with the API base injected, for tests and for the web
+/// server's integration suite.
+///
+/// This exists so the dev-build-versus-tag dispatch above lives in exactly ONE
+/// place. A surface that hardcoded its own copy of that `if` (because it needed
+/// to point a test at a local server) would silently keep the old behaviour the
+/// next time the rule changed. Pass [`crate::urls::GITHUB_API_BASE`] for the real
+/// thing; `load_release_notes` is the convenience wrapper that does.
+///
+/// BLOCKING: worker only.
+pub fn load_release_notes_from(
+    api_base: &str,
+    root: &Path,
+    running_version: &str,
+) -> Result<ReleaseNotes, FetchError> {
     if running_version == crate::first_load::DEVELOPMENT_VERSION {
-        return fetch_latest(crate::urls::GITHUB_API_BASE);
+        return fetch_latest(api_base);
     }
     load_or_fetch_tag(
-        crate::urls::GITHUB_API_BASE,
+        api_base,
         &cache_path(root),
         running_version,
         CACHE_TTL,

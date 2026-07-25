@@ -79,6 +79,17 @@ export interface SettingDescriptor {
    * the setting. Pinned by `CustomizeWebappDialog.test.tsx`'s "does not call the
    * GitHub endpoint when the row is unchanged". */
   writeTarget: "settings" | "identity" | "changesPane" | "github"
+  /** True when the config field is the NEGATIVE of what this row shows: the row
+   * says "Show the welcome screen" while `ui.disable_automated_welcome_screen`
+   * says the opposite. Every row in this modal is phrased positively, because a
+   * "Disable X" toggle turned off is a double negative the reader has to unpick.
+   *
+   * The contract, and it is only two places: `read` returns the value AS SHOWN
+   * (already flipped), and `buildWrites` in `CustomizeWebappDialog.tsx` flips it
+   * back once, immediately before it goes on the wire. Nothing else in the
+   * pipeline knows or cares, so the unchanged-row skip still compares
+   * shown-value to shown-value. Bool rows only. */
+  inverted?: boolean
   /** Reads the current value out of the live Bootstrap document, falling back
    * to `default` when an older server omits the field. NOTE: for the
    * `"changesPane"`-targeted row this is NOT the effective value shown in the
@@ -311,6 +322,34 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // The bootstrap projects this as `randomize_agent_names_by_default`,
         // not under its config key's name.
         read: (b) => b.randomize_agent_names_by_default ?? false,
+      },
+      {
+        key: "ui.disable_automated_welcome_screen",
+        label: "Show the welcome screen on a new install",
+        description:
+          "Shows a one-time welcome screen the first time dux runs, explaining projects, agents, and worktrees. Turning this off skips it automatically; the app menu's \"Welcome screen…\" still opens it any time.",
+        surface: "both",
+        control: { kind: "bool" },
+        // Presented POSITIVELY ("show it") while the config field is a
+        // NEGATIVE ("disable it"), because a row that reads "Disable X" turns
+        // every toggle into a double negative. The dialog inverts on read and on
+        // write: `buildWrites` in `CustomizeWebappDialog.tsx` flips it exactly once.
+        inverted: true,
+        default: true,
+        writeTarget: "settings",
+        read: (b) => !(b.disable_automated_welcome_screen ?? false),
+      },
+      {
+        key: "ui.disable_release_notes",
+        label: "Show what's new after an update",
+        description:
+          "After dux updates to a new version, shows that release's highlights once, fetched from GitHub. Turning this off skips it automatically; the app menu's \"What's new…\" still opens it any time.",
+        surface: "both",
+        control: { kind: "bool" },
+        inverted: true,
+        default: true,
+        writeTarget: "settings",
+        read: (b) => !(b.disable_release_notes ?? false),
       },
       {
         key: "defaults.provider",

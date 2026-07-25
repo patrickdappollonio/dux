@@ -458,9 +458,14 @@ function buildWrites(
       github = value as boolean
     } else {
       const [group, field] = d.key.split(".")
-      if (group === "capabilities") capabilities[field] = value
-      else if (group === "defaults") defaults[field] = value
-      else ui[field] = value
+      // THE single flip point for an `inverted` row (see the descriptor's doc):
+      // the row shows "Show the welcome screen", the config field is
+      // `disable_automated_welcome_screen`. Everything upstream — the seed, the
+      // switch, the unchanged-row skip above — works in shown-values only.
+      const wire = d.inverted ? !(value as boolean) : value
+      if (group === "capabilities") capabilities[field] = wire
+      else if (group === "defaults") defaults[field] = wire
+      else ui[field] = wire
     }
   }
   const hasSettings =

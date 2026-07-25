@@ -11,6 +11,7 @@ import { ChangedFiles } from "@/components/ChangedFiles"
 import { ChangeProviderDialog } from "@/components/ChangeProviderDialog"
 import { CommitDialog } from "@/components/CommitDialog"
 import { EditorOverlay } from "@/components/EditorOverlay"
+import { FirstLoadDialog } from "@/components/FirstLoadDialog"
 import { ConfigEditorDialog } from "@/components/ConfigEditorDialog"
 import { ConfirmDeleteTerminalDialog } from "@/components/ConfirmDeleteTerminalDialog"
 import { ConfirmCloseTabDialog } from "@/components/ConfirmCloseTabDialog"
@@ -72,6 +73,7 @@ function GlobalOverlays() {
       <TaskManagerDialog />
       <ConfigEditorDialog />
       <CustomizeWebappDialog />
+      <FirstLoadDialog />
       <ConfirmDiscardFileDialog />
       <ConfirmCloseEditorTabDialog />
       <GlobalEnvDialog />

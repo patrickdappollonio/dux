@@ -117,6 +117,12 @@ pub struct AppState {
     /// `X-Connection-Id` (unknown id → broadcast) and by `count` for a later task's
     /// per-class caps. A cheap `Arc` clone so every request/socket shares one map.
     pub connections: Arc<crate::rest_common::ConnectionRegistry>,
+    /// This launch's pending first-load screen (welcome / what's-new), decided
+    /// ONCE by the resolver task spawned in [`build_app`] and injected into the
+    /// bootstrap document per request. See [`crate::first_load_routes`] for why
+    /// it is not computed per request and why the version is stamped on
+    /// dismissal rather than at startup.
+    pub first_load: Arc<crate::first_load_routes::FirstLoadState>,
 }
 
 /// Maximum size of a single inbound WebSocket message (text or binary). This
@@ -221,6 +227,10 @@ pub struct RouterParams {
     /// (lowercased, port-stripped) inside the allowlist; raw strings here. Only
     /// meaningful when the host guard is active (see [`bound_ips`]).
     pub configured_hosts: Vec<String>,
+    /// Base URL for release-notes fetches. Defaults to
+    /// `dux_core::urls::GITHUB_API_BASE`; overridden only by tests (see
+    /// [`RouterParams::with_release_notes_api_base`]).
+    pub release_notes_api_base: String,
 }
 
 impl RouterParams {
@@ -244,7 +254,18 @@ impl RouterParams {
             tree_list_max_concurrency: dux_core::config::DEFAULT_TREE_LIST_MAX_CONCURRENCY,
             bound_ips: Vec::new(),
             configured_hosts: Vec::new(),
+            release_notes_api_base: dux_core::urls::GITHUB_API_BASE.to_string(),
         }
+    }
+
+    /// Point release-notes fetches at `base` instead of the real GitHub API.
+    /// Exists for tests: no test may contact api.github.com, so the integration
+    /// suite serves a canned release payload from a local listener and passes its
+    /// base here. Production never calls this and keeps
+    /// `dux_core::urls::GITHUB_API_BASE`.
+    pub fn with_release_notes_api_base(mut self, base: impl Into<String>) -> Self {
+        self.release_notes_api_base = base.into();
+        self
     }
 
     /// Set the file-search index cap from `[server] search_index_max_files`.
@@ -389,6 +410,19 @@ pub fn build_app(
     // so clients on the `projects` / `sessions` topics refetch `/api/v1/spine`.
     // Same lifetime/teardown story as the config forwarder above.
     spawn_spine_changed_forwarder(engine.subscribe_spine_changes(), Arc::clone(&event_bus));
+    // Run the first-load gate ONCE for this launch, off every request path. The
+    // resolver parks the screen (if any) in this state and emits `config.changed`
+    // so already-connected clients refetch bootstrap and find it; clients that
+    // connect later just read it out of their first bootstrap. Same lifetime and
+    // runtime-context story as the forwarders above.
+    let first_load = Arc::new(crate::first_load_routes::FirstLoadState::new(
+        params.release_notes_api_base,
+    ));
+    crate::first_load_routes::spawn_first_load_resolver(
+        engine.clone(),
+        Arc::clone(&event_bus),
+        Arc::clone(&first_load),
+    );
     let state = AppState {
         engine,
         console: params.console,
@@ -424,6 +458,7 @@ pub fn build_app(
         idempotency: Arc::new(crate::rest_common::IdempotencyCache::new()),
         pty_size_owners: Arc::new(PtySizeOwners::default()),
         connections: Arc::new(crate::rest_common::ConnectionRegistry::new()),
+        first_load,
     };
 
     // Every route is served plainly (trusted-local: no login gate). `extra_gated`
@@ -457,6 +492,7 @@ pub fn build_app(
         .merge(crate::tab_actions::routes())
         .merge(crate::browse_routes::routes())
         .merge(crate::config_routes::routes())
+        .merge(crate::first_load_routes::routes())
         .merge(extra_gated)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(crate::web_assets::static_handler)
@@ -1516,7 +1552,7 @@ fn pty_owner_event(pty_id: &str, owner_conn_id: u64, epoch: u64, device: Option<
 /// The single `config.changed` signal emitted whenever the engine reloads config.
 /// No `id`/`rev` — it is a plain "refetch `/api/v1/bootstrap`" signal delivered on
 /// the coarse `config` topic.
-fn config_changed_event() -> Event {
+pub(crate) fn config_changed_event() -> Event {
     Event::Resource {
         event: "config.changed".to_string(),
         id: None,
@@ -3813,6 +3849,16 @@ mod tests {
             "agent_scrollback_lines",
             "show_changes_pane",
             "global_env",
+            // The first-load screens: the welcome copy and the website link ride
+            // here unconditionally (config-static, and the app menu can open the
+            // screen on demand), the two suppression flags feed the Preferences
+            // rows, and `pending_first_load` is the per-launch decision the
+            // handler injects (present as an explicit null when no screen is due).
+            "welcome_screen",
+            "website_url",
+            "pending_first_load",
+            "disable_automated_welcome_screen",
+            "disable_release_notes",
         ] {
             assert!(
                 obj.contains_key(field),

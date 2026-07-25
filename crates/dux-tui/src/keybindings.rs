@@ -1138,6 +1138,23 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         }),
         hint_contexts: &[],
     },
+    // The two first-load screens, on demand. Deliberately NO default keybinding:
+    // they are read-once screens, so consuming a hotkey for either would be a bad
+    // trade. The palette is how you reach them.
+    BindingDef {
+        action: Action::ShowWelcomeScreen,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::ShowReleaseNotes,
+        default_keys: &[],
+        scopes: &[],
+        help: None,
+        hint_contexts: &[],
+    },
     BindingDef {
         action: Action::DeleteProject,
         default_keys: &[],
@@ -2378,7 +2395,9 @@ mod tests {
             "rerun-startup-command-on-agent",
             "resource-monitor",
             "show-agent",
+            "show-release-notes",
             "show-terminal",
+            "show-welcome-screen",
             "sort-agents",
             "start-web-server",
             "toggle-agent-auto-reopen",

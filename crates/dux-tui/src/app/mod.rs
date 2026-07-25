@@ -106,6 +106,23 @@ pub struct App {
     pub(crate) help_scroll: Option<u16>,
     pub(crate) last_help_height: u16,
     pub(crate) last_help_lines: u16,
+    /// Visible height and total line count of the first-load modal's content
+    /// pane, recorded at render so the scroll keys can clamp (the same shape as
+    /// `last_help_height`/`last_help_lines`, for the same reason: the extent
+    /// depends on the wrap width, which only the renderer knows).
+    pub(crate) last_first_load_height: u16,
+    pub(crate) last_first_load_lines: u16,
+    /// The startup gate's plan, held from the moment the release-notes fetch is
+    /// dispatched until the worker returns and
+    /// [`dux_core::first_load::after_fetch`] folds the outcome in. `None` once
+    /// consumed; a `Welcome` or `Nothing` plan never lands here because neither
+    /// needs the network.
+    pub(crate) pending_first_load: Option<dux_core::first_load::FirstLoadPlan>,
+    /// Payload channel for the in-flight release-notes worker. The keyed
+    /// busy→final status rides the engine's own worker channel; only the notes
+    /// themselves come back here. `Some` means a fetch is in flight, which is
+    /// what stops the palette command from starting a second one.
+    pub(crate) notes_fetch_rx: Option<mpsc::Receiver<NotesFetched>>,
     pub(crate) fullscreen_overlay: FullscreenOverlay,
     pub(crate) startup_log_viewer: Option<StartupLogViewer>,
     pub(crate) status: KeyedStatusController,
@@ -1185,6 +1202,12 @@ pub(crate) enum PromptState {
     },
     ChangeAgentProvider(ChangeAgentProviderPrompt),
     AgentInfo(AgentInfoPrompt),
+    /// One of the two first-load screens (first-run welcome, or what's-new after
+    /// a version change). They share one modal frame; see
+    /// [`crate::app::first_load`]. Routed through `PromptState` so `Esc` and the
+    /// generic overlay dismissal keep working uniformly — the one addition is
+    /// that dismissal stamps the running version as seen when the plan says to.
+    FirstLoad(FirstLoadPrompt),
     ChangeDefaultProvider(ChangeDefaultProviderPrompt),
     ChangeProjectDefaultProvider(ChangeProjectDefaultProviderPrompt),
     ChangeTheme(ChangeThemePrompt),
@@ -1630,6 +1653,11 @@ pub(crate) enum OverlayMouseLayout {
     AgentInfo {
         close_button: Rect,
     },
+    /// The first-load modal's two one-row pill buttons.
+    FirstLoad {
+        primary_button: Rect,
+        secondary_button: Rect,
+    },
     ChangeAgentProvider {
         list: Rect,
         items: usize,
@@ -1962,6 +1990,7 @@ pub(crate) fn build_left_items(
 }
 
 mod components;
+mod first_load;
 mod input;
 mod render;
 mod reorder;
@@ -1974,6 +2003,8 @@ mod workers;
 // Re-export the welcome wordmark so the server status screen
 // (`crate::server_screen`) can reuse it without making `render` public.
 pub(crate) use render::ASCII_LOGO;
+
+pub(crate) use first_load::{FirstLoadButton, FirstLoadPrompt, NotesFetched};
 
 impl App {
     /// Bootstrap the TUI. The caller must have already resolved `paths`,
@@ -2038,8 +2069,16 @@ impl App {
         let mut status = KeyedStatusController::with_clear_after(Duration::from_secs(
             config.ui.status_clear_seconds as u64,
         ));
-        // Write the first-run hint into the anonymous slot and pin it so it
+        // Write the orientation hint into the anonymous slot and pin it so it
         // persists until the user's first action replaces it.
+        //
+        // KEPT despite the arrival of the welcome screen, which says all of this
+        // and more. The comment here used to call this a "first-run hint", which
+        // was never accurate: it is set on EVERY cold boot, not only the first, so
+        // deleting it would take the orientation line away from every existing
+        // user in exchange for de-duplicating one launch in a fresh install's
+        // lifetime. On that one launch the welcome modal covers it anyway, and
+        // dismissing the modal writes its own status over it.
         status.set(Instant::now(), None, StatusTone::Info, initial_status);
         status.pin();
         if let Some(message) = theme_warning {
@@ -2178,6 +2217,10 @@ impl App {
             help_scroll: None,
             last_help_height: 0,
             last_help_lines: 0,
+            last_first_load_height: 0,
+            last_first_load_lines: 0,
+            pending_first_load: None,
+            notes_fetch_rx: None,
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
             status,
@@ -2251,6 +2294,12 @@ impl App {
         // any session the user closed in the web UI must stay closed.
         if matches!(restore, SessionRestore::Restore) {
             app.restore_sessions();
+            // The first-load gate runs on a COLD BOOT only. A web-server→TUI flip
+            // comes through `resume` with `SessionRestore::Skip`, and re-showing
+            // the welcome or what's-new screen on every flip would be noise (the
+            // shared `last_seen_version` row may not even have been stamped yet if
+            // the user is still looking at the screen in another surface).
+            app.begin_first_load();
         }
         app.seed_pr_statuses_from_db();
         app.rebuild_left_items();
@@ -2692,6 +2741,19 @@ impl App {
             ));
             return true;
         }
+        // The first-load screens dismiss like any other prompt, EXCEPT that
+        // dismissal is also what records the running version as seen (the core
+        // gate's timing contract), so they cannot take the generic path that just
+        // blanks `prompt`.
+        if matches!(self.prompt, PromptState::FirstLoad(_)) {
+            self.dismiss_first_load_prompt();
+            let palette_key = self.bindings.label_for(Action::OpenPalette);
+            self.set_info(format!(
+                "Dismissed. Press {palette_key} and run show-welcome-screen or show-release-notes \
+                 to see these again."
+            ));
+            return true;
+        }
         if !matches!(self.prompt, PromptState::None) {
             self.prompt = PromptState::None;
             self.set_info("Dismissed dialog. Resume your work in the current pane.");
@@ -3051,6 +3113,11 @@ impl App {
                 self.open_resource_monitor();
                 Ok(())
             }
+            // Both first-load screens can be opened deliberately even when their
+            // `[ui] disable_*` flag is set: the flags suppress only what dux does
+            // on its own, never what the user asks for.
+            "show-welcome-screen" => self.show_welcome_screen_command(),
+            "show-release-notes" => self.show_release_notes_command(),
             "toggle-diff-line-numbers" => {
                 self.show_diff_line_numbers = !self.show_diff_line_numbers;
                 self.engine.config.ui.show_diff_line_numbers = self.show_diff_line_numbers;

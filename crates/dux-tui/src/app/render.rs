@@ -5871,6 +5871,22 @@ impl App {
                 self.overlay_layout.active =
                     OverlayMouseLayout::AddProjectFailed { ok_button: ok_area };
             }
+            PromptState::FirstLoad(prompt) => {
+                self.render_dim_overlay(frame);
+                // Height = the duck's 15 rows plus the border ring, the button
+                // row, and its rule. The duck is the tallest element, so it sets
+                // the modal's height; `centered_rect_exact` clamps on a short
+                // terminal.
+                let area = first_load::modal_area(frame.area());
+                self.clear_overlay_area(frame, area);
+                let rendered = first_load::render_modal(frame, area, prompt, &self.theme);
+                self.last_first_load_height = rendered.content_height;
+                self.last_first_load_lines = rendered.content_lines;
+                self.overlay_layout.active = OverlayMouseLayout::FirstLoad {
+                    primary_button: rendered.primary_button,
+                    secondary_button: rendered.secondary_button,
+                };
+            }
             PromptState::AgentInfo(prompt) => {
                 self.render_dim_overlay(frame);
                 let dialog_width = 72.min(frame.area().width.max(1));

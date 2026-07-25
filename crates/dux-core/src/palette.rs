@@ -331,6 +331,23 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-session: the web exposes "Agent info…" from the session ⋯ menu.
     },
     PaletteCommand {
+        action: Action::ShowWelcomeScreen,
+        name: "show-welcome-screen",
+        description: "Show the dux welcome screen and getting-started steps",
+        // GLOBAL and parameter-free. It also has no default keybinding: a
+        // read-once screen is not worth a hotkey. The web shows the same screen
+        // automatically on a first load and reaches it from its app menu.
+    },
+    PaletteCommand {
+        action: Action::ShowReleaseNotes,
+        name: "show-release-notes",
+        description: "Show what's new in the running dux version",
+        // GLOBAL and parameter-free, and no default keybinding for the same
+        // reason as show-welcome-screen. May fetch from GitHub, because the user
+        // asked for it; the automatic showing is what the `[ui]
+        // disable_release_notes` flag suppresses.
+    },
+    PaletteCommand {
         action: Action::DeleteProject,
         name: "delete-project",
         description: "Remove the selected project and its sessions",

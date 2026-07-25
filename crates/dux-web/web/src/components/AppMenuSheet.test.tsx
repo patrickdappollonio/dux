@@ -10,6 +10,8 @@ vi.mock("@/lib/store", () => ({
   openMacrosDialog: vi.fn(),
   openGlobalEnv: vi.fn(),
   openTaskManager: vi.fn(),
+  openWelcomeScreen: vi.fn(),
+  openReleaseNotes: vi.fn(),
   sortAgents: (by: string) => sortAgents(by),
 }))
 vi.mock("@/lib/configApi", () => ({
@@ -42,6 +44,16 @@ describe("AppMenuSheet", () => {
     for (const title of expected) {
       expect(rendered.some((t) => t?.includes(title))).toBe(true)
     }
+  })
+
+  // The mobile twin of AppMenu.test.tsx's first-load entry check: a flyout
+  // cannot work on touch, so the two renderers are separate code and both must
+  // be proven to carry the entries.
+  it("offers both first-load screens at the root", () => {
+    render(<Harness />)
+    const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
+    expect(rendered.some((t) => t?.includes("Welcome screen"))).toBe(true)
+    expect(rendered.some((t) => t?.includes("What's new"))).toBe(true)
   })
 
   it("shows the root title and no back arrow at the root", () => {

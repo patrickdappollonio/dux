@@ -128,6 +128,8 @@ enum PromptMouseTarget {
     ConfigReloadFailedApply,
     AddProjectFailedOk,
     AgentInfoClose,
+    FirstLoadPrimary,
+    FirstLoadSecondary,
     StartupCommandLogItem(usize),
     StartupCommandLogsClose,
     StartupCommandInput,
@@ -233,6 +235,8 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::AddProjectFailedOk => Some(ButtonPressedTarget::AddProjectFailedOk),
             PromptMouseTarget::AgentInfoClose => Some(ButtonPressedTarget::AgentInfoClose),
+            PromptMouseTarget::FirstLoadPrimary => Some(ButtonPressedTarget::FirstLoadPrimary),
+            PromptMouseTarget::FirstLoadSecondary => Some(ButtonPressedTarget::FirstLoadSecondary),
             PromptMouseTarget::StartupCommandLogsClose => {
                 Some(ButtonPressedTarget::StartupCommandLogsClose)
             }
@@ -389,6 +393,25 @@ fn scroll_startup_command_log(
 }
 
 impl App {
+    /// The one quit path: ask for confirmation while anything is still running,
+    /// otherwise quit outright. Returns whether the run loop should exit.
+    ///
+    /// Extracted so the first-load modal's `Ctrl-c` can reach the SAME behavior
+    /// rather than re-deriving the running counts (see `handle_prompt_key`).
+    pub(crate) fn begin_quit(&mut self) -> bool {
+        let agent_count = self.engine.providers.len();
+        let terminal_count = self.running_companion_terminal_count();
+        if agent_count + terminal_count > 0 {
+            self.prompt = PromptState::ConfirmQuit {
+                agent_count,
+                terminal_count,
+                confirm_selected: false,
+            };
+            return false;
+        }
+        true
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Prompts take precedence over every other input target so modal text
         // fields can safely capture keystrokes even when other modes were
@@ -498,19 +521,7 @@ impl App {
 
         if !defer_global && let Some(action) = self.bindings.lookup(&key, BindingScope::Global) {
             match action {
-                Action::Quit => {
-                    let agent_count = self.engine.providers.len();
-                    let terminal_count = self.running_companion_terminal_count();
-                    if agent_count + terminal_count > 0 {
-                        self.prompt = PromptState::ConfirmQuit {
-                            agent_count,
-                            terminal_count,
-                            confirm_selected: false,
-                        };
-                        return Ok(false);
-                    }
-                    return Ok(true);
-                }
+                Action::Quit => return Ok(self.begin_quit()),
                 Action::ToggleHelp => {
                     self.help_scroll = if self.help_scroll.is_some() {
                         None
@@ -3098,6 +3109,81 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::FirstLoad(_)) {
+            // Dialog scope first: Esc closes, Enter activates, and
+            // ToggleSelection (Tab / Shift-Tab / h / l / Left / Right) moves
+            // between the two buttons.
+            match self.bindings.lookup(&key, BindingScope::Dialog) {
+                Some(Action::CloseOverlay) => {
+                    self.close_top_overlay();
+                    return Ok(false);
+                }
+                Some(Action::Confirm) => {
+                    return Ok(self.activate_first_load_button());
+                }
+                Some(Action::ToggleSelection) => {
+                    if let PromptState::FirstLoad(prompt) = &mut self.prompt {
+                        prompt.focus = prompt.focus.toggled();
+                    }
+                    return Ok(false);
+                }
+                _ => {}
+            }
+            // Space activates the focused button — the universal dialog
+            // convention, hardcoded rather than bound (see CLAUDE.md). It is
+            // therefore NOT available as a scroll key here, unlike the help
+            // overlay.
+            if key.code == KeyCode::Char(' ') {
+                return Ok(self.activate_first_load_button());
+            }
+            // `q` DISMISSES this modal; it deliberately does NOT scroll to the
+            // bottom the way it does in the help overlay. This is the first screen
+            // a brand-new user ever sees, `q` is the single most likely "get me out
+            // of this unfamiliar thing" keypress, and rewarding it with a silent
+            // jump to the bottom of the prose is a bad first impression. `End`
+            // keeps scroll-to-bottom, so nothing is lost.
+            //
+            // Resolved through the Global-scope Quit binding rather than a
+            // hardcoded 'q' so a user who rebound quit gets their key here too,
+            // but ONLY for a modifier-free binding. `Ctrl-c` must keep quitting
+            // dux: it is a process-level convention, not a UI gesture — people
+            // press it to leave the PROGRAM, not to close the thing in front of
+            // them — and swallowing the first press to dismiss a modal reads as
+            // dux refusing to exit, which is worst for exactly the brand-new user
+            // this screen exists for. `q` and `Esc` are already generous coverage
+            // for dismissal. Do not widen this to modifier-carrying bindings.
+            if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::Quit) {
+                if key.modifiers.is_empty() {
+                    self.close_top_overlay();
+                    return Ok(false);
+                }
+                // The quit path replaces or closes this screen either way, so
+                // stamp it first — otherwise a cancelled ConfirmQuit would leave
+                // the user with the screen gone AND due to see it again next
+                // launch.
+                self.dismiss_first_load_prompt();
+                return Ok(self.begin_quit());
+            }
+            // This is a non-interactive overlay, so the line-scroll keys scroll
+            // unconditionally. They reuse the Help scope's scroll vocabulary
+            // (j/k/arrows/PgUp/PgDn/Home/End) so they stay rebindable and
+            // consistent with the app's other scrollable overlay — minus `q`,
+            // handled above.
+            if let Some(action) = self.bindings.lookup(&key, BindingScope::Help) {
+                let page = self.first_load_page();
+                match action {
+                    Action::MoveDown => self.scroll_first_load(1),
+                    Action::MoveUp => self.scroll_first_load(-1),
+                    Action::ScrollPageDown => self.scroll_first_load(page),
+                    Action::ScrollPageUp => self.scroll_first_load(-page),
+                    Action::ScrollToBottom => self.scroll_first_load(i32::from(u16::MAX)),
+                    Action::ScrollToTop => self.scroll_first_load(-i32::from(u16::MAX)),
+                    _ => {}
+                }
+            }
+            return Ok(false);
+        }
+
         if matches!(self.prompt, PromptState::AgentInfo(_)) {
             // Read-only modal: Enter, Esc, or Space (the focused Close button) all
             // dismiss it. Routed through PromptState so Esc behaves uniformly.
@@ -4263,6 +4349,18 @@ impl App {
             OverlayMouseLayout::AgentInfo { close_button } => {
                 if contains_point(close_button, column, row) {
                     Some(PromptMouseTarget::AgentInfoClose)
+                } else {
+                    None
+                }
+            }
+            OverlayMouseLayout::FirstLoad {
+                primary_button,
+                secondary_button,
+            } => {
+                if contains_point(primary_button, column, row) {
+                    Some(PromptMouseTarget::FirstLoadPrimary)
+                } else if contains_point(secondary_button, column, row) {
+                    Some(PromptMouseTarget::FirstLoadSecondary)
                 } else {
                     None
                 }
@@ -5576,6 +5674,21 @@ impl App {
     }
 
     fn handle_prompt_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if matches!(self.prompt, PromptState::FirstLoad(_)) {
+            // Wheel scrolls the prose; clicks fall through to the shared button
+            // press machinery below.
+            match mouse.kind {
+                MouseEventKind::ScrollDown => {
+                    self.scroll_first_load(MOUSE_WHEEL_LINES as i32);
+                    return false;
+                }
+                MouseEventKind::ScrollUp => {
+                    self.scroll_first_load(-(MOUSE_WHEEL_LINES as i32));
+                    return false;
+                }
+                _ => {}
+            }
+        }
         if let PromptState::ResourceMonitor {
             scroll_offset,
             selected_row,
@@ -5948,6 +6061,8 @@ impl App {
             | PromptMouseTarget::ConfigReloadFailedApply
             | PromptMouseTarget::AddProjectFailedOk
             | PromptMouseTarget::AgentInfoClose
+            | PromptMouseTarget::FirstLoadPrimary
+            | PromptMouseTarget::FirstLoadSecondary
             | PromptMouseTarget::StartupCommandLogsClose => {
                 debug_assert!(
                     false,
@@ -6086,6 +6201,20 @@ impl App {
             ButtonPressedTarget::StartupCommandLogsClose => {
                 self.prompt = PromptState::None;
                 false
+            }
+            // The clicked pill takes focus first, so the shared activation path
+            // (which reads the focused button) does exactly what the click meant.
+            ButtonPressedTarget::FirstLoadPrimary => {
+                if let PromptState::FirstLoad(prompt) = &mut self.prompt {
+                    prompt.focus = FirstLoadButton::Primary;
+                }
+                self.activate_first_load_button()
+            }
+            ButtonPressedTarget::FirstLoadSecondary => {
+                if let PromptState::FirstLoad(prompt) = &mut self.prompt {
+                    prompt.focus = FirstLoadButton::Secondary;
+                }
+                self.activate_first_load_button()
             }
         }
     }

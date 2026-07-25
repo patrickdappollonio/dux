@@ -6,6 +6,8 @@ const openMacrosDialog = vi.fn()
 const openGlobalEnv = vi.fn()
 const openTaskManager = vi.fn()
 const sortAgents = vi.fn()
+const openWelcomeScreen = vi.fn()
+const openReleaseNotes = vi.fn()
 const reload = vi.fn(() => Promise.resolve())
 
 vi.mock("@/lib/store", () => ({
@@ -15,6 +17,8 @@ vi.mock("@/lib/store", () => ({
   openGlobalEnv: () => openGlobalEnv(),
   openTaskManager: () => openTaskManager(),
   sortAgents: (by: string) => sortAgents(by),
+  openWelcomeScreen: () => openWelcomeScreen(),
+  openReleaseNotes: () => openReleaseNotes(),
 }))
 vi.mock("@/lib/configApi", () => ({ configApi: { reload: () => reload() } }))
 
@@ -44,6 +48,9 @@ describe("appMenuModel", () => {
       ["submenu", "configuration"],
       ["separator", "sep-agents"],
       ["item", "task-manager"],
+      ["separator", "sep-about"],
+      ["item", "welcome-screen"],
+      ["item", "release-notes"],
     ])
   })
 
@@ -59,6 +66,9 @@ describe("appMenuModel", () => {
       "edit-macros",
       "global-env",
       "task-manager",
+      // Both first-load entries open the shared dialog.
+      "welcome-screen",
+      "release-notes",
     ]) {
       expect(titleOf(id)?.title.endsWith("…"), `${id} should end with …`).toBe(
         true,
@@ -146,6 +156,10 @@ describe("appMenuModel", () => {
     expect(openTaskManager).toHaveBeenCalledOnce()
     run("reload-config")
     expect(reload).toHaveBeenCalledOnce()
+    run("welcome-screen")
+    expect(openWelcomeScreen).toHaveBeenCalledOnce()
+    run("release-notes")
+    expect(openReleaseNotes).toHaveBeenCalledOnce()
 
     run("sort-updated")
     expect(sortAgents).toHaveBeenCalledWith("updated")

@@ -9,6 +9,8 @@ vi.mock("@/lib/store", () => ({
   openMacrosDialog: vi.fn(),
   openGlobalEnv: vi.fn(),
   openTaskManager: vi.fn(),
+  openWelcomeScreen: vi.fn(),
+  openReleaseNotes: vi.fn(),
   sortAgents: vi.fn(),
 }))
 vi.mock("@/lib/configApi", () => ({
@@ -88,6 +90,18 @@ describe("AppMenu", () => {
       if (entry.kind === "separator") continue
       expect(rendered.some((t) => t?.includes(entry.title))).toBe(true)
     }
+  })
+
+  // Both first-load entries must reach BOTH presentations from the one model.
+  // This is the desktop half; `AppMenuSheet.test.tsx` has the mobile twin.
+  it("offers both first-load screens at the top level", async () => {
+    render(<AppMenu />)
+    fireEvent.click(screen.getByRole("button", { name: /^menu$/i }))
+    await screen.findByRole("menu")
+
+    const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
+    expect(rendered.some((t) => t?.includes("Welcome screen"))).toBe(true)
+    expect(rendered.some((t) => t?.includes("What's new"))).toBe(true)
   })
 
   it("marks submenu triggers with aria-haspopup", async () => {

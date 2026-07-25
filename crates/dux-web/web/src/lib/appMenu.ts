@@ -26,12 +26,14 @@
 import {
   Activity,
   ArrowDownAZ,
+  PartyPopper,
   ArrowUpDown,
   CalendarPlus,
   Clock,
   FileCode,
   Globe,
   RefreshCw,
+  Rocket,
   SlidersHorizontal,
   SquarePen,
   Wrench,
@@ -42,6 +44,8 @@ import { toast } from "sonner"
 import { configApi } from "@/lib/configApi"
 import {
   openConfigEditor,
+  openReleaseNotes,
+  openWelcomeScreen,
   openCustomizeWebapp,
   openGlobalEnv,
   openTaskManager,
@@ -190,6 +194,25 @@ export function appMenuModel(): AppMenuEntry[] {
       title: "Task Manager…",
       icon: Activity,
       run: () => openTaskManager(),
+    },
+    { kind: "separator", id: "sep-about" },
+    // ACTIONS, not preferences: each opens a dialog, so each keeps a leading
+    // icon and a trailing "…". Their `ui.disable_*` counterparts are Preferences
+    // rows, and those flags suppress only the AUTOMATIC screens — these entries
+    // keep working regardless, which is the whole reason they exist.
+    {
+      kind: "item",
+      id: "welcome-screen",
+      title: "Welcome screen…",
+      icon: Rocket,
+      run: () => openWelcomeScreen(),
+    },
+    {
+      kind: "item",
+      id: "release-notes",
+      title: "What's new…",
+      icon: PartyPopper,
+      run: () => openReleaseNotes(),
     },
   ]
 }

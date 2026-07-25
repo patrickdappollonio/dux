@@ -3534,6 +3534,10 @@ mod tests {
             help_scroll: None,
             last_help_height: 0,
             last_help_lines: 0,
+            last_first_load_height: 0,
+            last_first_load_lines: 0,
+            pending_first_load: None,
+            notes_fetch_rx: None,
             fullscreen_overlay: FullscreenOverlay::None,
             startup_log_viewer: None,
             status: crate::statusline::KeyedStatusController::with_clear_after(

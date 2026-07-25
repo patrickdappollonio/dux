@@ -131,6 +131,65 @@ export interface Bootstrap {
    * `types.ts`), which is the effective per-project value. Older servers omit
    * it, so consumers fall back to "claude". */
   global_default_provider?: string
+  /** The first-run welcome screen's copy, from `dux_core::welcome_screen` so the
+   * web and the TUI say identical words. Present unconditionally, not only when
+   * the welcome is pending: the app menu can open the screen on demand. Older
+   * servers omit it, so consumers must tolerate `undefined` (the menu entry then
+   * has nothing to show). Distinct from `welcome_tips`, the rotating idle-pane
+   * tips. */
+  welcome_screen?: WelcomeScreenView
+  /** `dux_core::urls::WEBSITE` — where the welcome screen's secondary button
+   * goes. Server-projected so the two surfaces cannot disagree about a dux URL.
+   * Older servers omit it. */
+  website_url?: string
+  /** The first-load screen THIS launch should show, or null/absent for neither.
+   * Decided once by the server at startup and held in its memory, so a browser
+   * that connects at any point still receives it. Dismissing it (`dismissFirstLoad`)
+   * records the version as seen in SQLite, which the TUI reads too — so a
+   * dismissal here settles the screen on both surfaces. */
+  pending_first_load?: PendingFirstLoad | null
+  /** Mirrors `config.ui.disable_automated_welcome_screen`: suppresses the
+   * AUTOMATIC first-run welcome only; the app menu entry still opens it. Older
+   * servers omit it, so consumers fall back to false. */
+  disable_automated_welcome_screen?: boolean
+  /** Mirrors `config.ui.disable_release_notes`: suppresses the AUTOMATIC
+   * what's-new screen only; the app menu entry still opens it. Older servers omit
+   * it, so consumers fall back to false. */
+  disable_release_notes?: boolean
+}
+
+/** One numbered getting-started step. The number is carried by the server, not
+ * derived from the array index. */
+export interface WelcomeStepView {
+  number: number
+  title: string
+  detail: string
+}
+
+/** The first-run welcome screen's content. Plain prose and titles: the server
+ * hands over text, never Markdown, so nothing here needs a Markdown renderer. */
+export interface WelcomeScreenView {
+  tagline: string
+  paragraphs: string[]
+  steps: WelcomeStepView[]
+}
+
+/** One release's notes, trimmed server-side to what the what's-new screen shows.
+ * `paragraphs` and `sections` are plain text (core stripped the Markdown). */
+export interface ReleaseNotesView {
+  version: string
+  headline: string
+  paragraphs: string[]
+  sections: string[]
+  /** The release's own web page — where "Open full notes" goes. */
+  html_url: string
+}
+
+/** The pending first-load screen. `notes` is present exactly when `screen` is
+ * `"whats_new"`: the server never offers that screen without notes in hand. */
+export interface PendingFirstLoad {
+  screen: "welcome" | "whats_new"
+  notes?: ReleaseNotesView | null
 }
 
 /** Fallback per-agent tab cap when the server omits `agent_tabs_max` (older

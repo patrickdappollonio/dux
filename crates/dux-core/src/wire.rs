@@ -696,6 +696,17 @@ pub struct SettingsPatch {
     /// unrecognized name rejects the WHOLE patch, matching
     /// `pr_banner_position`.
     pub default_provider: Option<String>,
+    /// `ui.disable_automated_welcome_screen`: suppresses the AUTOMATIC first-run
+    /// welcome screen. A plain field write with no side effects (the gate reads
+    /// it at the NEXT launch), so it rides the generic settings path. It does NOT
+    /// disable the app menu's on-demand "Welcome screen…" entry, which bypasses
+    /// the gate entirely.
+    pub disable_automated_welcome_screen: Option<bool>,
+    /// `ui.disable_release_notes`: suppresses the AUTOMATIC what's-new screen
+    /// after a version change. Same plain-write reasoning as
+    /// `disable_automated_welcome_screen`, and likewise leaves the on-demand
+    /// "What's new…" menu entry working.
+    pub disable_release_notes: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -1378,6 +1389,8 @@ impl Engine {
             hyperlinks,
             enable_randomized_pet_name_by_default,
             default_provider,
+            disable_automated_welcome_screen,
+            disable_release_notes,
         } = patch;
 
         // Validate enums BEFORE mutating the candidate, so a rejected value
@@ -1444,6 +1457,12 @@ impl Engine {
         }
         if let Some(v) = default_provider {
             candidate.defaults.provider = v;
+        }
+        if let Some(v) = disable_automated_welcome_screen {
+            candidate.ui.disable_automated_welcome_screen = v;
+        }
+        if let Some(v) = disable_release_notes {
+            candidate.ui.disable_release_notes = v;
         }
 
         // Idempotent: skip the write (and the fan-out) when nothing changed
@@ -8784,6 +8803,20 @@ mod tests {
                 expect: "true",
             },
             SettingsFieldRow {
+                key: "disable_automated_welcome_screen",
+                seed: |c| c.ui.disable_automated_welcome_screen = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.disable_automated_welcome_screen.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
+                key: "disable_release_notes",
+                seed: |c| c.ui.disable_release_notes = false,
+                sent: serde_json::json!(true),
+                read: |c| c.ui.disable_release_notes.to_string(),
+                expect: "true",
+            },
+            SettingsFieldRow {
                 key: "pr_banner_position",
                 seed: |c| c.ui.pr_banner_position = "bottom".to_string(),
                 sent: serde_json::json!("top"),
@@ -8829,7 +8862,7 @@ mod tests {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            14,
+            16,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -8893,6 +8926,8 @@ mod tests {
             // `claude` is the default, `codex` is the other provider that ships
             // in `ProvidersConfig::default()`.
             default_provider: Some("codex".to_string()),
+            disable_automated_welcome_screen: Some(!before.ui.disable_automated_welcome_screen),
+            disable_release_notes: Some(!before.ui.disable_release_notes),
         });
         engine.apply_wire(patch).expect("dispatch ok");
 
@@ -8929,6 +8964,14 @@ mod tests {
             !before.defaults.enable_randomized_pet_name_by_default
         );
         assert_eq!(after.defaults.provider, "codex");
+        assert_eq!(
+            after.ui.disable_automated_welcome_screen,
+            !before.ui.disable_automated_welcome_screen
+        );
+        assert_eq!(
+            after.ui.disable_release_notes,
+            !before.ui.disable_release_notes
+        );
 
         // Disk must agree with memory. Asserting only one of the two is what
         // let the copy-back drift out of step with the eager write.
@@ -8961,6 +9004,14 @@ mod tests {
             after.defaults.enable_randomized_pet_name_by_default
         );
         assert_eq!(disk.defaults.provider, after.defaults.provider);
+        assert_eq!(
+            disk.ui.disable_automated_welcome_screen,
+            after.ui.disable_automated_welcome_screen
+        );
+        assert_eq!(
+            disk.ui.disable_release_notes,
+            after.ui.disable_release_notes
+        );
     }
 
     /// CROSS-LANGUAGE PIN: the curated favicon color names live twice — here in

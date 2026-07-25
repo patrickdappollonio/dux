@@ -172,6 +172,115 @@ pub struct BootstrapView {
     /// cannot be confused with that per-project field when read alongside it.
     /// Older servers omit it, so the web falls back to "claude".
     pub global_default_provider: String,
+    /// The first-run welcome screen's content, from `dux_core::welcome_screen`.
+    /// Projected UNCONDITIONALLY, not only when the welcome is pending: the app
+    /// menu can open the screen on demand at any time, and the content is
+    /// config-static (its last paragraph interpolates this machine's config
+    /// path), so the bootstrap document is exactly its home. Distinct from
+    /// `welcome_tips`, which is the rotating idle-pane tip list.
+    pub welcome_screen: WelcomeScreenView,
+    /// `dux_core::urls::WEBSITE` — where the welcome screen's secondary button
+    /// goes. Projected rather than hardcoded client-side so the surfaces cannot
+    /// disagree about a dux URL (see the `urls` module docs).
+    pub website_url: String,
+    /// The first-load screen this launch should show, or `None` for neither.
+    ///
+    /// NOT engine state, and [`Engine::bootstrap`] always leaves it `None`. The
+    /// web server computes the plan ONCE at startup (`first_load::plan`, then
+    /// `after_fetch` when the release-notes worker returns), holds the result in
+    /// memory, and injects it into this document on every request — so a browser
+    /// that connects a minute after startup still receives the screen. The
+    /// version is stamped as seen when the user DISMISSES it, never when the
+    /// plan is computed (see the `first_load` module docs).
+    pub pending_first_load: Option<PendingFirstLoadView>,
+    /// Mirrors `config.ui.disable_automated_welcome_screen`: suppresses the
+    /// AUTOMATIC first-run welcome only. The app menu's "Welcome screen…" still
+    /// opens it. Read by the web's Preferences dialog.
+    pub disable_automated_welcome_screen: bool,
+    /// Mirrors `config.ui.disable_release_notes`: suppresses the AUTOMATIC
+    /// what's-new screen after a version change only. The app menu's "What's
+    /// new…" still opens it. Read by the web's Preferences dialog.
+    pub disable_release_notes: bool,
+}
+
+/// One numbered getting-started step, projected from
+/// `dux_core::welcome_screen::WelcomeStep`. The number is carried, not derived
+/// from an array index, so the client never has to re-derive the sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WelcomeStepView {
+    pub number: u8,
+    pub title: String,
+    pub detail: String,
+}
+
+/// The first-run welcome screen's content, projected from
+/// `dux_core::welcome_screen::WelcomeScreen`.
+///
+/// Plain prose and titles: the client renders text, never Markdown. Core does
+/// the trimming so neither surface needs a Markdown renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WelcomeScreenView {
+    pub tagline: String,
+    pub paragraphs: Vec<String>,
+    pub steps: Vec<WelcomeStepView>,
+}
+
+impl WelcomeScreenView {
+    /// Project the welcome content for the machine whose config lives at
+    /// `config_path`.
+    pub fn from_core(screen: crate::welcome_screen::WelcomeScreen) -> Self {
+        Self {
+            tagline: screen.tagline.to_string(),
+            paragraphs: screen.paragraphs,
+            steps: screen
+                .steps
+                .iter()
+                .map(|s| WelcomeStepView {
+                    number: s.number,
+                    title: s.title.to_string(),
+                    detail: s.detail.to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The pending first-load screen: which one, plus the release notes when the
+/// screen is the what's-new one.
+///
+/// Deliberately minimal. The welcome screen needs no payload here because its
+/// content rides [`BootstrapView::welcome_screen`] unconditionally, so this
+/// carries only what is specific to THIS launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingFirstLoadView {
+    /// `"welcome"` | `"whats_new"`. A string, not a bool, so a third screen can
+    /// be added without reshaping the wire.
+    pub screen: String,
+    /// The release notes for the running version. `Some` exactly when `screen`
+    /// is `"whats_new"`: the gate never shows that screen without notes in hand
+    /// (a failed fetch downgrades the plan to "show nothing").
+    pub notes: Option<crate::release_notes::ReleaseNotes>,
+}
+
+impl PendingFirstLoadView {
+    /// The wire name for [`crate::first_load::FirstLoad::Welcome`].
+    pub const WELCOME: &'static str = "welcome";
+    /// The wire name for [`crate::first_load::FirstLoad::WhatsNew`].
+    pub const WHATS_NEW: &'static str = "whats_new";
+
+    pub fn welcome() -> Self {
+        Self {
+            screen: Self::WELCOME.to_string(),
+            notes: None,
+        }
+    }
+
+    pub fn whats_new(notes: crate::release_notes::ReleaseNotes) -> Self {
+        Self {
+            screen: Self::WHATS_NEW.to_string(),
+            notes: Some(notes),
+        }
+    }
 }
 
 /// A single text macro projected for web clients, from
@@ -812,6 +921,16 @@ impl Engine {
             attention_indicator: self.config.ui.attention_indicator,
             attention_on_bell: self.config.ui.attention_on_bell,
             global_default_provider: self.config.defaults.provider.clone(),
+            welcome_screen: WelcomeScreenView::from_core(crate::welcome_screen::welcome_screen(
+                &self.paths.config_path,
+            )),
+            website_url: crate::urls::WEBSITE.to_string(),
+            // Always `None` here: the pending screen lives in the web server's
+            // memory, not the engine's, and the bootstrap ROUTE injects it. See
+            // the field's doc.
+            pending_first_load: None,
+            disable_automated_welcome_screen: self.config.ui.disable_automated_welcome_screen,
+            disable_release_notes: self.config.ui.disable_release_notes,
         }
     }
 }
@@ -1646,12 +1765,89 @@ mod tests {
             "attention_indicator",
             "attention_on_bell",
             "global_default_provider",
+            "welcome_screen",
+            "website_url",
+            "pending_first_load",
+            "disable_automated_welcome_screen",
+            "disable_release_notes",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
                 "bootstrap JSON must carry {field}: {json}"
             );
         }
+    }
+
+    #[test]
+    fn the_welcome_screen_content_is_projected_from_core_and_names_the_config_path() {
+        // The web renders the SAME prose the TUI does; core owns the copy, and
+        // the last paragraph interpolates this machine's config path. Projected
+        // unconditionally (not only when the welcome is pending) because the app
+        // menu can open the screen on demand at any time.
+        let (engine, _tmp) = test_engine();
+        let b = engine.bootstrap();
+        assert_eq!(b.welcome_screen.tagline, crate::welcome_screen::TAGLINE);
+        assert_eq!(b.welcome_screen.steps.len(), 3);
+        assert_eq!(b.welcome_screen.steps[0].number, 1);
+        assert_eq!(b.welcome_screen.steps[0].title, "Add a project");
+        let joined = b.welcome_screen.paragraphs.join(" ");
+        assert!(
+            joined.contains(&engine.paths.config_path.display().to_string()),
+            "the resolved config path must be projected verbatim: {joined}"
+        );
+    }
+
+    #[test]
+    fn the_website_url_is_projected_from_the_one_url_home() {
+        // The welcome screen's secondary button links here. Projected rather
+        // than hardcoded in the client so the two surfaces cannot disagree.
+        let (engine, _tmp) = test_engine();
+        assert_eq!(engine.bootstrap().website_url, crate::urls::WEBSITE);
+    }
+
+    #[test]
+    fn no_screen_is_pending_in_the_bare_projection() {
+        // The pending first-load screen is NOT engine state: the web server
+        // computes the plan once at startup, holds it in memory, and injects it
+        // into this document per request. The projection always says `None` so
+        // the field's absence is never mistaken for "the engine decided no".
+        let (engine, _tmp) = test_engine();
+        assert!(engine.bootstrap().pending_first_load.is_none());
+    }
+
+    #[test]
+    fn the_two_first_load_disable_flags_are_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+        let b = engine.bootstrap();
+        assert!(!b.disable_automated_welcome_screen);
+        assert!(!b.disable_release_notes);
+
+        engine.config.ui.disable_automated_welcome_screen = true;
+        engine.config.ui.disable_release_notes = true;
+        let b = engine.bootstrap();
+        assert!(b.disable_automated_welcome_screen);
+        assert!(b.disable_release_notes);
+    }
+
+    #[test]
+    fn a_pending_screen_serializes_with_its_screen_name_and_notes() {
+        // The wire shape the web client branches on: a screen name plus the
+        // notes, present only for the what's-new screen.
+        let welcome = PendingFirstLoadView::welcome();
+        let json = serde_json::to_string(&welcome).expect("serialize");
+        assert!(json.contains("\"screen\":\"welcome\""), "{json}");
+        assert!(json.contains("\"notes\":null"), "{json}");
+
+        let notes = crate::release_notes::ReleaseNotes {
+            version: "v0.7.0".to_string(),
+            headline: "Louder failures".to_string(),
+            ..Default::default()
+        };
+        let whats_new = PendingFirstLoadView::whats_new(notes);
+        let json = serde_json::to_string(&whats_new).expect("serialize");
+        assert!(json.contains("\"screen\":\"whats_new\""), "{json}");
+        assert!(json.contains("\"version\":\"v0.7.0\""), "{json}");
+        assert!(json.contains("Louder failures"), "{json}");
     }
 
     #[test]

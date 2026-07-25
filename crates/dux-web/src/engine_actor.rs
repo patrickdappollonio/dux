@@ -205,6 +205,18 @@ pub enum EngineRequest {
     /// verbatim. The caller adopts the change via the existing config reload.
     /// `Ok(())` on success; `Err(message)` for a parse or IO failure.
     WriteRawConfig(String, oneshot::Sender<Result<(), String>>),
+    /// Read everything `dux_core::first_load::plan` needs, off the engine thread:
+    /// the last-seen version from SQLite, the running display version, the two
+    /// `[ui]` suppression flags, and the state root the release-notes cache lives
+    /// under. One round-trip so the resolver never touches the store directly
+    /// (the engine is the single writer/reader of `sessions.sqlite3`).
+    FirstLoadInputs(oneshot::Sender<FirstLoadInputs>),
+    /// Record the running version as seen (`SessionStore::set_last_seen_version`).
+    ///
+    /// Routed through the engine because it owns the ONE `SessionStore` handle,
+    /// which is also what makes dismissal shared: the TUI reads the same row, so
+    /// dismissing in a browser settles the screen for both surfaces.
+    MarkVersionSeen(String, oneshot::Sender<Result<(), String>>),
     /// Gracefully wind down every running PTY (SIGTERM the children so CLIs can
     /// save state for a later resume), then stop the engine thread. Replies once
     /// the wind-down completes so the server can finish exiting.
@@ -978,6 +990,52 @@ impl EngineHandle {
         rx.await
             .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
     }
+
+    /// Read the inputs `dux_core::first_load::plan` needs. `None` when the engine
+    /// thread is gone, in which case the caller shows no screen at all rather
+    /// than guessing (and, critically, stamps nothing).
+    pub async fn first_load_inputs(&self) -> Option<FirstLoadInputs> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::FirstLoadInputs(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Record `version` as seen. This is the write that makes a dismissal shared
+    /// between the web UI and the TUI: one SQLite row, read by both.
+    pub async fn mark_version_seen(&self, version: String) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::MarkVersionSeen(version, tx))
+            .await
+            .is_err()
+        {
+            return Err("the engine is not available".to_string());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("the engine did not reply".to_string()))
+    }
+}
+
+/// Everything the first-load gate needs, read off the engine thread in one
+/// round-trip. See [`EngineRequest::FirstLoadInputs`].
+#[derive(Clone, Debug)]
+pub struct FirstLoadInputs {
+    /// The version recorded in SQLite; `None` on a first ever launch.
+    pub last_seen: Option<String>,
+    /// This build's display version (`"development"` for a non-release build).
+    pub running: String,
+    pub disable_welcome: bool,
+    pub disable_release_notes: bool,
+    /// The dux state directory, where the release-notes cache file lives.
+    pub state_root: std::path::PathBuf,
 }
 
 /// Spawn the engine thread. Returns a handle and the thread's join handle.
@@ -2052,6 +2110,35 @@ fn handle_request(
                 &content,
                 config_disk_ahead,
             ));
+        }
+        EngineRequest::FirstLoadInputs(reply) => {
+            // A store read failure is treated as "no version recorded", which is
+            // the conservative direction: the worst case is showing the welcome
+            // screen once more, never silently swallowing a release's notes.
+            let last_seen = match engine.session_store.last_seen_version() {
+                Ok(v) => v,
+                Err(err) => {
+                    dux_core::logger::warn(&format!(
+                        "[server] could not read the last-seen version; treating this \
+                         as a first launch: {err:#}"
+                    ));
+                    None
+                }
+            };
+            let _ = reply.send(FirstLoadInputs {
+                last_seen,
+                running: dux_core::display_version().to_string(),
+                disable_welcome: engine.config.ui.disable_automated_welcome_screen,
+                disable_release_notes: engine.config.ui.disable_release_notes,
+                state_root: engine.paths.root.clone(),
+            });
+        }
+        EngineRequest::MarkVersionSeen(version, reply) => {
+            let result = engine
+                .session_store
+                .set_last_seen_version(&version)
+                .map_err(|err| format!("could not record the version as seen: {err:#}"));
+            let _ = reply.send(result);
         }
     }
 }

@@ -32,6 +32,8 @@ const sampleBootstrap: Bootstrap = {
   attention_indicator: false,
   attention_on_bell: false,
   global_default_provider: "codex",
+  disable_automated_welcome_screen: true,
+  disable_release_notes: true,
 }
 
 describe("settingsDescriptors", () => {
@@ -67,6 +69,8 @@ describe("settingsDescriptors", () => {
         "ui.pr_banner_position",
         "capabilities.hyperlinks",
         "ui.github_integration",
+        "ui.disable_automated_welcome_screen",
+        "ui.disable_release_notes",
         "defaults.enable_randomized_pet_name_by_default",
         "defaults.provider",
       ]),
@@ -110,6 +114,57 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.github_integration"]).toBe(false)
     expect(byKey["defaults.enable_randomized_pet_name_by_default"]).toBe(false)
     expect(byKey["defaults.provider"]).toBe("codex")
+    // The two first-load rows are INVERTED: the bootstrap says "disabled: true",
+    // the row shows "shown: false".
+    expect(byKey["ui.disable_automated_welcome_screen"]).toBe(false)
+    expect(byKey["ui.disable_release_notes"]).toBe(false)
+  })
+
+  // The first-load rows are the only inverted ones. The row is phrased
+  // positively ("Show the welcome screen") while the config field is a negative
+  // (`disable_automated_welcome_screen`), so `read` must return the SHOWN value
+  // and `buildWrites` must flip it back exactly once. A missing `inverted` flag
+  // here would silently save the opposite of what the switch shows.
+  it("marks the two first-load rows as inverted and shows them positively", () => {
+    const byKey = Object.fromEntries(
+      allSettingDescriptors().map((d) => [d.key, d]),
+    )
+    for (const key of [
+      "ui.disable_automated_welcome_screen",
+      "ui.disable_release_notes",
+    ]) {
+      const d = byKey[key]
+      expect(d.inverted, `${key} must be inverted`).toBe(true)
+      expect(d.control.kind, key).toBe("bool")
+      // Shown positively: the label asks to SHOW something, and the shown
+      // default is true (both config flags default to false = not disabled).
+      expect(d.label.toLowerCase(), key).toContain("show")
+      expect(d.default, key).toBe(true)
+      // The description must say the menu entry still works, because that is the
+      // whole distinction between "disable the automatic screen" and "remove the
+      // feature".
+      expect(d.description.toLowerCase(), key).toContain("still opens it")
+    }
+    // Nothing else is inverted; inversion is a deliberate exception, not a habit.
+    const inverted = allSettingDescriptors()
+      .filter((d) => d.inverted)
+      .map((d) => d.key)
+      .sort()
+    expect(inverted).toEqual([
+      "ui.disable_automated_welcome_screen",
+      "ui.disable_release_notes",
+    ])
+  })
+
+  it("read() falls back to showing both first-load screens on an older bootstrap", () => {
+    const bare = { ...sampleBootstrap } as Partial<Bootstrap>
+    delete bare.disable_automated_welcome_screen
+    delete bare.disable_release_notes
+    const byKey = Object.fromEntries(
+      allSettingDescriptors().map((d) => [d.key, d.read(bare as Bootstrap)]),
+    )
+    expect(byKey["ui.disable_automated_welcome_screen"]).toBe(true)
+    expect(byKey["ui.disable_release_notes"]).toBe(true)
   })
 
   // CROSS-LANGUAGE PIN. The keys this modal can PATCH live twice: here, and in
@@ -140,6 +195,8 @@ describe("settingsDescriptors", () => {
       "ui.auto_reopen_agents",
       "ui.compose_bar",
       "ui.copy_on_select",
+      "ui.disable_automated_welcome_screen",
+      "ui.disable_release_notes",
       "ui.pr_banner_position",
       "ui.status_clear_seconds",
     ])

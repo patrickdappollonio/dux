@@ -23,7 +23,13 @@ import {
   fetchChanges,
   type SessionChangesResponse,
 } from "./changesApi"
-import { type Bootstrap, fetchBootstrap } from "./bootstrapApi"
+import {
+  type Bootstrap,
+  type PendingFirstLoad,
+  type ReleaseNotesView,
+  fetchBootstrap,
+} from "./bootstrapApi"
+import { firstLoadApi } from "./firstLoadApi"
 import { attentionCount, formatTabTitle } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { resolveInstanceTitle } from "./instanceTitle"
@@ -80,6 +86,34 @@ export type SelectedTarget =
 // hub ("home"), the focused terminal, or the changed-files view. Desktop never
 // reads this — it renders all three panes at once.
 export type MobileScreen = "home" | "terminal" | "changes"
+
+/** Which of the two first-load screens the dialog is showing. */
+export type FirstLoadScreen = "welcome" | "whats_new"
+
+/**
+ * The open first-load dialog. ONE dialog serves both screens; only the text and
+ * the two buttons differ, so this carries the union of what either needs.
+ */
+export interface FirstLoadDialogState {
+  screen: FirstLoadScreen
+  /**
+   * True when this is THIS LAUNCH's automatic screen (the server offered it in
+   * the bootstrap document). Closing an automatic screen DISMISSES it — the
+   * server records the version as seen in SQLite, settling it for the TUI too.
+   * An on-demand open from the app menu is `false` and dismisses nothing:
+   * looking something up is not the same as acknowledging this launch's screen.
+   */
+  automatic: boolean
+  /** The release notes, for the what's-new screen. Null while loading, or when
+   *  the screen is the welcome one. */
+  notes: ReleaseNotesView | null
+  /** An in-flight on-demand notes fetch. The automatic screen never loads: the
+   *  server already had the notes in hand before offering the screen. */
+  loading: boolean
+  /** A failed on-demand fetch, shown in place of the body. Also toasted, so a
+   *  failure is never silent. */
+  error: string | null
+}
 
 // The name-input dialog (one component, two modes) targets either a fresh agent
 // in a project or a fork of an existing session. The shared draft/randomize/
@@ -363,6 +397,15 @@ export interface DuxState {
   // visibility; the dialog seeds its fields from the bootstrap document, so it
   // needs no state beyond this flag.
   customizeWebappOpen: boolean
+  // The one first-load dialog (first-run welcome / post-upgrade what's-new).
+  // Null when closed. ONE dialog serves both screens; they differ only in text
+  // and buttons, so the shape is shared. See `FirstLoadDialogState`.
+  firstLoad: FirstLoadDialogState | null
+  // Set the moment THIS session dismisses an automatic first-load screen, so a
+  // later `config.changed` refetch that still carries the (not yet cleared)
+  // pending screen cannot pop it straight back up. Purely a re-open guard: the
+  // durable record is the server's SQLite row.
+  firstLoadDismissed: boolean
   // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
   // is the working copy of the whole macro list the user edits before saving
   // (the save is wholesale — `update_macros` replaces the entire `[macros]`
@@ -570,6 +613,8 @@ let state: DuxState = {
   configEditorLoading: false,
   configEditorError: null,
   customizeWebappOpen: false,
+  firstLoad: null,
+  firstLoadDismissed: false,
   macrosDialogOpen: false,
   macrosDraft: [],
   mobileScreen: "home",
@@ -899,6 +944,12 @@ function applyBootstrap(b: Bootstrap): void {
   // refetch, so a live rename updates the tab (and re-applies the current dot)
   // without a reload.
   refreshAttentionChrome()
+  // The server decided this launch's first-load screen once, at startup, and
+  // holds it in memory — so it arrives on the FIRST bootstrap of a client that
+  // connects at any point, and on the `config.changed`-driven refetch the server
+  // emits the moment the decision resolves (which is how a browser already open
+  // during a slow release-notes fetch still gets the screen). Guarded inside.
+  offerAutomaticFirstLoad(b.pending_first_load ?? null)
 }
 
 // The instance title/favicon carry a live "needs attention" overlay: a `(N) `
@@ -3485,6 +3536,116 @@ export function openCustomizeWebapp(): void {
 
 export function closeCustomizeWebapp(): void {
   setState({ customizeWebappOpen: false })
+}
+
+// ── The two first-load screens ───────────────────────────────────────────────
+//
+// One dialog, two screens, three entry points: the server's automatic offer (via
+// `applyBootstrap`) and the app menu's two on-demand items. Only the automatic
+// one dismisses on close.
+
+// Open the automatic screen the server offered in the bootstrap document, if any.
+// Called from `applyBootstrap`, so it runs on first load AND on every
+// `config.changed` refetch — hence the three guards below, each of which is the
+// difference between "shown once" and "pops up while you work".
+function offerAutomaticFirstLoad(pending: PendingFirstLoad | null): void {
+  if (pending === null) return
+  // Already dismissed in this browser session: the server clears its pending
+  // screen on dismissal, but a refetch that raced the clear would otherwise
+  // re-open what the user just closed.
+  if (state.firstLoadDismissed) return
+  // A dialog is already up (this screen, or the same screen opened on demand).
+  // Re-opening would reset the user's scroll position mid-read.
+  if (state.firstLoad !== null) return
+  setState({
+    firstLoad: {
+      screen: pending.screen,
+      automatic: true,
+      // The server never offers the what's-new screen without notes in hand, so
+      // the automatic path never loads and never fails.
+      notes: pending.notes ?? null,
+      loading: false,
+      error: null,
+    },
+  })
+}
+
+// The app menu's "Welcome screen…". Needs no fetch: the copy rides the bootstrap
+// document unconditionally, exactly so this entry always works.
+export function openWelcomeScreen(): void {
+  setState({
+    firstLoad: {
+      screen: "welcome",
+      automatic: false,
+      notes: null,
+      loading: false,
+      error: null,
+    },
+  })
+}
+
+// The app menu's "What's new…". Opens immediately in a loading state and fetches
+// the notes, because the server may have to reach GitHub. Works even when
+// `ui.disable_release_notes` is set: that preference suppresses the AUTOMATIC
+// screen only. A failure lands in the dialog body AND a toast — never silent.
+export function openReleaseNotes(): void {
+  setState({
+    firstLoad: {
+      screen: "whats_new",
+      automatic: false,
+      notes: null,
+      loading: true,
+      error: null,
+    },
+  })
+  firstLoadApi
+    .fetchReleaseNotes()
+    .then((notes) => {
+      // Drop a late reply if the user closed the dialog or navigated to the
+      // other screen meanwhile.
+      if (state.firstLoad === null) return
+      if (state.firstLoad.screen !== "whats_new") return
+      setState({
+        firstLoad: { ...state.firstLoad, notes, loading: false, error: null },
+      })
+    })
+    .catch((e) => {
+      const message =
+        e instanceof Error ? e.message : "Could not load the release notes."
+      toast.error(message)
+      if (state.firstLoad === null) return
+      if (state.firstLoad.screen !== "whats_new") return
+      setState({
+        firstLoad: { ...state.firstLoad, loading: false, error: message },
+      })
+    })
+}
+
+// Close the first-load dialog. Closing an AUTOMATIC screen also dismisses it:
+// the server records the running version as seen in SQLite, the one row the TUI
+// reads too, so the screen is settled on both surfaces. An on-demand open
+// dismisses nothing.
+//
+// The close is optimistic and unconditional — a failed dismissal must not trap
+// the user behind a modal — but `firstLoadDismissed` is set only on success, so a
+// failed write leaves the screen genuinely pending for the next load rather than
+// silently swallowing it.
+export function closeFirstLoad(): void {
+  const open = state.firstLoad
+  setState({ firstLoad: null })
+  if (open === null || !open.automatic) return
+  firstLoadApi
+    .dismiss()
+    .then(() => {
+      setState({ firstLoadDismissed: true })
+    })
+    .catch((e) => {
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "Could not record this screen as seen; it may appear again.",
+      )
+    })
 }
 
 // Persist the instance identity (browser tab title + favicon colour). The

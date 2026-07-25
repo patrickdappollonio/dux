@@ -207,6 +207,51 @@ describe("CustomizeWebappDialog", () => {
     expect(uiKeys.length + capKeys.length).toBe(1)
   })
 
+  // The two first-load rows are the only INVERTED ones: the switch says "Show
+  // the welcome screen" while the config field is
+  // `disable_automated_welcome_screen`. If the flip in `buildWrites` were ever
+  // dropped, the dialog would save the exact opposite of what the user sees —
+  // silent, and invisible until someone restarted dux. Hence a test per
+  // direction.
+  it("saves an inverted first-load row as the negated config field", async () => {
+    // Both screens currently enabled (nothing disabled), so both switches read
+    // ON. Turning one OFF must send `disable_* = true`.
+    seed({
+      disable_automated_welcome_screen: false,
+      disable_release_notes: false,
+    })
+    render(<CustomizeWebappDialog />)
+
+    const welcomeSwitch = screen.getByLabelText(
+      "Show the welcome screen on a new install",
+    )
+    expect(welcomeSwitch.getAttribute("aria-checked")).toBe("true")
+
+    fireEvent.click(welcomeSwitch)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui?.disable_automated_welcome_screen).toBe(true)
+    // Only the touched row is sent.
+    expect(patch.ui?.disable_release_notes).toBeUndefined()
+  })
+
+  it("shows an inverted first-load row as OFF when the config disables it, and saves re-enabling it", async () => {
+    seed({ disable_release_notes: true })
+    render(<CustomizeWebappDialog />)
+
+    const notesSwitch = screen.getByLabelText("Show what's new after an update")
+    expect(notesSwitch.getAttribute("aria-checked")).toBe("false")
+
+    fireEvent.click(notesSwitch)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui?.disable_release_notes).toBe(false)
+  })
+
   it("saving the Changes-pane toggle calls setChangesPaneVisibility, not saveSettings, and the row reflects an active override", async () => {
     seed({ show_changes_pane: true })
     mockState.changesPaneOverride = false // a concurrent client already flipped it.

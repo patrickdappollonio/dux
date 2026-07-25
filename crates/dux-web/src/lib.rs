@@ -33,6 +33,7 @@ pub mod console;
 pub mod engine_actor;
 pub mod event_bus;
 pub mod file_routes;
+pub mod first_load_routes;
 pub mod git_routes;
 pub mod host_guard;
 pub mod project_actions;

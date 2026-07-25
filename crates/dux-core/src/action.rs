@@ -146,6 +146,15 @@ pub enum Action {
     /// Open the read-only Agent Info modal for the focused agent (name, provider,
     /// branch lineage, worktree, status).
     OpenAgentInfo,
+    /// Open the first-run welcome screen on demand. Palette-only (no default
+    /// keybinding). Works even when `[ui] disable_automated_welcome_screen` is
+    /// set: that flag suppresses only the AUTOMATIC showing.
+    ShowWelcomeScreen,
+    /// Open the what's-new screen for the running version on demand, fetching the
+    /// release notes if they are not cached. Palette-only (no default
+    /// keybinding). Works even when `[ui] disable_release_notes` is set, and may
+    /// fetch, because the user asked for it.
+    ShowReleaseNotes,
     // Manual reordering (the TUI equivalent of the web's drag-to-reorder). Each
     // moves the selected agent/terminal in the sidebar and switches the sort to
     // manual. Palette-only (no default keybinding).
@@ -273,6 +282,8 @@ impl Action {
             Action::StartWebServer => "start_web_server",
             Action::ToggleAlwaysShowTabs => "toggle_always_show_tabs",
             Action::OpenAgentInfo => "open_agent_info",
+            Action::ShowWelcomeScreen => "show_welcome_screen",
+            Action::ShowReleaseNotes => "show_release_notes",
             Action::MoveAgentUp => "move_agent_up",
             Action::MoveAgentDown => "move_agent_down",
             Action::MoveAgentTop => "move_agent_top",
@@ -443,6 +454,8 @@ impl Action {
             Action::OpenAgentInfo => {
                 "Show the selected agent's details: provider, branch lineage, worktree, and status."
             }
+            Action::ShowWelcomeScreen => "Open the dux welcome screen.",
+            Action::ShowReleaseNotes => "Open the release notes for the running dux version.",
             Action::MoveAgentUp => {
                 "Move the selected agent up one position (switches sorting to manual)."
             }
@@ -581,6 +594,8 @@ impl Action {
             | Action::StartWebServer
             | Action::ToggleAlwaysShowTabs
             | Action::OpenAgentInfo
+            | Action::ShowWelcomeScreen
+            | Action::ShowReleaseNotes
             | Action::MoveAgentUp
             | Action::MoveAgentDown
             | Action::MoveAgentTop

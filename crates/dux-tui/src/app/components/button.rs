@@ -107,6 +107,12 @@ pub(crate) enum ButtonPressedTarget {
     AddProjectFailedOk,
     AgentInfoClose,
     StartupCommandLogsClose,
+    /// The first-load modal's two pill buttons. Unlike every other entry here
+    /// they are NOT drawn by [`Button`] — the approved first-load design uses
+    /// one-row accent-filled pills, not the 3-row bordered widget — but they ride
+    /// the same press machinery so a mouse click behaves identically.
+    FirstLoadPrimary,
+    FirstLoadSecondary,
 }
 
 /// In-flight state for a button the user is currently pressing. `target`

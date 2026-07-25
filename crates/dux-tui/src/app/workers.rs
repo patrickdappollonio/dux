@@ -11,6 +11,10 @@ use super::*;
 
 impl App {
     pub(crate) fn drain_events(&mut self) {
+        // The release-notes worker's PAYLOAD rides its own channel (the keyed
+        // busy→final status rides the engine channel below as a
+        // `StatusOpCompleted`), so fold it in on the same tick.
+        self.drain_notes_fetch();
         while let Ok(event) = self.engine.worker_rx.try_recv() {
             // A PR-lookup completion carries back the opaque id of the keyed busy
             // its dispatch opened. Capture it (and whether the lookup succeeded)
