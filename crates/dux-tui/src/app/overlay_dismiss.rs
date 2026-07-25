@@ -1160,6 +1160,180 @@ mod tests {
         assert!(matches!(app.prompt, PromptState::None));
     }
 
+    // ────────────────────────── the help overlay ──────────────────────────
+    //
+    // Help is NOT a `PromptState` variant — it lives in `help_scroll` and is
+    // handled in `handle_mouse` rather than the prompt mouse path, so
+    // `outside_click_policy` (which takes a `&PromptState`) structurally cannot
+    // reach it. It still dismisses on an outside click, reusing this module's
+    // geometry rule (`click_outside_frame`) and the same fail-closed contract,
+    // and closing through the same `close_help_overlay` helper the keyboard
+    // ladder uses. These tests live here because that is what they exercise.
+
+    fn open_help(app: &mut App) {
+        app.help_scroll = Some(0);
+    }
+
+    fn toggle_help_key(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .expect("toggle help");
+    }
+
+    #[test]
+    fn outside_click_closes_the_help_overlay() {
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        render(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+
+        assert_eq!(app.help_scroll, None, "help survived a click outside it");
+    }
+
+    #[test]
+    fn a_click_inside_the_help_overlay_does_not_close_it() {
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        render(&mut app);
+        let rect = frame_rect(&app);
+
+        for row in rect.y..rect.y + rect.height {
+            app.handle_mouse(left_down(rect.x + 1, row));
+            assert_eq!(
+                app.help_scroll,
+                Some(0),
+                "a click at row {row} inside the help overlay closed it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wheel_still_scrolls_help_both_ways_and_never_closes_it() {
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        render(&mut app);
+        assert!(
+            app.last_help_lines > app.last_help_height,
+            "fixture must have more help content than fits, or scrolling proves nothing"
+        );
+
+        // Wheel over the page, and wheel outside it: neither is a dismissal.
+        for (column, row) in [(frame_rect(&app).x + 1, frame_rect(&app).y + 1), (0, 0)] {
+            app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
+            assert_eq!(app.help_scroll, Some(3), "the wheel stopped scrolling down");
+            app.handle_mouse(mouse(MouseEventKind::ScrollUp, column, row));
+            assert_eq!(app.help_scroll, Some(0), "the wheel stopped scrolling up");
+        }
+    }
+
+    #[test]
+    fn help_fails_closed_when_no_rect_was_recorded() {
+        // Help can be open UNDER a fullscreen overlay: `render_overlay` returns
+        // before `render_help`, so no rect is recorded, yet the mouse still
+        // routes into the help branch. Failing open would close it on any click.
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        render(&mut app);
+
+        assert_eq!(app.overlay_layout.frame.get(), None);
+        app.handle_mouse(left_down(0, 0));
+
+        assert_eq!(
+            app.help_scroll,
+            Some(0),
+            "help closed with no rect recorded"
+        );
+    }
+
+    #[test]
+    fn the_help_mouse_route_lands_where_the_keyboard_route_lands() {
+        // Same scenario, two devices. Everything but the announcement must
+        // match — including the scroll offset, which neither route may leave
+        // behind for the next open.
+        let by_key = {
+            let mut app = test_app(default_bindings());
+            open_help(&mut app);
+            render(&mut app);
+            app.help_scroll = Some(5);
+            esc(&mut app);
+            (app.help_scroll, app.last_help_lines, app.last_help_height)
+        };
+        let by_click = {
+            let mut app = test_app(default_bindings());
+            open_help(&mut app);
+            render(&mut app);
+            app.help_scroll = Some(5);
+            app.handle_mouse(left_down(0, 0));
+            (app.help_scroll, app.last_help_lines, app.last_help_height)
+        };
+
+        assert_eq!(by_key.0, None, "the keyboard route kept a scroll offset");
+        assert_eq!(by_key, by_click);
+    }
+
+    #[test]
+    fn closing_help_by_click_stays_silent_like_every_other_outside_click() {
+        // Deliberate divergence from the keyboard ladder, which narrates the
+        // dismissal: a click is self-evident, and the 26 modals that dismiss
+        // through this engine already announce nothing.
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        render(&mut app);
+        let before = status_text(&app);
+
+        app.handle_mouse(left_down(0, 0));
+
+        assert_eq!(app.help_scroll, None);
+        assert_eq!(status_text(&app), before, "the dismissal announced itself");
+
+        // The keyboard route still says how to get back.
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        esc(&mut app);
+        assert!(
+            status_text(&app).is_some_and(|text| text.contains("help")),
+            "the keyboard ladder must keep its message"
+        );
+    }
+
+    #[test]
+    fn an_outside_click_on_help_never_asks_the_app_to_exit() {
+        // `handle_mouse` returns "should the app exit"; a copy-paste returning
+        // `true` here would quit dux on a stray click.
+        let mut app = test_app(default_bindings());
+        open_help(&mut app);
+        render(&mut app);
+
+        assert!(!app.handle_mouse(left_down(0, 0)));
+        assert_eq!(app.help_scroll, None);
+    }
+
+    #[test]
+    fn help_is_still_opened_and_closed_by_the_keyboard() {
+        let mut app = test_app(default_bindings());
+        assert_eq!(app.help_scroll, None);
+
+        toggle_help_key(&mut app);
+        assert_eq!(
+            app.help_scroll,
+            Some(0),
+            "the toggle key stopped opening help"
+        );
+
+        // Pre-existing, and unchanged here: while help is open the help branch
+        // in `handle_key` consumes every key, so the toggle key does not close
+        // it — the close-overlay key does, via `close_top_overlay`, which
+        // `handle_key` reaches before that branch.
+        toggle_help_key(&mut app);
+        assert_eq!(app.help_scroll, Some(0));
+        esc(&mut app);
+        assert_eq!(
+            app.help_scroll, None,
+            "the close-overlay key stopped closing help"
+        );
+    }
+
     // ───────────────── Esc / outside-click parity (the point) ─────────────────
     //
     // Each of these runs the SAME scenario twice on two fresh apps — cancelled

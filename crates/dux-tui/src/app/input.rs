@@ -6798,6 +6798,25 @@ impl App {
         // outlive its dialog.
         self.pressed_button = None;
 
+        if self.help_scroll.is_some() {
+            // A press outside the help page closes it, like every modal the
+            // click-outside engine covers. Help is not a `PromptState` variant,
+            // so `outside_click_policy` cannot reach it; what IS reused is the
+            // engine's geometry rule (left-press-only, and fail-closed when no
+            // rect was recorded this frame) and its recorded rect, which
+            // `render_help` already stores through `clear_overlay_area`.
+            //
+            // Safe HERE and nowhere earlier: this branch already returns for
+            // every mouse event while help is open, so no click reaching it can
+            // belong to anything else — help has no controls, and the handlers
+            // below (fullscreen overlays, panes, the tab strip) are all
+            // unreachable while it is up. Left-press-only is also what keeps
+            // the wheel arms below intact.
+            if overlay_dismiss::click_outside_frame(self.overlay_layout.frame.get(), &mouse) {
+                self.close_help_overlay(false);
+                return false;
+            }
+        }
         if let Some(ref mut scroll) = self.help_scroll {
             let max_help = self
                 .last_help_lines

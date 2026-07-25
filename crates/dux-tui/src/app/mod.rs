@@ -2799,6 +2799,34 @@ impl App {
         self.engine.seed_pr_statuses_from_store();
     }
 
+    /// Close the help overlay if it is open, reporting whether it was.
+    ///
+    /// The ONE place help is closed. The close-overlay key reaches it through
+    /// [`App::close_top_overlay`] and an outside click reaches it from the help
+    /// branch of `handle_mouse`, so the two devices cannot drift — help is not
+    /// a [`PromptState`] variant, so it cannot ride the click-outside engine's
+    /// [`App::cancel_prompt`] ladder (see [`super::overlay_dismiss`]) and needs
+    /// its own shared close instead.
+    ///
+    /// Dropping `help_scroll` is what closes it, and that also discards the
+    /// scroll offset: help always reopens at the top, by either route.
+    ///
+    /// `announce` is the only difference between the two callers. The keyboard
+    /// says how to reopen; a click stays silent, matching the engine's
+    /// deliberate no-status rule for every other outside-click dismissal (the
+    /// user just watched the overlay disappear under their cursor).
+    pub(crate) fn close_help_overlay(&mut self, announce: bool) -> bool {
+        if self.help_scroll.is_none() {
+            return false;
+        }
+        self.help_scroll = None;
+        if announce {
+            let key = self.bindings.label_for(Action::ToggleHelp);
+            self.set_info(format!("Closed help overlay. Press {key} to reopen."));
+        }
+        true
+    }
+
     pub(crate) fn close_top_overlay(&mut self) -> bool {
         // The agent-list filter is the top-most dismissible layer on the Left pane.
         // Esc clears the query and restores the full list without activating a row,
@@ -2870,10 +2898,7 @@ impl App {
             self.set_info("Dismissed dialog. Resume your work in the current pane.");
             return true;
         }
-        if self.help_scroll.is_some() {
-            self.help_scroll = None;
-            let key = self.bindings.label_for(Action::ToggleHelp);
-            self.set_info(format!("Closed help overlay. Press {key} to reopen."));
+        if self.close_help_overlay(true) {
             return true;
         }
         if matches!(self.center_mode, CenterMode::Diff { .. }) {
