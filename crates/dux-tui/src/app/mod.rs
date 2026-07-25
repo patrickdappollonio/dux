@@ -35,6 +35,7 @@ use crate::editor::DetectedEditor;
 use crate::git;
 use crate::keybindings::{
     Action, BindingScope, HintContext, InteractiveBytePatterns, RuntimeBindings,
+    text_field_owns_key,
 };
 use crate::lockfile::SingleInstanceLock;
 use crate::logger;

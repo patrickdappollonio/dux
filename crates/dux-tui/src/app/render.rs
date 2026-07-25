@@ -7263,18 +7263,27 @@ impl App {
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
+                // This modal's text field owns the letters and the horizontal
+                // arrows, so the hint names the first key of the action that
+                // still reaches the toggle here (see `text_field_owns_key`).
+                // If a rebinding leaves none, the segment is dropped: naming a
+                // key that types a character is worse than naming none.
+                let toggle_key = self
+                    .bindings
+                    .label_for_text_field_dialog(Action::ToggleSelection);
                 let mut hints = vec![Span::raw(" ")];
                 hints.extend(self.theme.key_badge_default(&confirm_key));
                 hints.push(Span::styled(
                     " confirm  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                hints.extend(self.theme.key_badge_default(&toggle_key));
-                hints.push(Span::styled(
-                    " toggle  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
+                if let Some(toggle_key) = &toggle_key {
+                    hints.extend(self.theme.key_badge_default(toggle_key));
+                    hints.push(Span::styled(
+                        " toggle  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
                 hints.extend(self.theme.key_badge_default(&close_key));
                 hints.push(Span::styled(
                     " cancel",
@@ -7578,18 +7587,26 @@ impl App {
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
+                // Same rule as the rename modal: the name field owns the
+                // letters and the horizontal arrows, so the hint names the
+                // first key of the action that still reaches focus movement
+                // here, and drops the segment when a rebinding leaves none.
+                let toggle_key = self
+                    .bindings
+                    .label_for_text_field_dialog(Action::ToggleSelection);
                 let mut hints = vec![Span::raw(" ")];
                 hints.extend(self.theme.key_badge_default(&confirm_key));
                 hints.push(Span::styled(
                     " confirm  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                hints.extend(self.theme.key_badge_default(&toggle_key));
-                hints.push(Span::styled(
-                    " focus  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
+                if let Some(toggle_key) = &toggle_key {
+                    hints.extend(self.theme.key_badge_default(toggle_key));
+                    hints.push(Span::styled(
+                        " focus  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
                 hints.push(Span::styled(
                     "Space toggle  ",
                     Style::default().fg(self.theme.hint_desc_fg),
@@ -13227,6 +13244,283 @@ mod tests {
             );
             assert_eq!(marker_in(&buf, border_column), None);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Footer hints for the two modals that pair a text field with checkboxes.
+    //
+    // `Action::ToggleSelection` is bound by default to `h`/`l`/`Left`/`Right`
+    // as well as `Tab`/`Shift-Tab`, and `label_for` names the FIRST key. In the
+    // rename and new-agent-name modals the field owns the letters and the
+    // horizontal arrows, so those keys never reach the toggle there: the hint
+    // must name the first key that is actually reachable.
+    // ------------------------------------------------------------------
+
+    /// Full screen text of a rendered frame, one line per row.
+    fn rendered_screen(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Bindings with every default key list except `action`, which gets `keys`.
+    fn bindings_with(action: Action, keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
+        RuntimeBindings::new(
+            move |a| {
+                if a == action {
+                    keys.clone()
+                } else {
+                    crate::keybindings::BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == a)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        )
+    }
+
+    /// A single-code key combination as the key event a user would produce.
+    fn press(key: crokey::KeyCombination) -> KeyEvent {
+        let crokey::OneToThree::One(code) = key.codes else {
+            panic!("test fixtures use single-code combinations only");
+        };
+        KeyEvent::new(code, key.modifiers)
+    }
+
+    /// The toggle key the two text-field modals actually route to the toggle.
+    fn reachable_toggle(app: &App) -> Option<crokey::KeyCombination> {
+        app.bindings
+            .first_key_reaching(Action::ToggleSelection, |k| !text_field_owns_key(k))
+    }
+
+    fn rename_prompt() -> PromptState {
+        PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("agent".to_string()),
+            rename_branch: false,
+        }
+    }
+
+    fn name_new_agent_prompt(app: &App) -> PromptState {
+        PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("agent".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus: NameNewAgentFocus::Input,
+        }
+    }
+
+    #[test]
+    fn rename_footer_names_a_key_that_really_toggles_the_checkbox() {
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_prompt();
+
+        let label = app
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection)
+            .expect("default bindings leave a reachable toggle key");
+        assert_ne!(
+            label, "h",
+            "`h` types into the name field here; it must never be the advertised toggle"
+        );
+
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains(&format!("<{label}> toggle")),
+            "rename footer should advertise <{label}>; got:\n{screen}"
+        );
+        assert!(
+            !screen.contains("<h> toggle"),
+            "rename footer must not advertise `h`:\n{screen}"
+        );
+
+        // The label is tied to behaviour: the advertised key toggles.
+        let key = reachable_toggle(&app).expect("reachable toggle key");
+        app.handle_key(press(key)).expect("handle key");
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => assert!(
+                *rename_branch,
+                "the key the footer names must toggle the rename-branch checkbox"
+            ),
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_new_agent_footer_names_a_key_that_really_moves_focus() {
+        let mut app = test_app(default_bindings());
+        app.prompt = name_new_agent_prompt(&app);
+
+        let label = app
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection)
+            .expect("default bindings leave a reachable toggle key");
+        assert_ne!(
+            label, "h",
+            "`h` types into the name field here; it must never be the advertised focus key"
+        );
+
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains(&format!("<{label}> focus")),
+            "new-agent footer should advertise <{label}>; got:\n{screen}"
+        );
+        assert!(
+            !screen.contains("<h> focus"),
+            "new-agent footer must not advertise `h`:\n{screen}"
+        );
+
+        let key = reachable_toggle(&app).expect("reachable toggle key");
+        app.handle_key(press(key)).expect("handle key");
+        match &app.prompt {
+            PromptState::NameNewAgent { focus, .. } => assert_ne!(
+                *focus,
+                NameNewAgentFocus::Input,
+                "the key the footer names must move focus off the name field"
+            ),
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebinding_past_a_suppressed_first_key_moves_the_hint_to_the_reachable_one() {
+        // `Left` is owned by the caret in this modal, so the hint has to skip
+        // it and name `F2`, the first key that still reaches the toggle.
+        let keys = vec![
+            crokey::KeyCombination::one_key(KeyCode::Left, KeyModifiers::NONE),
+            crokey::KeyCombination::one_key(KeyCode::F(2), KeyModifiers::NONE),
+        ];
+        let mut app = test_app(bindings_with(Action::ToggleSelection, keys));
+        app.prompt = rename_prompt();
+
+        let label = app
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection)
+            .expect("F2 still reaches the toggle");
+        assert_ne!(label, "Left", "the caret owns Left in this modal");
+
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains(&format!("<{label}> toggle")),
+            "footer should advertise the reachable <{label}>; got:\n{screen}"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            .expect("handle key");
+        match &app.prompt {
+            PromptState::RenameSession { rename_branch, .. } => {
+                assert!(*rename_branch, "the advertised F2 must toggle")
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fully_suppressed_toggle_binding_drops_the_hint_instead_of_lying() {
+        // Every key of the action is owned by the text field here, so there is
+        // no honest key to name: the segment is dropped rather than naming a
+        // key that types a letter or rendering an empty badge.
+        let keys = vec![
+            crokey::KeyCombination::one_key(KeyCode::Char('h'), KeyModifiers::NONE),
+            crokey::KeyCombination::one_key(KeyCode::Char('l'), KeyModifiers::NONE),
+        ];
+        let mut app = test_app(bindings_with(Action::ToggleSelection, keys));
+        assert!(
+            app.bindings
+                .label_for_text_field_dialog(Action::ToggleSelection)
+                .is_none(),
+            "no key of the action reaches the toggle in this modal"
+        );
+
+        for prompt in [rename_prompt(), name_new_agent_prompt(&app)] {
+            app.prompt = prompt;
+            let screen = rendered_screen(&mut app);
+            assert!(
+                !screen.contains("toggle") || !screen.contains("<h>"),
+                "must not advertise the letter that types:\n{screen}"
+            );
+            assert!(
+                !screen.contains("<> "),
+                "must not render an empty key badge:\n{screen}"
+            );
+            assert!(
+                !screen.contains("<h> focus") && !screen.contains("<l> focus"),
+                "must not advertise a typing letter as the focus key:\n{screen}"
+            );
+            // The rest of the footer survives.
+            assert!(
+                screen.contains("confirm") && screen.contains("cancel"),
+                "the remaining hints must still render:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn button_only_dialogs_keep_their_first_key_hint() {
+        // The 22 other Dialog-scope consumers have no text field, so `h` really
+        // does toggle there and their hints must stay exactly as they are.
+        let mut app = test_app(default_bindings());
+        let unchanged = app.bindings.label_for(Action::ToggleSelection);
+        assert_eq!(unchanged, "h", "default first key of the shared action");
+
+        app.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
+            session_id: "session-1".to_string(),
+            tab_id: "session-1".to_string(),
+            session_label: "agent".to_string(),
+            worktree_path: "/tmp/wt".to_string(),
+            options: vec![ChangeAgentProviderOption {
+                provider: ProviderKind::from_str("codex"),
+                supports_resume: true,
+                resume_available: false,
+                is_current: true,
+            }],
+            selected: 0,
+            focus: ChangeAgentProviderFocus::List,
+            mode: ChangeAgentProviderMode::Retarget,
+        });
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("<h> buttons"),
+            "the agent-provider dialog keeps its <h> hint:\n{screen}"
+        );
+
+        app.prompt = PromptState::ChangeDefaultProvider(ChangeDefaultProviderPrompt {
+            current: ProviderKind::from_str("codex"),
+            options: vec![ChangeDefaultProviderOption {
+                provider: ProviderKind::from_str("codex"),
+                is_current: true,
+            }],
+            selected: 0,
+            focus: ChangeDefaultProviderFocus::List,
+        });
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("<h> buttons"),
+            "the default-provider dialog keeps its <h> hint:\n{screen}"
+        );
     }
 
     /// The diff pane's outer rect, reconstructed from the content rect it

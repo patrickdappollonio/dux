@@ -56,20 +56,6 @@ fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
     }
 }
 
-/// Horizontal arrows belong to a text field's caret, never to a dialog's
-/// selection.
-///
-/// `Action::ToggleSelection` is bound by default to `Left`/`Right` as well as
-/// `h`/`l`/`Tab`/`Shift-Tab`, which is right for the button-only confirmation
-/// dialogs that make up almost every Dialog-scope consumer. The two modals
-/// that pair a single-line text input with checkboxes must suppress the
-/// binding lookup for these keys, exactly as they already suppress it for
-/// plain characters, so the arrows reach the field. Modified arrows
-/// (`Alt`/`Ctrl`) are covered too: the field maps those to word movement.
-fn is_horizontal_arrow(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Left | KeyCode::Right)
-}
-
 /// Treat both crossterm's `BackTab` and explicit `Tab + Shift` as reverse-tab.
 /// Some terminals deliver one form, some the other.
 fn is_reverse_tab(key: KeyEvent) -> bool {
@@ -3584,11 +3570,11 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
-            let is_plain_char = matches!(key.code, KeyCode::Char(_))
-                && !key.modifiers.contains(KeyModifiers::CONTROL);
             // Plain characters type; horizontal arrows move the caret. Both
-            // belong to the text field, so neither consults the bindings.
-            let action = if is_plain_char || is_horizontal_arrow(key) {
+            // belong to the text field, so neither consults the bindings. The
+            // footer hint is derived from this same predicate, so it can only
+            // ever name a key that still reaches the bindings here.
+            let action = if text_field_owns_key(key) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
@@ -3740,11 +3726,11 @@ impl App {
             rename_branch,
         } = &mut self.prompt
         {
-            let is_plain_char = matches!(key.code, KeyCode::Char(_))
-                && !key.modifiers.contains(KeyModifiers::CONTROL);
             // Plain characters type; horizontal arrows move the caret. Both
-            // belong to the text field, so neither consults the bindings.
-            let action = if is_plain_char || is_horizontal_arrow(key) {
+            // belong to the text field, so neither consults the bindings. The
+            // footer hint is derived from this same predicate, so it can only
+            // ever name a key that still reaches the bindings here.
+            let action = if text_field_owns_key(key) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)

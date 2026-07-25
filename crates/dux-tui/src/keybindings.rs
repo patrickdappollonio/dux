@@ -1319,6 +1319,35 @@ const HELP_SECTION_ORDER: &[&str] = &[
     "Overlays",
 ];
 
+/// Keys that a dialog's single-line text field owns, so the dialog's binding
+/// lookup never sees them.
+///
+/// The rename-agent and new-agent-name modals pair a text field with
+/// checkboxes. Plain characters type into the field and the horizontal arrows
+/// move its caret (modified arrows too: the field maps `Alt`/`Ctrl` arrows to
+/// word movement), so neither may be claimed by a Dialog-scope binding there.
+/// `Action::ToggleSelection` is bound by default to `h`/`l`/`Left`/`Right` as
+/// well as `Tab`/`Shift-Tab`, which is right for the button-only confirmation
+/// dialogs that make up almost every Dialog-scope consumer but wrong for these
+/// two.
+///
+/// This is the ONE predicate behind both halves of that behaviour: the input
+/// layer suppresses the lookup with it (`app::input`), and the renderer picks
+/// the footer's key with it via
+/// [`RuntimeBindings::label_for_text_field_dialog`]. Keeping both on this
+/// function is what stops the hint from naming a key the field swallows.
+///
+/// Accepts anything that converts into a [`KeyCombination`], so the input layer
+/// can hand it a raw crossterm `KeyEvent` and the renderer a stored binding key.
+pub fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
+    let key: KeyCombination = key.into();
+    match key.codes {
+        crokey::OneToThree::One(KeyCode::Char(_)) => !key.modifiers.contains(KeyModifiers::CONTROL),
+        crokey::OneToThree::One(KeyCode::Left) | crokey::OneToThree::One(KeyCode::Right) => true,
+        _ => false,
+    }
+}
+
 /// Normalize `BackTab` (sent by crossterm for shift-tab) into `Tab + SHIFT`
 /// so that `key!(shift-tab)` from crokey matches the actual terminal event.
 fn normalize_backtab(kc: KeyCombination) -> KeyCombination {
@@ -1519,6 +1548,44 @@ impl RuntimeBindings {
                     .join("/")
             })
             .unwrap_or_default()
+    }
+
+    /// First key combination of an action that satisfies `reachable`.
+    ///
+    /// A surface that routes some keys elsewhere before consulting the
+    /// bindings (see [`text_field_owns_key`]) must not advertise a key it
+    /// swallows. Passing the surface's own suppression rule here keeps the
+    /// hint and the routing reading from one predicate.
+    pub fn first_key_reaching(
+        &self,
+        action: Action,
+        reachable: impl Fn(KeyCombination) -> bool,
+    ) -> Option<KeyCombination> {
+        self.bindings
+            .iter()
+            .find(|b| b.action == action)
+            .and_then(|b| b.keys.iter().copied().find(|k| reachable(*k)))
+    }
+
+    /// Display label for the first key combination of an action that satisfies
+    /// `reachable`, or `None` when the surface suppresses every one of them.
+    pub fn label_for_reaching(
+        &self,
+        action: Action,
+        reachable: impl Fn(KeyCombination) -> bool,
+    ) -> Option<String> {
+        self.first_key_reaching(action, reachable)
+            .map(|k| self.format.to_string(k))
+    }
+
+    /// Display label for an action inside a dialog whose single-line text field
+    /// owns the letters and the horizontal arrows ([`text_field_owns_key`]).
+    ///
+    /// `None` means the user has rebound the action so that every one of its
+    /// keys is swallowed by the field there; a caller must then drop the hint
+    /// rather than name a key that types a character.
+    pub fn label_for_text_field_dialog(&self, action: Action) -> Option<String> {
+        self.label_for_reaching(action, |k| !text_field_owns_key(k))
     }
 
     /// Combined label for two related actions (e.g. MoveDown + MoveUp → "j/k").
@@ -1898,6 +1965,66 @@ mod tests {
             },
             true,
         )
+    }
+
+    #[test]
+    fn text_field_owns_letters_and_horizontal_arrows_only() {
+        // Owned by the field: it types these or moves its caret with them.
+        for key in [
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        ] {
+            assert!(text_field_owns_key(key), "{key:?} belongs to the field");
+        }
+        // Not owned: these still reach the dialog's bindings.
+        for key in [
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
+        ] {
+            assert!(!text_field_owns_key(key), "{key:?} reaches the bindings");
+        }
+    }
+
+    #[test]
+    fn label_for_text_field_dialog_skips_the_suppressed_keys() {
+        let bindings = default_bindings();
+        // The shared default list starts with `h`, which the field types.
+        assert_eq!(bindings.label_for(Action::ToggleSelection), "h");
+        assert_eq!(
+            bindings
+                .label_for_text_field_dialog(Action::ToggleSelection)
+                .as_deref(),
+            Some("Tab"),
+            "the hint must name the first key that still reaches the action"
+        );
+
+        // Rebound to keys the field owns entirely: no honest label exists.
+        let letters_only = RuntimeBindings::new(
+            |action| {
+                if action == Action::ToggleSelection {
+                    vec![key!(h), key!(l)]
+                } else {
+                    BINDING_DEFS
+                        .iter()
+                        .find(|d| d.action == action)
+                        .map(|d| d.default_keys.to_vec())
+                        .unwrap_or_default()
+                }
+            },
+            true,
+        );
+        assert_eq!(
+            letters_only.label_for_text_field_dialog(Action::ToggleSelection),
+            None
+        );
     }
 
     #[test]
