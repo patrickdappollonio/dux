@@ -1327,6 +1327,54 @@ mod tests {
         );
     }
 
+    /// REGRESSION. The approved mock rendered the tagline and the release
+    /// headline as one unwrapped span, and at the 90-column target the prose
+    /// column is only ~50 wide, so the 72-character tagline was silently cut off
+    /// mid-word at "...and a real term". Nobody noticed until the mock was
+    /// actually rendered rather than read.
+    ///
+    /// This asserts the END of each string survives, which is the part clipping
+    /// eats, and that no produced line overflows the column it was given.
+    #[test]
+    fn long_prose_wraps_instead_of_being_clipped_at_the_column_edge() {
+        let colors = colors();
+        let prose_cols = 50u16;
+
+        let welcome = sample_welcome();
+        assert!(
+            welcome.tagline.chars().count() > prose_cols as usize,
+            "only meaningful while the tagline overflows the column"
+        );
+        let lines = welcome_lines(&welcome, prose_cols, &colors);
+        let flat: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tail = welcome
+            .tagline
+            .rsplit_once(' ')
+            .map(|(_, last)| last)
+            .expect("tagline has spaces");
+        assert!(
+            flat.contains(tail),
+            "the tagline was clipped before its final word {tail:?}: {flat}"
+        );
+
+        // A long release headline must survive the same way.
+        let notes = sample_notes();
+        let notes_lines = whats_new_lines(&notes, prose_cols, &colors);
+        for group in [&lines, &notes_lines] {
+            for line in group.iter() {
+                let width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+                assert!(
+                    width <= prose_cols as usize,
+                    "line is wider than its column and would be clipped: {line:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_screen_renders_at_every_width_without_panicking() {
         let colors = colors();
