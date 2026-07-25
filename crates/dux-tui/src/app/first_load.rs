@@ -53,11 +53,16 @@ pub(crate) const DUCK: &[&str] = &[
 pub(crate) const ART_WIDTH: u16 = 33;
 
 /// Target modal width in COLUMNS. Deliberately wider than a routine dialog
-/// because this one carries the art column PLUS prose; a terminal has no pixels,
-/// and at a typical cell width near 8px the "start somewhat wide" target lands
-/// around 90 columns. [`centered_rect_exact`] clamps it down, so a narrow window
-/// simply gets less.
-pub(crate) const MODAL_COLS: u16 = 90;
+/// because this one carries the art column PLUS prose.
+///
+/// Sized from the READING MEASURE rather than picked round: the duck column and
+/// the divider spend a fixed 38 columns, so the prose column is whatever is left.
+/// At 104 that leaves 63 characters, inside the classic 60-70 band where prose is
+/// comfortable to read. The earlier 90 left only 49, which read cramped next to
+/// the art. [`centered_rect_exact`] clamps it down, so a narrow window simply
+/// gets less, and below [`shows_art`]'s threshold the duck drops out entirely and
+/// the prose takes the full width.
+pub(crate) const MODAL_COLS: u16 = 104;
 
 /// Below this many columns of prose the art column is dropped entirely: a duck
 /// plus a 20-column ribbon of text is worse than no duck.
@@ -1125,7 +1130,15 @@ mod tests {
 
     #[test]
     fn the_modal_starts_wide_and_drops_the_duck_only_when_prose_would_be_squeezed() {
-        assert_eq!(MODAL_COLS, 90, "deliberately wider than a routine dialog");
+        // The width is chosen from the reading measure, so assert the PROPERTY
+        // that motivates it rather than only the magic number: with the duck and
+        // divider spending their fixed columns, the prose column must land in the
+        // 60-70 character band where prose reads comfortably.
+        let prose_cols = MODAL_COLS - 2 - (ART_WIDTH + ART_PADDING + RULE_COLS) - 1;
+        assert!(
+            (60..=70).contains(&prose_cols),
+            "prose column is {prose_cols}, outside the comfortable 60-70 measure"
+        );
         assert!(shows_art(MODAL_COLS - 2), "the target width keeps the duck");
         assert!(shows_art(68), "33 art + 2 pad + 3 rule + 30 prose");
         assert!(!shows_art(67), "one column short and the prose wins");
