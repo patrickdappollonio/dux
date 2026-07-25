@@ -3050,6 +3050,17 @@ impl App {
             return Ok(false);
         }
 
+        if matches!(self.prompt, PromptState::ConfigReloadFailed { .. }) {
+            // The validation error can be far longer than the dialog, so the
+            // Help scope's scroll vocabulary (j/k/arrows/PgUp/PgDn/Home/End)
+            // reaches the rest of it. Checked BEFORE the Dialog scope below,
+            // which owns Space (the checkbox) and Tab (focus). Up/Down are free
+            // here: focus moves with Tab/Left/Right.
+            if self.scroll_error_dialog_for(&key) {
+                return Ok(false);
+            }
+        }
+
         if let PromptState::ConfigReloadFailed {
             recover_old_config,
             focus,
@@ -3101,6 +3112,12 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::AddProjectFailed { .. }) {
+            // Scroll first (see the config-reload dialog above): the failure
+            // message may not fit, and none of its scroll keys collide with the
+            // dialog's own Enter/Esc/Space dismissal.
+            if self.scroll_error_dialog_for(&key) {
+                return Ok(false);
+            }
             let action = self.bindings.lookup(&key, BindingScope::Dialog);
             let is_space = key.code == KeyCode::Char(' ');
             if matches!(action, Some(Action::Confirm | Action::CloseOverlay)) || is_space {
@@ -4965,7 +4982,52 @@ impl App {
         self.prompt = PromptState::AddProjectFailed {
             message,
             return_prompt: Box::new(return_prompt),
+            scroll: 0,
         };
+    }
+
+    /// Apply `key` to the open error dialog's message scroll, reporting whether
+    /// it was a scroll key (and so must not fall through to the dialog's buttons).
+    ///
+    /// The two error dialogs (`ConfigReloadFailed`, `AddProjectFailed`) share
+    /// this: both carry a message that can outgrow the screen, and both are how a
+    /// user learns something is broken, so every line has to be reachable. The
+    /// vocabulary is the Help scope's, the same one the first-load screens reuse,
+    /// so it stays rebindable and consistent.
+    pub(crate) fn scroll_error_dialog_for(&mut self, key: &KeyEvent) -> bool {
+        let Some(action) = self.bindings.lookup(key, BindingScope::Help) else {
+            return false;
+        };
+        let page = i32::from(self.last_error_dialog_height.max(1));
+        match action {
+            Action::MoveDown => self.scroll_error_dialog(1),
+            Action::MoveUp => self.scroll_error_dialog(-1),
+            Action::ScrollPageDown => self.scroll_error_dialog(page),
+            Action::ScrollPageUp => self.scroll_error_dialog(-page),
+            Action::ScrollToBottom => self.scroll_error_dialog(i32::from(u16::MAX)),
+            Action::ScrollToTop => self.scroll_error_dialog(-i32::from(u16::MAX)),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Scroll the open error dialog's message by `delta` rows, clamped to the
+    /// extent the renderer last recorded.
+    pub(crate) fn scroll_error_dialog(&mut self, delta: i32) {
+        let max = self
+            .last_error_dialog_lines
+            .saturating_sub(self.last_error_dialog_height.max(1));
+        let scroll = match &mut self.prompt {
+            PromptState::ConfigReloadFailed { scroll, .. }
+            | PromptState::AddProjectFailed { scroll, .. } => scroll,
+            _ => return,
+        };
+        let next = if delta >= 0 {
+            scroll.saturating_add(delta as u16)
+        } else {
+            scroll.saturating_sub(delta.unsigned_abs() as u16)
+        };
+        *scroll = next.min(max);
     }
 
     fn resolve_add_project_failed(&mut self) -> bool {
@@ -7513,8 +7575,10 @@ not_a_real_action = ["x"]
                 error,
                 recover_old_config,
                 focus,
+                scroll,
             } => {
                 assert!(error.contains("unknown action"));
+                assert_eq!(*scroll, 0, "a freshly opened dialog starts at the top");
                 assert!(!recover_old_config);
                 assert_eq!(*focus, ConfigReloadFailedFocus::Close);
             }
@@ -7532,6 +7596,7 @@ not_a_real_action = ["x"]
             error: "broken".to_string(),
             recover_old_config: true,
             focus: ConfigReloadFailedFocus::Apply,
+            scroll: 0,
         };
 
         app.resolve_config_reload_failed(true);
@@ -7549,6 +7614,75 @@ not_a_real_action = ["x"]
             std::fs::read_to_string(&app.engine.paths.config_path).expect("read recovered");
         let parsed: Config = toml::from_str(&recovered).expect("parse recovered config");
         assert_eq!(parsed.ui.right_width_pct, 42);
+    }
+
+    /// A long, multi-line error must be reachable with the keyboard, and the
+    /// scroll keys must not fire the dialog's buttons on the way. Both error
+    /// dialogs share the handler, so both are checked.
+    #[test]
+    fn the_error_dialogs_scroll_their_message_without_dismissing_themselves() {
+        let long = (0..40)
+            .map(|i| format!("error detail line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for which in 0..2 {
+            let mut app = test_app(default_bindings());
+            app.prompt = if which == 0 {
+                PromptState::ConfigReloadFailed {
+                    error: long.clone(),
+                    recover_old_config: false,
+                    focus: ConfigReloadFailedFocus::Close,
+                    scroll: 0,
+                }
+            } else {
+                PromptState::AddProjectFailed {
+                    message: long.clone(),
+                    return_prompt: Box::new(PromptState::None),
+                    scroll: 0,
+                }
+            };
+            // What the renderer would have recorded for a 40-line message in a
+            // 12-row pane.
+            app.last_error_dialog_lines = 44;
+            app.last_error_dialog_height = 12;
+
+            let scroll_of = |app: &App| match &app.prompt {
+                PromptState::ConfigReloadFailed { scroll, .. }
+                | PromptState::AddProjectFailed { scroll, .. } => *scroll,
+                other => panic!("the dialog dismissed itself: {other:?}"),
+            };
+
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .expect("scroll down one line");
+            assert_eq!(scroll_of(&app), 1);
+            app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))
+                .expect("scroll down a page");
+            assert_eq!(scroll_of(&app), 13);
+            app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+                .expect("scroll to the bottom");
+            assert_eq!(
+                scroll_of(&app),
+                32,
+                "End must reach the last row of the message, not overshoot it"
+            );
+            app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+                .expect("scroll back to the top");
+            assert_eq!(scroll_of(&app), 0);
+
+            // The checkbox (config reload) and the buttons still work: a scroll
+            // key must not have consumed Space or Enter.
+            if which == 0 {
+                app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                    .expect("move focus");
+                assert!(matches!(app.prompt, PromptState::ConfigReloadFailed { .. }));
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .expect("dismiss");
+            assert!(
+                matches!(app.prompt, PromptState::None),
+                "Esc must still dismiss the dialog"
+            );
+        }
     }
 
     fn install_kill_running_overlay(app: &mut App, items: usize) {

@@ -3536,6 +3536,8 @@ mod tests {
             last_help_lines: 0,
             last_first_load_height: 0,
             last_first_load_lines: 0,
+            last_error_dialog_height: 0,
+            last_error_dialog_lines: 0,
             pending_first_load: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,

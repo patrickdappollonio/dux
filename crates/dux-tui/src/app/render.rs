@@ -7,6 +7,56 @@ use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
 use ratatui::buffer::{CellDiffOption, CellWidth};
 use std::path::Path;
 
+/// What an error dialog's shared message pane laid out: the pane itself, the
+/// rows left below it inside the border ring, and the message's total wrapped
+/// row count (the number the scroll keys clamp against).
+struct ErrorDialogLayout {
+    body: Rect,
+    rest: Rect,
+    total_rows: u16,
+}
+
+/// The index of the first tab the strip draws, chosen so the focused tab is
+/// visible within `avail` display columns.
+///
+/// Pure, so the renderer can ask it twice: once at the full strip width to learn
+/// whether anything ends up hidden to the left (which costs a column for the
+/// leading `…`), then again at the narrowed width. Narrowing `avail` can only
+/// move the answer LATER in the list, never back to 0, which is what makes that
+/// two-pass reservation stable.
+///
+/// `seg_w` holds each tab's total width (box borders and inter-box gap
+/// included). Never scrolls further than it must: the answer is 0 whenever the
+/// focused tab is already reachable from the left edge.
+fn tab_strip_start_index(seg_w: &[u16], avail: u16, focused_idx: usize) -> usize {
+    let mut start = 0usize;
+    loop {
+        let mut w = 0u16;
+        let mut count = 0usize;
+        for width in seg_w.iter().skip(start) {
+            if w + *width > avail {
+                break;
+            }
+            w += *width;
+            count += 1;
+        }
+        let end = start + count;
+        if focused_idx >= end && end < seg_w.len() {
+            start += 1;
+            if start >= seg_w.len() {
+                start = seg_w.len().saturating_sub(1);
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    // Safety net: guarantee the focused tab is visible even if the walk above
+    // couldn't include it (e.g. it stepped past `focused_idx` because that
+    // segment alone is wider than the strip).
+    start.min(focused_idx)
+}
+
 /// How an agent row's project tag should be rendered. Decided purely from the
 /// project the session points at, so both the full-width row's inline tag and
 /// the collapsed icon rail agree on when to surface a warning marker.
@@ -1812,9 +1862,14 @@ impl App {
             let close = self.bindings.label_for(Action::CloseOverlay);
             let mut spans: Vec<Span> = Vec::new();
 
-            if scroll > 0 {
+            // Report the offset actually DRAWN, not the raw one held in
+            // `center_mode`. The two differ whenever the content shrank under a
+            // stale offset (a shorter file, a diff refresh): the view clamps to
+            // what exists, and an unclamped number here would overstate where the
+            // reader is until the next key press.
+            if drawn_scroll > 0 {
                 spans.push(Span::styled(
-                    format!("Scrolled back {scroll} lines. "),
+                    format!("Scrolled back {drawn_scroll} lines. "),
                     Style::default().fg(self.theme.hint_key_fg),
                 ));
                 spans.extend(self.theme.dim_key_badge_default(&scroll_down));
@@ -2088,8 +2143,9 @@ impl App {
 
         // No "+" add button: new tabs are created via the `new-agent-tab`
         // palette command (or the NewTab keybinding), so the boxes get the
-        // full strip width.
-        let avail = strip_area.width;
+        // full strip width — minus one column when a leading truncation mark is
+        // needed (decided below, once the segment widths are known).
+        let strip_width = strip_area.width;
 
         // Label text per tab (the content INSIDE each box). All tabs are
         // generic — no per-tab marker — except the focused tab, which is
@@ -2130,6 +2186,23 @@ impl App {
         // Choose a start index so the focused tab is visible within `avail`.
         let focused_idx = tab_ids.iter().position(|i| *i == focused_id).unwrap_or(0);
 
+        // Tabs can be hidden to the LEFT as well as to the right: the
+        // scroll-into-view choice below advances the start index to reach a
+        // focused tab further along. That needs its own leading truncation mark
+        // (mirroring the trailing `…`), and the mark needs a column of its own so
+        // it never sits under the first box.
+        //
+        // Deciding it takes two passes over the same pure choice, because the
+        // column it costs can itself change where the strip has to start. The
+        // first pass asks the question at the full width; the second re-asks it
+        // with the narrower strip. Narrowing can only push the start LATER
+        // (unit-tested in `tab_strip_start_index_scrolls_only_far_enough…`), so
+        // the two passes agree on whether anything is hidden and the reservation
+        // cannot oscillate.
+        let leading_hidden = tab_strip_start_index(&seg_w, strip_width, focused_idx) > 0;
+        let avail = strip_width.saturating_sub(u16::from(leading_hidden));
+        let strip_x = strip_area.x + u16::from(leading_hidden);
+
         // If the focused segment alone is wider than the available strip
         // width, truncate its label (UTF-8/width-safe) so it fits within
         // `avail`. Without this, the scroll-into-view loop below can never
@@ -2148,34 +2221,7 @@ impl App {
             seg_w[focused_idx] = seg_content[focused_idx].as_str().cell_width() + 3;
         }
 
-        let mut start = 0usize;
-        loop {
-            let mut w = 0u16;
-            let mut count = 0usize;
-            for width in seg_w.iter().skip(start) {
-                if w + *width > avail {
-                    break;
-                }
-                w += *width;
-                count += 1;
-            }
-            let end = start + count;
-            if focused_idx >= end && end < seg_w.len() {
-                start += 1;
-                if start >= seg_w.len() {
-                    start = seg_w.len() - 1;
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-        // Safety net: guarantee the focused tab is visible even if the loop
-        // above couldn't include it (e.g. it walked `start` past
-        // `focused_idx` before the truncation above narrowed the segment).
-        if start > focused_idx {
-            start = focused_idx;
-        }
+        let start = tab_strip_start_index(&seg_w, avail, focused_idx);
 
         let buf = frame.buffer_mut();
         // Base fill for the whole 3-row strip band, painted with the app
@@ -2194,13 +2240,21 @@ impl App {
         // active dot inside its label, so it stays unambiguous without color.
         let corners = border::ROUNDED;
         let (top_y, mid_y, bot_y) = (strip_area.y, strip_area.y + 1, strip_area.y + 2);
-        let mut x = strip_area.x;
+        // Leading truncation mark: same one-cell `…` in the same dim color as the
+        // trailing one, in the column reserved for it above. Horizontal
+        // truncation, so this is not the vertical `scroll_marker` treatment.
+        if start > 0 {
+            buf[(strip_area.x, mid_y)]
+                .set_symbol("…")
+                .set_style(Style::default().fg(self.theme.hint_dim_desc_fg));
+        }
+        let mut x = strip_x;
         for i in start..seg_content.len() {
-            if x + seg_w[i] > strip_area.x + avail {
+            if x + seg_w[i] > strip_x + avail {
                 // No more room; show an overflow marker if any remain.
                 if i < seg_content.len() {
                     let ell_style = Style::default().fg(self.theme.hint_dim_desc_fg);
-                    if x < strip_area.x + avail {
+                    if x < strip_x + avail {
                         buf[(x, mid_y)].set_symbol("…").set_style(ell_style);
                     }
                 }
@@ -3785,6 +3839,22 @@ impl App {
                         frame.buffer_mut(),
                         &mut state,
                     );
+                    // Scroll marker in the list block's right border column. ITEM
+                    // units: a `ListState` offset counts whole entries and never
+                    // clips the top one, and every directory row is one line.
+                    // `item_count` is the count that matches `items` (completions
+                    // while editing a path, filtered entries otherwise); the
+                    // placeholder rows ("No matching entries.") report 0, which
+                    // reads as unscrollable, as it should.
+                    render_scroll_marker(
+                        frame,
+                        list_render_area,
+                        list_inner,
+                        state.offset(),
+                        list_inner.height as usize,
+                        item_count,
+                        self.theme.hint_key_fg,
+                    );
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: Some(input_inner),
                         list: list_inner,
@@ -3835,6 +3905,17 @@ impl App {
                         list_render_area,
                         frame.buffer_mut(),
                         &mut state,
+                    );
+                    // Same marker on the no-filter layout, where the list fills
+                    // the whole modal. ITEM units (see the sibling branch).
+                    render_scroll_marker(
+                        frame,
+                        list_render_area,
+                        list_inner,
+                        state.offset(),
+                        list_inner.height as usize,
+                        item_count,
+                        self.theme.hint_key_fg,
                     );
                     self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
                         input: None,
@@ -4553,6 +4634,22 @@ impl App {
                     &mut state,
                 );
 
+                // Scroll marker in the list block's right border column (the
+                // block carries LEFT|RIGHT|BOTTOM, so that column exists). This
+                // is an ITEM-offset surface: a `ListState` offset counts whole
+                // items and never clips the top one, and every theme row is a
+                // single line, so items and rows agree. `state.offset()` is read
+                // AFTER the render, which is what scrolls it to the selection.
+                render_scroll_marker(
+                    frame,
+                    list_area,
+                    list_inner,
+                    state.offset(),
+                    list_inner.height as usize,
+                    prompt.options.len(),
+                    self.theme.hint_key_fg,
+                );
+
                 self.overlay_layout.active = OverlayMouseLayout::ChangeTheme {
                     list: list_inner,
                     items: prompt.options.len(),
@@ -4906,6 +5003,23 @@ impl App {
                         frame.buffer_mut().set_string(x, y, ch.to_string(), style);
                     }
                 }
+
+                // Scroll marker in the Output block's own right BORDER column.
+                // The body is painted cell-by-cell, so a full-width log line
+                // owns its last content column; the border column is the only
+                // cell nothing else can want. Units are wrapped visual ROWS
+                // (`startup_command_log_visual_lines` pre-splits to the body
+                // width), the same measure `max_scroll` above clamps with. The
+                // sibling "Runs" list is deliberately left unmarked.
+                render_scroll_marker(
+                    frame,
+                    body_area,
+                    body_inner,
+                    scroll_offset as usize,
+                    body_inner.height as usize,
+                    content_lines.len(),
+                    self.theme.hint_key_fg,
+                );
 
                 let close_width = 16;
                 let close_area = Rect {
@@ -5779,6 +5893,7 @@ impl App {
                 error,
                 recover_old_config,
                 focus,
+                scroll,
             } => {
                 self.render_dim_overlay(frame);
                 let dialog_width = 68.min(frame.area().width.max(1));
@@ -5812,33 +5927,32 @@ impl App {
                         Style::default().fg(self.theme.hint_desc_fg),
                     )),
                 ];
-                for line in error.lines().take(6) {
+                // The WHOLE error, never a `take(6)`. A TOML validation failure
+                // runs long and its tail is usually the part naming the actual
+                // problem, so the dialog scrolls (marker below) instead of
+                // dropping lines with nothing to say it did.
+                for line in error.lines() {
                     body_lines.push(Line::from(format!(" {line}")));
                 }
-                let body_height = wrapped_line_count(&body_lines, inner_width, false);
-                let area = centered_rect_exact(
+                let dialog = self.render_error_dialog_body(
+                    frame,
+                    "Reload Config Failed",
                     dialog_width,
-                    2 + body_height + 1 + checkbox_height + 3,
-                    frame.area(),
+                    body_lines,
+                    1 + checkbox_height + 3,
+                    *scroll,
                 );
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Reload Config Failed");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
+                self.last_error_dialog_height = dialog.body.height;
+                self.last_error_dialog_lines = dialog.total_rows;
 
-                let [body_area, _, checkbox_area, buttons_area] = Layout::default()
+                let [_, checkbox_area, buttons_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(body_height),
                         Constraint::Length(1),
                         Constraint::Length(checkbox_height),
                         Constraint::Length(3),
                     ])
-                    .areas(inner);
-
-                Paragraph::new(body_lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
+                    .areas(dialog.rest);
 
                 let (checkbox_rect, _) = self.render_overlay_checkbox(
                     frame,
@@ -5897,10 +6011,11 @@ impl App {
                     checkbox,
                 };
             }
-            PromptState::AddProjectFailed { message, .. } => {
+            PromptState::AddProjectFailed {
+                message, scroll, ..
+            } => {
                 self.render_dim_overlay(frame);
                 let dialog_width = 68.min(frame.area().width.max(1));
-                let inner_width = dialog_width.saturating_sub(2);
                 let mut body_lines = vec![
                     Line::from(""),
                     Line::from(Span::styled(
@@ -5909,24 +6024,24 @@ impl App {
                     )),
                     Line::from(""),
                 ];
-                for line in message.lines().take(6) {
+                // The WHOLE message, never a `take(6)`: a rejected path plus the
+                // git error explaining it runs past six lines, and the tail is
+                // the part that says why. The body scrolls instead (marker in the
+                // border column).
+                for line in message.lines() {
                     body_lines.push(Line::from(format!(" {line}")));
                 }
-                let body_height = wrapped_line_count(&body_lines, inner_width, false);
-                let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
-                self.clear_overlay_area(frame, area);
-                let outer = self.themed_overlay_block("Add Project Failed");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
-
-                let [body_area, buttons_area] = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(body_height), Constraint::Length(3)])
-                    .areas(inner);
-
-                Paragraph::new(body_lines)
-                    .wrap(Wrap { trim: false })
-                    .render(body_area, frame.buffer_mut());
+                let dialog = self.render_error_dialog_body(
+                    frame,
+                    "Add Project Failed",
+                    dialog_width,
+                    body_lines,
+                    3,
+                    *scroll,
+                );
+                self.last_error_dialog_height = dialog.body.height;
+                self.last_error_dialog_lines = dialog.total_rows;
+                let buttons_area = dialog.rest;
 
                 let btn_width = shared_button_width(&["OK"]);
                 let ok_area = Rect {
@@ -8108,6 +8223,25 @@ impl App {
             }
         }
 
+        // Scroll marker in the modal's right BORDER column, on the content
+        // pane's last row. It has to be the border column: the log is painted
+        // cell-by-cell with `set_string`, so a full-width line owns the pane's
+        // last content column and a marker drawn there would eat a character.
+        // Units are wrapped visual ROWS — `startup_command_log_visual_lines`
+        // pre-splits the content to the pane width, so one entry is one row,
+        // which is the same measure `max_scroll` above clamps with.
+        let drawn_scroll = viewer.scroll_offset;
+        let total_rows = lines.len();
+        render_scroll_marker(
+            frame,
+            area,
+            term_area,
+            drawn_scroll as usize,
+            term_area.height as usize,
+            total_rows,
+            self.theme.hint_key_fg,
+        );
+
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let search_key = self.bindings.label_for(Action::SearchToggle);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
@@ -8391,6 +8525,117 @@ impl App {
             // around the inner widgets — tracks the active theme instead of
             // reading terminal-default behind the border ring.
             .style(Style::default().bg(self.theme.overlay_bg))
+    }
+
+    /// Lay out and paint the scrollable message pane the two error dialogs share
+    /// (`ConfigReloadFailed`, `AddProjectFailed`), and hand back the geometry the
+    /// caller needs for the controls below it.
+    ///
+    /// `extra_inner_rows` is everything the caller lays out INSIDE the border ring
+    /// below the message (a spacer, a checkbox, a button row). The message pane
+    /// takes as many rows as the message needs, capped at what the terminal can
+    /// show, so the buttons never get squeezed out by a long error; anything that
+    /// does not fit is reached by scrolling.
+    fn render_error_dialog_body(
+        &self,
+        frame: &mut Frame,
+        title: &str,
+        dialog_width: u16,
+        body_lines: Vec<Line<'static>>,
+        extra_inner_rows: u16,
+        scroll: u16,
+    ) -> ErrorDialogLayout {
+        let inner_width = dialog_width.saturating_sub(2);
+        // Pre-wrap rather than letting the `Paragraph` do it: `wrapped.len()` is
+        // then the RENDERED row count by construction, which is the unit the
+        // scroll clamp and the marker are measured in. A wrapping paragraph draws
+        // more rows than it has lines and never reports how many — the trap the
+        // help page hit, where the bottom of the page was unreachable.
+        let wrapped = wrap_styled_lines(&body_lines, inner_width as usize);
+        let total_rows = u16::try_from(wrapped.len()).unwrap_or(u16::MAX);
+
+        // Cap the message pane so the dialog still fits the terminal WITH its
+        // controls. Without the cap a 200-line error would size the dialog past
+        // the screen and the layout solver would eat the button row.
+        let max_body = frame
+            .area()
+            .height
+            .saturating_sub(2 + extra_inner_rows)
+            .max(1);
+        let body_height = total_rows.min(max_body);
+        let area = centered_rect_exact(
+            dialog_width,
+            2 + body_height + extra_inner_rows,
+            frame.area(),
+        );
+        self.clear_overlay_area(frame, area);
+
+        // A scroll hint in the bottom border, but only when there is something to
+        // scroll: the keys are the Help scope's, so the labels come from the
+        // bindings rather than being hardcoded.
+        let scrollable = total_rows > body_height;
+        let mut block = self.themed_overlay_block(title);
+        if scrollable {
+            let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
+            let scroll_down = self.bindings.labels_for(Action::ScrollPageDown);
+            // Owned spans: `key_badge_default` borrows its label, and the block
+            // outlives these locals.
+            let owned = |spans: Vec<Span<'_>>| -> Vec<Span<'static>> {
+                spans
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.to_string(), s.style))
+                    .collect()
+            };
+            let mut hint: Vec<Span<'static>> = vec![Span::raw(" ")];
+            hint.extend(owned(self.theme.key_badge_default(&scroll_up)));
+            hint.push(Span::styled(
+                "/",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            hint.extend(owned(self.theme.key_badge_default(&scroll_down)));
+            hint.push(Span::styled(
+                " scroll the message",
+                Style::default().fg(self.theme.hint_desc_fg),
+            ));
+            block = block.title_bottom(Line::from(hint));
+        }
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        let body = Rect::new(inner.x, inner.y, inner.width, body_height.min(inner.height));
+        let rest = Rect::new(
+            inner.x,
+            inner.y + body.height,
+            inner.width,
+            inner.height.saturating_sub(body.height),
+        );
+
+        // Clamp what we DRAW, so a stale offset (the message just got shorter, or
+        // the terminal grew) agrees with the marker below.
+        let max_scroll = total_rows.saturating_sub(body.height);
+        let scroll = scroll.min(max_scroll);
+        Paragraph::new(wrapped)
+            .scroll((scroll, 0))
+            .render(body, frame.buffer_mut());
+
+        // Marker in the dialog's right BORDER column, on the message pane's last
+        // row — clear of the checkbox and buttons below. Units are wrapped rows,
+        // exactly what the clamp above uses.
+        render_scroll_marker(
+            frame,
+            area,
+            body,
+            scroll as usize,
+            body.height as usize,
+            total_rows as usize,
+            self.theme.hint_key_fg,
+        );
+
+        ErrorDialogLayout {
+            body,
+            rest,
+            total_rows,
+        }
     }
 
     fn center_pane_agent_title(&self) -> String {
@@ -10110,6 +10355,133 @@ mod tests {
                  focus_idx={focus_idx}"
             );
         }
+    }
+
+    /// The start-index choice is pure, so the two passes the renderer makes over
+    /// it (one to learn whether a leading indicator is needed, one with the
+    /// column it costs) can be checked without a frame.
+    #[test]
+    fn tab_strip_start_index_scrolls_only_far_enough_to_show_the_focused_tab() {
+        // Four 10-wide segments in a 25-wide strip: two fit at a time.
+        let seg_w = [10u16, 10, 10, 10];
+        assert_eq!(tab_strip_start_index(&seg_w, 25, 0), 0);
+        assert_eq!(tab_strip_start_index(&seg_w, 25, 1), 0);
+        assert_eq!(tab_strip_start_index(&seg_w, 25, 2), 1);
+        assert_eq!(tab_strip_start_index(&seg_w, 25, 3), 2);
+        // Everything fits: never scroll.
+        assert_eq!(tab_strip_start_index(&seg_w, 100, 3), 0);
+        // Narrowing the strip can only push the start later, which is what makes
+        // the renderer's two-pass reservation stable.
+        for focused in 0..seg_w.len() {
+            assert!(
+                tab_strip_start_index(&seg_w, 24, focused)
+                    >= tab_strip_start_index(&seg_w, 25, focused)
+            );
+        }
+        // Degenerate inputs must not panic or wrap around.
+        assert_eq!(tab_strip_start_index(&[], 10, 0), 0);
+        assert_eq!(tab_strip_start_index(&[40], 10, 0), 0);
+    }
+
+    /// Render `count` tabs into a `width`-wide pane with `focus_idx` focused and
+    /// return the app plus the buffer.
+    fn tab_strip_frame(
+        count: usize,
+        width: u16,
+        focus_idx: usize,
+    ) -> (App, Rect, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        for i in 0..count {
+            seed_render_tab(
+                &mut app,
+                &session_id,
+                &format!("tab-{i}"),
+                &format!("provider-{i}"),
+                i as i64,
+            );
+        }
+        let tab_ids = app.session_tab_ids(&session_id);
+        let focused = tab_ids[focus_idx].clone();
+        app.set_focused_tab(&session_id, &focused);
+
+        let area = Rect::new(0, 0, width, 24);
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                app.render_agent_tab_strip_if_needed(frame, area, true);
+            })
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, area, buf)
+    }
+
+    /// Tabs hidden to the LEFT must say so, mirroring the trailing `…` the strip
+    /// already paints when tabs are hidden to the right. Without it those tabs
+    /// are invisible with no hint that they exist.
+    #[test]
+    fn tab_strip_marks_tabs_hidden_to_the_left() {
+        // Six tabs in a pane too narrow for them all, focused on the last: the
+        // scroll-into-view logic has to advance the start index.
+        let (app, area, buf) = tab_strip_frame(6, 34, 6);
+        let mid_y = area.y + 1;
+        assert_eq!(
+            buf[(area.x, mid_y)].symbol(),
+            "…",
+            "the strip scrolled right, so its first column must mark the hidden tabs"
+        );
+        let first_box_x = app
+            .agent_tab_regions
+            .iter()
+            .map(|(_, rect)| rect.x)
+            .min()
+            .expect("at least one tab rendered");
+        assert!(
+            first_box_x > area.x,
+            "the leading indicator must have its own column, not sit under a tab box"
+        );
+        for (tab_id, rect) in &app.agent_tab_regions {
+            assert!(
+                rect.x + rect.width <= area.x + area.width,
+                "reserving the leading column must not push {tab_id} past the pane: {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_strip_has_no_leading_marker_at_its_leftmost_position() {
+        // Same pane, focused on the FIRST tab: nothing is hidden to the left, so
+        // a leading indicator would be a lie (the trailing one still shows).
+        let (app, area, buf) = tab_strip_frame(6, 34, 0);
+        let mid_y = area.y + 1;
+        assert_ne!(
+            buf[(area.x, mid_y)].symbol(),
+            "…",
+            "nothing is hidden to the left at the leftmost position"
+        );
+        let first_box_x = app
+            .agent_tab_regions
+            .iter()
+            .map(|(_, rect)| rect.x)
+            .min()
+            .expect("at least one tab rendered");
+        assert_eq!(
+            first_box_x, area.x,
+            "with no indicator to make room for, the first box keeps column zero"
+        );
+
+        // And a pane wide enough for every tab has no indicator on either side.
+        let (_, area, buf) = tab_strip_frame(6, 200, 6);
+        let row: String = (area.x..area.x + area.width)
+            .map(|x| buf[(x, area.y + 1)].symbol().to_string())
+            .collect();
+        assert!(
+            !row.contains('…'),
+            "a strip that fits needs no truncation marks: {row:?}"
+        );
     }
 
     /// F3 regression: the active-tab dot must come from the one shared glyph
@@ -12144,6 +12516,695 @@ mod tests {
                 cell.y >= long_rect.y && cell.y < long_rect.y + long_rect.height,
                 "the marker must stay on the content pane's rows"
             );
+        }
+    }
+
+    /// Which of the two error dialogs to put on screen. They are separate
+    /// `PromptState` variants with the same problem: a long, multi-line message
+    /// (a TOML validation error is normally many lines) used to be cut at six
+    /// lines with nothing to say so.
+    #[derive(Clone, Copy)]
+    enum ErrorDialog {
+        ConfigReload,
+        AddProject,
+    }
+
+    /// Render one of the error dialogs carrying `message`, with `scroll` applied.
+    fn error_dialog_frame(
+        which: ErrorDialog,
+        size: (u16, u16),
+        message: String,
+        scroll: u16,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = match which {
+            ErrorDialog::ConfigReload => PromptState::ConfigReloadFailed {
+                error: message,
+                recover_old_config: false,
+                focus: ConfigReloadFailedFocus::Close,
+                scroll,
+            },
+            ErrorDialog::AddProject => PromptState::AddProjectFailed {
+                message,
+                return_prompt: Box::new(PromptState::None),
+                scroll,
+            },
+        };
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The error dialogs are a fixed 68 columns wide, centered, so their right
+    /// border column (the only cell the marker may use) is derivable.
+    fn error_dialog_border_column(size: (u16, u16)) -> Rect {
+        let width = 68u16.min(size.0.max(1));
+        let x = size.0.saturating_sub(width) / 2;
+        Rect::new(x + width - 1, 0, 1, size.1)
+    }
+
+    /// A message with numbered lines, so a test can name the one it is looking
+    /// for. Line 7 onward is what the old `take(6)` threw away.
+    fn long_error_message(lines: usize) -> String {
+        (0..lines)
+            .map(|i| format!("error detail line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_long_error_dialog_message_is_fully_reachable() {
+        // Both dialogs are how a user learns their config is broken, and the tail
+        // of a TOML validation error is usually the part naming the problem, so
+        // nothing may be dropped: the lines past the old six-line cut must be
+        // readable, and the LAST line must be retrievable.
+        for which in [ErrorDialog::ConfigReload, ErrorDialog::AddProject] {
+            let count = 40;
+            let message = long_error_message(count);
+            let (app, buf) = error_dialog_frame(which, (100, 30), message.clone(), 0);
+            let rows = buffer_rows(&buf);
+            assert!(
+                rows.iter().any(|row| row.contains("error detail line 0")),
+                "the first line must be on screen:\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                app.last_error_dialog_lines > app.last_error_dialog_height,
+                "the fixture must overflow the dialog: {} lines in {} rows",
+                app.last_error_dialog_lines,
+                app.last_error_dialog_height
+            );
+
+            // Scroll as far as the input handler will allow, which is what the
+            // scroll-to-bottom key does with the numbers the renderer recorded.
+            let max = app
+                .last_error_dialog_lines
+                .saturating_sub(app.last_error_dialog_height.max(1));
+            let (_, buf) = error_dialog_frame(which, (100, 30), message.clone(), max);
+            let rows = buffer_rows(&buf);
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains(&format!("error detail line {}", count - 1))),
+                "scrolled to the bottom, the LAST line of the error must be on \
+                 screen:\n{}",
+                rows.join("\n")
+            );
+
+            // And every line in between is reachable at some offset: walk the
+            // whole message a page at a time and tick each one off.
+            let page = app.last_error_dialog_height.max(1);
+            let mut seen = vec![false; count];
+            let mut scroll = 0u16;
+            loop {
+                let (_, buf) = error_dialog_frame(which, (100, 30), message.clone(), scroll);
+                let rows = buffer_rows(&buf).join("\n");
+                for (i, seen) in seen.iter_mut().enumerate() {
+                    if rows.contains(&format!("error detail line {i} ")) {
+                        *seen = true;
+                    }
+                }
+                if scroll >= max {
+                    break;
+                }
+                scroll = (scroll + page).min(max);
+            }
+            let missing: Vec<usize> = seen
+                .iter()
+                .enumerate()
+                .filter(|(_, seen)| !**seen)
+                .map(|(i, _)| i)
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "every line of the message must be reachable; never saw {missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_error_dialog_marker_points_the_way_at_top_middle_and_bottom() {
+        for which in [ErrorDialog::ConfigReload, ErrorDialog::AddProject] {
+            let border_column = error_dialog_border_column((100, 30));
+            let message = long_error_message(40);
+            let (app, buf) = error_dialog_frame(which, (100, 30), message.clone(), 0);
+            assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+            let max = app
+                .last_error_dialog_lines
+                .saturating_sub(app.last_error_dialog_height.max(1));
+            assert!(max > 1, "the fixture must overflow");
+
+            let (_, buf) = error_dialog_frame(which, (100, 30), message.clone(), max / 2);
+            assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+
+            let (_, buf) = error_dialog_frame(which, (100, 30), message, max);
+            assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+        }
+    }
+
+    #[test]
+    fn a_short_error_dialog_message_gets_no_marker() {
+        // A one-line error fits, and a marker on a dialog that cannot scroll
+        // would be a lie.
+        for which in [ErrorDialog::ConfigReload, ErrorDialog::AddProject] {
+            let (app, buf) = error_dialog_frame(
+                which,
+                (100, 30),
+                "invalid value for `ui.right_width_pct`".to_string(),
+                0,
+            );
+            assert!(
+                app.last_error_dialog_lines <= app.last_error_dialog_height,
+                "fixture must fit: {} lines in {} rows",
+                app.last_error_dialog_lines,
+                app.last_error_dialog_height
+            );
+            let border_column = error_dialog_border_column((100, 30));
+            assert_eq!(marker_in(&buf, border_column), None);
+        }
+    }
+
+    #[test]
+    fn a_huge_error_message_still_leaves_the_dialog_controls_on_screen() {
+        // The message pane now sizes itself to the message, so an unbounded one
+        // could have sized the dialog past the terminal and let the layout solver
+        // eat the buttons. It is capped at what the terminal can show instead.
+        let message = long_error_message(400);
+        let (_, buf) = error_dialog_frame(ErrorDialog::ConfigReload, (100, 20), message.clone(), 0);
+        let rows = buffer_rows(&buf).join("\n");
+        assert!(
+            rows.contains("Close") && rows.contains("Recover"),
+            "both buttons must survive a 400-line error:\n{rows}"
+        );
+        assert!(
+            rows.contains("Recover last working config"),
+            "the checkbox must survive too:\n{rows}"
+        );
+
+        let (_, buf) = error_dialog_frame(ErrorDialog::AddProject, (100, 20), message, 0);
+        let rows = buffer_rows(&buf).join("\n");
+        assert!(rows.contains("OK"), "the OK button must survive:\n{rows}");
+    }
+
+    #[test]
+    fn the_error_dialog_marker_never_covers_a_full_width_message_line() {
+        // The message is rendered with a leading space in a 66-column content
+        // pane, so a 65-character line reaches the pane's last column. The marker
+        // lives one cell further out, in the dialog's border column.
+        for which in [ErrorDialog::ConfigReload, ErrorDialog::AddProject] {
+            let message = (0..40)
+                .map(|_| "X".repeat(65))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (_, buf) = error_dialog_frame(which, (100, 30), message, 3);
+            let border_column = error_dialog_border_column((100, 30));
+            assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+            // Every row that holds message text keeps its last content column.
+            let last_content = border_column.x - 1;
+            let rows_with_text = (0..30u16)
+                .filter(|y| buf[(border_column.x - 2, *y)].symbol() == "X")
+                .count();
+            assert!(rows_with_text > 3, "the fixture must paint several rows");
+            for y in 0..30u16 {
+                if buf[(border_column.x - 2, y)].symbol() == "X" {
+                    assert_eq!(
+                        buf[(last_content, y)].symbol(),
+                        "X",
+                        "row {y}'s last content column must still hold the message"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_diff_hint_bar_reports_the_clamped_scroll_position() {
+        // The hint text used to print the raw `center_mode` scroll while the view
+        // rendered a clamped one, so after the content shrank (a shorter file, a
+        // refresh) the number overstated where the reader actually was until the
+        // next key press.
+        for gutter_width in [0usize, 6] {
+            // A stale offset far past the end of a long diff: the hint must
+            // report the position the view actually drew.
+            let (app, buf) = diff_frame((120, 40), 400, gutter_width, 10_000);
+            let (content, _) = diff_rects(&app);
+            let max = app.last_diff_visual_lines - content.height;
+            let rows = buffer_rows(&buf);
+            let hint = rows
+                .iter()
+                .find(|row| row.contains("Scrolled back"))
+                .unwrap_or_else(|| panic!("expected a scroll hint (gutter {gutter_width})"));
+            assert!(
+                hint.contains(&format!("Scrolled back {max} lines")),
+                "the hint must report the clamped position {max} (gutter \
+                 {gutter_width}); got {hint:?}"
+            );
+            assert!(
+                !hint.contains("10000"),
+                "the raw offset must never reach the hint (gutter {gutter_width}): {hint:?}"
+            );
+
+            // A diff short enough that nothing can scroll: the clamped position
+            // is 0, so the hint must be the un-scrolled variant rather than
+            // "Scrolled back 0 lines".
+            let (_, buf) = diff_frame((120, 40), 3, gutter_width, 50);
+            let rows = buffer_rows(&buf);
+            assert!(
+                !rows.iter().any(|row| row.contains("Scrolled back")),
+                "a diff that fits is not scrolled back (gutter {gutter_width}):\n{}",
+                rows.join("\n")
+            );
+        }
+    }
+
+    /// Put the fullscreen startup-log viewer on screen with `rows` log lines and
+    /// `scroll` applied.
+    ///
+    /// The viewer measures in wrapped visual ROWS: its content is pre-split to
+    /// the pane width by `startup_command_log_visual_lines`, so one entry is one
+    /// row. Each fixture line is short enough not to wrap, which makes the row
+    /// count equal to `rows` and the arithmetic in the assertions checkable.
+    fn startup_log_frame(
+        size: (u16, u16),
+        rows: usize,
+        scroll: u16,
+        long_line: bool,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let content = (0..rows)
+            .map(|i| {
+                if long_line {
+                    // Exactly as wide as the content pane, so every rendered row
+                    // reaches its last content column: the marker must not eat it.
+                    let pane = centered_rect(96, 94, Rect::new(0, 0, size.0, size.1));
+                    "X".repeat(pane.width.saturating_sub(2) as usize)
+                } else {
+                    format!("log line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        app.startup_log_viewer = Some(StartupLogViewer {
+            scope_label: "project my-proj".to_string(),
+            path: None,
+            display_name: "startup.log".to_string(),
+            content,
+            scroll_offset: scroll,
+            search: crate::app::text_input::TextInput::new(),
+            searching: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The startup-log viewer's content pane (recorded by the renderer) and the
+    /// border column beside its modal.
+    fn startup_log_rects(app: &App, frame: Rect) -> (Rect, Rect) {
+        let content = app
+            .mouse_layout
+            .agent_term
+            .expect("the startup log records its content area");
+        let area = centered_rect(96, 94, frame);
+        (
+            content,
+            Rect::new(area.x + area.width - 1, area.y, 1, area.height),
+        )
+    }
+
+    #[test]
+    fn the_fullscreen_startup_log_marker_points_the_way_at_top_middle_and_bottom() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let rows = 400;
+
+        let (app, buf) = startup_log_frame((100, 30), rows, 0, false);
+        let (content, border_column) = startup_log_rects(&app, frame);
+        assert!(
+            rows > content.height as usize,
+            "the fixture must overflow: {rows} rows in {}",
+            content.height
+        );
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+
+        let max = rows as u16 - content.height;
+        let (_, buf) = startup_log_frame((100, 30), rows, max / 2, false);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+
+        let (_, buf) = startup_log_frame((100, 30), rows, max, false);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+
+        for scroll in [0, max / 2, max] {
+            let (_, buf) = startup_log_frame((100, 30), rows, scroll, false);
+            assert_eq!(
+                marker_in(&buf, content),
+                None,
+                "the marker must stay in the border column, off the log's cells"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_startup_log_gets_no_marker() {
+        let frame = Rect::new(0, 0, 100, 30);
+        let (app, buf) = startup_log_frame((100, 30), 3, 0, false);
+        let (content, border_column) = startup_log_rects(&app, frame);
+        assert!(content.height > 3, "fixture must fit");
+        assert_eq!(marker_in(&buf, border_column), None);
+    }
+
+    #[test]
+    fn the_startup_log_marker_never_covers_a_full_width_log_line() {
+        // The log is painted cell-by-cell with `set_string`, so a line as wide as
+        // the pane occupies its LAST content column. The marker lives in the
+        // modal's border column, one cell further out, so that character survives.
+        let frame = Rect::new(0, 0, 100, 30);
+        let (app, buf) = startup_log_frame((100, 30), 400, 5, true);
+        let (content, border_column) = startup_log_rects(&app, frame);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+        let last_col = content.x + content.width - 1;
+        for y in content.y..content.y + content.height {
+            assert_eq!(
+                buf[(last_col, y)].symbol(),
+                "X",
+                "row {y}'s last content column must still hold the log's own text"
+            );
+        }
+    }
+
+    #[test]
+    fn the_startup_log_marker_clears_the_search_bar() {
+        // The search bar overlays the bottom three rows of the modal's INNER
+        // area, which includes the marker's row. It must not reach the border
+        // column the marker uses.
+        let frame = Rect::new(0, 0, 100, 30);
+        let (mut app, _) = startup_log_frame((100, 30), 400, 5, false);
+        let (_, border_column) = startup_log_rects(&app, frame);
+        if let Some(viewer) = &mut app.startup_log_viewer {
+            viewer.searching = true;
+        }
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        assert_eq!(
+            marker_in(terminal.backend().buffer(), border_column).as_deref(),
+            Some("↕"),
+            "the search bar must not paint over the marker"
+        );
+    }
+
+    /// Open the Startup Command Logs overlay with `rows` lines of output and
+    /// `scroll` applied to the Output body.
+    fn startup_command_logs_frame(
+        size: (u16, u16),
+        rows: usize,
+        scroll: u16,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let content = (0..rows)
+            .map(|i| format!("output line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.prompt = PromptState::StartupCommandLogs(crate::app::StartupCommandLogPrompt {
+            scope_label: "my-proj".to_string(),
+            entries: vec![dux_core::startup::StartupCommandLogEntry {
+                path: std::path::PathBuf::from("/tmp/startup.log"),
+                display_name: "startup.log".to_string(),
+                modified_at: None,
+            }],
+            selected: 0,
+            filter: crate::app::text_input::TextInput::new(),
+            searching: false,
+            content,
+            scroll_offset: scroll,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The Output body pane and the border column of its own bordered block.
+    fn startup_command_logs_rects(app: &App) -> (Rect, Rect) {
+        match app.overlay_layout.active {
+            OverlayMouseLayout::StartupCommandLogs { body, .. } => {
+                (body, Rect::new(body.x + body.width, body.y, 1, body.height))
+            }
+            ref other => panic!("expected the startup command logs layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_startup_command_logs_output_marker_points_the_way_at_top_middle_and_bottom() {
+        // The Output body measures in wrapped visual ROWS, like the fullscreen
+        // viewer: its content is pre-split to the body width.
+        let rows = 400;
+        let (app, buf) = startup_command_logs_frame((120, 34), rows, 0);
+        let (body, border_column) = startup_command_logs_rects(&app);
+        assert!(
+            rows > body.height as usize,
+            "the fixture must overflow the body"
+        );
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+
+        let max = rows as u16 - body.height;
+        let (_, buf) = startup_command_logs_frame((120, 34), rows, max / 2);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+
+        let (_, buf) = startup_command_logs_frame((120, 34), rows, max);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+
+        for scroll in [0, max / 2, max] {
+            let (_, buf) = startup_command_logs_frame((120, 34), rows, scroll);
+            assert_eq!(
+                marker_in(&buf, body),
+                None,
+                "the marker must stay in the body block's border column"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_startup_command_log_output_gets_no_marker() {
+        let (app, buf) = startup_command_logs_frame((120, 34), 3, 0);
+        let (body, border_column) = startup_command_logs_rects(&app);
+        assert!(body.height > 3, "fixture must fit");
+        assert_eq!(marker_in(&buf, border_column), None);
+    }
+
+    /// Open the Change Theme picker with `count` synthetic themes and `selected`
+    /// highlighted.
+    fn change_theme_frame(
+        size: (u16, u16),
+        count: usize,
+        selected: usize,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let options = (0..count)
+            .map(|i| crate::theme::ThemeListing {
+                id: format!("theme-{i}"),
+                display_name: format!("Theme {i}"),
+                source: crate::theme::ThemeSource::Bundled,
+            })
+            .collect::<Vec<_>>();
+        app.prompt = PromptState::ChangeTheme(crate::app::ChangeThemePrompt {
+            options,
+            selected,
+            current: "theme-0".to_string(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The theme list's inner rect and the border column beside it.
+    fn change_theme_rects(app: &App) -> (Rect, Rect, usize) {
+        match app.overlay_layout.active {
+            OverlayMouseLayout::ChangeTheme { list, items, .. } => (
+                list,
+                Rect::new(list.x + list.width, list.y, 1, list.height),
+                items,
+            ),
+            ref other => panic!("expected the change theme layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_change_theme_marker_tracks_the_item_offset() {
+        // The theme picker is a LIST: its `ListState` offset counts whole items
+        // and never clips the top one, so items is the unit the marker gets.
+        let (app, buf) = change_theme_frame((90, 30), 60, 0);
+        let (list, border_column, items) = change_theme_rects(&app);
+        assert!(
+            items > list.height as usize + 1,
+            "the picker must overflow: {items} themes in {} rows",
+            list.height
+        );
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↓"));
+        assert_eq!(
+            marker_in(&buf, list),
+            None,
+            "a marker inside the list would sit on a theme's own row"
+        );
+
+        let (app, buf) = change_theme_frame((90, 30), 60, list.height as usize);
+        let (_, border_column, _) = change_theme_rects(&app);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↕"));
+
+        let (app, buf) = change_theme_frame((90, 30), 60, items - 1);
+        let (_, border_column, _) = change_theme_rects(&app);
+        assert_eq!(marker_in(&buf, border_column).as_deref(), Some("↑"));
+    }
+
+    #[test]
+    fn a_short_theme_list_gets_no_marker() {
+        let (app, buf) = change_theme_frame((90, 30), 3, 0);
+        let (list, border_column, items) = change_theme_rects(&app);
+        assert!(
+            items > 0 && items <= list.height as usize,
+            "fixture must fit: {items} themes in {} rows",
+            list.height
+        );
+        assert_eq!(marker_in(&buf, border_column), None);
+    }
+
+    /// Open the project browser with `count` synthetic directory entries and
+    /// `selected` highlighted. `filter` non-empty exercises the variant that
+    /// splits a filter input off the top of the modal.
+    fn browse_projects_frame(
+        size: (u16, u16),
+        count: usize,
+        selected: usize,
+        filter: &str,
+    ) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let root = std::path::PathBuf::from(&app.engine.projects[0].path);
+        let entries = (0..count)
+            .map(|i| crate::app::BrowserEntry {
+                path: root.join(format!("dir-{i}")),
+                label: format!("dir-{i}/"),
+                is_git_repo: false,
+                is_parent: false,
+            })
+            .collect::<Vec<_>>();
+        let mut input = crate::app::text_input::TextInput::new();
+        for ch in filter.chars() {
+            input.insert_char(ch);
+        }
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: root,
+            entries,
+            loading: false,
+            selected,
+            filter: input,
+            searching: false,
+            editing_path: false,
+            path_input: crate::app::text_input::TextInput::new(),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The directory list's inner rect, the border column beside it, and the
+    /// item count the renderer recorded.
+    fn browse_projects_rects(app: &App) -> (Rect, Rect, usize) {
+        match app.overlay_layout.active {
+            OverlayMouseLayout::BrowseProjects { list, items, .. } => (
+                list,
+                Rect::new(list.x + list.width, list.y, 1, list.height),
+                items,
+            ),
+            ref other => panic!("expected the browse projects layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_browse_projects_marker_tracks_the_item_offset() {
+        // A directory listing is a LIST: item units, not rows of wrapped text.
+        // Both layout variants are covered — no filter (one full-height list) and
+        // a filter typed (an input strip plus a shorter list).
+        for filter in ["", "dir-"] {
+            let (app, buf) = browse_projects_frame((90, 30), 60, 0, filter);
+            let (list, border_column, items) = browse_projects_rects(&app);
+            assert!(
+                items > list.height as usize + 1,
+                "the browser must overflow (filter {filter:?}): {items} entries in {} rows",
+                list.height
+            );
+            assert_eq!(
+                marker_in(&buf, border_column).as_deref(),
+                Some("↓"),
+                "at the top (filter {filter:?})"
+            );
+            assert_eq!(
+                marker_in(&buf, list),
+                None,
+                "a marker inside the list would sit on a directory's own row"
+            );
+
+            let (app, buf) = browse_projects_frame((90, 30), 60, list.height as usize, filter);
+            let (_, border_column, _) = browse_projects_rects(&app);
+            assert_eq!(
+                marker_in(&buf, border_column).as_deref(),
+                Some("↕"),
+                "in the middle (filter {filter:?})"
+            );
+
+            let (app, buf) = browse_projects_frame((90, 30), 60, items - 1, filter);
+            let (_, border_column, _) = browse_projects_rects(&app);
+            assert_eq!(
+                marker_in(&buf, border_column).as_deref(),
+                Some("↑"),
+                "at the bottom (filter {filter:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_directory_listing_gets_no_marker() {
+        for filter in ["", "dir-"] {
+            let (app, buf) = browse_projects_frame((90, 30), 3, 0, filter);
+            let (list, border_column, items) = browse_projects_rects(&app);
+            assert!(
+                items > 0 && items <= list.height as usize,
+                "fixture must fit: {items} entries in {} rows",
+                list.height
+            );
+            assert_eq!(marker_in(&buf, border_column), None);
         }
     }
 

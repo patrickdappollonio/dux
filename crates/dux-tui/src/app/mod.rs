@@ -112,6 +112,14 @@ pub struct App {
     /// depends on the wrap width, which only the renderer knows).
     pub(crate) last_first_load_height: u16,
     pub(crate) last_first_load_lines: u16,
+    /// Visible height and total wrapped-row count of the error dialogs'
+    /// (`ConfigReloadFailed`, `AddProjectFailed`) message pane, recorded at
+    /// render so the scroll keys can clamp. Same shape and same reason as
+    /// `last_help_height`/`last_help_lines`: the extent depends on the wrap
+    /// width, which only the renderer knows. Only one such dialog can be open at
+    /// a time, so the pair is shared.
+    pub(crate) last_error_dialog_height: u16,
+    pub(crate) last_error_dialog_lines: u16,
     /// The startup gate's plan, held from the moment the release-notes fetch is
     /// dispatched until the worker returns and
     /// [`dux_core::first_load::after_fetch`] folds the outcome in. `None` once
@@ -1198,6 +1206,12 @@ pub(crate) enum PromptState {
     AddProjectFailed {
         message: String,
         return_prompt: Box<PromptState>,
+        /// First visible row of the message. The failure text can run long (a
+        /// path plus a git error, several lines of it), and every line matters
+        /// when it is how the user learns why the project was rejected, so the
+        /// body scrolls instead of being truncated. Clamped at render against
+        /// [`App::last_error_dialog_lines`]/[`App::last_error_dialog_height`].
+        scroll: u16,
     },
     /// Shown when adding a plain folder that is not a git repository (the
     /// adopt-a-folder flow). Confirming runs `git init`, seeds a starter
@@ -1262,6 +1276,12 @@ pub(crate) enum PromptState {
         error: String,
         recover_old_config: bool,
         focus: ConfigReloadFailedFocus,
+        /// First visible row of the validation error. A TOML validation failure
+        /// is normally many lines and the tail is usually the part naming the
+        /// actual problem, so the body scrolls rather than dropping it. Clamped
+        /// at render against
+        /// [`App::last_error_dialog_lines`]/[`App::last_error_dialog_height`].
+        scroll: u16,
     },
     ConfirmDeleteAgent {
         session_id: String,
@@ -2236,6 +2256,8 @@ impl App {
             last_help_lines: 0,
             last_first_load_height: 0,
             last_first_load_lines: 0,
+            last_error_dialog_height: 0,
+            last_error_dialog_lines: 0,
             pending_first_load: None,
             notes_fetch_rx: None,
             deferred_first_load_notes: None,
@@ -3280,6 +3302,7 @@ impl App {
             error,
             recover_old_config: false,
             focus: ConfigReloadFailedFocus::Close,
+            scroll: 0,
         };
     }
 
