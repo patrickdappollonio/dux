@@ -7167,12 +7167,18 @@ impl App {
             PromptState::RenameSession {
                 input,
                 rename_branch,
+                focus,
                 ..
             } => {
                 self.render_dim_overlay(frame);
+                let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
+                    CheckboxState::Focused
+                } else {
+                    CheckboxState::Normal
+                };
                 let checkbox = Checkbox::new("Also rename the git branch")
                     .checked(*rename_branch)
-                    .state(CheckboxState::Normal);
+                    .state(checkbox_state);
                 let dialog_width = 62.min(frame.area().width.max(1));
                 let inner_width = dialog_width.saturating_sub(2);
                 let checkbox_height = checkbox
@@ -7251,7 +7257,7 @@ impl App {
                     checkbox_area,
                     "Also rename the git branch",
                     *rename_branch,
-                    CheckboxState::Normal,
+                    checkbox_state,
                     Some(Line::from(Span::styled(
                         format!(
                             "{}Open PRs will still reference the old branch name",
@@ -7263,12 +7269,13 @@ impl App {
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
-                // This modal's text field owns the letters and the horizontal
-                // arrows, so the hint names the first key of the action that
-                // still reaches the toggle here (see `text_field_owns_key`).
-                // If a rebinding leaves none, the segment is dropped: naming a
-                // key that types a character is worse than naming none.
-                let toggle_key = self
+                // Same rule as the new-agent modal: the name field owns the
+                // letters and the horizontal arrows, so the hint names the
+                // first key of the action that still reaches focus movement
+                // here (see `text_field_owns_key`). If a rebinding leaves none,
+                // the segment is dropped: naming a key that types a character
+                // is worse than naming none.
+                let focus_key = self
                     .bindings
                     .label_for_text_field_dialog(Action::ToggleSelection);
                 let mut hints = vec![Span::raw(" ")];
@@ -7277,13 +7284,17 @@ impl App {
                     " confirm  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                if let Some(toggle_key) = &toggle_key {
-                    hints.extend(self.theme.key_badge_default(toggle_key));
+                if let Some(focus_key) = &focus_key {
+                    hints.extend(self.theme.key_badge_default(focus_key));
                     hints.push(Span::styled(
-                        " toggle  ",
+                        " focus  ",
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                 }
+                hints.push(Span::styled(
+                    "Space toggle  ",
+                    Style::default().fg(self.theme.hint_desc_fg),
+                ));
                 hints.extend(self.theme.key_badge_default(&close_key));
                 hints.push(Span::styled(
                     " cancel",
@@ -13276,6 +13287,117 @@ mod tests {
             .join("\n")
     }
 
+    /// Style of the checkbox marker cell (`[`) on the row whose text contains
+    /// `label`, from a real rendered frame.
+    ///
+    /// Panics when the label is not on screen: a focus-indication test that
+    /// silently compared nothing would be worthless.
+    fn checkbox_marker_style(app: &mut App, label: &str) -> Style {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if !row.contains(label) {
+                continue;
+            }
+            let marker = row.find('[').expect("a checkbox row carries a marker");
+            let cell = &buf[(marker as u16, y)];
+            return Style::default()
+                .fg(cell.fg)
+                .bg(cell.bg)
+                .add_modifier(cell.modifier);
+        }
+        panic!("checkbox labelled {label:?} was not rendered");
+    }
+
+    #[test]
+    fn rename_focused_checkbox_renders_differently_from_the_unfocused_one() {
+        const LABEL: &str = "Also rename the git branch";
+        let mut app = test_app(default_bindings());
+
+        app.prompt = rename_prompt();
+        let unfocused = checkbox_marker_style(&mut app, LABEL);
+
+        app.prompt = match rename_prompt() {
+            PromptState::RenameSession {
+                session_id,
+                input,
+                rename_branch,
+                ..
+            } => PromptState::RenameSession {
+                session_id,
+                input,
+                rename_branch,
+                focus: RenameSessionFocus::RenameBranchCheckbox,
+            },
+            other => panic!("expected RenameSession, got {other:?}"),
+        };
+        let focused = checkbox_marker_style(&mut app, LABEL);
+
+        assert_ne!(
+            focused, unfocused,
+            "a focused checkbox must look focused; moving focus somewhere \
+             invisible is the bug this guards"
+        );
+    }
+
+    #[test]
+    fn name_new_agent_focused_checkboxes_render_differently_from_the_unfocused_ones() {
+        const RANDOMIZED: &str = "Use randomized pet name";
+        const COPY: &str = "Copy uncommitted changes";
+        let mut app = test_app(default_bindings());
+
+        let with_focus = |app: &App, focus: NameNewAgentFocus| match name_new_agent_prompt(app) {
+            PromptState::NameNewAgent {
+                request,
+                input,
+                randomize_name,
+                randomized_name,
+                copy_changes,
+                ..
+            } => PromptState::NameNewAgent {
+                request,
+                input,
+                randomize_name,
+                randomized_name,
+                copy_changes,
+                focus,
+            },
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        };
+
+        app.prompt = with_focus(&app, NameNewAgentFocus::Input);
+        let randomized_unfocused = checkbox_marker_style(&mut app, RANDOMIZED);
+        let copy_unfocused = checkbox_marker_style(&mut app, COPY);
+
+        app.prompt = with_focus(&app, NameNewAgentFocus::RandomizedNameCheckbox);
+        assert_ne!(
+            checkbox_marker_style(&mut app, RANDOMIZED),
+            randomized_unfocused,
+            "the focused randomized-name checkbox must look focused"
+        );
+        assert_eq!(
+            checkbox_marker_style(&mut app, COPY),
+            copy_unfocused,
+            "only the focused checkbox changes"
+        );
+
+        app.prompt = with_focus(&app, NameNewAgentFocus::CopyChangesCheckbox);
+        assert_ne!(
+            checkbox_marker_style(&mut app, COPY),
+            copy_unfocused,
+            "the focused copy-changes checkbox must look focused"
+        );
+    }
+
     /// Bindings with every default key list except `action`, which gets `keys`.
     fn bindings_with(action: Action, keys: Vec<crokey::KeyCombination>) -> RuntimeBindings {
         RuntimeBindings::new(
@@ -13313,6 +13435,7 @@ mod tests {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         }
     }
 
@@ -13334,37 +13457,50 @@ mod tests {
     }
 
     #[test]
-    fn rename_footer_names_a_key_that_really_toggles_the_checkbox() {
+    fn rename_footer_names_a_key_that_really_moves_focus() {
         let mut app = test_app(default_bindings());
         app.prompt = rename_prompt();
 
         let label = app
             .bindings
             .label_for_text_field_dialog(Action::ToggleSelection)
-            .expect("default bindings leave a reachable toggle key");
+            .expect("default bindings leave a reachable focus key");
         assert_ne!(
             label, "h",
-            "`h` types into the name field here; it must never be the advertised toggle"
+            "`h` types into the name field here; it must never be the advertised focus key"
         );
 
         let screen = rendered_screen(&mut app);
         assert!(
-            screen.contains(&format!("<{label}> toggle")),
+            screen.contains(&format!("<{label}> focus")),
             "rename footer should advertise <{label}>; got:\n{screen}"
         );
         assert!(
-            !screen.contains("<h> toggle"),
+            !screen.contains("<h> focus"),
             "rename footer must not advertise `h`:\n{screen}"
         );
+        assert!(
+            screen.contains("Space toggle"),
+            "rename footer should say Space toggles the focused checkbox:\n{screen}"
+        );
 
-        // The label is tied to behaviour: the advertised key toggles.
+        // The label is tied to behaviour: the advertised key moves focus, and
+        // leaves the checkbox value alone.
         let key = reachable_toggle(&app).expect("reachable toggle key");
         app.handle_key(press(key)).expect("handle key");
         match &app.prompt {
-            PromptState::RenameSession { rename_branch, .. } => assert!(
-                *rename_branch,
-                "the key the footer names must toggle the rename-branch checkbox"
-            ),
+            PromptState::RenameSession {
+                focus,
+                rename_branch,
+                ..
+            } => {
+                assert_eq!(
+                    *focus,
+                    RenameSessionFocus::RenameBranchCheckbox,
+                    "the key the footer names must move focus onto the checkbox"
+                );
+                assert!(!*rename_branch, "moving focus must not change the value");
+            }
             other => panic!("expected RenameSession, got {other:?}"),
         }
     }
@@ -13419,21 +13555,23 @@ mod tests {
         let label = app
             .bindings
             .label_for_text_field_dialog(Action::ToggleSelection)
-            .expect("F2 still reaches the toggle");
+            .expect("F2 still reaches focus movement");
         assert_ne!(label, "Left", "the caret owns Left in this modal");
 
         let screen = rendered_screen(&mut app);
         assert!(
-            screen.contains(&format!("<{label}> toggle")),
+            screen.contains(&format!("<{label}> focus")),
             "footer should advertise the reachable <{label}>; got:\n{screen}"
         );
 
         app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
             .expect("handle key");
         match &app.prompt {
-            PromptState::RenameSession { rename_branch, .. } => {
-                assert!(*rename_branch, "the advertised F2 must toggle")
-            }
+            PromptState::RenameSession { focus, .. } => assert_eq!(
+                *focus,
+                RenameSessionFocus::RenameBranchCheckbox,
+                "the advertised F2 must move focus"
+            ),
             other => panic!("expected RenameSession, got {other:?}"),
         }
     }

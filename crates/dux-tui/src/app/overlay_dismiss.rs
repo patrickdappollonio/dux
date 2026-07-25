@@ -332,6 +332,7 @@ mod tests {
             session_id: "session-1".to_string(),
             input,
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         }
     }
 

@@ -63,6 +63,17 @@ fn is_reverse_tab(key: KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
+/// Whether a focus-movement key means "backwards".
+///
+/// The movement action carries no direction of its own, so the key that
+/// triggered it supplies one: `Shift-Tab`/`BackTab` and the two conventional
+/// "left" keys walk backwards, and anything else walks forwards. This is a
+/// directional hint for the default key set, not a hardcoded binding: a
+/// rebound key simply moves forwards.
+fn focus_move_is_reverse(key: KeyEvent) -> bool {
+    is_reverse_tab(key) || matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseTarget {
     LeftPane,
@@ -3570,11 +3581,21 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::NameNewAgent { .. }) {
+            let checkbox_focused = matches!(
+                self.prompt,
+                PromptState::NameNewAgent {
+                    focus: NameNewAgentFocus::RandomizedNameCheckbox
+                        | NameNewAgentFocus::CopyChangesCheckbox,
+                    ..
+                }
+            );
             // Plain characters type; horizontal arrows move the caret. Both
-            // belong to the text field, so neither consults the bindings. The
-            // footer hint is derived from this same predicate, so it can only
-            // ever name a key that still reaches the bindings here.
-            let action = if text_field_owns_key(key) {
+            // belong to the text field, so neither consults the bindings while
+            // the field has focus. Once focus is on a checkbox the field owns
+            // nothing, so every key reaches the bindings and the movement keys
+            // navigate. The footer hint is derived from this same predicate, so
+            // it can only ever name a key that still reaches the bindings here.
+            let action = if !checkbox_focused && text_field_owns_key(key) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
@@ -3585,7 +3606,7 @@ impl App {
                     self.prompt = PromptState::None;
                 }
                 Some(Action::ToggleSelection) => {
-                    self.focus_next_name_new_agent_control(!is_reverse_tab(key));
+                    self.focus_next_name_new_agent_control(!focus_move_is_reverse(key));
                 }
                 Some(Action::Confirm) => {
                     // Extract the name from the input before taking ownership.
@@ -3695,14 +3716,6 @@ impl App {
                     self.dispatch_create_agent_request(request, msg)?;
                 }
                 _ => {
-                    let checkbox_focused = matches!(
-                        self.prompt,
-                        PromptState::NameNewAgent {
-                            focus: NameNewAgentFocus::RandomizedNameCheckbox
-                                | NameNewAgentFocus::CopyChangesCheckbox,
-                            ..
-                        }
-                    );
                     if checkbox_focused {
                         // A focused checkbox is the only control accepting
                         // input, and Space is the only key it takes. Every
@@ -3720,17 +3733,21 @@ impl App {
             return Ok(false);
         }
 
-        if let PromptState::RenameSession {
-            session_id,
-            input,
-            rename_branch,
-        } = &mut self.prompt
-        {
+        if matches!(self.prompt, PromptState::RenameSession { .. }) {
+            let checkbox_focused = matches!(
+                self.prompt,
+                PromptState::RenameSession {
+                    focus: RenameSessionFocus::RenameBranchCheckbox,
+                    ..
+                }
+            );
             // Plain characters type; horizontal arrows move the caret. Both
-            // belong to the text field, so neither consults the bindings. The
-            // footer hint is derived from this same predicate, so it can only
-            // ever name a key that still reaches the bindings here.
-            let action = if text_field_owns_key(key) {
+            // belong to the text field, so neither consults the bindings while
+            // the field has focus. Once focus is on the checkbox the field owns
+            // nothing, so every key reaches the bindings and the movement keys
+            // navigate. The footer hint is derived from this same predicate, so
+            // it can only ever name a key that still reaches the bindings here.
+            let action = if !checkbox_focused && text_field_owns_key(key) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
@@ -3741,6 +3758,15 @@ impl App {
                     self.prompt = PromptState::None;
                 }
                 Some(Action::Confirm) => {
+                    let PromptState::RenameSession {
+                        session_id,
+                        input,
+                        rename_branch,
+                        ..
+                    } = &self.prompt
+                    else {
+                        unreachable!()
+                    };
                     let id = session_id.clone();
                     let new_name = input.text.clone();
                     let also_rename_branch = *rename_branch;
@@ -3748,10 +3774,21 @@ impl App {
                     self.apply_rename_session(&id, new_name, also_rename_branch);
                 }
                 Some(Action::ToggleSelection) => {
-                    *rename_branch = !*rename_branch;
+                    self.focus_next_rename_session_control(!focus_move_is_reverse(key));
                 }
                 _ => {
-                    input.handle_key(key);
+                    if checkbox_focused {
+                        // A focused checkbox is the only control accepting
+                        // input, and Space is the only key it takes. Every
+                        // other key is dropped rather than routed to the name
+                        // field: the field draws no caret while focus sits on
+                        // the checkbox, so editing it here would be invisible.
+                        if key.code == KeyCode::Char(' ') {
+                            self.toggle_rename_session_branch();
+                        }
+                    } else if let PromptState::RenameSession { input, .. } = &mut self.prompt {
+                        input.handle_key(key);
+                    }
                 }
             }
             return Ok(false);
@@ -5585,8 +5622,9 @@ impl App {
             OverlayMouseLayout::RenameSession { input, .. } => input,
             _ => return,
         };
-        if let PromptState::RenameSession { input, .. } = &mut self.prompt {
+        if let PromptState::RenameSession { input, focus, .. } = &mut self.prompt {
             input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
+            *focus = RenameSessionFocus::Input;
         }
     }
 
@@ -5610,6 +5648,32 @@ impl App {
             let display_row = usize::from(row.saturating_sub(input_area.y));
             let display_col = usize::from(column.saturating_sub(input_area.x));
             input.set_cursor_from_display_pos(display_row, display_col);
+        }
+    }
+
+    /// Move focus between the rename modal's two controls.
+    ///
+    /// `_forward` is accepted so the call site reads exactly like the new-agent
+    /// modal's, but with only two controls both directions land on the other
+    /// one, so it has nothing to decide here.
+    fn focus_next_rename_session_control(&mut self, _forward: bool) {
+        if let PromptState::RenameSession { focus, .. } = &mut self.prompt {
+            *focus = match *focus {
+                RenameSessionFocus::Input => RenameSessionFocus::RenameBranchCheckbox,
+                RenameSessionFocus::RenameBranchCheckbox => RenameSessionFocus::Input,
+            };
+        }
+    }
+
+    fn toggle_rename_session_branch(&mut self) {
+        if let PromptState::RenameSession {
+            rename_branch,
+            focus,
+            ..
+        } = &mut self.prompt
+        {
+            *focus = RenameSessionFocus::RenameBranchCheckbox;
+            *rename_branch = !*rename_branch;
         }
     }
 
@@ -5709,9 +5773,7 @@ impl App {
                 }
             }
             OverlayCheckboxId::RenameSessionBranch => {
-                if let PromptState::RenameSession { rename_branch, .. } = &mut self.prompt {
-                    *rename_branch = !*rename_branch;
-                }
+                self.toggle_rename_session_branch();
             }
             OverlayCheckboxId::NonDefaultBranchCheckoutDefault => {
                 if let PromptState::ConfirmNonDefaultBranch {
@@ -7352,8 +7414,8 @@ mod tests {
         LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
         NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
         PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry,
-        PromptState, PullTarget, ResourceKind, ResourceStats, RightSection, RuntimeTargetId,
-        SearchableList, StartupCommandLogPrompt, TextInput, WorkerEvent,
+        PromptState, PullTarget, RenameSessionFocus, ResourceKind, ResourceStats, RightSection,
+        RuntimeTargetId, SearchableList, StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
@@ -7994,6 +8056,7 @@ not_a_real_action = ["x"]
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         };
         app.input_target = InputTarget::Agent;
 
@@ -8016,6 +8079,7 @@ not_a_real_action = ["x"]
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent".to_string()),
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
@@ -8037,6 +8101,7 @@ not_a_real_action = ["x"]
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent-branch".to_string()),
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -8288,34 +8353,94 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn rename_toggle_checkbox_flips_rename_branch() {
+    fn rename_tab_cycles_focus_and_only_space_flips_the_checkbox() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("test".to_string()),
             rename_branch: true,
+            focus: RenameSessionFocus::Input,
         };
 
-        // Tab toggles the checkbox.
+        // Tab moves focus onto the checkbox, leaving its value alone.
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
-            PromptState::RenameSession { rename_branch, .. } => {
-                assert!(!*rename_branch, "Tab should toggle rename_branch to false");
+            PromptState::RenameSession {
+                rename_branch,
+                focus,
+                ..
+            } => {
+                assert_eq!(*focus, RenameSessionFocus::RenameBranchCheckbox);
+                assert!(*rename_branch, "Tab must not change the value");
             }
             other => panic!("expected RenameSession, got {other:?}"),
         }
 
-        // Tab again toggles it back.
+        // Space acts on the focused control.
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                rename_branch,
+                input,
+                focus,
+                ..
+            } => {
+                assert!(!*rename_branch, "Space should toggle the focused checkbox");
+                assert_eq!(*focus, RenameSessionFocus::RenameBranchCheckbox);
+                assert_eq!(input.text, "test", "Space must not reach the name field");
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+
+        // Tab again returns focus to the field, still without touching it.
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
 
         match &app.prompt {
-            PromptState::RenameSession { rename_branch, .. } => {
+            PromptState::RenameSession {
+                rename_branch,
+                focus,
+                ..
+            } => {
+                assert_eq!(*focus, RenameSessionFocus::Input);
+                assert!(!*rename_branch, "the second Tab must not change the value");
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_space_types_into_the_field_when_it_has_focus() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("a".to_string()),
+            rename_branch: true,
+            focus: RenameSessionFocus::Input,
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                input,
+                rename_branch,
+                ..
+            } => {
                 assert!(
                     *rename_branch,
-                    "second Tab should toggle rename_branch back to true"
+                    "Space in the field must not touch the checkbox"
+                );
+                assert_eq!(
+                    input.text.chars().count(),
+                    2,
+                    "Space should have typed into the field, got {:?}",
+                    input.text
                 );
             }
             other => panic!("expected RenameSession, got {other:?}"),
@@ -8323,23 +8448,108 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn rename_shift_tab_toggles_checkbox() {
+    fn rename_shift_tab_moves_focus_backwards_without_changing_the_checkbox() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::RenameSession {
             session_id: "session-1".to_string(),
             input: TextInput::with_text("test".to_string()),
             rename_branch: true,
+            focus: RenameSessionFocus::Input,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
             .unwrap();
 
         match &app.prompt {
-            PromptState::RenameSession { rename_branch, .. } => {
-                assert!(
-                    !*rename_branch,
-                    "Shift-Tab should toggle rename_branch to false"
+            PromptState::RenameSession {
+                rename_branch,
+                focus,
+                ..
+            } => {
+                assert_eq!(*focus, RenameSessionFocus::RenameBranchCheckbox);
+                assert!(*rename_branch, "Shift-Tab must not change the value");
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_movement_keys_navigate_while_the_checkbox_has_focus() {
+        // `h`/`l` and the horizontal arrows belong to the field only while the
+        // field has focus. On the checkbox there is no caret to move, so they
+        // navigate back to the field and never change the value.
+        for code in [
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            let mut app = test_app(default_bindings());
+            app.prompt = PromptState::RenameSession {
+                session_id: "session-1".to_string(),
+                input: TextInput::with_text("agent".to_string()),
+                rename_branch: true,
+                focus: RenameSessionFocus::RenameBranchCheckbox,
+            };
+
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+
+            match &app.prompt {
+                PromptState::RenameSession {
+                    input,
+                    rename_branch,
+                    focus,
+                    ..
+                } => {
+                    assert_eq!(
+                        *focus,
+                        RenameSessionFocus::Input,
+                        "{code:?} should navigate off the checkbox"
+                    );
+                    assert!(*rename_branch, "{code:?} must not change the value");
+                    assert_eq!(input.text, "agent", "{code:?} must not edit the field");
+                }
+                other => panic!("expected RenameSession, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rename_checkbox_click_toggles_it_and_moves_focus_there() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("agent".to_string()),
+            rename_branch: false,
+            focus: RenameSessionFocus::Input,
+        };
+        install_rename_overlay(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 26, 12));
+
+        match &app.prompt {
+            PromptState::RenameSession {
+                rename_branch,
+                focus,
+                ..
+            } => {
+                assert!(*rename_branch, "a click should toggle the checkbox");
+                assert_eq!(
+                    *focus,
+                    RenameSessionFocus::RenameBranchCheckbox,
+                    "a click should move focus onto what it acted on"
                 );
+            }
+            other => panic!("expected RenameSession, got {other:?}"),
+        }
+
+        // Clicking back into the field returns focus to it.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 26, 10));
+
+        match &app.prompt {
+            PromptState::RenameSession { focus, .. } => {
+                assert_eq!(*focus, RenameSessionFocus::Input);
             }
             other => panic!("expected RenameSession, got {other:?}"),
         }
@@ -8354,6 +8564,7 @@ not_a_real_action = ["x"]
             session_id: "session-1".to_string(),
             input: TextInput::with_text("agent".to_string()),
             rename_branch: true,
+            focus: RenameSessionFocus::Input,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
@@ -8400,6 +8611,7 @@ not_a_real_action = ["x"]
             session_id: "session-1".to_string(),
             input: TextInput::with_text(String::new()),
             rename_branch: true,
+            focus: RenameSessionFocus::Input,
         };
 
         for c in ['h', 'l'] {
@@ -15435,6 +15647,7 @@ cyan = "#00ffff"
             session_id: sid,
             input: TextInput::with_text("rename me".to_string()),
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         };
         install_rename_overlay(&mut app);
 
@@ -15454,6 +15667,7 @@ cyan = "#00ffff"
             session_id: sid,
             input: TextInput::with_text("rename me".to_string()),
             rename_branch: false,
+            focus: RenameSessionFocus::Input,
         };
         install_rename_overlay(&mut app);
 
@@ -18979,6 +19193,59 @@ cyan = "#00ffff"
                 );
             }
             other => panic!("expected NameNewAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_new_agent_movement_keys_navigate_while_a_checkbox_has_focus() {
+        // With both checkboxes present the walk is
+        // Input → Randomized → Copy → Input, and its mirror backwards. None of
+        // these keys may edit the field or change a checkbox value.
+        let cases = [
+            (
+                KeyCode::Char('l'),
+                NameNewAgentFocus::RandomizedNameCheckbox,
+                NameNewAgentFocus::CopyChangesCheckbox,
+            ),
+            (
+                KeyCode::Right,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+                NameNewAgentFocus::CopyChangesCheckbox,
+            ),
+            (
+                KeyCode::Char('h'),
+                NameNewAgentFocus::CopyChangesCheckbox,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+            ),
+            (
+                KeyCode::Left,
+                NameNewAgentFocus::CopyChangesCheckbox,
+                NameNewAgentFocus::RandomizedNameCheckbox,
+            ),
+        ];
+
+        for (code, from, expected) in cases {
+            let mut app = test_app(default_bindings());
+            app.prompt = name_new_agent_prompt_with_focus(&app, from);
+
+            app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap();
+
+            match &app.prompt {
+                PromptState::NameNewAgent {
+                    input,
+                    focus,
+                    randomize_name,
+                    copy_changes,
+                    ..
+                } => {
+                    assert_eq!(*focus, expected, "{code:?} from {from:?} should navigate");
+                    assert!(!*randomize_name, "{code:?} must not change a value");
+                    assert!(!*copy_changes, "{code:?} must not change a value");
+                    assert_eq!(input.text, "agent", "{code:?} must not edit the field");
+                }
+                other => panic!("expected NameNewAgent, got {other:?}"),
+            }
         }
     }
 }

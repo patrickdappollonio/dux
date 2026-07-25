@@ -1177,6 +1177,18 @@ pub(crate) enum ConfirmNonDefaultBranchFocus {
     Checkbox,
 }
 
+/// Which selectable element has focus in the Rename Agent modal.
+///
+/// Mirrors [`NameNewAgentFocus`]: the modal pairs a single-line name field with
+/// a checkbox, so movement keys need somewhere to move focus TO. Without this,
+/// the movement action had to be wired straight to the checkbox value, which
+/// made Tab flip the box instead of highlighting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenameSessionFocus {
+    Input,
+    RenameBranchCheckbox,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NameNewAgentFocus {
     Input,
@@ -1344,6 +1356,7 @@ pub(crate) enum PromptState {
         session_id: String,
         input: TextInput,
         rename_branch: bool,
+        focus: RenameSessionFocus,
     },
     PullRequestInput {
         project: Project,
@@ -3947,6 +3960,7 @@ impl App {
                 input: TextInput::with_text(current_name)
                     .with_char_map(crate::git::agent_name_char_map),
                 rename_branch: true,
+                focus: RenameSessionFocus::Input,
             };
         } else {
             self.set_error("No agent session selected.");
