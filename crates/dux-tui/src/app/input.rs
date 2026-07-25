@@ -3709,19 +3709,22 @@ impl App {
                     self.dispatch_create_agent_request(request, msg)?;
                 }
                 _ => {
-                    if key.code == KeyCode::Char(' ') {
-                        let checkbox_focused = matches!(
-                            self.prompt,
-                            PromptState::NameNewAgent {
-                                focus: NameNewAgentFocus::RandomizedNameCheckbox
-                                    | NameNewAgentFocus::CopyChangesCheckbox,
-                                ..
-                            }
-                        );
-                        if checkbox_focused {
+                    let checkbox_focused = matches!(
+                        self.prompt,
+                        PromptState::NameNewAgent {
+                            focus: NameNewAgentFocus::RandomizedNameCheckbox
+                                | NameNewAgentFocus::CopyChangesCheckbox,
+                            ..
+                        }
+                    );
+                    if checkbox_focused {
+                        // A focused checkbox is the only control accepting
+                        // input, and Space is the only key it takes. Every
+                        // other key is dropped rather than routed to the name
+                        // field: the field draws no caret while focus sits on
+                        // a checkbox, so editing it here would be invisible.
+                        if key.code == KeyCode::Char(' ') {
                             self.toggle_focused_name_new_agent_checkbox();
-                        } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
-                            input.handle_key(key);
                         }
                     } else if let PromptState::NameNewAgent { input, .. } = &mut self.prompt {
                         input.handle_key(key);
@@ -18897,5 +18900,99 @@ cyan = "#00ffff"
             app.engine.agent_tabs.contains_key(&tab_id),
             "killing an extra tab keeps its row (it becomes dormant)"
         );
+    }
+
+    fn name_new_agent_prompt_with_focus(app: &App, focus: NameNewAgentFocus) -> PromptState {
+        PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("agent".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus,
+        }
+    }
+
+    #[test]
+    fn name_new_agent_printable_does_not_edit_field_while_checkbox_focused() {
+        // A focused checkbox draws no caret, so a keystroke there must not
+        // silently append to the (unfocused) name field.
+        for focus in [
+            NameNewAgentFocus::RandomizedNameCheckbox,
+            NameNewAgentFocus::CopyChangesCheckbox,
+        ] {
+            let mut app = test_app(default_bindings());
+            app.prompt = name_new_agent_prompt_with_focus(&app, focus);
+
+            app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+                .unwrap();
+
+            match &app.prompt {
+                PromptState::NameNewAgent {
+                    input,
+                    focus: current,
+                    ..
+                } => {
+                    assert_eq!(input.text, "agent", "printable must not edit the field");
+                    assert_eq!(*current, focus, "printable must not move focus");
+                }
+                other => panic!("expected NameNewAgent, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn name_new_agent_printable_types_while_input_focused() {
+        let mut app = test_app(default_bindings());
+        app.prompt = name_new_agent_prompt_with_focus(&app, NameNewAgentFocus::Input);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, .. } => assert_eq!(input.text, "agenty"),
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn name_new_agent_space_toggles_focused_checkbox_and_types_in_the_field() {
+        let mut app = test_app(default_bindings());
+        app.prompt = name_new_agent_prompt_with_focus(&app, NameNewAgentFocus::CopyChangesCheckbox);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent {
+                input,
+                copy_changes,
+                ..
+            } => {
+                assert!(*copy_changes, "Space should toggle the focused checkbox");
+                assert_eq!(input.text, "agent", "Space must not reach the field");
+            }
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        }
+
+        app.prompt = name_new_agent_prompt_with_focus(&app, NameNewAgentFocus::Input);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .unwrap();
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, .. } => {
+                assert_eq!(
+                    input.text, "agent ",
+                    "Space should type when the field owns focus"
+                );
+            }
+            other => panic!("expected NameNewAgent, got {other:?}"),
+        }
     }
 }
