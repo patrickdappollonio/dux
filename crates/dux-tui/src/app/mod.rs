@@ -1304,15 +1304,18 @@ pub(crate) enum PromptState {
         project_id: String,
         project_name: String,
         input: TextInput,
+        focus: ConfigureFieldFocus,
     },
     ConfigureProjectEnv {
         project_id: String,
         project_name: String,
         input: TextInput,
+        focus: ConfigureFieldFocus,
     },
     ConfigureGlobalEnv {
         project_name: String,
         input: TextInput,
+        focus: ConfigureFieldFocus,
     },
     #[allow(dead_code)]
     StartupCommandLogs(StartupCommandLogPrompt),
@@ -1629,10 +1632,54 @@ impl MacroEditFocus {
         order[next]
     }
 
-    /// Whether this stop is a text field, and so owns the plain characters and
-    /// the horizontal arrows that would otherwise reach the bindings.
-    pub(crate) fn is_text_field(self) -> bool {
-        matches!(self, MacroEditFocus::Name | MacroEditFocus::Text)
+    /// Whether this stop is actually TAKING keystrokes right now.
+    ///
+    /// The single-line name field always is: typing there is immediate. The
+    /// multiline body only is once it has been engaged, and an unengaged body
+    /// owns nothing, so the movement keys keep working while focus is parked on
+    /// it. That distinction is what [`MacroEditFocus::is_text_field`] cannot
+    /// make on its own.
+    pub(crate) fn owns_keys(self, body_engaged: bool) -> bool {
+        match self {
+            MacroEditFocus::Name => true,
+            MacroEditFocus::Text => body_engaged,
+            MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => false,
+        }
+    }
+}
+
+/// Which control has focus in the three `Configure*` modals (startup command,
+/// project environment, global environment).
+///
+/// All three hold ONE full-text field, so Enter cannot mean "submit": it is
+/// content the moment the field is engaged. The field therefore keeps the
+/// engage step, and the modal carries the Cancel/Save pair that gives Enter its
+/// third, unambiguous meaning. That is the dual-mode rule, and these three used
+/// to be the only modals breaking it.
+///
+/// Declared in visual order, which is also the forward focus order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ConfigureFieldFocus {
+    /// The full-text body. Unengaged it takes no keystrokes at all; engaging it
+    /// is an explicit act (the confirm key, the engage binding, or a double
+    /// click on the field).
+    #[default]
+    Input,
+    Cancel,
+    Save,
+}
+
+impl ConfigureFieldFocus {
+    /// The next focus stop in `forward` direction, wrapping at both ends.
+    /// Every stop is unconditional here, but the shared ring is used anyway so
+    /// this modal's focus order is declared as data like everyone else's.
+    pub(crate) fn step(self, forward: bool) -> Self {
+        let ring: [(ConfigureFieldFocus, bool); 3] = [
+            (ConfigureFieldFocus::Input, true),
+            (ConfigureFieldFocus::Cancel, true),
+            (ConfigureFieldFocus::Save, true),
+        ];
+        components::focus_ring::next_focus(&ring, self, forward)
     }
 }
 
@@ -1883,8 +1930,12 @@ pub(crate) enum OverlayMouseLayout {
         offset: usize,
         close_button: Rect,
     },
+    /// Shared by all three `Configure*` modals: one full-text field plus the
+    /// Cancel/Save pair the dual-mode rule requires of it.
     ConfigureStartupCommand {
         input: Rect,
+        cancel_button: Rect,
+        save_button: Rect,
     },
     KillRunning {
         input: Option<Rect>,

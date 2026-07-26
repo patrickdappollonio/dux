@@ -2076,6 +2076,7 @@ impl App {
             input: TextInput::with_text(project.startup_command.unwrap_or_default())
                 .with_multiline(6)
                 .with_placeholder("Enter startup command..."),
+            focus: ConfigureFieldFocus::default(),
         };
         self.input_target = InputTarget::None;
         self.set_info("Enter a startup command for this project. Empty clears it.");
@@ -2088,6 +2089,7 @@ impl App {
                 project_id,
                 project_name,
                 input,
+                ..
             } => (
                 project_id.clone(),
                 project_name.clone(),
@@ -2159,6 +2161,7 @@ impl App {
             input: TextInput::with_text(crate::config::project_env_to_lines(&project.env))
                 .with_multiline(8)
                 .with_placeholder("KEY=value"),
+            focus: ConfigureFieldFocus::default(),
         };
         self.set_info("Enter one environment variable per line as KEY=value. Empty clears them.");
         Ok(())
@@ -2174,6 +2177,7 @@ impl App {
             ))
             .with_multiline(8)
             .with_placeholder("KEY=value"),
+            focus: ConfigureFieldFocus::default(),
         };
         self.set_info("Enter global environment variables as KEY=value. Empty clears them.");
         Ok(())
@@ -2210,6 +2214,7 @@ impl App {
                 project_id,
                 project_name,
                 input,
+                ..
             } => {
                 let env = match crate::config::parse_project_env_lines(&input.text) {
                     Ok(env) => env,

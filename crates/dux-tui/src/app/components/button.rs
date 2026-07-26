@@ -88,6 +88,10 @@ pub(crate) enum ButtonPressedTarget {
     /// above): Cancel abandons the edit, Save writes the macro to config.
     EditMacroCancel,
     EditMacroSave,
+    /// The three `Configure*` modals' shared pair: Cancel abandons the edit,
+    /// Save writes the startup command / environment block.
+    ConfigureFieldCancel,
+    ConfigureFieldSave,
     ConfirmQuitCancel,
     ConfirmQuitConfirm,
     ConfirmDiscardCancel,

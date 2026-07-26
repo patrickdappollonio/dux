@@ -489,6 +489,7 @@ mod tests {
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("half-typed-name".to_string()),
+                    focus: ConfigureFieldFocus::default(),
                 },
             ),
             (
@@ -497,6 +498,7 @@ mod tests {
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("half-typed-name".to_string()),
+                    focus: ConfigureFieldFocus::default(),
                 },
             ),
             (
@@ -504,6 +506,7 @@ mod tests {
                 PromptState::ConfigureGlobalEnv {
                     project_name: project.name.clone(),
                     input: TextInput::with_text("half-typed-name".to_string()),
+                    focus: ConfigureFieldFocus::default(),
                 },
             ),
             ("RenameSession", rename_session_prompt()),

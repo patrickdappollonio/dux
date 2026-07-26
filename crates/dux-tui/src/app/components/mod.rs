@@ -25,5 +25,5 @@ pub(crate) use scroll_marker::render_scroll_marker;
 /// land on a content cell; the renderers reach it through
 /// [`render_scroll_marker`].
 #[cfg(test)]
-pub(crate) use scroll_marker::scroll_marker_rect;
+pub(crate) use scroll_marker::{MARKER_GLYPHS, scroll_marker_rect};
 pub(crate) use wrap_lines::wrap_styled_lines;

@@ -23,6 +23,40 @@ const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
 
+/// The full-text field of whichever `Configure*` modal is open, read-only.
+/// Only the tests read a configure field without intending to mutate it.
+#[cfg(test)]
+fn configure_project_text_input(prompt: &PromptState) -> Option<&TextInput> {
+    match prompt {
+        PromptState::ConfigureStartupCommand { input, .. }
+        | PromptState::ConfigureProjectEnv { input, .. }
+        | PromptState::ConfigureGlobalEnv { input, .. } => Some(input),
+        _ => None,
+    }
+}
+
+/// Which control has focus in whichever `Configure*` modal is open.
+fn configure_focus(prompt: &PromptState) -> Option<ConfigureFieldFocus> {
+    match prompt {
+        PromptState::ConfigureStartupCommand { focus, .. }
+        | PromptState::ConfigureProjectEnv { focus, .. }
+        | PromptState::ConfigureGlobalEnv { focus, .. } => Some(*focus),
+        _ => None,
+    }
+}
+
+/// Point focus at one of the configure modal's controls. Focusing anything
+/// other than the field leaves edit mode, so focus can never sit on a button
+/// while the field still swallows keystrokes.
+fn set_configure_focus(prompt: &mut PromptState, next: ConfigureFieldFocus) {
+    match prompt {
+        PromptState::ConfigureStartupCommand { focus, .. }
+        | PromptState::ConfigureProjectEnv { focus, .. }
+        | PromptState::ConfigureGlobalEnv { focus, .. } => *focus = next,
+        _ => {}
+    }
+}
+
 fn configure_project_text_input_mut(prompt: &mut PromptState) -> Option<&mut TextInput> {
     match prompt {
         PromptState::ConfigureStartupCommand { input, .. }
@@ -149,6 +183,8 @@ enum PromptMouseTarget {
     MacroSurfaceOption(usize),
     MacroCancel,
     MacroSave,
+    ConfigureFieldCancel,
+    ConfigureFieldSave,
 }
 
 impl ButtonPressedTarget {
@@ -192,6 +228,10 @@ impl ButtonPressedTarget {
             }
             PromptMouseTarget::MacroCancel => Some(ButtonPressedTarget::EditMacroCancel),
             PromptMouseTarget::MacroSave => Some(ButtonPressedTarget::EditMacroSave),
+            PromptMouseTarget::ConfigureFieldCancel => {
+                Some(ButtonPressedTarget::ConfigureFieldCancel)
+            }
+            PromptMouseTarget::ConfigureFieldSave => Some(ButtonPressedTarget::ConfigureFieldSave),
             PromptMouseTarget::ConfirmQuitCancel => Some(ButtonPressedTarget::ConfirmQuitCancel),
             PromptMouseTarget::ConfirmQuitConfirm => Some(ButtonPressedTarget::ConfirmQuitConfirm),
             PromptMouseTarget::ConfirmDiscardCancel => {
@@ -2844,65 +2884,8 @@ impl App {
             return Ok(false);
         }
 
-        if matches!(
-            self.prompt,
-            PromptState::ConfigureStartupCommand { .. }
-                | PromptState::ConfigureProjectEnv { .. }
-                | PromptState::ConfigureGlobalEnv { .. }
-        ) && self.input_target == InputTarget::StartupCommand
-        {
-            self.handle_startup_command_input_key(key)?;
-            return Ok(false);
-        }
-
-        if matches!(
-            self.prompt,
-            PromptState::ConfigureStartupCommand { .. }
-                | PromptState::ConfigureProjectEnv { .. }
-                | PromptState::ConfigureGlobalEnv { .. }
-        ) {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let files_action = self.bindings.lookup(&key, BindingScope::Files);
-            if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
-                    input.clear();
-                }
-                return Ok(false);
-            }
-            match palette_action.or(dialog_action).or(files_action) {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                    self.input_target = InputTarget::None;
-                }
-                Some(Action::Confirm) => {
-                    if matches!(self.prompt, PromptState::ConfigureGlobalEnv { .. }) {
-                        self.apply_configure_global_env()?;
-                    } else if matches!(self.prompt, PromptState::ConfigureProjectEnv { .. }) {
-                        self.apply_configure_project_env()?;
-                    } else {
-                        self.apply_configure_startup_command()?;
-                    }
-                }
-                Some(Action::EngageCommitInput) => {
-                    self.input_target = InputTarget::StartupCommand;
-                    if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
-                        input.move_end();
-                    }
-                }
-                _ => {
-                    if matches!(
-                        key.code,
-                        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
-                    ) {
-                        self.input_target = InputTarget::StartupCommand;
-                        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
-                            input.handle_key(key);
-                        }
-                    }
-                }
-            }
-            return Ok(false);
+        if let Some(focus) = configure_focus(&self.prompt) {
+            return self.handle_configure_modal_key(key, focus);
         }
 
         if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
@@ -3892,7 +3875,11 @@ impl App {
         // arrows, so those never reach the bindings and can never be read as a
         // movement key. Same predicate the rename/new-agent modals use, and the
         // same one the footer picks its hint keys with.
-        let owned_by_field = focus.is_text_field() && text_field_owns_key(key);
+        //
+        // `owns_keys` and not `is_text_field`: the UNENGAGED body takes no
+        // keystrokes at all, so it owns none of them, and the movement keys
+        // must keep working while focus is parked on it.
+        let owned_by_field = focus.owns_keys(self.macro_text_engaged()) && text_field_owns_key(key);
         let action = if owned_by_field {
             None
         } else {
@@ -3913,10 +3900,14 @@ impl App {
                 return Ok(false);
             }
             Some(Action::Confirm) => {
-                // Enter activates the focused control, and confirms the modal
-                // from anywhere that is not a button.
+                // Enter acts on the focused control. On the unengaged BODY that
+                // means ENGAGE, not save: Enter is content once the body is
+                // engaged, so it cannot also mean submit, and the Save button
+                // is what carries that meaning instead. From the single-line
+                // name field, from the selector, and from Save it submits.
                 match focus {
                     MacroEditFocus::Cancel => self.cancel_macro_edit(),
+                    MacroEditFocus::Text => self.engage_macro_text(),
                     _ => self.save_macro_edit(),
                 }
                 return Ok(false);
@@ -3938,32 +3929,149 @@ impl App {
                 }
             }
             MacroEditFocus::Text => {
-                // Unengaged body: the explicit engage binding engages it, and so
-                // does typing anything the field would take — the same
-                // auto-engage `ConfigureStartupCommand` offers, so a user who
-                // just starts typing is not silently dropping keystrokes.
-                let engage = matches!(
+                // Unengaged body: engaging is an explicit act, never a side
+                // effect of typing. The vim-style affordance is not hardcoded,
+                // `EngageCommitInput` already defaults to `i`, so resolving it
+                // through the bindings gives the vim key and honours a rebind.
+                if matches!(
                     self.bindings.lookup(&key, BindingScope::Files),
                     Some(Action::EngageCommitInput)
-                );
-                if engage {
-                    self.input_target = InputTarget::MacroText;
-                    if let Some(state) = self.macro_edit_state_mut() {
-                        state.text_input.move_end();
-                    }
-                } else if matches!(
-                    key.code,
-                    KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
                 ) {
-                    self.input_target = InputTarget::MacroText;
-                    if let Some(state) = self.macro_edit_state_mut() {
-                        state.text_input.handle_key(key);
-                    }
+                    self.engage_macro_text();
                 }
             }
             MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => {}
         }
         Ok(false)
+    }
+
+    /// The three `Configure*` modals' key handling: an ordinary modal with a
+    /// focus model over one full-text field and a Cancel/Save pair.
+    ///
+    /// Built to read exactly like [`App::handle_macro_editor_key`], because
+    /// they are the same shape: an engaged full-text field owns every key but
+    /// the exit binding, movement keys move focus and change nothing, Space
+    /// acts on whatever has focus, and Escape abandons (or, inside the engaged
+    /// field, only leaves edit mode).
+    fn handle_configure_modal_key(
+        &mut self,
+        key: KeyEvent,
+        focus: ConfigureFieldFocus,
+    ) -> Result<bool> {
+        // ── The engaged field owns every key but the exit binding ─────────
+        if self.input_target == InputTarget::StartupCommand {
+            self.handle_startup_command_input_key(key)?;
+            return Ok(false);
+        }
+
+        // Clearing the body is reachable from every focus stop, as it was
+        // before the modal had more than one.
+        if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+                input.clear();
+            }
+            return Ok(false);
+        }
+
+        // An UNENGAGED full-text field takes no keystrokes, so it owns none:
+        // the movement keys and plain characters are the modal's while the
+        // field is not engaged. (A single-line field would own them, which is
+        // why the macro editor's name field is gated the other way.)
+        let action = self
+            .bindings
+            .lookup(&key, BindingScope::Palette)
+            .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
+
+        // Space is hardcoded, never a binding: it is the universal "act on the
+        // focused control" key.
+        let is_space = key.code == KeyCode::Char(' ');
+
+        match action {
+            Some(Action::CloseOverlay) => {
+                self.cancel_configure_modal();
+                return Ok(false);
+            }
+            Some(Action::ToggleSelection) => {
+                self.focus_next_configure_control(!focus_move_is_reverse(key));
+                return Ok(false);
+            }
+            Some(Action::Confirm) => {
+                // The confirm key acts on the focused control. On the body that
+                // means ENGAGE, not save: Enter is content once the field is
+                // engaged, so it cannot also mean submit, and the Save button
+                // is what carries that meaning instead.
+                match focus {
+                    ConfigureFieldFocus::Input => self.engage_configure_field(),
+                    ConfigureFieldFocus::Cancel => self.cancel_configure_modal(),
+                    ConfigureFieldFocus::Save => self.apply_configure_modal()?,
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+
+        match focus {
+            ConfigureFieldFocus::Cancel if is_space => self.cancel_configure_modal(),
+            ConfigureFieldFocus::Save if is_space => self.apply_configure_modal()?,
+            ConfigureFieldFocus::Input => {
+                // The vim-style engage affordance. It is not hardcoded here:
+                // `EngageCommitInput` already defaults to `i`, so resolving it
+                // through the bindings gives the vim key out of the box and
+                // still honours a rebind.
+                if matches!(
+                    self.bindings.lookup(&key, BindingScope::Files),
+                    Some(Action::EngageCommitInput)
+                ) {
+                    self.engage_configure_field();
+                }
+            }
+            ConfigureFieldFocus::Cancel | ConfigureFieldFocus::Save => {}
+        }
+        Ok(false)
+    }
+
+    /// Start editing the configure modal's full-text field, caret at the end.
+    fn engage_configure_field(&mut self) {
+        self.input_target = InputTarget::StartupCommand;
+        set_configure_focus(&mut self.prompt, ConfigureFieldFocus::Input);
+        if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
+            input.move_end();
+        }
+    }
+
+    /// Move focus between the configure modal's controls. Leaving the field
+    /// always drops edit mode, so focus can never sit on a button while the
+    /// field still swallows keystrokes.
+    fn focus_next_configure_control(&mut self, forward: bool) {
+        self.input_target = InputTarget::None;
+        if let Some(focus) = configure_focus(&self.prompt) {
+            set_configure_focus(&mut self.prompt, focus.step(forward));
+        }
+    }
+
+    /// Point focus at one control, for the mouse. Focusing anything other than
+    /// the field leaves edit mode.
+    pub(super) fn focus_configure_control(&mut self, focus: ConfigureFieldFocus) {
+        if focus != ConfigureFieldFocus::Input {
+            self.input_target = InputTarget::None;
+        }
+        set_configure_focus(&mut self.prompt, focus);
+    }
+
+    /// Abandon the configure modal. Writes nothing: Escape never saves.
+    pub(super) fn cancel_configure_modal(&mut self) {
+        self.prompt = PromptState::None;
+        self.input_target = InputTarget::None;
+    }
+
+    /// Commit whichever configure modal is open.
+    pub(super) fn apply_configure_modal(&mut self) -> Result<()> {
+        match self.prompt {
+            PromptState::ConfigureGlobalEnv { .. } => self.apply_configure_global_env(),
+            PromptState::ConfigureProjectEnv { .. } => self.apply_configure_project_env(),
+            PromptState::ConfigureStartupCommand { .. } => self.apply_configure_startup_command(),
+            _ => Ok(()),
+        }
     }
 
     fn macro_edit_state_mut(&mut self) -> Option<&mut MacroEditState> {
@@ -3995,6 +4103,15 @@ impl App {
         }
         if let Some(state) = self.macro_edit_state_mut() {
             state.focus = focus;
+        }
+    }
+
+    /// Start editing the macro body, caret at the end.
+    fn engage_macro_text(&mut self) {
+        self.input_target = InputTarget::MacroText;
+        if let Some(state) = self.macro_edit_state_mut() {
+            state.focus = MacroEditFocus::Text;
+            state.text_input.move_end();
         }
     }
 
@@ -4280,9 +4397,19 @@ impl App {
                         .map(PromptMouseTarget::StartupCommandLogItem)
                 }
             }
-            OverlayMouseLayout::ConfigureStartupCommand { input } => {
-                contains_point(input, column, row).then_some(PromptMouseTarget::StartupCommandInput)
-            }
+            OverlayMouseLayout::ConfigureStartupCommand {
+                input,
+                cancel_button,
+                save_button,
+            } => click_target(
+                &[
+                    (input, PromptMouseTarget::StartupCommandInput),
+                    (cancel_button, PromptMouseTarget::ConfigureFieldCancel),
+                    (save_button, PromptMouseTarget::ConfigureFieldSave),
+                ],
+                column,
+                row,
+            ),
             OverlayMouseLayout::EditMacros {
                 name_input,
                 text_input,
@@ -5759,7 +5886,7 @@ impl App {
 
     fn set_startup_command_cursor_from_mouse(&mut self, column: u16, row: u16) {
         let input_area = match self.overlay_layout.active {
-            OverlayMouseLayout::ConfigureStartupCommand { input } => input,
+            OverlayMouseLayout::ConfigureStartupCommand { input, .. } => input,
             _ => return,
         };
         if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
@@ -6352,6 +6479,8 @@ impl App {
             | PromptMouseTarget::ConfirmDeleteMacroConfirm
             | PromptMouseTarget::MacroCancel
             | PromptMouseTarget::MacroSave
+            | PromptMouseTarget::ConfigureFieldCancel
+            | PromptMouseTarget::ConfigureFieldSave
             | PromptMouseTarget::ConfirmQuitCancel
             | PromptMouseTarget::ConfirmQuitConfirm
             | PromptMouseTarget::ConfirmDiscardCancel
@@ -6448,6 +6577,18 @@ impl App {
             ButtonPressedTarget::EditMacroSave => {
                 self.focus_macro_edit_control(MacroEditFocus::Save);
                 self.save_macro_edit();
+                false
+            }
+            ButtonPressedTarget::ConfigureFieldCancel => {
+                self.focus_configure_control(ConfigureFieldFocus::Cancel);
+                self.cancel_configure_modal();
+                false
+            }
+            ButtonPressedTarget::ConfigureFieldSave => {
+                self.focus_configure_control(ConfigureFieldFocus::Save);
+                if let Err(err) = self.apply_configure_modal() {
+                    self.set_error(format!("{err:#}"));
+                }
                 false
             }
             ButtonPressedTarget::ConfirmQuitCancel => self.resolve_confirm_quit(false),
@@ -7571,19 +7712,20 @@ mod tests {
 
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
+    use crate::app::input::configure_project_text_input;
     use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
-        ConfigReloadFailedFocus, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
-        CreateAgentBranchInspection, CreateAgentRequest, DeleteAgentFocus, FocusPane,
-        FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
-        KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
-        LeftSection, MacroBarState, MacroEditFocus, MacroEditState, MouseClickTarget,
-        MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction, OverlayCheckbox,
-        OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt, ProcessInfo,
-        ProjectChooserIntent, ProjectWorktreeEntry, PromptState, PullTarget, RenameSessionFocus,
-        ResourceKind, ResourceStats, RightSection, RuntimeTargetId, SearchableList,
-        StartupCommandLogPrompt, TextInput, WorkerEvent,
+        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
+        ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
+        DeleteAgentFocus, FocusPane, FullscreenOverlay, InputTarget, KillRunningAction,
+        KillRunningFocus, KillRunningFooterAction, KillRunningPrompt, KillableRuntime,
+        KillableRuntimeKind, LeftItem, LeftSection, MacroBarState, MacroEditFocus, MacroEditState,
+        MouseClickTarget, MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction,
+        OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt,
+        ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry, PromptState, PullTarget,
+        RenameSessionFocus, ResourceKind, ResourceStats, RightSection, RuntimeTargetId,
+        SearchableList, StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::app::{StartupLogViewer, pick_project_matches};
     use crate::clipboard::Clipboard;
@@ -7761,6 +7903,8 @@ mod tests {
     fn install_configure_startup_command_overlay(app: &mut App) {
         app.overlay_layout.active = OverlayMouseLayout::ConfigureStartupCommand {
             input: Rect::new(10, 6, 40, 4),
+            cancel_button: Rect::new(10, 12, 16, 3),
+            save_button: Rect::new(32, 12, 16, 3),
         };
     }
 
@@ -8381,6 +8525,7 @@ not_a_real_action = ["x"]
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+            focus: ConfigureFieldFocus::default(),
         };
         app.input_target = InputTarget::StartupCommand;
 
@@ -8405,6 +8550,7 @@ not_a_real_action = ["x"]
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+            focus: ConfigureFieldFocus::default(),
         };
         app.input_target = InputTarget::StartupCommand;
 
@@ -8425,6 +8571,7 @@ not_a_real_action = ["x"]
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+            focus: ConfigureFieldFocus::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
@@ -8446,6 +8593,7 @@ not_a_real_action = ["x"]
             project_id: "project-1".to_string(),
             project_name: "demo".to_string(),
             input: TextInput::with_text("npm install\nnpm test".to_string()).with_multiline(6),
+            focus: ConfigureFieldFocus::default(),
         };
         install_configure_startup_command_overlay(&mut app);
 
@@ -8475,6 +8623,7 @@ not_a_real_action = ["x"]
             input: TextInput::new()
                 .with_multiline(6)
                 .with_placeholder("Enter startup command..."),
+            focus: ConfigureFieldFocus::default(),
         };
         app.input_target = InputTarget::None;
 
@@ -8491,7 +8640,7 @@ not_a_real_action = ["x"]
             "expected placeholder in non-editing mode, got: {rendered}"
         );
 
-        let OverlayMouseLayout::ConfigureStartupCommand { input } = app.overlay_layout.active
+        let OverlayMouseLayout::ConfigureStartupCommand { input, .. } = app.overlay_layout.active
         else {
             panic!("expected configure startup command overlay layout");
         };
@@ -8503,6 +8652,273 @@ not_a_real_action = ["x"]
             })
             .expect("placeholder first cell");
         assert_eq!(placeholder_cell.fg, app.theme.hint_desc_fg);
+    }
+
+    // ── The dual-mode configure modals: engage, commit, abandon ─────────────
+    //
+    // The three `Configure*` modals hold a full-text field, so Enter is content
+    // once the field is engaged and cannot also be "submit". These tests pin the
+    // replacement contract: the confirm key ENGAGES the field, typing alone does
+    // not, and the modal still has a reachable way to both commit and abandon.
+
+    /// One of the three configure modals, in the state opening it produces.
+    fn configure_prompt(which: &str, project_id: &str, text: &str) -> PromptState {
+        let field = |lines: usize| TextInput::with_text(text.to_string()).with_multiline(lines);
+        match which {
+            "ConfigureStartupCommand" => PromptState::ConfigureStartupCommand {
+                project_id: project_id.to_string(),
+                project_name: "demo".to_string(),
+                input: field(6),
+                focus: ConfigureFieldFocus::Input,
+            },
+            "ConfigureProjectEnv" => PromptState::ConfigureProjectEnv {
+                project_id: project_id.to_string(),
+                project_name: "demo".to_string(),
+                input: field(8),
+                focus: ConfigureFieldFocus::Input,
+            },
+            "ConfigureGlobalEnv" => PromptState::ConfigureGlobalEnv {
+                project_name: "All projects".to_string(),
+                input: field(8),
+                focus: ConfigureFieldFocus::Input,
+            },
+            other => panic!("unknown configure modal {other}"),
+        }
+    }
+
+    const CONFIGURE_MODALS: [&str; 3] = [
+        "ConfigureStartupCommand",
+        "ConfigureProjectEnv",
+        "ConfigureGlobalEnv",
+    ];
+
+    /// The body text every configure modal is seeded with, chosen so it parses
+    /// as a valid environment block AND as a startup command.
+    const CONFIGURE_BODY: &str = "KEY=value";
+
+    /// Whether the modal attempted to write anything. The three modals persist
+    /// through different paths, so the observation differs per modal; what the
+    /// reachability test cares about is only "did a write happen".
+    fn configure_wrote(app: &App, which: &str) -> bool {
+        match which {
+            "ConfigureGlobalEnv" => !app.engine.config.env.is_empty(),
+            _ => !app.pending_persist_ops.is_empty(),
+        }
+    }
+
+    #[test]
+    fn configure_modal_confirm_engages_the_field_instead_of_saving() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            app.input_target = InputTarget::None;
+
+            app.handle_key(key(KeyCode::Enter)).expect("confirm key");
+
+            assert_eq!(
+                app.input_target,
+                InputTarget::StartupCommand,
+                "{which}: the confirm key must ENGAGE the full-text field"
+            );
+            assert!(
+                !matches!(app.prompt, PromptState::None),
+                "{which}: engaging must leave the modal open"
+            );
+            assert!(
+                !configure_wrote(&app, which),
+                "{which}: engaging must not write anything"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_modal_typing_alone_does_not_engage_the_field() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            app.input_target = InputTarget::None;
+
+            // `x` is not the engage binding, so it must be dropped: an unengaged
+            // full-text field takes no keystrokes.
+            app.handle_key(key(KeyCode::Char('x'))).expect("plain key");
+
+            assert_eq!(
+                app.input_target,
+                InputTarget::None,
+                "{which}: a plain character must not auto-engage the field"
+            );
+            assert_eq!(
+                configure_project_text_input(&app.prompt).map(|input| input.text.as_str()),
+                Some(CONFIGURE_BODY),
+                "{which}: a plain character must not reach an unengaged field"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_modal_engage_binding_still_engages_the_field() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            app.input_target = InputTarget::None;
+
+            let engage = app
+                .bindings
+                .first_key_reaching(Action::EngageCommitInput, |_| true)
+                .expect("an engage binding");
+            app.handle_key(press(engage)).expect("engage");
+
+            assert_eq!(
+                app.input_target,
+                InputTarget::StartupCommand,
+                "{which}: the engage binding must engage the field"
+            );
+            assert_eq!(
+                configure_project_text_input(&app.prompt).map(|input| input.text.as_str()),
+                Some(CONFIGURE_BODY),
+                "{which}: engaging must not type the engage key into the body"
+            );
+        }
+    }
+
+    /// The no-stuck-state property. From the state the modal OPENS in, moving
+    /// focus and confirming must be able to reach BOTH outcomes: a commit and an
+    /// abandon. The search is bounded and order-free on purpose, so it pins the
+    /// property rather than one particular focus order.
+    #[test]
+    fn configure_modal_can_reach_both_a_commit_and_an_abandon() {
+        for which in CONFIGURE_MODALS {
+            let mut committed = false;
+            let mut abandoned = false;
+            for moves in 0..6 {
+                let mut app = test_app(default_bindings());
+                let project_id = app.engine.projects[0].id.clone();
+                app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+                app.input_target = InputTarget::None;
+
+                for _ in 0..moves {
+                    app.handle_key(key(KeyCode::Tab)).expect("move focus");
+                }
+                app.handle_key(key(KeyCode::Enter)).expect("confirm");
+
+                let closed = matches!(app.prompt, PromptState::None);
+                let wrote = configure_wrote(&app, which);
+                committed |= closed && wrote;
+                abandoned |= closed && !wrote;
+            }
+            assert!(
+                committed,
+                "{which}: no reachable path commits the modal, so the user is stuck"
+            );
+            assert!(
+                abandoned,
+                "{which}: no reachable path abandons the modal without writing"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_modal_escape_from_the_unengaged_state_abandons_without_writing() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            app.input_target = InputTarget::None;
+
+            app.handle_key(key(KeyCode::Esc)).expect("escape");
+
+            assert!(
+                matches!(app.prompt, PromptState::None),
+                "{which}: Escape closes the modal"
+            );
+            assert!(!configure_wrote(&app, which), "{which}: Escape never saves");
+        }
+    }
+
+    /// Render a real frame so the configure modal publishes its true hit rects.
+    fn configure_modal_rects(app: &mut App) -> (Rect, Rect, Rect) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        match app.overlay_layout.active {
+            OverlayMouseLayout::ConfigureStartupCommand {
+                input,
+                cancel_button,
+                save_button,
+            } => (input, cancel_button, save_button),
+            other => panic!("expected the configure modal layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configure_modal_clicking_save_commits_and_clicking_cancel_abandons() {
+        for which in CONFIGURE_MODALS {
+            // Save.
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            let (_, _, save) = configure_modal_rects(&mut app);
+            let (x, y) = (save.x + save.width / 2, save.y + save.height / 2);
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
+            assert!(
+                matches!(app.prompt, PromptState::None),
+                "{which}: clicking Save closes the modal"
+            );
+            assert!(
+                configure_wrote(&app, which),
+                "{which}: clicking Save must commit"
+            );
+
+            // Cancel.
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            let (_, cancel, _) = configure_modal_rects(&mut app);
+            let (x, y) = (cancel.x + cancel.width / 2, cancel.y + cancel.height / 2);
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
+            assert!(
+                matches!(app.prompt, PromptState::None),
+                "{which}: clicking Cancel closes the modal"
+            );
+            assert!(
+                !configure_wrote(&app, which),
+                "{which}: clicking Cancel must write nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_modal_double_clicking_the_field_engages_it() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, "one\ntwo\nthree");
+            let (input, _, _) = configure_modal_rects(&mut app);
+            let (x, y) = (input.x + 2, input.y + 1);
+
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+            assert_eq!(
+                app.input_target,
+                InputTarget::None,
+                "{which}: one click only places the caret"
+            );
+
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+            assert_eq!(
+                app.input_target,
+                InputTarget::StartupCommand,
+                "{which}: a double click engages the field"
+            );
+        }
     }
 
     #[test]
@@ -18750,6 +19166,60 @@ cyan = "#00ffff"
         );
     }
 
+    #[test]
+    fn macro_edit_confirm_engages_the_unengaged_body_and_saves_from_elsewhere() {
+        let mut app = app_with_two_macros();
+        open_macro_editor(&mut app);
+        set_macro_focus(&mut app, MacroEditFocus::Text);
+
+        app.handle_key(key(KeyCode::Enter)).expect("confirm");
+
+        assert_eq!(
+            app.input_target,
+            InputTarget::MacroText,
+            "the confirm key must ENGAGE the body, not save from it"
+        );
+        assert!(
+            macro_editing_is_open(&app),
+            "engaging leaves the editor open"
+        );
+
+        // From the single-line name field the confirm key still submits: Enter
+        // is unambiguous there, nothing competes for it.
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        set_macro_focus(&mut app, MacroEditFocus::Name);
+        app.handle_key(key(KeyCode::Enter)).expect("confirm");
+        assert!(
+            !macro_editing_is_open(&app),
+            "the confirm key still submits from a single-line field"
+        );
+    }
+
+    #[test]
+    fn macro_edit_movement_keys_work_while_focus_sits_on_the_unengaged_body() {
+        // The body owns no keys until it is engaged, so a movement key parked on
+        // it must still move focus rather than being swallowed as content.
+        for movement in [KeyCode::Left, KeyCode::Right, KeyCode::Char('h')] {
+            let mut app = app_with_two_macros();
+            open_macro_editor(&mut app);
+            set_macro_focus(&mut app, MacroEditFocus::Text);
+            let before = macro_edit(&app).text_input.text.clone();
+
+            app.handle_key(key(movement)).expect("movement key");
+
+            assert_ne!(
+                macro_focus(&app),
+                MacroEditFocus::Text,
+                "{movement:?} must move focus off the unengaged body"
+            );
+            assert_eq!(
+                macro_edit(&app).text_input.text,
+                before,
+                "{movement:?} must not change the body"
+            );
+        }
+    }
+
     fn macro_editing_is_open(app: &App) -> bool {
         matches!(
             &app.prompt,
@@ -18805,9 +19275,20 @@ cyan = "#00ffff"
         app.handle_key(key(KeyCode::Char(' '))).expect("space");
         assert_eq!(macro_edit(&app).name_input.text, "greet ");
 
+        // The UNENGAGED body is not a typing surface, so it takes no space.
         set_macro_focus(&mut app, MacroEditFocus::Text);
         app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        assert_eq!(
+            macro_edit(&app).text_input.text,
+            "hello",
+            "an unengaged body swallows nothing"
+        );
+        // Engaged, it takes the space as content like any other character.
+        app.handle_key(key(KeyCode::Enter))
+            .expect("engage the body");
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
         assert_eq!(macro_edit(&app).text_input.text, "hello ");
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
 
         // The selector advances.
         set_macro_focus(&mut app, MacroEditFocus::Surface);
@@ -18823,6 +19304,8 @@ cyan = "#00ffff"
 
         open_macro_editor(&mut app);
         set_macro_focus(&mut app, MacroEditFocus::Text);
+        app.handle_key(key(KeyCode::Enter))
+            .expect("engage the body");
         app.handle_key(key(KeyCode::Char(' '))).expect("space");
         set_macro_focus(&mut app, MacroEditFocus::Save);
         app.handle_key(key(KeyCode::Char(' '))).expect("space");
@@ -19013,6 +19496,14 @@ cyan = "#00ffff"
         app.handle_key(press(engage)).expect("engage the body");
         type_chars(app, text);
         app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        // The confirm key ENGAGES the unengaged body rather than saving from it,
+        // so the save has to come from the Save button.
+        for _ in 0..MACRO_FOCUS_ORDER.len() {
+            if macro_focus(app) == MacroEditFocus::Save {
+                break;
+            }
+            app.handle_key(key(KeyCode::Tab)).expect("focus forward");
+        }
         app.handle_key(key(KeyCode::Enter)).expect("save");
     }
 

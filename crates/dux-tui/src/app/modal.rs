@@ -138,14 +138,15 @@ impl ModalSpec {
 
 /// The modals that break the dual-mode rule today, by title.
 ///
-/// All three are single-control configure modals holding a `with_multiline`
-/// field and publishing no button at all. They are listed rather than fixed on
-/// purpose: adding their buttons is a separate, separately reviewable change,
-/// and this list is the thing that will fail when it lands. **The test asserts
-/// this set EXACTLY**, so fixing a modal forces its entry out of the list; a
-/// stale exemption cannot survive.
+/// **Empty, and it must stay that way.** It held the three configure modals
+/// (startup command, project environment, global environment), each a
+/// single-control form with a `with_multiline` field and no button at all;
+/// they were given the Cancel/Save pair in the same change that redefined
+/// their Enter to ENGAGE the field. **The test asserts this set EXACTLY**, so
+/// a new violator cannot be added without writing its name here and defending
+/// it in review.
 ///
-/// This list is temporary. It should only ever shrink.
+/// This list should only ever shrink.
 ///
 /// ---
 ///
@@ -158,11 +159,7 @@ impl ModalSpec {
 /// docs.) The rule is the house style for MODALS, chosen because a modal's
 /// Enter is otherwise overloaded, not a claim that no other design can work.
 #[allow(dead_code)]
-pub(crate) const KNOWN_DUAL_MODE_VIOLATIONS: &[&str] = &[
-    "ConfigureStartupCommand",
-    "ConfigureProjectEnv",
-    "ConfigureGlobalEnv",
-];
+pub(crate) const KNOWN_DUAL_MODE_VIOLATIONS: &[&str] = &[];
 
 /// The registry. `None` means "no modal is open" ([`PromptState::None`]).
 ///
@@ -240,12 +237,12 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::NameNewAgent { .. }
         | PromptState::PullRequestInput { .. } => ModalSpec::new(Form, false, false),
 
-        // The three known dual-mode violators: a `with_multiline` field and no
-        // button at all. See `KNOWN_DUAL_MODE_VIOLATIONS`. Do NOT "fix" the
-        // table to make the test pass, the table records what IS.
+        // The three configure modals: one full-text field plus Cancel/Save.
+        // They were the dual-mode rule's only violators and are now compliant,
+        // so `KNOWN_DUAL_MODE_VIOLATIONS` is empty.
         PromptState::ConfigureStartupCommand { .. }
         | PromptState::ConfigureProjectEnv { .. }
-        | PromptState::ConfigureGlobalEnv { .. } => ModalSpec::new(Form, true, false),
+        | PromptState::ConfigureGlobalEnv { .. } => ModalSpec::new(Form, true, true),
 
         // ── The one variant that is two modals ──────────────────────────
         // `EditMacros` serves two families depending on its own state, so the
@@ -358,7 +355,6 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ChangeTheme { .. }
         | OverlayMouseLayout::ResourceMonitor { .. }
         | OverlayMouseLayout::StartupCommandLogs { .. }
-        | OverlayMouseLayout::ConfigureStartupCommand { .. }
         | OverlayMouseLayout::RenameSession { .. }
         | OverlayMouseLayout::PullRequestInput { .. }
         | OverlayMouseLayout::NameNewAgent { .. } => false,
@@ -377,6 +373,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ConfirmNonDefaultBranch { .. }
         | OverlayMouseLayout::ConfirmUseExistingBranch { .. }
         | OverlayMouseLayout::ConfigReloadFailed { .. }
+        | OverlayMouseLayout::ConfigureStartupCommand { .. }
         | OverlayMouseLayout::EditMacros { .. } => true,
     }
 }
@@ -615,10 +612,11 @@ mod tests {
         AgentInfoPrompt, AgentInfoTone, ChangeAgentProviderMode, ChangeAgentProviderOption,
         ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
         ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
-        ConfigReloadFailedFocus, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
-        DeleteAgentFocus, KillRunningAction, KillRunningFocus, KillRunningPrompt, MacroEditFocus,
-        MacroEditState, NameNewAgentFocus, PendingMacroDelete, PickProjectWorktreePrompt,
-        ProjectChooserIntent, RenameSessionFocus, SearchableList, StartupCommandLogPrompt,
+        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
+        ConfirmNonDefaultBranchFocus, DeleteAgentFocus, KillRunningAction, KillRunningFocus,
+        KillRunningPrompt, MacroEditFocus, MacroEditState, NameNewAgentFocus, PendingMacroDelete,
+        PickProjectWorktreePrompt, ProjectChooserIntent, RenameSessionFocus, SearchableList,
+        StartupCommandLogPrompt,
     };
     use crate::model::ProviderKind;
     use dux_core::worker::{BranchWarningKind, CreateAgentRequest, NonDefaultBranchAction};
@@ -781,6 +779,7 @@ mod tests {
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+                    focus: ConfigureFieldFocus::default(),
                 },
             ),
             (
@@ -789,6 +788,7 @@ mod tests {
                     project_id: project.id.clone(),
                     project_name: project.name.clone(),
                     input: TextInput::with_text("K=V".to_string()).with_multiline(8),
+                    focus: ConfigureFieldFocus::default(),
                 },
             ),
             (
@@ -796,6 +796,7 @@ mod tests {
                 PromptState::ConfigureGlobalEnv {
                     project_name: "All projects".to_string(),
                     input: TextInput::with_text("K=V".to_string()).with_multiline(8),
+                    focus: ConfigureFieldFocus::default(),
                 },
             ),
             (

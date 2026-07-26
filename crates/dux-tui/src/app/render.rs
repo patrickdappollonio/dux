@@ -4428,18 +4428,22 @@ impl App {
             PromptState::ConfigureStartupCommand {
                 project_name,
                 input,
+                focus,
                 ..
             }
             | PromptState::ConfigureProjectEnv {
                 project_name,
                 input,
+                focus,
                 ..
             }
             | PromptState::ConfigureGlobalEnv {
                 project_name,
                 input,
+                focus,
                 ..
             } => {
+                let focus = *focus;
                 let is_env = matches!(
                     &self.prompt,
                     PromptState::ConfigureProjectEnv { .. }
@@ -4447,7 +4451,13 @@ impl App {
                 );
                 let is_global_env = matches!(&self.prompt, PromptState::ConfigureGlobalEnv { .. });
                 self.render_dim_overlay(frame);
-                let area = centered_rect_exact(76, if is_env { 18 } else { 16 }, frame.area());
+                // Four rows taller than the field-only modal used to be: a
+                // blank misclick-safety row plus the three-row Cancel/Save pair
+                // the dual-mode rule requires of a full-text field.
+                // Wider than the field-only modal was: the footer now names
+                // the focus, engage, activate, clear and cancel keys, and a
+                // truncated footer is a footer that stops being an answer.
+                let area = centered_rect_exact(84, if is_env { 22 } else { 20 }, frame.area());
                 self.clear_overlay_area(frame, area);
                 let outer = self.themed_overlay_block(if is_global_env {
                     "Configure Global Environment"
@@ -4458,11 +4468,13 @@ impl App {
                 });
                 let inner = outer.inner(area);
                 outer.render(area, frame.buffer_mut());
-                let [label_area, input_area, hint_area] = Layout::default()
+                let [label_area, input_area, _, buttons_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(2),
                         Constraint::Min(3),
+                        Constraint::Length(1),
+                        Constraint::Length(3),
                         Constraint::Length(1),
                     ])
                     .areas(inner);
@@ -4492,17 +4504,24 @@ impl App {
                 ])
                 .render(label_area, frame.buffer_mut());
 
-                let focused = self.input_target == InputTarget::StartupCommand;
-                // Shared focused-control idiom, not `border_focused`: that token
-                // is what `overlay_border` defaults to, so the pair renders
-                // identically in every shipped theme. See
-                // `Theme::overlay_field_border_style`.
-                let input_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_set(border::ROUNDED)
-                    .border_style(self.theme.overlay_field_border_style(focused));
-                let text_area = input_block.inner(input_area);
-                input_block.render(input_area, frame.buffer_mut());
+                // Two different questions, and conflating them is the bug this
+                // modal used to have: FOCUS is "the next keystroke is aimed
+                // here", ENGAGED is "the field is swallowing keystrokes". A
+                // focused-but-unengaged field takes nothing, so it gets the
+                // focus border and no caret, and the footer names the key that
+                // engages it.
+                let field_focused = focus == ConfigureFieldFocus::Input;
+                let engaged = self.input_target == InputTarget::StartupCommand;
+                let text_area = self.render_modal_text_field_frame(
+                    frame,
+                    input_area,
+                    field_focused,
+                    engaged.then(|| {
+                        self.bindings
+                            .label_for_reaching(Action::ExitCommitInput, |_| true)
+                            .unwrap_or_default()
+                    }),
+                );
 
                 let mut render_input = input.clone();
                 render_input
@@ -4526,7 +4545,9 @@ impl App {
                         Paragraph::new(line_text.as_str()).render(line_area, frame.buffer_mut());
                     }
                 }
-                if focused {
+                // Exactly one caret, and only on an ENGAGED field. A caret on a
+                // field that will not receive your keys is a lie.
+                if engaged {
                     let (cursor_row, cursor_col) = render_input.cursor_display_position();
                     let cx = text_area.x + cursor_col as u16;
                     let cy = text_area.y + cursor_row as u16;
@@ -4535,48 +4556,93 @@ impl App {
                     }
                 }
 
-                let confirm_key = self.bindings.label_for(Action::Confirm);
+                // The body can hold more than the pane shows, so it carries the
+                // shared one-cell marker. Units are wrapped visual rows, which
+                // is what `render_input` counts after `set_display_width`.
+                render_scroll_marker(
+                    frame,
+                    input_area,
+                    text_area,
+                    render_input.scroll_offset(),
+                    text_area.height as usize,
+                    render_input.total_lines(),
+                    self.theme.hint_desc_fg,
+                );
+
+                // ── Cancel / Save ─────────────────────────────────────────
+                // Cancel discards typing, so the pair sits behind a blank row
+                // and a wide gap (the misclick-safety tenet).
+                let btn_width = 16u16;
+                let gap = 6u16;
+                let total = btn_width * 2 + gap;
+                let left_offset = buttons_area.width.saturating_sub(total) / 2;
+                let cancel_button = Rect {
+                    x: buttons_area.x + left_offset,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                let save_button = Rect {
+                    x: cancel_button.x + btn_width + gap,
+                    y: buttons_area.y,
+                    width: btn_width,
+                    height: 3,
+                };
+                Button::new("Cancel")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfigureFieldCancel,
+                        self.pressed_button,
+                        focus == ConfigureFieldFocus::Cancel,
+                        true,
+                    ))
+                    .render(frame, cancel_button, &self.theme);
+                Button::new("Save")
+                    .kind(ButtonKind::Confirm)
+                    .state(button_state_for(
+                        ButtonPressedTarget::ConfigureFieldSave,
+                        self.pressed_button,
+                        focus == ConfigureFieldFocus::Save,
+                        true,
+                    ))
+                    .render(frame, save_button, &self.theme);
+
+                // ── Hints. Every key is resolved through the bindings. ────
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
-                let edit_key = self.bindings.label_for(Action::EngageCommitInput);
-                let exit_key = self.bindings.labels_for(Action::ExitCommitInput);
-                let clear_key = "Ctrl-d";
-                let mut hints = vec![Span::raw(" ")];
-                if focused {
-                    hints.extend(self.theme.key_badge_default(&exit_key));
-                    hints.push(Span::styled(
-                        " exit edit  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    hints.extend(self.theme.key_badge_default(clear_key));
-                    hints.push(Span::styled(
-                        " clear",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
+                let hints: Vec<Hint> = if engaged {
+                    vec![
+                        Hint::key(
+                            self.bindings.labels_for(Action::ExitCommitInput),
+                            "stop editing",
+                        ),
+                        Hint::key("Ctrl-d", "clear"),
+                    ]
                 } else {
-                    hints.extend(self.theme.key_badge_default(&edit_key));
-                    hints.push(Span::styled(
-                        " edit  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    hints.extend(self.theme.key_badge_default(&confirm_key));
-                    hints.push(Span::styled(
-                        " save  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    hints.extend(self.theme.key_badge_default(clear_key));
-                    hints.push(Span::styled(
-                        " clear  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                    hints.extend(self.theme.key_badge_default(&close_key));
-                    hints.push(Span::styled(
-                        " cancel",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                }
-                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active =
-                    OverlayMouseLayout::ConfigureStartupCommand { input: text_area };
+                    let mut hints = vec![Hint::maybe_key(
+                        self.bindings
+                            .label_for_text_field_dialog(Action::ToggleSelection),
+                        "move focus",
+                    )];
+                    if field_focused {
+                        // Named because an unengaged full-text field takes no
+                        // keystrokes, so the user has to be told how to start.
+                        hints.push(Hint::key(
+                            self.bindings.label_for(Action::EngageCommitInput),
+                            "edit text",
+                        ));
+                    }
+                    hints.push(Hint::plain("Space act on focus"));
+                    hints.push(Hint::key("Ctrl-d", "clear"));
+                    hints.push(Hint::key(close_key, "cancel"));
+                    hints
+                };
+                Paragraph::new(modal_hint_line(&self.theme, &hints))
+                    .render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active = OverlayMouseLayout::ConfigureStartupCommand {
+                    input: text_area,
+                    cancel_button,
+                    save_button,
+                };
             }
             PromptState::StartupCommandLogs(prompt) => {
                 self.render_dim_overlay(frame);
@@ -7624,8 +7690,12 @@ impl App {
             label_style,
         )))
         .render(name_label, frame.buffer_mut());
-        let name_inner =
-            self.render_macro_field_frame(frame, name_area, focus == MacroEditFocus::Name, None);
+        let name_inner = self.render_modal_text_field_frame(
+            frame,
+            name_area,
+            focus == MacroEditFocus::Name,
+            None,
+        );
         Paragraph::new(Line::from(Span::raw(format!(" {}", state.name_input.text))))
             .render(name_inner, frame.buffer_mut());
 
@@ -7640,7 +7710,7 @@ impl App {
             label_style,
         )))
         .render(text_label, frame.buffer_mut());
-        let text_inner = self.render_macro_field_frame(
+        let text_inner = self.render_modal_text_field_frame(
             frame,
             text_area,
             focus == MacroEditFocus::Text,
@@ -7663,6 +7733,18 @@ impl App {
             Paragraph::new(Line::from(Span::raw(format!(" {line_text}"))))
                 .render(line_area, frame.buffer_mut());
         }
+
+        // The body can hold more than the pane shows, so it carries the shared
+        // one-cell marker. Units are the body's own visual rows.
+        render_scroll_marker(
+            frame,
+            text_area,
+            text_inner,
+            state.text_input.scroll_offset(),
+            text_inner.height as usize,
+            state.text_input.total_lines(),
+            self.theme.hint_desc_fg,
+        );
 
         // Exactly one hardware caret: on the name field while it has focus, or
         // on the body while the body is ENGAGED. An unengaged body takes no
@@ -7806,7 +7888,7 @@ impl App {
         };
     }
 
-    /// Draw one macro-editor text field's border and return its inner area.
+    /// Draw one modal text field's border and return its inner area.
     ///
     /// The focused field is drawn by the shared `overlay_field_border_style`
     /// (`button_active_fg` plus BOLD), never from `border_focused`: that token
@@ -7815,7 +7897,7 @@ impl App {
     ///
     /// `engaged_exit_key`, when present, marks the field as ENGAGED (taking
     /// keystrokes) and names the key that leaves edit mode.
-    fn render_macro_field_frame(
+    fn render_modal_text_field_frame(
         &self,
         frame: &mut Frame,
         area: Rect,
@@ -7831,7 +7913,7 @@ impl App {
             block = block.title_bottom(
                 Line::from(vec![
                     Span::styled(
-                        " editing — ",
+                        " editing: ",
                         Style::default().fg(self.theme.button_active_fg),
                     ),
                     Span::styled(exit_key, Style::default().fg(self.theme.hint_key_fg)),
@@ -11062,6 +11144,63 @@ mod tests {
         app
     }
 
+    #[test]
+    fn the_macro_body_shows_engaged_apart_from_focused_and_marks_an_overflow() {
+        use super::super::components::{MARKER_GLYPHS, scroll_marker_rect};
+
+        let mut app = macro_editor_app(super::MacroEditFocus::Text);
+        let engage_key = app.bindings.label_for(Action::EngageCommitInput);
+
+        app.input_target = InputTarget::None;
+        let unengaged = rendered_rows(&mut app).join("\n");
+        app.input_target = InputTarget::MacroText;
+        let engaged = rendered_rows(&mut app).join("\n");
+
+        assert!(
+            !unengaged.contains("editing:"),
+            "a body that takes no keystrokes must not claim to be editing"
+        );
+        assert!(
+            engaged.contains("editing:"),
+            "the engaged body must say so, or it looks like the focused one"
+        );
+        assert!(
+            unengaged.contains(&engage_key) && unengaged.contains("edit text"),
+            "an unengaged body must name the key that starts editing"
+        );
+
+        // A body longer than its pane carries the shared one-cell marker.
+        let mut app = macro_editor_app(super::MacroEditFocus::Text);
+        match &mut app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => {
+                state.text_input = TextInput::with_text(
+                    (0..40)
+                        .map(|n| format!("line {n}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+                .with_multiline(8);
+            }
+            other => panic!("expected an open macro editor, got {other:?}"),
+        }
+        let rows = rendered_rows(&mut app);
+        let inner = macro_text_rect(&app.overlay_layout.active);
+        let area = Rect::new(inner.x - 1, inner.y - 1, inner.width + 2, inner.height + 2);
+        let cell = scroll_marker_rect(area, inner);
+        let glyph = rows[cell.y as usize]
+            .chars()
+            .nth(cell.x as usize)
+            .expect("marker cell")
+            .to_string();
+        assert!(
+            MARKER_GLYPHS.contains(&glyph.as_str()),
+            "an overflowing macro body must carry the shared scroll marker, got {glyph:?}"
+        );
+    }
+
     /// The style of the top-left corner cell of a rect, from a real frame.
     fn corner_style(app: &mut App, pick: impl Fn(&OverlayMouseLayout) -> Rect) -> Style {
         use ratatui::Terminal;
@@ -13541,7 +13680,7 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("render frame");
-        let OverlayMouseLayout::ConfigureStartupCommand { input } = app.overlay_layout.active
+        let OverlayMouseLayout::ConfigureStartupCommand { input, .. } = app.overlay_layout.active
         else {
             panic!("the modal must publish its text field's hit-test rect");
         };
@@ -13554,57 +13693,189 @@ mod tests {
         cell_style(buf, input.x - 1, input.y - 1)
     }
 
-    #[test]
-    fn startup_command_and_env_modals_render_their_focused_field_as_focused() {
+    // ── The three configure modals, now that they are dual-mode forms ───────
+    //
+    // FOCUS and ENGAGEMENT are two different things and must render as two
+    // different things: a focused-but-unengaged full-text field takes no
+    // keystrokes, so it gets the focus border, NO caret, and a footer naming
+    // the key that starts editing.
+
+    /// One of the three configure modals, with focus wherever the caller wants.
+    fn configure_modal_prompt(which: &str, text: &str, focus: ConfigureFieldFocus) -> PromptState {
         let field = || {
-            TextInput::with_text("cargo build".to_string())
+            TextInput::with_text(text.to_string())
                 .with_multiline(6)
                 .with_placeholder("Enter startup command...")
         };
-        let prompts = [
-            (
-                "ConfigureStartupCommand",
-                PromptState::ConfigureStartupCommand {
-                    project_id: "p1".to_string(),
-                    project_name: "demo".to_string(),
-                    input: field(),
-                },
-            ),
-            (
-                "ConfigureProjectEnv",
-                PromptState::ConfigureProjectEnv {
-                    project_id: "p1".to_string(),
-                    project_name: "demo".to_string(),
-                    input: field(),
-                },
-            ),
-            (
-                "ConfigureGlobalEnv",
-                PromptState::ConfigureGlobalEnv {
-                    project_name: "demo".to_string(),
-                    input: field(),
-                },
-            ),
-        ];
+        match which {
+            "ConfigureStartupCommand" => PromptState::ConfigureStartupCommand {
+                project_id: "p1".to_string(),
+                project_name: "demo".to_string(),
+                input: field(),
+                focus,
+            },
+            "ConfigureProjectEnv" => PromptState::ConfigureProjectEnv {
+                project_id: "p1".to_string(),
+                project_name: "demo".to_string(),
+                input: field(),
+                focus,
+            },
+            "ConfigureGlobalEnv" => PromptState::ConfigureGlobalEnv {
+                project_name: "demo".to_string(),
+                input: field(),
+                focus,
+            },
+            other => panic!("unknown configure modal {other}"),
+        }
+    }
 
-        for (name, prompt) in prompts {
+    const CONFIGURE_MODAL_NAMES: [&str; 3] = [
+        "ConfigureStartupCommand",
+        "ConfigureProjectEnv",
+        "ConfigureGlobalEnv",
+    ];
+
+    /// Render and return the whole frame's text, one row per line.
+    fn rendered_rows(app: &mut App) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn startup_command_and_env_modals_render_their_focused_field_as_focused() {
+        for name in CONFIGURE_MODAL_NAMES {
             let mut app = test_app(default_bindings());
-            app.prompt = prompt;
 
+            app.prompt = configure_modal_prompt(name, "cargo build", ConfigureFieldFocus::Cancel);
             app.input_target = InputTarget::None;
             let unfocused = startup_command_field_corner_style(&mut app);
 
-            app.input_target = InputTarget::StartupCommand;
+            app.prompt = configure_modal_prompt(name, "cargo build", ConfigureFieldFocus::Input);
             let focused = startup_command_field_corner_style(&mut app);
 
             assert_ne!(
                 focused, unfocused,
-                "{name}: the engaged text field must render as focused; \
+                "{name}: the focused text field must render as focused; \
                  focus you cannot see is not focus"
             );
             assert_ne!(
                 focused.fg, unfocused.fg,
                 "{name}: the focused field must differ in colour, not only in weight"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configure_modal_shows_engaged_apart_from_focused_and_says_how_to_start() {
+        for name in CONFIGURE_MODAL_NAMES {
+            let mut app = test_app(default_bindings());
+            let engage_key = app.bindings.label_for(Action::EngageCommitInput);
+
+            app.prompt = configure_modal_prompt(name, "cargo build", ConfigureFieldFocus::Input);
+            app.input_target = InputTarget::None;
+            let unengaged = rendered_rows(&mut app).join("\n");
+
+            app.input_target = InputTarget::StartupCommand;
+            let engaged = rendered_rows(&mut app).join("\n");
+
+            assert!(
+                !unengaged.contains("editing:"),
+                "{name}: a field that takes no keystrokes must not claim to be editing"
+            );
+            assert!(
+                engaged.contains("editing:"),
+                "{name}: the engaged field must say so, or it looks like the focused one"
+            );
+            assert!(
+                unengaged.contains(&engage_key) && unengaged.contains("edit text"),
+                "{name}: an unengaged field must name the key that starts editing; \
+                 looked for {engage_key:?} and \"edit text\""
+            );
+        }
+    }
+
+    #[test]
+    fn a_configure_modal_publishes_a_confirm_button() {
+        for name in CONFIGURE_MODAL_NAMES {
+            let mut app = test_app(default_bindings());
+            app.prompt = configure_modal_prompt(name, "cargo build", ConfigureFieldFocus::Input);
+            let _ = rendered_rows(&mut app);
+            assert!(
+                super::super::modal::layout_publishes_confirm_button(&app.overlay_layout.active),
+                "{name}: a modal with a full-text field must publish a confirm button"
+            );
+            let rows = rendered_rows(&mut app).join("\n");
+            assert!(rows.contains("Save"), "{name}: the Save button must render");
+            assert!(
+                rows.contains("Cancel"),
+                "{name}: the Cancel button must render"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configure_modal_marks_a_body_that_overflows_its_pane() {
+        use super::super::components::{MARKER_GLYPHS, scroll_marker_rect};
+
+        for name in CONFIGURE_MODAL_NAMES {
+            let short = {
+                let mut app = test_app(default_bindings());
+                app.prompt = configure_modal_prompt(name, "one line", ConfigureFieldFocus::Input);
+                let rows = rendered_rows(&mut app);
+                let OverlayMouseLayout::ConfigureStartupCommand { input, .. } =
+                    app.overlay_layout.active
+                else {
+                    panic!("{name}: the modal must publish its field rect");
+                };
+                // The field's outer rect is its inner rect plus the border ring.
+                let area = Rect::new(input.x - 1, input.y - 1, input.width + 2, input.height + 2);
+                let cell = scroll_marker_rect(area, input);
+                rows[cell.y as usize]
+                    .chars()
+                    .nth(cell.x as usize)
+                    .expect("marker cell")
+            };
+            assert!(
+                !MARKER_GLYPHS.contains(&short.to_string().as_str()),
+                "{name}: a body that fits must not claim it can scroll, got {short:?}"
+            );
+
+            let long = {
+                let body = (0..40)
+                    .map(|n| format!("KEY{n}=value"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut app = test_app(default_bindings());
+                app.prompt = configure_modal_prompt(name, &body, ConfigureFieldFocus::Input);
+                let rows = rendered_rows(&mut app);
+                let OverlayMouseLayout::ConfigureStartupCommand { input, .. } =
+                    app.overlay_layout.active
+                else {
+                    panic!("{name}: the modal must publish its field rect");
+                };
+                let area = Rect::new(input.x - 1, input.y - 1, input.width + 2, input.height + 2);
+                let cell = scroll_marker_rect(area, input);
+                rows[cell.y as usize]
+                    .chars()
+                    .nth(cell.x as usize)
+                    .expect("marker cell")
+            };
+            assert!(
+                MARKER_GLYPHS.contains(&long.to_string().as_str()),
+                "{name}: an overflowing body must carry the shared scroll marker, got {long:?}"
             );
         }
     }

@@ -117,13 +117,18 @@ buttons all at once, and every one of them is a focus stop:
 
 - The movement keys (`toggle_selection` in `[keys]`, **Tab** / **Shift-Tab** by
   default) move focus between the five controls. They never change a value.
-- **Space** acts on whichever control has focus: it types a space in a text
-  field, advances the surface selector, and activates a button.
+- **Space** acts on whichever control has focus: it types a space in the name
+  field or in the engaged text field, advances the surface selector, and
+  activates a button.
 - The name field takes typing immediately. The text field is multiline, so
-  **Enter** there has to mean "new line" rather than "confirm" — it therefore
-  has an edit mode: engage it with `engage_commit_input` (**i** by default),
-  and leave edit mode with `exit_commit_input` (**Esc** or **Ctrl-G**), which
-  keeps the form open and your text intact.
+  **Enter** there has to mean "new line" rather than "confirm", and it
+  therefore has an edit mode. Three things engage it, and nothing else does:
+  `confirm` (**Enter** by default) while the field has focus,
+  `engage_commit_input` (**i** by default), and a double click on the field.
+  Leave edit mode with `exit_commit_input` (**Esc** or **Ctrl-G**), which keeps
+  the form open and your text intact. Typing on an unengaged field does
+  nothing: the footer names the key that starts editing, and the field draws no
+  caret until it is really taking your keystrokes.
 - **Esc** outside the text field's edit mode cancels the edit and writes
   nothing.
 - Everything is clickable: clicking a field focuses it (clicking the text field
