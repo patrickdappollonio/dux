@@ -1956,6 +1956,9 @@ pub(crate) enum OverlayMouseLayout {
         offset: usize,
     },
     PickProject {
+        /// The `/`-search field, published only while it is drawn, so a click
+        /// can land the caret in it.
+        input: Option<Rect>,
         list: Rect,
         items: usize,
         offset: usize,
@@ -1975,6 +1978,8 @@ pub(crate) enum OverlayMouseLayout {
         // every modal, in `OverlayMouseLayoutState::frame` (the click-outside
         // dismissal engine's store), so a per-variant copy would be a second
         // source of truth for the same rect.
+        /// The filter field, published only while it is drawn.
+        input: Option<Rect>,
         list: Rect,
         body: Rect,
         items: usize,

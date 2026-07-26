@@ -4759,6 +4759,7 @@ impl App {
                 let selected_visual =
                     Self::startup_command_log_selected_visual_index(prompt, &visible_indices);
                 let mut state = ListState::default().with_selected(selected_visual);
+                let mut filter_input_rect: Option<Rect> = None;
                 if let Some(filter_area) = filter_area {
                     let filter_block = Block::default()
                         .title(" Filter ")
@@ -4770,6 +4771,7 @@ impl App {
                         .border_style(self.theme.overlay_field_border_style(prompt.searching))
                         .style(Style::default().bg(self.theme.overlay_bg));
                     let filter_inner = filter_block.inner(filter_area);
+                    filter_input_rect = Some(filter_inner);
                     filter_block.render(filter_area, frame.buffer_mut());
                     let text = if prompt.filter.is_empty() && prompt.searching {
                         "type to filter logs"
@@ -4904,6 +4906,7 @@ impl App {
                     ))
                     .render(frame, close_area, &self.theme);
                 self.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
+                    input: filter_input_rect,
                     list: list_inner,
                     body: body_inner,
                     items: visible_indices.len(),
@@ -5265,6 +5268,11 @@ impl App {
                 let details_block = self
                     .themed_overlay_block(intent.title())
                     .title_bottom(Line::from(bottom_spans));
+                // A field the user cannot click into is a gap: the filter rect
+                // is published whenever the filter is the thing being drawn.
+                let filter_input_rect = list
+                    .is_filtering()
+                    .then(|| details_block.inner(details_area));
                 if list.is_filtering() {
                     Paragraph::new(render_single_line_cursor_input(
                         "/ ",
@@ -5363,6 +5371,7 @@ impl App {
                     &mut state,
                 );
                 self.overlay_layout.active = OverlayMouseLayout::PickProject {
+                    input: filter_input_rect,
                     list: list_inner,
                     items: visible.len(),
                     offset: state.offset(),

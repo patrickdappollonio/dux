@@ -129,6 +129,8 @@ enum PromptMouseTarget {
     CommandInput,
     CommandItem(usize),
     BrowseProjectInput,
+    PickProjectInput,
+    StartupCommandLogsInput,
     BrowseProjectItem(usize),
     PickEditorItem(usize),
     PickProjectWorktreeItem(usize),
@@ -282,6 +284,8 @@ impl ButtonPressedTarget {
             PromptMouseTarget::CommandInput
             | PromptMouseTarget::CommandItem(_)
             | PromptMouseTarget::BrowseProjectInput
+            | PromptMouseTarget::PickProjectInput
+            | PromptMouseTarget::StartupCommandLogsInput
             | PromptMouseTarget::BrowseProjectItem(_)
             | PromptMouseTarget::PickEditorItem(_)
             | PromptMouseTarget::PickProjectWorktreeItem(_)
@@ -4503,21 +4507,30 @@ impl App {
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::PickProjectWorktreeItem),
             OverlayMouseLayout::PickProject {
+                input,
                 list,
                 items,
                 offset,
-                ..
-            } => Self::overlay_row_at(list, offset, items, column, row)
-                .map(PromptMouseTarget::PickProjectItem),
+            } => {
+                if input.is_some_and(|rect| contains_point(rect, column, row)) {
+                    Some(PromptMouseTarget::PickProjectInput)
+                } else {
+                    Self::overlay_row_at(list, offset, items, column, row)
+                        .map(PromptMouseTarget::PickProjectItem)
+                }
+            }
             OverlayMouseLayout::ResourceMonitor { .. } => None,
             OverlayMouseLayout::StartupCommandLogs {
+                input,
                 list,
                 items,
                 offset,
                 close_button,
                 ..
             } => {
-                if contains_point(close_button, column, row) {
+                if input.is_some_and(|rect| contains_point(rect, column, row)) {
+                    Some(PromptMouseTarget::StartupCommandLogsInput)
+                } else if contains_point(close_button, column, row) {
                     Some(PromptMouseTarget::StartupCommandLogsClose)
                 } else {
                     Self::overlay_row_at(list, offset, items, column, row)
@@ -5132,6 +5145,37 @@ impl App {
                     cursor_from_single_line_position(&filter.text, input_area, 2, column);
                 *searching = true;
             }
+        }
+    }
+
+    /// Land the caret in the project chooser's `/`-search field. The renderer
+    /// pads it with the two-cell `"/ "` prefix.
+    fn set_pick_project_filter_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::PickProject {
+                input: Some(input), ..
+            } => input,
+            _ => return,
+        };
+        if let PromptState::PickProject { list, .. } = &mut self.prompt {
+            list.filter.cursor =
+                cursor_from_single_line_position(&list.filter.text, input_area, 2, column);
+            list.searching = true;
+        }
+    }
+
+    /// Land the caret in the startup-log filter. Its field carries no prefix.
+    fn set_startup_command_logs_filter_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::StartupCommandLogs {
+                input: Some(input), ..
+            } => input,
+            _ => return,
+        };
+        if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
+            prompt.filter.cursor =
+                cursor_from_single_line_position(&prompt.filter.text, input_area, 0, column);
+            prompt.searching = true;
         }
     }
 
@@ -6443,6 +6487,12 @@ impl App {
             }
             PromptMouseTarget::BrowseProjectInput => {
                 self.set_browser_input_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::PickProjectInput => {
+                self.set_pick_project_filter_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::StartupCommandLogsInput => {
+                self.set_startup_command_logs_filter_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::BrowseProjectItem(index) => {
                 let double_click =
@@ -8266,6 +8316,7 @@ not_a_real_action = ["x"]
 
     fn install_startup_command_logs_overlay(app: &mut App, items: usize) {
         app.overlay_layout.active = OverlayMouseLayout::StartupCommandLogs {
+            input: None,
             list: Rect::new(12, 5, 30, 12),
             body: Rect::new(44, 5, 40, 12),
             items,
@@ -22440,5 +22491,84 @@ cyan = "#00ffff"
         assert_eq!(at(3), "🚀".len());
         assert_eq!(at(4), "🚀a".len());
         assert_eq!(at(99), text.len());
+    }
+
+    /// A field the user cannot click into is a gap. The project chooser's
+    /// filter is a real caret-bearing single-line field, so it must publish a
+    /// rect and a click on it must land the caret.
+    #[test]
+    fn the_project_chooser_filter_takes_a_click() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::PickProject {
+            intent: ProjectChooserIntent::NewAgent,
+            entries: vec![crate::app::ProjectChooserEntry {
+                id: "one".to_string(),
+                name: "one".to_string(),
+                path: "/tmp/one".to_string(),
+                agent_count: 0,
+                path_missing: false,
+            }],
+            list: SearchableList::new(),
+        };
+        if let PromptState::PickProject { list, .. } = &mut app.prompt {
+            list.searching = true;
+            list.filter.text = "abcdef".to_string();
+            list.filter.cursor = list.filter.text.len();
+        }
+        render_once(&mut app);
+
+        let OverlayMouseLayout::PickProject { input, .. } = app.overlay_layout.active else {
+            panic!("expected the project chooser layout");
+        };
+        let input = input.expect("the chooser filter must publish its rect");
+
+        // Click on the third character of the query (the renderer pads by the
+        // two-cell "/ " prefix).
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: input.x + 2 + 2,
+            row: input.y,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        let PromptState::PickProject { list, .. } = &app.prompt else {
+            panic!("the chooser must stay open");
+        };
+        assert_eq!(list.filter.cursor, 2, "the click must land the caret");
+    }
+
+    /// Same rule for the startup-log picker's filter, which is the other
+    /// caret-bearing single-line field that published no rect. The surface is
+    /// only reachable under `cfg(test)` today; the field is a field regardless.
+    #[test]
+    fn the_startup_log_picker_filter_takes_a_click() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            scope_label: "demo".to_string(),
+            entries: Vec::new(),
+            selected: 0,
+            filter: TextInput::with_text("abcdef".to_string()),
+            searching: true,
+            content: String::new(),
+            scroll_offset: 0,
+        });
+        render_once(&mut app);
+
+        let OverlayMouseLayout::StartupCommandLogs { input, .. } = app.overlay_layout.active else {
+            panic!("expected the startup-log picker layout");
+        };
+        let input = input.expect("the filter must publish its rect");
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: input.x + 2,
+            row: input.y,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        let PromptState::StartupCommandLogs(prompt) = &app.prompt else {
+            panic!("the picker must stay open");
+        };
+        assert_eq!(prompt.filter.cursor, 2, "the click must land the caret");
     }
 }
