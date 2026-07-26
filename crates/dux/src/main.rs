@@ -174,6 +174,11 @@ fn run_server(args: impl Iterator<Item = String>) -> Result<()> {
 
     let paths = dux_core::config::DuxPaths::discover()?;
     std::fs::create_dir_all(&paths.root)?;
+    // `dux server` never calls `ensure_config`, so without this the bootstrap's
+    // project-sync would create a comment-free config.toml on a first run that
+    // starts in server mode. Registering the TUI's canonical renderer keeps
+    // "the config file is the documentation" true on both entry points.
+    dux_tui::install_canonical_renderer();
     let config = dux_core::config::load_config(&paths);
 
     // Initialize the logger early so every subsequent logger::* call in the server

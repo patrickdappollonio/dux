@@ -32,6 +32,11 @@ pub fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             reject_unknown_flags(&args[1..], &["--yes"])?;
             run_regenerate(paths, yes)
         }
+        "restore-docs" => {
+            let yes = args[1..].iter().any(|a| a == "--yes");
+            reject_unknown_flags(&args[1..], &["--yes"])?;
+            run_restore_docs(paths, yes)
+        }
         "path" => {
             println!("{}", paths.config_path.display());
             Ok(())
@@ -66,7 +71,11 @@ Subcommands:
   dux config reset --all   Full factory reset: remove config, logs, sessions, and worktrees
   dux config regenerate    Preview a fresh default config (shows diff)
   dux config regenerate --yes
-                           Overwrite the config file with fresh defaults"
+                           Overwrite the config file with fresh defaults
+  dux config restore-docs  Preview re-adding the explanatory comments to your
+                           config, keeping every value you have set
+  dux config restore-docs --yes
+                           Apply it (writes a timestamped backup first)"
     );
 }
 
@@ -534,6 +543,111 @@ fn run_regenerate(paths: &DuxPaths, yes: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// dux config restore-docs
+// ---------------------------------------------------------------------------
+
+/// Re-apply the commented template to the existing config, keeping every value.
+///
+/// Non-destructive by default (preview only), mirroring `dux config regenerate`:
+/// `--yes` commits. Unlike `regenerate`, this never falls back to defaults — an
+/// unparseable config is refused outright, because the whole point of the
+/// command is to be the safe alternative to a defaults-based rewrite.
+#[allow(deprecated)] // blessed sync-direct: CLI-only, one-shot, runs before any engine/queue exists
+fn run_restore_docs(paths: &DuxPaths, yes: bool) -> Result<()> {
+    if !paths.config_path.exists() {
+        println!("no config file found at {}", paths.config_path.display());
+        println!("dux writes a fully commented config the first time it starts.");
+        return Ok(());
+    }
+
+    let raw = fs::read_to_string(&paths.config_path).with_context_path(&paths.config_path)?;
+
+    // REFUSE on an unparseable config. Falling through to a defaults-based
+    // regeneration here would destroy exactly the data (projects, macros,
+    // provider commands, env values) this command exists to protect.
+    let restored = config::restore_documentation(&raw).map_err(|e| {
+        anyhow!(
+            "{e:#}\n\n\
+             Your config.toml has NOT been modified.\n\
+             Fix the syntax error at {} and run this again. If you would rather \
+             start over from defaults and lose your current settings, that is \
+             `dux config regenerate --yes`.",
+            paths.config_path.display()
+        )
+    })?;
+
+    if restored.is_noop(&raw) {
+        println!("config documentation is already up to date — nothing to do");
+        return Ok(());
+    }
+
+    if !yes {
+        print_unified_diff("current", "restored", &raw, &restored.text);
+        print_restore_report(&restored);
+        println!("\nRun `dux config restore-docs --yes` to apply this (a timestamped backup");
+        println!("of your current config is written first).");
+        return Ok(());
+    }
+
+    // Back up BEFORE committing. The writer below is atomic, which protects
+    // against a torn file, but not against "the result was not what I wanted".
+    let backup_path = backup_config(&paths.config_path, &raw)?;
+
+    dux_core::config_write::write_config_secure(&paths.config_path, &restored.text)
+        .with_context_path(&paths.config_path)?;
+
+    println!("documentation restored in {}", paths.config_path.display());
+    println!("backup of the previous config: {}", backup_path.display());
+    print_restore_report(&restored);
+    Ok(())
+}
+
+/// Print what the restore changed beyond adding comments. A dropped section is
+/// reported even though its data was inert: a silent drop is still data loss.
+fn print_restore_report(restored: &config::RestoredConfig) {
+    if !restored.dropped.is_empty() {
+        println!("\nRemoved (dux no longer reads these):");
+        for path in &restored.dropped {
+            println!("  [{path}]");
+        }
+    }
+    if !restored.preserved.is_empty() {
+        println!("\nKept as-is (not settings dux knows, carried over unchanged):");
+        for path in &restored.preserved {
+            println!("  {path}");
+        }
+    }
+}
+
+/// Write `raw` beside the config as `config.toml.backup-<UTC timestamp>`.
+///
+/// Never overwrites: if a backup with this second-resolution name already
+/// exists, a counter is appended, so repeated runs cannot clobber an earlier
+/// safety copy. Created 0600 like the config itself, since it holds the same
+/// potential secrets.
+fn backup_config(config_path: &Path, raw: &str) -> Result<PathBuf> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let base = config_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_string());
+    let dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow!("config path {} has no parent", config_path.display()))?;
+
+    let mut candidate = dir.join(format!("{base}.backup-{stamp}"));
+    let mut counter = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{base}.backup-{stamp}-{counter}"));
+        counter += 1;
+    }
+
+    #[allow(deprecated)] // blessed sync-direct: CLI-only one-shot; also gives the backup 0600
+    dux_core::config_write::write_config_secure(&candidate, raw).with_context_path(&candidate)?;
+    Ok(candidate)
+}
+
+// ---------------------------------------------------------------------------
 // Diff helpers
 // ---------------------------------------------------------------------------
 
@@ -963,6 +1077,210 @@ mod tests {
         };
         let result = run(&["path".to_string()], &paths);
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // dux config restore-docs
+    // -----------------------------------------------------------------------
+
+    fn bare_user_config_fixture() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/bare_user_config.toml"
+        ))
+        .expect("read bare user config fixture")
+    }
+
+    /// Every backup this command wrote, oldest name first.
+    fn backups(harness: &ResetHarness) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = fs::read_dir(&harness.paths.root)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(".backup-"))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn restore_docs_preview_writes_nothing_and_leaves_the_file_alone() {
+        let harness = ResetHarness::new();
+        let original = bare_user_config_fixture();
+        fs::write(&harness.paths.config_path, &original).expect("seed");
+
+        run(&["restore-docs".to_string()], &harness.paths).expect("preview");
+
+        assert_eq!(
+            fs::read_to_string(&harness.paths.config_path).expect("read"),
+            original,
+            "preview must not modify the config"
+        );
+        assert!(
+            backups(&harness).is_empty(),
+            "preview must not write a backup"
+        );
+    }
+
+    #[test]
+    fn restore_docs_yes_writes_a_backup_containing_the_original_bytes() {
+        let harness = ResetHarness::new();
+        let original = bare_user_config_fixture();
+        fs::write(&harness.paths.config_path, &original).expect("seed");
+
+        run(
+            &["restore-docs".to_string(), "--yes".to_string()],
+            &harness.paths,
+        )
+        .expect("apply");
+
+        // The config was rewritten with comments...
+        let after = fs::read_to_string(&harness.paths.config_path).expect("read config");
+        assert!(after.contains('#'), "config gained no comments");
+        assert_ne!(after, original);
+
+        // ...and exactly one backup holds the original bytes verbatim.
+        let backups = backups(&harness);
+        assert_eq!(backups.len(), 1, "expected one backup, got {backups:?}");
+        assert_eq!(
+            fs::read_to_string(&backups[0]).expect("read backup"),
+            original,
+            "the backup must be a byte-for-byte copy of the original"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_docs_backup_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let harness = ResetHarness::new();
+        fs::write(&harness.paths.config_path, bare_user_config_fixture()).expect("seed");
+
+        run(
+            &["restore-docs".to_string(), "--yes".to_string()],
+            &harness.paths,
+        )
+        .expect("apply");
+
+        // The backup carries the same potential secrets ([env] tokens) as the
+        // config, so it must not be group/world readable either.
+        let backup = backups(&harness).remove(0);
+        let mode = fs::metadata(&backup).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "backup must be 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn restore_docs_never_clobbers_an_earlier_backup() {
+        let harness = ResetHarness::new();
+        fs::write(&harness.paths.config_path, bare_user_config_fixture()).expect("seed");
+        run(
+            &["restore-docs".to_string(), "--yes".to_string()],
+            &harness.paths,
+        )
+        .expect("first apply");
+
+        // Make the config restorable again, then run again inside the same
+        // second so both runs compute the same timestamp.
+        let mut second = fs::read_to_string(&harness.paths.config_path).expect("read");
+        second.push_str("\n[a_fork_section]\nknob = 1\n");
+        fs::write(&harness.paths.config_path, &second).expect("reseed");
+        // Re-adding an orphan guarantees the second run is not a no-op.
+        fs::write(
+            &harness.paths.config_path,
+            format!("{second}\n[auth]\nusers = []\n"),
+        )
+        .expect("reseed with orphan");
+
+        run(
+            &["restore-docs".to_string(), "--yes".to_string()],
+            &harness.paths,
+        )
+        .expect("second apply");
+
+        assert_eq!(
+            backups(&harness).len(),
+            2,
+            "the second run must not overwrite the first backup"
+        );
+    }
+
+    #[test]
+    fn restore_docs_refuses_an_unparseable_config_and_leaves_it_byte_identical() {
+        let harness = ResetHarness::new();
+        let broken = "[server]\nport = = 8080\n[[[ nope\n";
+        fs::write(&harness.paths.config_path, broken).expect("seed");
+
+        let err = run(
+            &["restore-docs".to_string(), "--yes".to_string()],
+            &harness.paths,
+        )
+        .expect_err("must refuse a broken config");
+        let message = format!("{err:#}");
+
+        // It says why, and points at the path that would lose data instead.
+        assert!(message.contains("not valid TOML"), "{message}");
+        assert!(message.contains("has NOT been modified"), "{message}");
+        assert!(message.contains("regenerate --yes"), "{message}");
+
+        // The file is untouched, and no backup was written for a run that did
+        // nothing.
+        assert_eq!(
+            fs::read_to_string(&harness.paths.config_path).expect("read"),
+            broken,
+            "a refused restore must leave the file byte-identical"
+        );
+        assert!(backups(&harness).is_empty());
+    }
+
+    #[test]
+    fn restore_docs_is_a_noop_on_an_already_documented_config() {
+        let harness = ResetHarness::new();
+        harness.write_config_with_log_path("dux.log");
+        let original = fs::read_to_string(&harness.paths.config_path).expect("read");
+
+        run(
+            &["restore-docs".to_string(), "--yes".to_string()],
+            &harness.paths,
+        )
+        .expect("apply");
+
+        assert_eq!(
+            fs::read_to_string(&harness.paths.config_path).expect("read"),
+            original,
+            "a canonical config must not be rewritten"
+        );
+        assert!(
+            backups(&harness).is_empty(),
+            "a no-op must not write a backup"
+        );
+    }
+
+    #[test]
+    fn restore_docs_handles_a_missing_config_without_creating_one() {
+        let harness = ResetHarness::new();
+        assert!(!harness.paths.config_path.exists());
+
+        run(&["restore-docs".to_string()], &harness.paths).expect("missing config is not an error");
+
+        assert!(
+            !harness.paths.config_path.exists(),
+            "restore-docs must not create a config"
+        );
+    }
+
+    #[test]
+    fn restore_docs_rejects_unknown_flags() {
+        let harness = ResetHarness::new();
+        let err = run(
+            &["restore-docs".to_string(), "--force".to_string()],
+            &harness.paths,
+        )
+        .expect_err("unknown flag must be rejected");
+        assert!(format!("{err:#}").contains("unknown flag"));
     }
 
     struct ResetHarness {

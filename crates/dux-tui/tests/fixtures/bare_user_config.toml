@@ -1,0 +1,208 @@
+shutdown_timeout_seconds = 30
+[defaults]
+provider = "claude"
+start_directory = "/home/user/code"
+enable_randomized_pet_name_by_default = false
+pull_before_creating_agent_by_default = true
+copy_uncommitted_changes_by_default = true
+
+[env]
+
+[logging]
+level = "info"
+path = "dux.log"
+
+[ui]
+left_width_pct = 23
+right_width_pct = 19
+terminal_pane_height_pct = 33
+empty_project_separator_min_projects = 5
+staged_pane_height_pct = 50
+commit_pane_height_pct = 40
+agent_scrollback_lines = 10000
+status_clear_seconds = 6
+branch_sync_interval = 30
+show_diff_line_numbers = true
+diff_tab_width = 4
+github_integration = true
+auto_reopen_agents = false
+show_changes_pane = true
+pr_banner_position = "top"
+theme = "dux_dark"
+copy_on_select = true
+agent_tabs_max = 20
+always_show_tab_strip = false
+pr_poll_interval_seconds = 180
+attention_indicator = true
+attention_on_bell = true
+attention_grace_seconds = 3
+agent_sort = "manual"
+compose_bar = true
+disable_automated_welcome_screen = false
+disable_release_notes = false
+
+[editor]
+default = "cursor"
+
+[server]
+port = 8080
+tailscale_enabled = true
+listen_addrs = []
+insecure_allow_remote = false
+dangerously_listen_http = false
+color = "auto"
+access_log = true
+host = "127.0.0.1"
+allowed_hosts = []
+max_websocket_events_connections = 32
+max_websocket_agent_connections = 32
+max_websocket_terminal_connections = 64
+title = "dux @ workstation"
+favicon = ""
+shutdown_timeout_seconds = 30
+max_websocket_tab_connections = 64
+max_websocket_tabs_per_agent = 8
+search_index_max_files = 50000
+tree_list_max_concurrency = 8
+release_notes_max_concurrency = 2
+
+[server.acme]
+enabled = false
+domains = []
+email = ""
+http_port = 80
+https_port = 443
+production = true
+cache_dir = ""
+
+[auth]
+users = []
+
+[terminal]
+command = "/bin/bash"
+args = ["-l"]
+
+[startup_command_terminal]
+command = "$SHELL"
+args = ["-l", "-c"]
+
+[keys]
+show_terminal_keys = true
+
+[providers]
+
+[providers.claude]
+command = "claude"
+args = []
+resume_args = ["--continue"]
+install_hint = "curl -fsSL https://claude.ai/install.sh | bash"
+
+[providers.codex]
+command = "codex"
+args = []
+resume_args = ["resume", "--last"]
+install_hint = "brew install --cask codex"
+
+[providers.opencode]
+command = "opencode"
+args = []
+resume_args = ["--continue"]
+resume_wait_timeout_ms = 3000
+install_hint = "curl -fsSL https://opencode.ai/install | bash"
+
+[providers.copilot]
+command = "copilot"
+args = []
+resume_args = []
+install_hint = "curl -fsSL https://gh.io/copilot-install | bash"
+
+[providers.cline]
+command = "cline"
+args = []
+resume_args = []
+install_hint = "npm i -g cline"
+
+[macros]
+"Create a Pull Request" = { text = """
+Example line 1 of the placeholder body for this macro.
+Example line 2 of the placeholder body for this macro.
+Example line 3 of the placeholder body for this macro.
+Example line 4 of the placeholder body for this macro.
+Example line 5 of the placeholder body for this macro.""", surface = "agent" }
+"Claude.md or Agents.md review" = { text = "Example single-line macro body.", surface = "agent" }
+"Rebase or Merge from Upstream" = { text = "Example single-line macro body.", surface = "agent" }
+"Golang Unit, Integration and GolangCI" = { text = """
+Example line 1 of the placeholder body for this macro.
+Example line 2 of the placeholder body for this macro.
+Example line 3 of the placeholder body for this macro.""", surface = "agent" }
+"Copilor or AI Pull Request Review and Follow-up" = { text = """
+Example line 1 of the placeholder body for this macro.
+Example line 2 of the placeholder body for this macro.
+Example line 3 of the placeholder body for this macro.
+Example line 4 of the placeholder body for this macro.
+Example line 5 of the placeholder body for this macro.""", surface = "agent" }
+"Check CI pipeline and propose fixes" = { text = """
+Example line 1 of the placeholder body for this macro.
+Example line 2 of the placeholder body for this macro.
+Example line 3 of the placeholder body for this macro.""", surface = "agent" }
+"Server mode branch work parallel" = { text = """
+Example line 1 of the placeholder body for this macro.
+Example line 2 of the placeholder body for this macro.""", surface = "agent" }
+"Subagent development" = { text = """
+Example line 1 of the placeholder body for this macro.
+Example line 2 of the placeholder body for this macro.
+Example line 3 of the placeholder body for this macro.
+Example line 4 of the placeholder body for this macro.
+Example line 5 of the placeholder body for this macro.
+Example line 6 of the placeholder body for this macro.
+Example line 7 of the placeholder body for this macro.
+Example line 8 of the placeholder body for this macro.
+Example line 9 of the placeholder body for this macro.
+Example line 10 of the placeholder body for this macro.
+Example line 11 of the placeholder body for this macro.
+Example line 12 of the placeholder body for this macro.
+Example line 13 of the placeholder body for this macro.
+Example line 14 of the placeholder body for this macro.
+Example line 15 of the placeholder body for this macro.
+Example line 16 of the placeholder body for this macro.
+Example line 17 of the placeholder body for this macro.
+Example line 18 of the placeholder body for this macro.""", surface = "agent" }
+
+[capabilities]
+terminal_identity = "auto"
+passthrough = true
+clipboard_passthrough = "focused"
+hyperlinks = true
+web_notifications = true
+
+[[projects]]
+id = "f4f758b6-daf9-4116-bc55-025fddbe1822"
+path = "$HOME/Golang/src/github.com/example/dux"
+name = "dux"
+default_provider = "claude"
+
+[[projects]]
+id = "8b9afa4c-e53d-4806-94cb-72eb8824c1fe"
+path = "$HOME/Golang/src/github.com/example/coding-games"
+name = "coding-games"
+default_provider = "claude"
+
+[[projects]]
+id = "fc23d63f-010e-4860-ba98-b509c43fc246"
+path = "$HOME/Golang/src/github.com/example/volume-increaser"
+name = "volume-increaser"
+
+[[projects]]
+id = "c77f0303-bc61-47dc-86f6-1ef332c79fc4"
+path = "$HOME/Golang/src/github.com/example/claude-plugins"
+name = "claude-plugins"
+
+[[projects]]
+id = "8722a4ff-2bab-4eff-b049-1a74538411b4"
+path = "$HOME/Golang/src/github.com/example/headers-dot-live"
+name = "headers-dot-live"
+
+[[projects]]
+id = "3d2ffacd-1c11-44f6-bd9b-467439dc0f72"
+path = "$HOME/Golang/src/github.com/example/http-server"
+name = "http-server"

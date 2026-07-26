@@ -219,7 +219,13 @@ dux config diff --raw    # Unified diff against the default config
 dux config reset         # Remove config and logs (keeps agents)
 dux config reset --all   # Full factory reset
 dux config regenerate    # Preview a fresh default config
+dux config restore-docs  # Preview re-adding the comments, keeping your values
 ```
+
+If your `config.toml` is missing its explanatory comments (older versions could
+create one without them), `dux config restore-docs` puts them back without
+touching a single value. It previews the change by default; `--yes` applies it
+and writes a timestamped backup first.
 
 Override the config directory with the `DUX_HOME` environment variable.
 

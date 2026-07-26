@@ -24,6 +24,12 @@ pub(crate) use config_saver::TuiConfigSurface;
 /// `serve_with_engine` tick.
 pub use server_screen::{ServerScreenTick, ServerStatusScreen};
 
+/// Register the fully-commented config renderer with `dux-core`, so that any
+/// surface which CREATES `config.toml` writes the documented template rather
+/// than a bare one. Re-exported so `crates/dux/src/main.rs` can call it on the
+/// `dux server` path, which never goes through the TUI's `ensure_config`.
+pub use config::install_canonical_renderer;
+
 // Domain modules now live in dux-core. Re-export them at the crate root so
 // existing `crate::<mod>::…` paths across the binary keep resolving unchanged.
 pub(crate) use dux_core::{

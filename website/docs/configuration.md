@@ -21,15 +21,41 @@ are already wired in. Open it, read the comments, change what you like.
 
 ## Managing the config
 
-Three subcommands handle the file without you having to hunt for it:
+A handful of subcommands handle the file without you having to hunt for it:
 
 - `dux config path` prints the absolute path to the active config file.
 - `dux config diff` shows what you've changed from the defaults.
 - `dux config regenerate` previews the latest canonical template, so you can see
   new options after an upgrade.
+- `dux config restore-docs` puts the explanatory comments back into a config that
+  lost them, keeping every value exactly as it is.
 
 Hand-edits are preserved across saves: dux rewrites the file with `toml_edit`, so
 your comments and ordering survive.
+
+### Getting the comments back
+
+Older versions of dux could create a `config.toml` with no comments at all, and
+because ordinary saves only ever preserve comments (they never add them), such a
+file stayed bare forever. `dux config restore-docs` fixes that:
+
+```bash
+dux config restore-docs        # preview: shows a diff, changes nothing
+dux config restore-docs --yes  # apply
+```
+
+It is deliberately careful with your data:
+
+- Every value survives, including projects and their ids, macros with multi-line
+  bodies, provider commands and their arguments, and environment values.
+- Applying it writes a timestamped backup of the current file first and prints
+  where it went.
+- Settings dux does not recognize are kept as they are, not quietly deleted, and
+  are listed in the output.
+- A few sections dux genuinely no longer reads are removed, and the removal is
+  reported rather than done silently.
+- If the file cannot be parsed, the command refuses and changes nothing rather
+  than falling back to defaults, which would throw your settings away.
 
 ## Environment variables and portable paths
 

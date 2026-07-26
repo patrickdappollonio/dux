@@ -12,6 +12,9 @@ pub use dux_core::config::*;
 
 #[allow(deprecated)] // blessed sync-direct: boot/first-creation path runs before the queue exists
 pub fn ensure_config(paths: &DuxPaths) -> Result<Config> {
+    // Any core-side write that CREATES config.toml (bootstrap project-sync) must
+    // emit the commented template, not a bare one.
+    install_canonical_renderer();
     paths.ensure_dirs()?;
     if !paths.config_path.exists() {
         dux_core::config_write::write_config_secure(&paths.config_path, &render_default_config())
@@ -316,11 +319,18 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "agent_tabs_max",
             comment: Some(CommentSource::Static(
-                "# Maximum number of tabs a single agent may have, counting its Main\n\
-                 # tab. An agent's first (Main) tab is the one that resumes its previous\n\
-                 # conversation; every extra tab is a fresh, ephemeral \"support\" session.\n\
-                 # The \"+\" button stops adding tabs once an agent reaches this limit.\n\
-                 # Clamped to a sane ceiling; 0 falls back to the default (20).",
+                "# Maximum number of tabs a single agent may have. All tabs are equal:\n\
+                 # each one is a provider session inside the agent's single shared\n\
+                 # worktree, and they all edit the same files. A launching tab resumes\n\
+                 # its provider's previous conversation only when it is the sole live\n\
+                 # tab running that provider; otherwise it starts fresh.\n\
+                 # The \"+\" affordance stops adding tabs once an agent reaches this\n\
+                 # limit. Clamped to a sane ceiling; 0 falls back to the default (20).\n\
+                 # NOTE: this caps how many tabs may EXIST. In server mode a second,\n\
+                 # smaller limit caps how many of them may stream at once over the web\n\
+                 # UI: [server] max_websocket_tabs_per_agent (default 8). With the\n\
+                 # defaults you can create 20 tabs but view at most 8 of one agent's\n\
+                 # tabs simultaneously in a browser; raise that one too if you need more.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.agent_tabs_max),
         },
@@ -334,7 +344,11 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "branch_sync_interval",
             comment: Some(CommentSource::Static(
-                "# Interval in seconds for syncing git branch names in the background.\n# Keeps dux in sync if a branch is renamed outside the app.\n# Set to 0 to disable.",
+                "# Seconds between background syncs of git branch names. The key name\n\
+                 # omits the unit for backward compatibility, but the value IS in\n\
+                 # seconds, like every other interval in this file.\n\
+                 # Keeps dux in sync if a branch is renamed outside the app.\n\
+                 # Set to 0 to disable.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.branch_sync_interval),
         },
@@ -543,7 +557,20 @@ fn config_schema() -> Vec<ConfigEntry> {
              # machine's Tailscale address so your other tailnet devices can reach it\n\
              # (traffic is WireGuard-encrypted in transit). The in-app \"start web\n\
              # server\" flip always serves on loopback (plus Tailscale) regardless of\n\
-             # host. Only run a non-loopback host on a network you trust.",
+             # host. Only run a non-loopback host on a network you trust.\n\
+             #\n\
+             # Three settings below decide where dux listens and who it answers.\n\
+             # They do NOT override each other; they stack, and they are checked in\n\
+             # this order:\n\
+             #   1. host + port     — the one address dux binds. `dux server --bind\n\
+             #                        IP:port` overrides both for that run.\n\
+             #   2. tailscale_enabled — binds an ADDITIONAL address (this machine's\n\
+             #                        Tailscale IP, same port). Never replaces host;\n\
+             #                        best-effort, so a failure only warns.\n\
+             #   3. allowed_hosts   — not an address at all. Once a request arrives\n\
+             #                        at one of the addresses above, this is the\n\
+             #                        guard on its Host header.\n\
+             # So: binding is (1) plus optionally (2); (3) only ever rejects.",
         ),
         ConfigEntry::Field {
             key: "host",
@@ -682,7 +709,10 @@ fn config_schema() -> Vec<ConfigEntry> {
                  # monopolize that pool and starve other agents' tabs. Once an agent hits\n\
                  # this many live tab streams, further ones for THAT agent are refused with\n\
                  # HTTP 503 until one closes. A value of 0 PERMANENTLY blocks all tab\n\
-                 # streams until the server restarts.",
+                 # streams until the server restarts.\n\
+                 # This is a CONCURRENT-VIEWERS cap, not a limit on how many tabs an\n\
+                 # agent may have — that is [ui] agent_tabs_max (default 20). The two\n\
+                 # differ on purpose: creating a tab is cheap, streaming one is not.",
             )),
             value_fn: |c| FieldValue::Usize(c.server.max_websocket_tabs_per_agent as usize),
         },
@@ -842,6 +872,112 @@ pub fn render_config_with(
     bindings: &crate::keybindings::RuntimeBindings,
 ) -> String {
     render_config(config, bindings)
+}
+
+/// Render a config through the canonical commented renderer, deriving the
+/// keybinding labels from the config's own `[keys]` so the documented bindings
+/// match what the file actually binds.
+///
+/// This is the function handed to `dux_core::config_write::set_canonical_renderer`,
+/// which is how `dux serve` — a surface with no access to `RuntimeBindings` —
+/// still creates a fully-commented config on first run.
+pub fn render_config_documented(config: &Config) -> String {
+    let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
+    render_config(config, &bindings)
+}
+
+/// Install [`render_config_documented`] as the process-wide canonical renderer.
+///
+/// Call this before any code path that can CREATE `config.toml`. Both entry
+/// points do: the TUI through `ensure_config`, and `dux server` through its
+/// bootstrap project-sync. Idempotent.
+pub fn install_canonical_renderer() {
+    dux_core::config_write::set_canonical_renderer(render_config_documented);
+}
+
+// ---------------------------------------------------------------------------
+// dux config restore-docs
+// ---------------------------------------------------------------------------
+
+/// The result of re-applying the commented template to an existing config.
+#[derive(Debug)]
+pub struct RestoredConfig {
+    /// The full text of the restored file. Not yet written anywhere.
+    pub text: String,
+    /// Orphaned sections that were removed, as dotted paths.
+    pub dropped: Vec<String>,
+    /// Unknown keys carried over verbatim, as dotted paths.
+    pub preserved: Vec<String>,
+}
+
+impl RestoredConfig {
+    /// Whether restoring would leave the file byte-identical.
+    pub fn is_noop(&self, original_raw: &str) -> bool {
+        self.text == original_raw
+    }
+}
+
+/// Re-apply the fully-commented canonical template to an EXISTING config's raw
+/// text, keeping every value the file carries.
+///
+/// This is the read-only half of `dux config restore-docs`: it returns the text
+/// to write and what changed, and never touches the filesystem, so the CLI can
+/// preview it and the tests can exercise it without a temp directory.
+///
+/// # Safety contract
+///
+/// * An unparseable file is REFUSED with an error naming the parse failure. It
+///   deliberately does not fall through to a defaults-based regeneration —
+///   silently replacing a broken file with defaults is exactly the data loss
+///   this feature exists to prevent.
+/// * Unknown keys are preserved verbatim unless they sit under
+///   [`dux_core::config_write::ORPHANED_CONFIG_SECTIONS`], which are reported as
+///   dropped.
+/// * The result is re-parsed and compared against the config parsed from the
+///   input. A mismatch aborts with an error rather than writing, so a renderer
+///   bug can never silently rewrite a user's settings.
+pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
+    let original: DocumentMut = raw
+        .parse()
+        .context("config.toml is not valid TOML, so its values cannot be read back safely")?;
+
+    let config: Config = toml::from_str(raw)
+        .context("config.toml parses as TOML but not as a dux config, so its values cannot be read back safely")?;
+
+    let rendered_text = render_config_documented(&config);
+    let mut rendered: DocumentMut = rendered_text
+        .parse()
+        .context("the canonical config template did not render valid TOML (this is a dux bug)")?;
+
+    let report = dux_core::config_write::merge_unmanaged_keys(&mut rendered, &original);
+    let text = rendered.to_string();
+
+    // Self-check: the restore must be a FIXED POINT of the renderer. Rendering
+    // the config we just wrote has to reproduce the very same text, which can
+    // only happen if every value survived the round trip.
+    //
+    // This is deliberately not a raw `reparsed == config` equality check. The
+    // canonical template MATERIALIZES defaults that a bare file leaves implicit
+    // — most visibly `[keys]`, which gains every default binding (that is the
+    // point: a keys section with no keys never tells the user rebinding is
+    // possible). Struct equality would flag those as changes and refuse every
+    // real restore. The fixed-point check tolerates materialized defaults while
+    // still catching an actual altered or lost value, because a changed value
+    // renders differently.
+    let reparsed: Config = toml::from_str(&text)
+        .context("the restored config did not parse back as a dux config; refusing to write it")?;
+    if render_config_documented(&reparsed) != rendered_text {
+        anyhow::bail!(
+            "restoring the documentation would have changed a setting's value; refusing to write. \
+             This is a dux bug — please report it, and note that your config.toml has not been modified."
+        );
+    }
+
+    Ok(RestoredConfig {
+        text,
+        dropped: report.dropped,
+        preserved: report.preserved,
+    })
 }
 
 /// Persist the in-memory `Config` to disk using surgical edits via `toml_edit`.
@@ -1028,7 +1164,13 @@ fn render_project_configs(out: &mut String, projects: &[ProjectConfig]) {
          # Paths may use $HOME, ${HOME}, or ~ for portability across machines.\n\
          # startup_command runs in each new agent worktree before the provider launches.\n\
          # env defines per-project variables passed to agent and companion terminal PTYs.\n\
-         # Values may reference existing environment variables with $VAR or ${VAR}.\n",
+         # Values may reference existing environment variables with $VAR or ${VAR}.\n\
+         #\n\
+         # `id` is generated by dux and is how a project is matched to its agents and\n\
+         # worktrees in the database. It must be UNIQUE. If you add a project by hand,\n\
+         # do NOT copy an existing block's id: give it a fresh UUID, or delete the id\n\
+         # line and let dux generate one on next start. Two projects sharing an id is\n\
+         # an identity conflict and dux will refuse to start until you fix it.\n",
     );
     if projects.is_empty() {
         out.push_str(
@@ -1252,6 +1394,388 @@ mod tests {
         let bindings =
             crate::keybindings::RuntimeBindings::from_keys_config(&KeysConfig::default());
         render_config(config, &bindings)
+    }
+
+    // -----------------------------------------------------------------------
+    // dux config restore-docs
+    //
+    // The fixture is a COPY of a real user's config.toml (209 lines, 64
+    // settings, zero comments) taken from a cold review. It is the exact shape
+    // this feature exists for: a file born through the plain writer, which the
+    // comment-preserving patch path then carried forward forever without ever
+    // adding the documentation back.
+    // -----------------------------------------------------------------------
+
+    fn bare_user_config() -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/bare_user_config.toml"
+        );
+        std::fs::read_to_string(path).expect("read bare user config fixture")
+    }
+
+    #[test]
+    fn the_fixture_really_is_undocumented() {
+        // If this ever fails, the fixture stopped being the thing under test and
+        // every assertion below is measuring nothing.
+        let raw = bare_user_config();
+        assert!(
+            !raw.contains('#'),
+            "fixture must contain zero comments, or it is not a bare config"
+        );
+    }
+
+    #[test]
+    fn restore_docs_adds_comments_to_a_bare_config() {
+        let raw = bare_user_config();
+        let restored = restore_documentation(&raw).expect("restore");
+
+        assert!(
+            restored.text.contains('#'),
+            "restored config gained no comments"
+        );
+        // Not just a stray comment: the file must actually be documented. The
+        // canonical renderer emits a comment for essentially every setting.
+        let comment_lines = restored
+            .text
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .count();
+        assert!(
+            comment_lines > 100,
+            "expected a thoroughly documented file, got {comment_lines} comment lines"
+        );
+    }
+
+    #[test]
+    fn restore_docs_keeps_every_value_from_a_bare_config() {
+        let raw = bare_user_config();
+        let before: Config = toml::from_str(&raw).expect("fixture parses");
+        let restored = restore_documentation(&raw).expect("restore");
+        let after: Config = toml::from_str(&restored.text).expect("restored parses");
+
+        // The whole settings tree, compared as one value, EXCEPT the two places
+        // the canonical template deliberately materializes an implicit default.
+        // Normalizing those two and then comparing everything else is a much
+        // stronger check than a handful of spot assertions.
+        let mut normalized = after.clone();
+        normalized.keys.bindings = before.keys.bindings.clone();
+        for (name, provider) in normalized.providers.commands.iter_mut() {
+            if before.providers.commands[name]
+                .resume_wait_timeout_ms
+                .is_none()
+                && provider.resume_wait_timeout_ms == Some(0)
+            {
+                provider.resume_wait_timeout_ms = None;
+            }
+        }
+        assert_eq!(normalized, before, "restore changed a setting");
+
+        // The two materialized defaults must be semantically neutral.
+        // 1. `[keys]` gains every default binding: an absent binding already
+        //    MEANS the default, so writing it changes nothing about behaviour —
+        //    it just makes the file say that rebinding is possible.
+        let default_bindings = render_config_default(&Config::default());
+        for action in ["quit", "new_agent", "open_palette"] {
+            assert!(
+                after.keys.bindings.contains_key(action),
+                "[keys] should have been materialized with {action}"
+            );
+            assert!(
+                default_bindings.contains(action),
+                "sanity: {action} is a real default binding"
+            );
+        }
+        // 2. `resume_wait_timeout_ms` is written as 0 where it was absent, and
+        //    the engine treats None and 0 identically (both disable the hung
+        //    -resume window).
+        assert_eq!(
+            after.providers.commands["claude"].resume_wait_timeout_ms,
+            Some(0)
+        );
+        assert_eq!(
+            after.providers.commands["opencode"].resume_wait_timeout_ms,
+            Some(3000),
+            "a real, non-default timeout must be carried through unchanged"
+        );
+
+        // And spelled out for the categories the brief calls out as real user
+        // data, so a failure says WHICH kind of data was lost.
+        assert_eq!(after.projects.len(), 6);
+        assert_eq!(
+            after.projects[0].id, "f4f758b6-daf9-4116-bc55-025fddbe1822",
+            "a project's generated identifier must survive"
+        );
+        assert_eq!(after.projects[0].name.as_deref(), Some("dux"));
+
+        // Macros, including a multi-line body.
+        assert_eq!(after.macros.entries.len(), 8);
+        let multiline = after
+            .macros
+            .entries
+            .get("Create a Pull Request")
+            .expect("multi-line macro survives");
+        assert!(
+            multiline.text.contains('\n'),
+            "the macro body lost its newlines"
+        );
+        assert!(
+            multiline
+                .text
+                .contains("Example line 2 of the placeholder body"),
+            "a later line of the multi-line body was lost: {:?}",
+            multiline.text
+        );
+
+        // Providers with their argument lists, including a user-added provider
+        // that is not one of dux's defaults.
+        let claude = after.providers.commands.get("claude").expect("claude");
+        assert_eq!(
+            claude.resume_args.as_deref(),
+            Some(&["--continue".to_string()][..])
+        );
+        assert!(
+            after.providers.commands.contains_key("cline"),
+            "a user-added provider must survive"
+        );
+
+        // Free-form values that are easy to mangle when re-rendering.
+        assert_eq!(after.server.title, "dux @ workstation");
+        assert_eq!(
+            after.defaults.start_directory.as_deref(),
+            Some("/home/user/code")
+        );
+    }
+
+    #[test]
+    fn restore_docs_drops_orphaned_sections_and_reports_them() {
+        let raw = bare_user_config();
+        assert!(raw.contains("[auth]"), "fixture precondition");
+        assert!(raw.contains("[server.acme]"), "fixture precondition");
+
+        let restored = restore_documentation(&raw).expect("restore");
+
+        assert!(
+            !restored.text.contains("[auth]"),
+            "orphaned [auth] survived"
+        );
+        assert!(
+            !restored.text.contains("acme"),
+            "orphaned [server.acme] survived"
+        );
+        // Reported, not silent.
+        assert_eq!(restored.dropped, vec!["auth", "server.acme"]);
+    }
+
+    #[test]
+    fn restore_docs_preserves_unknown_keys_that_are_not_on_the_drop_list() {
+        let raw = bare_user_config();
+        // The fixture carries three retired [server] keys that are NOT on the
+        // drop list. They must be carried over, not quietly deleted.
+        for key in [
+            "listen_addrs",
+            "insecure_allow_remote",
+            "dangerously_listen_http",
+        ] {
+            assert!(raw.contains(key), "fixture precondition: {key}");
+        }
+
+        let restored = restore_documentation(&raw).expect("restore");
+
+        for key in [
+            "listen_addrs",
+            "insecure_allow_remote",
+            "dangerously_listen_http",
+        ] {
+            assert!(
+                restored.text.contains(key),
+                "unknown key {key} was dropped:\n{}",
+                restored.text
+            );
+        }
+        assert!(
+            restored
+                .preserved
+                .contains(&"server.listen_addrs".to_string()),
+            "preserved list: {:?}",
+            restored.preserved
+        );
+    }
+
+    #[test]
+    fn restore_docs_refuses_an_unparseable_config() {
+        let broken = "[server]\nport = = 8080\n[[[nope\n";
+        let err = restore_documentation(broken).expect_err("must refuse");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("not valid TOML"),
+            "the refusal must say why: {message}"
+        );
+    }
+
+    #[test]
+    fn restore_docs_refuses_a_config_that_is_valid_toml_but_not_a_dux_config() {
+        // Valid TOML, wrong types. Regenerating from defaults here would wipe
+        // the user's real settings, so this must refuse too.
+        let wrong = "[server]\nport = \"not a number\"\n";
+        let err = restore_documentation(wrong).expect_err("must refuse");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("not as a dux config"),
+            "the refusal must say why: {message}"
+        );
+    }
+
+    #[test]
+    fn restore_docs_is_a_noop_on_an_already_canonical_config() {
+        // The existing behaviour must not regress: a file the canonical renderer
+        // produced is already fully documented, so there is nothing to restore.
+        let raw = render_config_default(&Config::default());
+        let restored = restore_documentation(&raw).expect("restore");
+        assert!(
+            restored.is_noop(&raw),
+            "a canonical config should restore to itself"
+        );
+        assert!(restored.dropped.is_empty());
+        assert!(restored.preserved.is_empty());
+    }
+
+    #[test]
+    fn restore_docs_is_idempotent() {
+        let raw = bare_user_config();
+        let once = restore_documentation(&raw).expect("first restore");
+        let twice = restore_documentation(&once.text).expect("second restore");
+        assert_eq!(
+            twice.text, once.text,
+            "restoring twice must not keep changing the file"
+        );
+        assert!(
+            twice.dropped.is_empty(),
+            "the orphans were already dropped the first time"
+        );
+    }
+
+    #[test]
+    fn a_config_created_through_the_core_writer_is_born_documented() {
+        // The regression this pins: `save_config_with` is the path the WEB uses
+        // (`dux serve` bootstrap project-sync). It used to write a bare document
+        // when the file was missing, and because the later patch path preserves
+        // comments but never ADDS them, such a config stayed bare forever.
+        install_canonical_renderer();
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        assert!(!config_path.exists());
+
+        let mut config = Config::default();
+        config.projects.push(ProjectConfig {
+            id: "project-1".to_string(),
+            path: "/home/user/project".to_string(),
+            name: Some("test".to_string()),
+            default_provider: None,
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: BTreeMap::new(),
+        });
+
+        dux_core::config_write::save_config_with(
+            &config_path,
+            &config,
+            dux_core::config_write::Durability::NoFsync,
+        )
+        .expect("save");
+
+        let written = std::fs::read_to_string(&config_path).expect("read back");
+        let comment_lines = written
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .count();
+        assert!(
+            comment_lines > 100,
+            "a freshly created config must be documented, got {comment_lines} comment lines"
+        );
+        // And it is still a correct config, not just prose.
+        let parsed: Config = toml::from_str(&written).expect("reparse");
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].id, "project-1");
+    }
+
+    #[test]
+    fn a_restored_config_keeps_its_comments_through_an_ordinary_save() {
+        // The other half of the story: restoring the documentation is worthless
+        // if the very next save strips it again. The patch path is
+        // comment-preserving, and this proves it end to end on a RESTORED file.
+        let raw = bare_user_config();
+        let restored = restore_documentation(&raw).expect("restore");
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, &restored.text).expect("seed restored config");
+
+        // An ordinary value change, saved the way the app saves.
+        let mut config: Config = toml::from_str(&restored.text).expect("parse restored");
+        config.ui.left_width_pct = 31;
+        dux_core::config_write::patch_config_file_with(
+            &config_path,
+            &config,
+            dux_core::config_write::Durability::NoFsync,
+        )
+        .expect("patch");
+
+        let after = std::fs::read_to_string(&config_path).expect("read back");
+        let parsed: Config = toml::from_str(&after).expect("reparse");
+        assert_eq!(
+            parsed.ui.left_width_pct, 31,
+            "the value change did not land"
+        );
+        // The documentation survived the save.
+        let comment_lines = after
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .count();
+        assert!(
+            comment_lines > 100,
+            "an ordinary save stripped the restored documentation ({comment_lines} left)"
+        );
+        // And so did the user's real data.
+        assert_eq!(parsed.projects.len(), 6);
+        assert_eq!(parsed.macros.entries.len(), 8);
+    }
+
+    #[test]
+    fn every_empty_table_in_a_fresh_config_ships_an_example() {
+        // A user who has no projects, no macros, and no env must still be able
+        // to learn the syntax from the file itself, without leaving it.
+        let rendered = render_config_default(&Config::default());
+        let config: Config = toml::from_str(&rendered).expect("fresh config parses");
+        assert!(config.env.is_empty(), "precondition: [env] is empty");
+        assert!(config.macros.entries.is_empty(), "precondition: no macros");
+        assert!(config.projects.is_empty(), "precondition: no projects");
+
+        // Each empty table is followed by a commented example of its own shape.
+        assert!(
+            rendered.contains("# EDITOR = \"true\""),
+            "[env] has no example"
+        );
+        assert!(
+            rendered.contains("# \"Review\" = { text ="),
+            "[macros] has no example"
+        );
+        assert!(
+            rendered.contains("# [[projects]]"),
+            "[[projects]] has no example"
+        );
+        // An empty LIST is the same dead end: allowed_hosts = [] teaches nothing
+        // about what may go in it.
+        assert!(
+            rendered.contains("allowed_hosts = []"),
+            "precondition: allowed_hosts is empty by default"
+        );
+        assert!(
+            rendered.contains("#   allowed_hosts = ["),
+            "allowed_hosts has no example of the list format"
+        );
     }
 
     #[test]

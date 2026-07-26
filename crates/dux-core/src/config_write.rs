@@ -17,7 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Table, Value};
+use toml_edit::{Array, DocumentMut, Formatted, InlineTable, Item, Key, Table, Value};
 
 /// Permission bits for `config.toml`: owner read/write only (`0600`). The file
 /// may hold secrets such as tokens under `[env]`, so it must not be group/world
@@ -124,7 +124,40 @@ pub fn save_config_with(config_path: &Path, config: &Config, durability: Durabil
     if config_path.exists() {
         patch_config_file_with(config_path, config, durability)
     } else {
-        write_config_plain_with(config_path, config, durability)
+        // FIRST CREATION. This must emit the fully-commented template, not the
+        // plain one: "the config file is the documentation" (CLAUDE.md), and the
+        // patch path that runs on every later save preserves comments but never
+        // ADDS them, so a config born bare stays bare forever. See
+        // [`render_config_documented`].
+        write_config_atomic(config_path, &render_config_documented(config), durability)
+    }
+}
+
+/// The canonical fully-commented renderer, installed by the TUI at startup.
+///
+/// It cannot live in this crate: it needs the TUI's `RuntimeBindings` to render
+/// the `[keys]` and `[macros]` comments, and `dux-core` does not depend on
+/// `dux-tui`. So the binary registers it here once and every surface that
+/// creates a config file (the TUI, and `dux server`'s bootstrap project-sync)
+/// gets the documented output from the same source.
+static CANONICAL_RENDERER: std::sync::OnceLock<fn(&Config) -> String> = std::sync::OnceLock::new();
+
+/// Install the fully-commented renderer. Idempotent; the first caller wins.
+pub fn set_canonical_renderer(renderer: fn(&Config) -> String) {
+    let _ = CANONICAL_RENDERER.set(renderer);
+}
+
+/// Render `config` with comments when a canonical renderer has been installed,
+/// falling back to the plain render otherwise.
+///
+/// The fallback is deliberate rather than a panic: a comment-free config is
+/// degraded, not broken, and `dux config restore-docs` can add the comments
+/// later. Refusing to write would lose the user's settings outright, which is a
+/// far worse failure than losing the prose.
+pub fn render_config_documented(config: &Config) -> String {
+    match CANONICAL_RENDERER.get() {
+        Some(render) => render(config),
+        None => render_config_plain(config),
     }
 }
 
@@ -708,6 +741,247 @@ fn patch_env_table(doc: &mut DocumentMut, section: &str, env: &BTreeMap<String, 
     for (name, value) in env {
         table[name] = toml_edit::value(value.as_str());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Documentation restore: merging a user's unmanaged keys into a fresh render
+// ---------------------------------------------------------------------------
+
+/// Sections dux once wrote but no longer reads. They survive in real user files
+/// only because the surgical patch path preserves unknown keys, so a config that
+/// predates their removal carries them forever.
+///
+/// Anything listed here is REMOVED by the documentation-restore merge (and the
+/// removal is reported to the user — a silent drop is data loss even when the
+/// data was inert). Everything NOT listed here is preserved verbatim: a user may
+/// hand-add keys, run a fork, or have keys from a newer dux.
+///
+/// Entries are dotted table paths. A path matches when it is equal to an entry
+/// or nested beneath one.
+pub const ORPHANED_CONFIG_SECTIONS: &[&str] = &[
+    // Removed with the HTTP-basic-auth experiment. The server is single-tenant /
+    // trusted-access by design (CLAUDE.md) and has no login of any kind.
+    "auth",
+    // Removed with the built-in ACME/TLS listener. TLS is delegated to an
+    // upstream proxy or to Tailscale.
+    "server.acme",
+];
+
+/// One step of a path through a TOML document: a table key, or an index into an
+/// array of tables (`[[projects]]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PathSeg {
+    Key(String),
+    Index(usize),
+}
+
+/// Render a path for display: `server.acme.production`, `projects[0].custom_key`.
+fn path_display(path: &[PathSeg]) -> String {
+    let mut out = String::new();
+    for seg in path {
+        match seg {
+            PathSeg::Key(k) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(k);
+            }
+            PathSeg::Index(i) => {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("[{i}]"));
+            }
+        }
+    }
+    out
+}
+
+/// The dotted TABLE path (indices elided), used for drop-list matching so that
+/// `projects[0].auth` never collides with the top-level `[auth]` section.
+fn dotted_key_path(path: &[PathSeg]) -> String {
+    let keys: Vec<&str> = path
+        .iter()
+        .map(|seg| match seg {
+            PathSeg::Key(k) => k.as_str(),
+            PathSeg::Index(_) => "[]",
+        })
+        .collect();
+    keys.join(".")
+}
+
+/// Whether `dotted` is exactly an orphaned section.
+fn is_orphan_root(dotted: &str) -> bool {
+    ORPHANED_CONFIG_SECTIONS.contains(&dotted)
+}
+
+/// What the documentation-restore merge did to a user's non-canonical content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RestoreMergeReport {
+    /// Dotted paths of orphaned sections that were removed.
+    pub dropped: Vec<String>,
+    /// Dotted paths of unknown keys that were carried over verbatim.
+    pub preserved: Vec<String>,
+}
+
+impl RestoreMergeReport {
+    pub fn is_empty(&self) -> bool {
+        self.dropped.is_empty() && self.preserved.is_empty()
+    }
+}
+
+/// Copy every key of `original` that the freshly-rendered `rendered` document
+/// does not already carry into `rendered`, EXCEPT keys under
+/// [`ORPHANED_CONFIG_SECTIONS`], which are dropped. Returns what happened.
+///
+/// This is the safety net under "restore the documentation": the canonical
+/// renderer only emits keys dux knows about, so re-rendering a user's config
+/// from its parsed [`Config`] would otherwise silently discard anything else in
+/// the file. Values are moved as `toml_edit` items, so a preserved key keeps its
+/// own formatting and its own trailing/leading comments.
+pub fn merge_unmanaged_keys(
+    rendered: &mut DocumentMut,
+    original: &DocumentMut,
+) -> RestoreMergeReport {
+    let mut report = RestoreMergeReport::default();
+    let mut carry: Vec<CarriedLeaf> = Vec::new();
+    let mut path = Vec::new();
+    collect_unmanaged(
+        original.as_table(),
+        Some(rendered.as_table()),
+        &mut path,
+        &mut carry,
+        &mut report.dropped,
+    );
+
+    for leaf in carry {
+        let display = path_display(&leaf.path);
+        if insert_at_path(rendered, &leaf.path, leaf.key, leaf.item) {
+            report.preserved.push(display);
+        }
+    }
+    report.dropped.sort();
+    report.dropped.dedup();
+    report.preserved.sort();
+    report
+}
+
+/// A key the rendered document lacks, captured with its own `Key` so that the
+/// comment attached to it (which lives on the key's decor, not the item's)
+/// travels with it into the restored file.
+struct CarriedLeaf {
+    path: Vec<PathSeg>,
+    key: Key,
+    item: Item,
+}
+
+/// Walk `orig` alongside its counterpart in the rendered document, collecting
+/// leaf keys the rendered document lacks and noting dropped orphan sections.
+fn collect_unmanaged(
+    orig: &Table,
+    rendered: Option<&Table>,
+    path: &mut Vec<PathSeg>,
+    carry: &mut Vec<CarriedLeaf>,
+    dropped: &mut Vec<String>,
+) {
+    for (key, item) in orig.iter() {
+        path.push(PathSeg::Key(key.to_string()));
+        let dotted = dotted_key_path(path);
+
+        if is_orphan_root(&dotted) {
+            // Report the section once and do not descend: everything beneath it
+            // goes away with it.
+            dropped.push(dotted);
+            path.pop();
+            continue;
+        }
+
+        match item {
+            Item::Table(table) => {
+                let counterpart = rendered.and_then(|r| r.get(key)).and_then(Item::as_table);
+                collect_unmanaged(table, counterpart, path, carry, dropped);
+            }
+            Item::ArrayOfTables(arrays) => {
+                let counterpart = rendered
+                    .and_then(|r| r.get(key))
+                    .and_then(Item::as_array_of_tables);
+                for (index, table) in arrays.iter().enumerate() {
+                    path.push(PathSeg::Index(index));
+                    collect_unmanaged(
+                        table,
+                        counterpart.and_then(|a| a.get(index)),
+                        path,
+                        carry,
+                        dropped,
+                    );
+                    path.pop();
+                }
+            }
+            leaf => {
+                let already_rendered = rendered.map(|r| r.contains_key(key)).unwrap_or(false);
+                if !already_rendered && let Some(owned_key) = orig.key(key) {
+                    carry.push(CarriedLeaf {
+                        path: path.clone(),
+                        key: owned_key.clone(),
+                        item: leaf.clone(),
+                    });
+                }
+            }
+        }
+        path.pop();
+    }
+}
+
+/// Insert `item` at `path` in `doc`, creating intermediate tables as needed.
+///
+/// Returns false when the path cannot be materialized — the only such case is an
+/// array-of-tables index the rendered document does not have (dux cannot invent
+/// a `[[projects]]` entry that the canonical renderer did not emit).
+fn insert_at_path(doc: &mut DocumentMut, path: &[PathSeg], key: Key, item: Item) -> bool {
+    let Some((PathSeg::Key(_), parents)) = path.split_last() else {
+        return false;
+    };
+
+    let mut table: &mut Table = doc.as_table_mut();
+    let mut step = 0;
+    while step < parents.len() {
+        let PathSeg::Key(key) = &parents[step] else {
+            // An index never leads a path: it always follows the key naming the
+            // array it indexes into.
+            return false;
+        };
+
+        if let Some(PathSeg::Index(index)) = parents.get(step + 1) {
+            // `key[index]` — descend into an existing array-of-tables entry. dux
+            // cannot invent an entry the canonical renderer did not emit, so a
+            // missing array or index means "cannot preserve here".
+            let Some(arrays) = table.get_mut(key).and_then(Item::as_array_of_tables_mut) else {
+                return false;
+            };
+            let Some(next) = arrays.get_mut(*index) else {
+                return false;
+            };
+            table = next;
+            step += 2;
+            continue;
+        }
+
+        // Plain table step, creating an implicit table when absent. An implicit
+        // table emits no `[header]` line of its own, so a synthetic parent that
+        // exists only to hold a preserved leaf adds no stray empty section.
+        let entry = table.entry(key).or_insert_with(|| {
+            let mut fresh = Table::new();
+            fresh.set_implicit(true);
+            Item::Table(fresh)
+        });
+        let Some(next) = entry.as_table_mut() else {
+            return false;
+        };
+        table = next;
+        step += 1;
+    }
+
+    // `insert_formatted` (rather than `insert`) is what carries the key's own
+    // decor — including any comment written above it — into the restored file.
+    table.insert_formatted(&key, item);
+    true
 }
 
 /// Escape triple-quotes in a TOML multiline basic string.
@@ -1439,6 +1713,119 @@ unknown_key = \"untouched\"
         assert_eq!(parsed.env.get("FOO").map(String::as_str), Some("bar"));
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "project-1");
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_unmanaged_keys
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_preserves_an_unknown_key_and_drops_an_orphaned_section() {
+        let original: DocumentMut = "\
+[server]
+port = 8080
+listen_addrs = []
+
+[server.acme]
+enabled = false
+production = true
+
+[auth]
+users = []
+
+[my_fork_section]
+knob = 42
+"
+        .parse()
+        .expect("parse original");
+        let mut rendered: DocumentMut = "[server]\nport = 8080\n".parse().expect("parse rendered");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        let out = rendered.to_string();
+        // Unknown keys survive verbatim, whether beside a managed key or in a
+        // section dux has never heard of.
+        assert!(out.contains("listen_addrs = []"), "out:\n{out}");
+        assert!(out.contains("knob = 42"), "out:\n{out}");
+        // Orphaned sections are gone.
+        assert!(!out.contains("acme"), "out:\n{out}");
+        assert!(!out.contains("users"), "out:\n{out}");
+        // And their removal is reported, not silent.
+        assert_eq!(report.dropped, vec!["auth", "server.acme"]);
+        assert_eq!(
+            report.preserved,
+            vec!["my_fork_section.knob", "server.listen_addrs"]
+        );
+        // The merged document is still valid TOML.
+        let _: toml_edit::DocumentMut = out.parse().expect("merged output re-parses");
+    }
+
+    #[test]
+    fn merge_reports_nothing_when_the_render_already_covers_everything() {
+        let original: DocumentMut = "[server]\nport = 8080\n".parse().expect("parse");
+        let mut rendered: DocumentMut = "# doc\n[server]\nport = 8080\n".parse().expect("parse");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        assert!(report.is_empty(), "unexpected report: {report:?}");
+        assert!(rendered.to_string().contains("# doc"));
+    }
+
+    #[test]
+    fn merge_preserves_an_unknown_key_inside_an_array_of_tables() {
+        // A hand-added key inside a `[[projects]]` block must survive, because
+        // the canonical renderer only emits the project fields dux knows.
+        let original: DocumentMut = "\
+[[projects]]
+id = \"a\"
+custom_note = \"do not lose me\"
+
+[[projects]]
+id = \"b\"
+"
+        .parse()
+        .expect("parse original");
+        let mut rendered: DocumentMut = "[[projects]]\nid = \"a\"\n\n[[projects]]\nid = \"b\"\n"
+            .parse()
+            .expect("parse rendered");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        let out = rendered.to_string();
+        assert!(
+            out.contains("custom_note = \"do not lose me\""),
+            "out:\n{out}"
+        );
+        assert_eq!(report.preserved, vec!["projects[0].custom_note"]);
+        assert!(report.dropped.is_empty());
+    }
+
+    #[test]
+    fn merge_does_not_confuse_a_nested_auth_key_with_the_orphaned_auth_section() {
+        // The drop-list matches TABLE paths. A key called `auth` nested inside a
+        // live section is a user key and must be preserved, not dropped.
+        let original: DocumentMut = "[server]\nauth = \"token\"\n".parse().expect("parse");
+        let mut rendered: DocumentMut = "[server]\nport = 8080\n".parse().expect("parse");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        assert!(rendered.to_string().contains("auth = \"token\""));
+        assert_eq!(report.preserved, vec!["server.auth"]);
+        assert!(report.dropped.is_empty());
+    }
+
+    #[test]
+    fn merge_preserves_a_comment_attached_to_an_unknown_key() {
+        let original: DocumentMut = "[server]\n# why this knob exists\nfork_knob = 3\n"
+            .parse()
+            .expect("parse");
+        let mut rendered: DocumentMut = "[server]\nport = 8080\n".parse().expect("parse");
+
+        merge_unmanaged_keys(&mut rendered, &original);
+
+        let out = rendered.to_string();
+        assert!(out.contains("# why this knob exists"), "out:\n{out}");
+        assert!(out.contains("fork_knob = 3"), "out:\n{out}");
     }
 
     #[test]
