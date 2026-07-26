@@ -5183,31 +5183,53 @@ impl App {
                 let move_up = self.bindings.label_for(Action::MoveUp);
                 let search_key = self.bindings.label_for(Action::SearchToggle);
                 let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&search_key));
-                bottom_spans.push(Span::styled(
-                    " search  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " choose  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
+                if list.searching {
+                    // Search mode takes over most of this vocabulary: the
+                    // vertical and search keys are plain characters that the
+                    // filter now swallows, and the close key leaves search
+                    // instead of cancelling. Only the confirm key still means
+                    // what it says. The two filterable peers (the project
+                    // browser and the kill-running dialog) swap the same way;
+                    // they say `done` where this one says `choose`, because
+                    // their confirm ends the search while this one PICKS the
+                    // highlighted row.
+                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                    bottom_spans.push(Span::styled(
+                        " choose  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                    bottom_spans.push(Span::styled(
+                        " clear",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                } else {
+                    bottom_spans.extend(self.theme.key_badge_default(&move_down));
+                    bottom_spans.push(Span::styled(
+                        " down  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    bottom_spans.extend(self.theme.key_badge_default(&move_up));
+                    bottom_spans.push(Span::styled(
+                        " up  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    bottom_spans.extend(self.theme.key_badge_default(&search_key));
+                    bottom_spans.push(Span::styled(
+                        " search  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
+                    bottom_spans.push(Span::styled(
+                        " choose  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                    bottom_spans.extend(self.theme.key_badge_default(&close_key));
+                    bottom_spans.push(Span::styled(
+                        " cancel",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
 
                 let [details_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
@@ -7542,6 +7564,20 @@ impl App {
             _ => return,
         };
 
+        // The nested delete-confirm is a small box painted over the still-drawn
+        // list, so the list's footer would otherwise stay readable below it,
+        // advertising four keys the confirm has taken over: the new and delete
+        // keys do nothing, and the confirm and close keys mean Delete and
+        // Cancel. Its peers (Delete Terminal, Close Tab, Discard File) render
+        // no footer at all, so this one renders none either.
+        let delete_confirm_open = matches!(
+            &self.prompt,
+            PromptState::EditMacros {
+                pending_delete: Some(_),
+                ..
+            }
+        );
+
         self.render_dim_overlay(frame);
         self.clear_overlay_area(frame, popup);
 
@@ -7585,8 +7621,10 @@ impl App {
                 ])
                 .render(msg_area, frame.buffer_mut());
 
-                Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
-                    .render(hint_area, frame.buffer_mut());
+                if !delete_confirm_open {
+                    Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
+                        .render(hint_area, frame.buffer_mut());
+                }
             } else {
                 let [list_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
@@ -7645,8 +7683,10 @@ impl App {
                     offset: state.offset(),
                 };
 
-                Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
-                    .render(hint_area, frame.buffer_mut());
+                if !delete_confirm_open {
+                    Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
+                        .render(hint_area, frame.buffer_mut());
+                }
                 self.overlay_layout.active = list_layout;
             }
         }
@@ -14714,6 +14754,125 @@ mod tests {
         assert!(
             footer.contains("Ctrl-t") && footer.contains("Ctrl-x"),
             "the footer must name the rebound keys, got {footer:?}"
+        );
+    }
+
+    /// The project chooser's footer is state-aware, like its two filterable
+    /// peers (the project browser and the kill-running dialog).
+    ///
+    /// It used to be built unconditionally, so while the search row was up it
+    /// still read `<j> down  <k> up  </> search  <Enter> choose  <Esc> cancel`
+    /// even though `j`, `k` and `/` were all being typed into the filter and
+    /// Escape was leaving search rather than cancelling. Only two of its five
+    /// segments survive contact with search mode, so only those two are drawn.
+    ///
+    /// Note the deliberate difference from the two peers: they say
+    /// `<Enter> done`, but this chooser's confirm key PICKS the highlighted row
+    /// (pinned by `pick_project_confirm_picks_the_highlighted_row_while_searching`),
+    /// so it says `choose`. Matching their wording would have been a new lie.
+    #[test]
+    fn the_project_chooser_footer_is_state_aware_while_searching() {
+        /// The chooser's footer, read off the bottom border of its header block.
+        fn footer(app: &mut App) -> String {
+            let buf = render_to_buffer(app);
+            let area = super::centered_rect(72, 58, buf.area);
+            let y = area.y + 2;
+            ((area.x + 1)..(area.x + area.width - 1))
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        }
+
+        let mut app = test_app(default_bindings());
+        app.open_project_chooser(ProjectChooserIntent::NewAgent)
+            .expect("open the project chooser");
+
+        let resting = footer(&mut app);
+        for word in ["down", "up", "search", "choose", "cancel"] {
+            assert!(
+                resting.contains(word),
+                "the resting footer must still name {word}, got {resting:?}"
+            );
+        }
+
+        // Turn the search row on the way a user does.
+        let search_key = app
+            .bindings
+            .first_key_reaching(Action::SearchToggle, |_| true)
+            .expect("a search binding");
+        app.handle_key(press(search_key)).expect("begin search");
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::PickProject {
+                    list: super::SearchableList {
+                        searching: true,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "the search row must be up or this test proves nothing"
+        );
+
+        let searching = footer(&mut app);
+        for dead in ["down", "up", "search", "cancel"] {
+            assert!(
+                !searching.contains(dead),
+                "the search footer must not promise {dead}, got {searching:?}"
+            );
+        }
+        assert!(
+            searching.contains("choose") && searching.contains("clear"),
+            "the search footer must name what the two live keys do, got {searching:?}"
+        );
+    }
+
+    /// The nested delete-confirm is a small box painted OVER the still-drawn
+    /// macro list, so the list's footer stayed readable below it and every
+    /// word of it was false: the new-macro and delete-macro keys are dead
+    /// while the confirm is up, and the confirm/close keys mean Delete/Cancel
+    /// rather than edit/close. Its peer confirmations (Delete Terminal, Close
+    /// Tab, Discard File) render no footer at all, so this one renders none
+    /// either.
+    #[test]
+    fn the_macro_delete_confirm_hides_the_footer_it_contradicts() {
+        let mut app = macro_list_app(default_bindings());
+        let delete_key = app
+            .bindings
+            .first_key_reaching(Action::DeleteMacro, |_| true)
+            .expect("a delete-macro binding");
+        let new_key = app
+            .bindings
+            .first_key_reaching(Action::NewMacro, |_| true)
+            .expect("a new-macro binding");
+        app.handle_key(press(delete_key)).expect("stage the delete");
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::EditMacros {
+                    pending_delete: Some(_),
+                    ..
+                }
+            ),
+            "the delete-confirm must be up or this test proves nothing"
+        );
+
+        // The two keys the footer advertises really are dead while the confirm
+        // is up, which is what makes leaving the footer on screen a lie.
+        let before = format!("{:?}", app.prompt);
+        app.handle_key(press(new_key)).expect("new macro");
+        app.handle_key(press(delete_key)).expect("delete macro");
+        assert_eq!(
+            format!("{:?}", app.prompt),
+            before,
+            "neither advertised key does anything while the delete-confirm is up"
+        );
+
+        let buf = render_to_buffer(&mut app);
+        assert_eq!(
+            macro_modal_footer(&buf).trim(),
+            "",
+            "the macro list's footer must not stay readable under the delete-confirm"
         );
     }
 
