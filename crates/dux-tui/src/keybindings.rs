@@ -1217,6 +1217,16 @@ pub const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::ClearTextField,
+        default_keys: &[key!(ctrl - d)],
+        scopes: &[BindingScope::Dialog, BindingScope::CommitInput],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Empty the focused full-text field",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::DebugInput,
         default_keys: &[],
         scopes: &[],

@@ -131,7 +131,8 @@ buttons all at once, and every one of them is a focus stop:
   `confirm` (**Enter** by default) while the field has focus,
   `engage_commit_input` (**i** by default), and a double click on the field.
   Leave edit mode with `exit_commit_input` (**Esc** or **Ctrl-G**), which keeps
-  the form open and your text intact. Typing on an unengaged field does
+  the form open and your text intact. `clear_text_field` (**Ctrl-D** by
+  default) empties the field. Typing on an unengaged field does
   nothing: the footer names the key that starts editing, and the field draws no
   caret until it is really taking your keystrokes.
 - **Esc** outside the text field's edit mode cancels the edit and writes

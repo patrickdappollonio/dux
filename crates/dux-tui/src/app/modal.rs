@@ -212,6 +212,9 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // carry a pair and no longer do; the cue their Apply button carried (it
         // greyed out when the highlighted row was already the active provider)
         // moved onto the row itself, see `render::ACTIVE_PROVIDER_MARKER`.
+        // The three near-identical handlers they left behind are now one,
+        // `App::handle_provider_picker_key`, reached through
+        // `super::input::provider_picker_kind`.
         PromptState::Command { .. }
         | PromptState::BrowseProjects { .. }
         | PromptState::PickEditor { .. }

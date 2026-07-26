@@ -4615,7 +4615,7 @@ impl App {
                             self.bindings.labels_for(Action::ExitCommitInput),
                             "stop editing",
                         ),
-                        Hint::key("Ctrl-d", "clear"),
+                        Hint::key(self.bindings.label_for(Action::ClearTextField), "clear"),
                     ]
                 } else {
                     let mut hints = vec![Hint::maybe_key(
@@ -4632,7 +4632,10 @@ impl App {
                         ));
                     }
                     hints.push(Hint::plain("Space act on focus"));
-                    hints.push(Hint::key("Ctrl-d", "clear"));
+                    hints.push(Hint::key(
+                        self.bindings.label_for(Action::ClearTextField),
+                        "clear",
+                    ));
                     hints.push(Hint::key(close_key, "cancel"));
                     hints
                 };
@@ -4664,7 +4667,12 @@ impl App {
                     " search  ",
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
-                bottom_spans.extend(self.theme.key_badge_default("PgUp/PgDn"));
+                let page_keys = format!(
+                    "{}/{}",
+                    self.bindings.label_for(Action::ScrollPageUp),
+                    self.bindings.label_for(Action::ScrollPageDown)
+                );
+                bottom_spans.extend(self.theme.key_badge_default(&page_keys));
                 bottom_spans.push(Span::styled(
                     " scroll  ",
                     Style::default().fg(self.theme.hint_desc_fg),
@@ -7855,7 +7863,7 @@ impl App {
                     self.bindings.labels_for(Action::ExitCommitInput),
                     "stop editing",
                 ),
-                Hint::key("Ctrl-d", "clear"),
+                Hint::key(self.bindings.label_for(Action::ClearTextField), "clear"),
             ]
         } else {
             let mut hints = vec![Hint::maybe_key(
@@ -8823,7 +8831,11 @@ impl App {
         let mut spans = vec![Span::raw(" ")];
         spans.extend(self.theme.key_badge_default(&close_key));
         spans.push(Span::styled(" close  ", desc_style));
-        spans.extend(self.theme.key_badge_default("Enter"));
+        // Resolved, not hardcoded: the handler answers to `Action::Confirm`,
+        // so the badge has to follow a rebind. "Scroll" below is a mouse
+        // gesture and has no binding to look up.
+        let expand_key = self.bindings.label_for(Action::Confirm);
+        spans.extend(self.theme.key_badge_default(&expand_key));
         spans.push(Span::styled(" expand/collapse  ", desc_style));
         spans.extend(self.theme.key_badge_default("Scroll"));
         spans.push(Span::styled(" navigate  ", desc_style));

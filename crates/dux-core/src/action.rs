@@ -128,6 +128,8 @@ pub enum Action {
     NewMacro,
     /// Delete the highlighted macro from the macro list.
     DeleteMacro,
+    /// Empty the focused full-text field in a modal.
+    ClearTextField,
     DebugInput,
     ToggleDiffLineNumbers,
     ResourceMonitor,
@@ -269,6 +271,7 @@ impl Action {
             Action::EditMacros => "edit_macros",
             Action::NewMacro => "new_macro",
             Action::DeleteMacro => "delete_macro",
+            Action::ClearTextField => "clear_text_field",
             Action::DebugInput => "debug_input",
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
@@ -421,6 +424,7 @@ impl Action {
             Action::EditMacros => "Open the text macros editor.",
             Action::NewMacro => "Create a new macro from the macro list.",
             Action::DeleteMacro => "Delete the highlighted macro from the macro list.",
+            Action::ClearTextField => "Empty the focused full-text field in a modal.",
             Action::DebugInput => "Open input event debugger to inspect keyboard and mouse events.",
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
@@ -572,7 +576,8 @@ impl Action {
             | Action::ToggleSelection
             | Action::ToggleMarked
             | Action::NewMacro
-            | Action::DeleteMacro => Some("Overlays"),
+            | Action::DeleteMacro
+            | Action::ClearTextField => Some("Overlays"),
             Action::KillRunning
             | Action::EditConfig
             | Action::RenameWebInstance

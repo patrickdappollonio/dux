@@ -435,6 +435,28 @@ fn scroll_startup_command_log(
     }
 }
 
+/// Which of the three provider pickers is open.
+///
+/// They are the same modal three times over: the same rows, the same footer,
+/// the same key vocabulary. The only thing that differs is which `apply_*`
+/// the confirm key reaches, so that is all this enum carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProviderPickerKind {
+    Agent,
+    GlobalDefault,
+    ProjectDefault,
+}
+
+/// The open provider picker, or `None` when the open modal is something else.
+pub(super) fn provider_picker_kind(prompt: &PromptState) -> Option<ProviderPickerKind> {
+    match prompt {
+        PromptState::ChangeAgentProvider(_) => Some(ProviderPickerKind::Agent),
+        PromptState::ChangeDefaultProvider(_) => Some(ProviderPickerKind::GlobalDefault),
+        PromptState::ChangeProjectDefaultProvider(_) => Some(ProviderPickerKind::ProjectDefault),
+        _ => None,
+    }
+}
+
 impl App {
     /// The one quit path: ask for confirmation while anything is still running,
     /// otherwise quit outright. Returns whether the run loop should exit.
@@ -1305,7 +1327,10 @@ impl App {
             | PromptState::ConfigureGlobalEnv { input, .. } => Some(input),
             _ => None,
         } {
-            if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if matches!(
+                self.bindings.lookup(&key, BindingScope::CommitInput),
+                Some(Action::ClearTextField)
+            ) {
                 input.clear();
             } else {
                 input.handle_key(key);
@@ -2194,7 +2219,16 @@ impl App {
             ..
         } = &mut self.prompt
         {
-            if key.code == KeyCode::Esc {
+            // The footer names `Action::CloseOverlay`, so the handler has to
+            // answer to it: a hardcoded `Esc` here meant the modal advertised
+            // one key and obeyed another the moment anyone rebound it. `Esc`
+            // stays wired unconditionally as well, the same escape hatch the
+            // input debugger keeps, so a broken rebind cannot trap the user.
+            let action = self
+                .bindings
+                .lookup(&key, BindingScope::Dialog)
+                .or_else(|| self.bindings.lookup(&key, BindingScope::Palette));
+            if key.code == KeyCode::Esc || matches!(action, Some(Action::CloseOverlay)) {
                 self.prompt = PromptState::None;
                 return Ok(false);
             }
@@ -2219,7 +2253,9 @@ impl App {
                 KeyCode::End => {
                     *selected_row = max_row;
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => {
+                _ if matches!(action, Some(Action::Confirm))
+                    || matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')) =>
+                {
                     if let Some(VisualRow::Parent(idx)) = visual.get(*selected_row) {
                         let stat = &rows[*idx];
                         // `has_breakdown()`, not `!children.is_empty()`: a leaf
@@ -2789,71 +2825,12 @@ impl App {
 
         // The three provider pickers are rows and nothing else: no Cancel, no
         // Apply, so no focus concept and no Tab. The close key cancels and the
-        // confirm key picks, which is what their footers say.
-        if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-
-            match palette_action.or(dialog_action) {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                }
-                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                    prompt.selected += 1;
-                }
-                Some(Action::MoveUp) if prompt.selected > 0 => {
-                    prompt.selected -= 1;
-                }
-                Some(Action::Confirm) => {
-                    self.apply_change_agent_provider()?;
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ChangeDefaultProvider(prompt) = &mut self.prompt {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-
-            match palette_action.or(dialog_action) {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                }
-                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                    prompt.selected += 1;
-                }
-                Some(Action::MoveUp) if prompt.selected > 0 => {
-                    prompt.selected -= 1;
-                }
-                Some(Action::Confirm) => {
-                    self.apply_change_default_provider()?;
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-
-        if let PromptState::ChangeProjectDefaultProvider(prompt) = &mut self.prompt {
-            let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
-            let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-
-            match palette_action.or(dialog_action) {
-                Some(Action::CloseOverlay) => {
-                    self.prompt = PromptState::None;
-                }
-                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                    prompt.selected += 1;
-                }
-                Some(Action::MoveUp) if prompt.selected > 0 => {
-                    prompt.selected -= 1;
-                }
-                Some(Action::Confirm) => {
-                    self.apply_change_project_default_provider()?;
-                }
-                _ => {}
-            }
-            return Ok(false);
+        // confirm key picks, which is what their footers say. They were three
+        // byte-for-byte identical handlers differing only in which `apply_*`
+        // the confirm key reached; they are ONE handler now, so a change to
+        // the picker vocabulary cannot land on two of the three.
+        if let Some(which) = provider_picker_kind(&self.prompt) {
+            return self.handle_provider_picker_key(key, which);
         }
 
         if let PromptState::ChangeTheme(prompt) = &mut self.prompt {
@@ -3745,6 +3722,64 @@ impl App {
         }
     }
 
+    /// The one handler behind all three provider pickers.
+    ///
+    /// A Picker's vertical keys move a SELECTION (a value), the close key
+    /// cancels and the confirm key picks. Only the last of those differs
+    /// between the three, and it differs by exactly one call.
+    fn handle_provider_picker_key(
+        &mut self,
+        key: KeyEvent,
+        which: ProviderPickerKind,
+    ) -> Result<bool> {
+        let action = self
+            .bindings
+            .lookup(&key, BindingScope::Palette)
+            .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
+        match action {
+            Some(Action::CloseOverlay) => {
+                self.prompt = PromptState::None;
+            }
+            Some(Action::MoveDown) => self.move_provider_picker_selection(true),
+            Some(Action::MoveUp) => self.move_provider_picker_selection(false),
+            Some(Action::Confirm) => match which {
+                ProviderPickerKind::Agent => self.apply_change_agent_provider()?,
+                ProviderPickerKind::GlobalDefault => self.apply_change_default_provider()?,
+                ProviderPickerKind::ProjectDefault => {
+                    self.apply_change_project_default_provider()?
+                }
+            },
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    /// Step the open provider picker's selection cursor, clamped at both ends.
+    fn move_provider_picker_selection(&mut self, forward: bool) {
+        let (selected, len) = match &mut self.prompt {
+            PromptState::ChangeAgentProvider(prompt) => {
+                let len = prompt.options.len();
+                (&mut prompt.selected, len)
+            }
+            PromptState::ChangeDefaultProvider(prompt) => {
+                let len = prompt.options.len();
+                (&mut prompt.selected, len)
+            }
+            PromptState::ChangeProjectDefaultProvider(prompt) => {
+                let len = prompt.options.len();
+                (&mut prompt.selected, len)
+            }
+            _ => return,
+        };
+        if forward {
+            if *selected + 1 < len {
+                *selected += 1;
+            }
+        } else if *selected > 0 {
+            *selected -= 1;
+        }
+    }
+
     fn handle_edit_macros_key(&mut self, key: KeyEvent) -> Result<bool> {
         if matches!(
             self.prompt,
@@ -3877,8 +3912,12 @@ impl App {
                 self.input_target = InputTarget::None;
                 return Ok(false);
             }
+            let clear = matches!(
+                self.bindings.lookup(&key, BindingScope::CommitInput),
+                Some(Action::ClearTextField)
+            );
             if let Some(state) = self.macro_edit_state_mut() {
-                if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if clear {
                     state.text_input.clear();
                 } else {
                     state.text_input.handle_key(key);
@@ -3982,7 +4021,10 @@ impl App {
 
         // Clearing the body is reachable from every focus stop, as it was
         // before the modal had more than one.
-        if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if matches!(
+            self.bindings.lookup(&key, BindingScope::Dialog),
+            Some(Action::ClearTextField)
+        ) {
             if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
                 input.clear();
             }
@@ -21498,6 +21540,186 @@ cyan = "#00ffff"
     }
 
     // ══════════════════════════════════════════════════════════════════════
+    // Change B5: "Ctrl-d" was a hardcoded literal in two hint bars and three
+    // key handlers. Bindings are user-configurable, so the hint lied the
+    // moment anyone rebound it, and there was nothing to rebind, because the
+    // handlers matched the chord by hand. It is `Action::ClearTextField` now.
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn clearing_a_full_text_field_follows_its_binding() {
+        let bindings = bindings_with_overrides(&[(Action::ClearTextField, &["ctrl-u"])]);
+        let mut app = test_app(bindings);
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "project-1".to_string(),
+            project_name: "demo".to_string(),
+            input: TextInput::with_text("npm install".to_string()).with_multiline(6),
+            focus: ConfigureFieldFocus::default(),
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .expect("handle rebound clear");
+        let PromptState::ConfigureStartupCommand { ref input, .. } = app.prompt else {
+            panic!("prompt changed");
+        };
+        assert!(
+            input.text.is_empty(),
+            "the rebound clear key must empty the field, got {:?}",
+            input.text
+        );
+    }
+
+    #[test]
+    fn clearing_the_macro_body_follows_its_binding_while_engaged() {
+        let bindings = bindings_with_overrides(&[(Action::ClearTextField, &["ctrl-u"])]);
+        let mut app = test_app(bindings);
+        app.prompt = PromptState::EditMacros {
+            entries: Vec::new(),
+            selected: 0,
+            editing: Some(MacroEditState {
+                id: None,
+                name_input: TextInput::new(),
+                text_input: TextInput::with_text("hello".to_string()).with_multiline(8),
+                surface: crate::config::MacroSurface::Both,
+                focus: MacroEditFocus::Text,
+            }),
+            pending_delete: None,
+        };
+        app.input_target = InputTarget::MacroText;
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .expect("handle rebound clear");
+        let PromptState::EditMacros {
+            editing: Some(ref state),
+            ..
+        } = app.prompt
+        else {
+            panic!("prompt changed");
+        };
+        assert!(
+            state.text_input.text.is_empty(),
+            "the rebound clear key must empty the macro body, got {:?}",
+            state.text_input.text
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Change B1: the resource monitor advertised a key its handler ignored.
+    //
+    // Its footer is built from `label_for(Action::CloseOverlay)`, but the
+    // handler matched a literal `KeyCode::Esc`. Rebind the close key and the
+    // modal names a key that does nothing while the key that works is unnamed.
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn resource_monitor_prompt() -> PromptState {
+        PromptState::ResourceMonitor {
+            rows: Vec::new(),
+            scroll_offset: 0,
+            selected_row: 0,
+            expanded: std::collections::HashSet::new(),
+            last_refresh: std::time::Instant::now(),
+            short_window_sample: false,
+        }
+    }
+
+    #[test]
+    fn the_resource_monitor_closes_on_the_key_its_footer_names() {
+        let mut app = test_app(bindings_with_overrides(&[(
+            Action::CloseOverlay,
+            &["ctrl-q"],
+        )]));
+        app.prompt = resource_monitor_prompt();
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+            .expect("handle rebound close");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the resource monitor must honour the close key it advertises"
+        );
+    }
+
+    /// Esc stays wired as well, unconditionally: a broken or hostile rebind
+    /// must never be able to trap the user inside a full-screen report.
+    #[test]
+    fn the_resource_monitor_keeps_escape_as_a_hardcoded_way_out() {
+        let mut app = test_app(bindings_with_overrides(&[(
+            Action::CloseOverlay,
+            &["ctrl-q"],
+        )]));
+        app.prompt = resource_monitor_prompt();
+        tap(&mut app, KeyCode::Esc);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Change B4: the three provider pickers are ONE handler
+    //
+    // A previous phase removed their Cancel/Apply buttons but left three
+    // byte-identical key handlers behind. This pins that the three answer the
+    // same vocabulary identically, so the next edit cannot land on two of the
+    // three. (It PASSED before the consolidation: the duplication was a
+    // maintainability defect, not a behavioural one.)
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn the_three_provider_pickers_answer_the_same_keys_identically() {
+        let project = {
+            let app = test_app(default_bindings());
+            app.engine.projects[0].clone()
+        };
+        let cases: Vec<(&str, PromptState)> = vec![
+            (
+                "ChangeAgentProvider",
+                PromptState::ChangeAgentProvider(agent_provider_prompt()),
+            ),
+            (
+                "ChangeDefaultProvider",
+                PromptState::ChangeDefaultProvider(default_provider_prompt()),
+            ),
+            (
+                "ChangeProjectDefaultProvider",
+                PromptState::ChangeProjectDefaultProvider(project_default_provider_prompt(
+                    project.id.clone(),
+                    project.name.clone(),
+                )),
+            ),
+        ];
+        let selection = |app: &App| -> usize {
+            match &app.prompt {
+                PromptState::ChangeAgentProvider(p) => p.selected,
+                PromptState::ChangeDefaultProvider(p) => p.selected,
+                PromptState::ChangeProjectDefaultProvider(p) => p.selected,
+                other => panic!("expected a provider picker, got {other:?}"),
+            }
+        };
+        for (name, prompt) in cases {
+            let mut app = test_app(bindings_with_overrides(&[
+                (Action::MoveDown, &["ctrl-n"]),
+                (Action::MoveUp, &["ctrl-e"]),
+                (Action::CloseOverlay, &["ctrl-q"]),
+            ]));
+            app.prompt = prompt.clone();
+            assert_eq!(selection(&app), 0, "{name}: starts on the first row");
+            app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+                .expect("move down");
+            assert_eq!(selection(&app), 1, "{name}: the bound key moves down");
+            // Clamped at the end, never wrapped.
+            app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+                .expect("move down at the end");
+            assert_eq!(selection(&app), 1, "{name}: the last row is the last row");
+            app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+                .expect("move up");
+            assert_eq!(selection(&app), 0, "{name}: the bound key moves up");
+            app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+                .expect("move up at the top");
+            assert_eq!(selection(&app), 0, "{name}: the first row is the first row");
+            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+                .expect("close");
+            assert!(
+                matches!(app.prompt, PromptState::None),
+                "{name}: the bound close key cancels the picker"
+            );
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     // Change B3: nine confirmations now name their focus
     //
     // They carried `confirm_selected: bool`. Two states is the right
@@ -21627,5 +21849,44 @@ cyan = "#00ffff"
         assert_eq!(ConfirmFocus::Confirm.toggled(), ConfirmFocus::Cancel);
         assert!(!ConfirmFocus::Cancel.is_confirm());
         assert!(ConfirmFocus::Confirm.is_confirm());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Change B2 (as a FINDING): `PromptState::StartupCommandLogs` is not the
+    // startup-log surface a user ever sees.
+    //
+    // The brief asked for a focus concept on this modal. It has none, and it
+    // has four interactive regions, so on the face of it the rule bites. But
+    // NOTHING outside `#[cfg(test)]` ever assigns this variant: the whole
+    // "read startup command logs" journey ends in the FULLSCREEN viewer
+    // (`FullscreenOverlay::StartupLog` + `App::startup_log_viewer`), which is
+    // deliberately not a `PromptState` variant at all (see `modal.rs`'s module
+    // docs). Giving a modal no user can open a focus model would be churn, and
+    // deleting a dead surface is a call for the owner, not for this change.
+    // This test pins where the journey really lands, so the claim above is
+    // measured rather than asserted.
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn the_startup_log_journey_opens_the_fullscreen_viewer_not_the_modal() {
+        let mut app = test_app(default_bindings());
+        app.apply_reaction(dux_core::engine::EventReaction::StartupLogArrived {
+            scope_label: "project \"demo\"".to_string(),
+            log: crate::startup::StartupCommandLatestLog {
+                path: None,
+                display_name: "run.log".to_string(),
+                content: "line one\nline two\n".to_string(),
+            },
+        });
+        assert!(
+            matches!(app.fullscreen_overlay, FullscreenOverlay::StartupLog),
+            "the log journey lands in the fullscreen viewer"
+        );
+        assert!(app.startup_log_viewer.is_some());
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "and never in PromptState::StartupCommandLogs, which nothing in \
+             production constructs"
+        );
     }
 }

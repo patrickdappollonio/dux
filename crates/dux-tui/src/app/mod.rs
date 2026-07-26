@@ -1318,6 +1318,23 @@ pub(crate) enum PromptState {
         focus: ConfigureFieldFocus,
     },
     #[allow(dead_code)]
+    /// The windowed startup-log browser.
+    ///
+    /// **Nothing outside `#[cfg(test)]` constructs this today.** The
+    /// "read startup command logs" journey resolves
+    /// `EventReaction::StartupLogArrived`, which opens the FULLSCREEN viewer
+    /// (`FullscreenOverlay::StartupLog` + [`App::startup_log_viewer`])
+    /// instead, so this modal is unreachable from the UI. It still renders and
+    /// still handles keys, and the modal registry still covers it, but do not
+    /// read a green suite here as evidence that a user can open it. Pinned by
+    /// `input::tests::the_startup_log_journey_opens_the_fullscreen_viewer_not_the_modal`.
+    ///
+    /// Consequence worth knowing before "fixing" it: it has four interactive
+    /// regions (the filter, the Runs list, the Output body, the Close button)
+    /// and no focus concept, so its Close button is unreachable by keyboard.
+    /// That is a real gap in a surface no user can reach; whether to wire a
+    /// focus model or delete the variant is an owner's decision, not a
+    /// tidy-up.
     StartupCommandLogs(StartupCommandLogPrompt),
     /// The project chooser: lists every project (agent-less included) so a
     /// project-scoped action can target one when the flat agent list has no
