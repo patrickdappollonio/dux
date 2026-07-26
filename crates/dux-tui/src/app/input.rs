@@ -448,7 +448,7 @@ impl App {
             self.prompt = PromptState::ConfirmQuit {
                 agent_count,
                 terminal_count,
-                confirm_selected: false,
+                focus: ConfirmFocus::Cancel,
             };
             return false;
         }
@@ -1447,7 +1447,7 @@ impl App {
         // time (see `resolve_confirm_discard_file`), so nothing here can go stale.
         self.prompt = PromptState::ConfirmDiscardFile {
             file_path: file.path.clone(),
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         };
         Ok(())
     }
@@ -3179,14 +3179,14 @@ impl App {
                     );
                 }
                 Some(Action::ToggleSelection) => {
-                    confirm_prompt.confirm_selected = !confirm_prompt.confirm_selected;
+                    confirm_prompt.focus = confirm_prompt.focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = confirm_prompt.confirm_selected;
+                    let confirm = confirm_prompt.focus.is_confirm();
                     return Ok(self.resolve_confirm_kill_running(confirm));
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = confirm_prompt.confirm_selected;
+                    let confirm = confirm_prompt.focus.is_confirm();
                     return Ok(self.resolve_confirm_kill_running(confirm));
                 }
                 _ => {}
@@ -3252,84 +3252,72 @@ impl App {
             return Ok(false);
         }
 
-        if let PromptState::ConfirmDeleteTerminal {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmDeleteTerminal { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_delete_terminal(confirm));
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_delete_terminal(confirm));
                 }
                 _ => {}
             }
         }
 
-        if let PromptState::ConfirmCloseTab {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmCloseTab { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_close_tab(confirm));
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_close_tab(confirm));
                 }
                 _ => {}
             }
         }
 
-        if let PromptState::ConfirmQuit {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmQuit { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_quit(confirm));
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_quit(confirm));
                 }
                 _ => {}
             }
         }
 
-        if let PromptState::ConfirmDiscardFile {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmDiscardFile { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_discard_file(confirm));
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_discard_file(confirm));
                 }
                 _ => {}
@@ -3337,23 +3325,20 @@ impl App {
             return Ok(false);
         }
 
-        if let PromptState::ConfirmCreateInitialCommit {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmCreateInitialCommit { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
                     self.resolve_confirm_create_initial_commit(false);
                 }
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     self.resolve_confirm_create_initial_commit(confirm);
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     self.resolve_confirm_create_initial_commit(confirm);
                 }
                 _ => {}
@@ -3361,24 +3346,21 @@ impl App {
             return Ok(false);
         }
 
-        if let PromptState::ConfirmInitRepo {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmInitRepo { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => {
                     self.resolve_confirm_init_repo(false);
                 }
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     self.resolve_confirm_init_repo(confirm);
                 }
                 // Space activates the focused button (dialog tenet).
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     self.resolve_confirm_init_repo(confirm);
                 }
                 _ => {}
@@ -3459,21 +3441,18 @@ impl App {
             return Ok(false);
         }
 
-        if let PromptState::ConfirmUseExistingBranch {
-            confirm_selected, ..
-        } = &mut self.prompt
-        {
+        if let PromptState::ConfirmUseExistingBranch { focus, .. } = &mut self.prompt {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *confirm_selected = !*confirm_selected;
+                    *focus = focus.toggled();
                 }
                 Some(Action::Confirm) => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_use_existing_branch(confirm));
                 }
                 _ if key.code == KeyCode::Char(' ') => {
-                    let confirm = *confirm_selected;
+                    let confirm = focus.is_confirm();
                     return Ok(self.resolve_confirm_use_existing_branch(confirm));
                 }
                 _ => {}
@@ -3601,7 +3580,7 @@ impl App {
                                 request,
                                 branch_name: name,
                                 location,
-                                confirm_selected: false,
+                                focus: ConfirmFocus::Cancel,
                             };
                             return Ok(false);
                         }
@@ -3835,7 +3814,7 @@ impl App {
                     };
                     *pending_delete = Some(PendingMacroDelete {
                         name,
-                        confirm_selected: false,
+                        focus: ConfirmFocus::Cancel,
                     });
                 }
             }
@@ -4267,13 +4246,13 @@ impl App {
                 return Ok(false);
             }
             if matches!(action, Some(Action::ToggleSelection)) {
-                pending.confirm_selected = !pending.confirm_selected;
+                pending.focus = pending.focus.toggled();
                 return Ok(false);
             }
             if !activate {
                 return Ok(false);
             }
-            pending.confirm_selected
+            pending.focus.is_confirm()
         };
 
         self.resolve_confirm_delete_macro(confirm);
@@ -5295,7 +5274,7 @@ impl App {
                     path: canonical.to_string_lossy().to_string(),
                     name: String::new(),
                     candidates,
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                     return_prompt: Box::new(return_prompt),
                 };
                 return;
@@ -7766,6 +7745,7 @@ mod tests {
 
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
+    use crate::app::ConfirmFocus;
     use crate::app::input::configure_project_text_input;
     use crate::app::test_support::*;
     use crate::app::{
@@ -8242,7 +8222,7 @@ not_a_real_action = ["x"]
             },
             action: KillRunningAction::Selected,
             target_ids: vec![runtime_id],
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         }
     }
 
@@ -9552,7 +9532,7 @@ not_a_real_action = ["x"]
             previous: previous.clone(),
             action: KillRunningAction::Selected,
             target_ids: vec![RuntimeTargetId::Agent("session-1".to_string())],
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         });
 
         app.resolve_confirm_kill_running(false);
@@ -10117,7 +10097,7 @@ not_a_real_action = ["x"]
             },
             action: KillRunningAction::Selected,
             target_ids: vec![RuntimeTargetId::Agent("session-1".to_string())],
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         });
 
         app.resolve_confirm_kill_running(true);
@@ -10257,12 +10237,12 @@ not_a_real_action = ["x"]
                 request,
                 branch_name,
                 location,
-                confirm_selected,
+                focus,
             } => {
                 assert!(matches!(request, CreateAgentRequest::NewProject { .. }));
                 assert_eq!(branch_name, "reuse-me");
                 assert_eq!(*location, crate::git::BranchLocation::Local);
-                assert!(!*confirm_selected);
+                assert_eq!(*focus, ConfirmFocus::Cancel);
             }
             other => panic!("expected use-existing-branch prompt, got {other:?}"),
         }
@@ -14451,7 +14431,7 @@ cyan = "#00ffff"
             path: canonical.clone(),
             name: String::new(),
             candidates: vec!["node_modules".to_string()],
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
             return_prompt: Box::new(PromptState::None),
         };
         app.resolve_confirm_init_repo(true);
@@ -14942,7 +14922,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         };
         install_confirm_quit_overlay(&mut app);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 35, 10));
@@ -14954,7 +14934,7 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         install_confirm_quit_overlay(&mut app);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 53, 10));
@@ -14969,16 +14949,18 @@ cyan = "#00ffff"
         app.prompt = PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         };
 
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
             .unwrap();
 
         match app.prompt {
-            PromptState::ConfirmQuit {
-                confirm_selected, ..
-            } => assert!(confirm_selected, "Shift-Tab should move selection to Quit"),
+            PromptState::ConfirmQuit { focus, .. } => assert_eq!(
+                focus,
+                ConfirmFocus::Confirm,
+                "Shift-Tab should move focus to Quit"
+            ),
             other => panic!("expected quit confirmation, got {other:?}"),
         }
     }
@@ -16165,7 +16147,7 @@ cyan = "#00ffff"
         }];
         app.prompt = PromptState::ConfirmDiscardFile {
             file_path: "src/main.rs".to_string(),
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         install_confirm_discard_overlay(&mut app);
 
@@ -18454,7 +18436,7 @@ cyan = "#00ffff"
             terminal_id: terminal_id.clone(),
             terminal_label: "test".to_string(),
             foreground_cmd: None,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
 
         app.resolve_confirm_delete_terminal(true);
@@ -18479,7 +18461,7 @@ cyan = "#00ffff"
             terminal_id,
             terminal_label: "test".to_string(),
             foreground_cmd: None,
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         };
 
         app.resolve_confirm_delete_terminal(false);
@@ -19050,7 +19032,7 @@ cyan = "#00ffff"
             ..
         } = &app.prompt
         {
-            Some((pending.name.as_str(), pending.confirm_selected))
+            Some((pending.name.as_str(), pending.focus.is_confirm()))
         } else {
             None
         }
@@ -20439,7 +20421,7 @@ cyan = "#00ffff"
             tab_id: tab_id.clone(),
             provider_label: "Codex".to_string(),
             is_main: false,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         // Space activates the focused (Close) button.
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
@@ -20478,7 +20460,7 @@ cyan = "#00ffff"
             tab_id: "tab-1".to_string(),
             provider_label: "Codex".to_string(),
             is_main: false,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
@@ -20515,7 +20497,7 @@ cyan = "#00ffff"
             tab_id: session_id.clone(),
             provider_label: "Codex".to_string(),
             is_main: true,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
@@ -20549,7 +20531,7 @@ cyan = "#00ffff"
             tab_id: "tab-1".to_string(),
             provider_label: "Codex".to_string(),
             is_main: false,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle close");
@@ -20590,7 +20572,7 @@ cyan = "#00ffff"
             tab_id: session_id.clone(),
             provider_label: "Codex".to_string(),
             is_main: true,
-            confirm_selected: true,
+            focus: ConfirmFocus::Confirm,
         };
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .expect("handle detach");
@@ -21513,5 +21495,137 @@ cyan = "#00ffff"
             app.macro_bar.is_none(),
             "one close key closes the macro bar even with a query typed"
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Change B3: nine confirmations now name their focus
+    //
+    // They carried `confirm_selected: bool`. Two states is the right
+    // cardinality (two buttons), so this is not an arity fix: a `bool` cannot
+    // SAY which control has focus, and `confirm_selected: false` at a call
+    // site reads as a checkbox that is off. `ConfirmFocus` is the shared type,
+    // so nine near-identical `…Focus` enums did not appear instead.
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Every two-button confirmation opens with focus on the SAFE control, and
+    /// the movement key moves that focus to the committing one and back.
+    #[test]
+    fn every_two_button_confirmation_names_its_focus_and_opens_on_cancel() {
+        let project = {
+            let app = test_app(default_bindings());
+            app.engine.projects[0].clone()
+        };
+        let request = || dux_core::worker::CreateAgentRequest::NewProject {
+            project: project.clone(),
+            custom_name: None,
+            use_existing_branch: false,
+            pull_before_create: false,
+            copy_uncommitted_changes: false,
+        };
+        let prompts: Vec<(&str, PromptState)> = vec![
+            (
+                "ConfirmDeleteTerminal",
+                PromptState::ConfirmDeleteTerminal {
+                    terminal_id: "t1".to_string(),
+                    terminal_label: "Terminal 1".to_string(),
+                    foreground_cmd: None,
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmCloseTab",
+                PromptState::ConfirmCloseTab {
+                    session_id: "s1".to_string(),
+                    tab_id: "t1".to_string(),
+                    provider_label: "Claude".to_string(),
+                    is_main: false,
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmQuit",
+                PromptState::ConfirmQuit {
+                    agent_count: 1,
+                    terminal_count: 0,
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmDiscardFile",
+                PromptState::ConfirmDiscardFile {
+                    file_path: "a.txt".to_string(),
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmCreateInitialCommit",
+                PromptState::ConfirmCreateInitialCommit {
+                    path: "/tmp/x".to_string(),
+                    name: "x".to_string(),
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+            (
+                "ConfirmInitRepo",
+                PromptState::ConfirmInitRepo {
+                    path: "/tmp/x".to_string(),
+                    name: "x".to_string(),
+                    candidates: Vec::new(),
+                    focus: ConfirmFocus::Cancel,
+                    return_prompt: Box::new(PromptState::None),
+                },
+            ),
+            (
+                "ConfirmUseExistingBranch",
+                PromptState::ConfirmUseExistingBranch {
+                    request: request(),
+                    branch_name: "b".to_string(),
+                    location: crate::git::BranchLocation::Local,
+                    focus: ConfirmFocus::Cancel,
+                },
+            ),
+        ];
+        let read = |app: &App| -> ConfirmFocus {
+            match &app.prompt {
+                PromptState::ConfirmDeleteTerminal { focus, .. }
+                | PromptState::ConfirmCloseTab { focus, .. }
+                | PromptState::ConfirmQuit { focus, .. }
+                | PromptState::ConfirmDiscardFile { focus, .. }
+                | PromptState::ConfirmCreateInitialCommit { focus, .. }
+                | PromptState::ConfirmInitRepo { focus, .. }
+                | PromptState::ConfirmUseExistingBranch { focus, .. } => *focus,
+                other => panic!("expected a confirmation, got {other:?}"),
+            }
+        };
+        for (name, prompt) in prompts {
+            let mut app = test_app(default_bindings());
+            app.prompt = prompt;
+            assert_eq!(
+                read(&app),
+                ConfirmFocus::Cancel,
+                "{name}: a confirmation opens with focus on the safe control"
+            );
+            tap(&mut app, KeyCode::Tab);
+            assert_eq!(
+                read(&app),
+                ConfirmFocus::Confirm,
+                "{name}: the movement key moves focus onto the committing button"
+            );
+            tap(&mut app, KeyCode::Tab);
+            assert_eq!(
+                read(&app),
+                ConfirmFocus::Cancel,
+                "{name}: a two-control focus ring is its own inverse"
+            );
+        }
+    }
+
+    #[test]
+    fn confirm_focus_toggles_and_reports_which_button_commits() {
+        assert_eq!(ConfirmFocus::default(), ConfirmFocus::Cancel);
+        assert_eq!(ConfirmFocus::Cancel.toggled(), ConfirmFocus::Confirm);
+        assert_eq!(ConfirmFocus::Confirm.toggled(), ConfirmFocus::Cancel);
+        assert!(!ConfirmFocus::Cancel.is_confirm());
+        assert!(ConfirmFocus::Confirm.is_confirm());
     }
 }

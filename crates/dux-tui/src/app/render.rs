@@ -5715,7 +5715,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmKillCancel,
                         self.pressed_button,
-                        !confirm_prompt.confirm_selected,
+                        !confirm_prompt.focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -5725,7 +5725,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmKillConfirm,
                         self.pressed_button,
-                        confirm_prompt.confirm_selected,
+                        confirm_prompt.focus.is_confirm(),
                         true,
                     ))
                     .render(frame, kill_area, &self.theme);
@@ -6165,7 +6165,7 @@ impl App {
             PromptState::ConfirmDeleteTerminal {
                 terminal_label,
                 foreground_cmd,
-                confirm_selected,
+                focus,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -6232,7 +6232,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteTerminalCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -6242,7 +6242,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDeleteTerminalConfirm,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, delete_area, &self.theme);
@@ -6256,7 +6256,7 @@ impl App {
                 session_id,
                 provider_label,
                 is_main,
-                confirm_selected,
+                focus,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -6335,7 +6335,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmCloseTabCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -6345,7 +6345,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmCloseTabConfirm,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, confirm_area, &self.theme);
@@ -6358,7 +6358,7 @@ impl App {
             PromptState::ConfirmQuit {
                 agent_count,
                 terminal_count,
-                confirm_selected,
+                focus,
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
@@ -6426,7 +6426,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmQuitCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -6436,7 +6436,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmQuitConfirm,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, quit_area, &self.theme);
@@ -6447,9 +6447,7 @@ impl App {
                 };
             }
             PromptState::ConfirmDiscardFile {
-                file_path,
-                confirm_selected,
-                ..
+                file_path, focus, ..
             } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(56, 30, frame.area());
@@ -6510,7 +6508,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDiscardCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -6520,7 +6518,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmDiscardConfirm,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, discard_area, &self.theme);
@@ -6530,11 +6528,7 @@ impl App {
                     discard_button: discard_area,
                 };
             }
-            PromptState::ConfirmCreateInitialCommit {
-                path,
-                confirm_selected,
-                ..
-            } => {
+            PromptState::ConfirmCreateInitialCommit { path, focus, .. } => {
                 self.render_dim_overlay(frame);
                 let area = centered_rect(60, 36, frame.area());
                 self.clear_overlay_area(frame, area);
@@ -6596,7 +6590,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmCreateInitialCommitCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -6606,7 +6600,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmCreateInitialCommitConfirm,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, create_area, &self.theme);
@@ -6619,7 +6613,7 @@ impl App {
             PromptState::ConfirmInitRepo {
                 path,
                 candidates,
-                confirm_selected,
+                focus,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -6691,7 +6685,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmInitRepoCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -6701,7 +6695,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmInitRepoConfirm,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, init_area, &self.theme);
@@ -6919,7 +6913,7 @@ impl App {
             PromptState::ConfirmUseExistingBranch {
                 branch_name,
                 location,
-                confirm_selected,
+                focus,
                 ..
             } => {
                 self.render_dim_overlay(frame);
@@ -6989,7 +6983,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmUseExistingBranchCancel,
                         self.pressed_button,
-                        !confirm_selected,
+                        !focus.is_confirm(),
                         true,
                     ))
                     .render(frame, cancel_area, &self.theme);
@@ -7001,7 +6995,7 @@ impl App {
                     .state(button_state_for(
                         ButtonPressedTarget::ConfirmUseExistingBranchUse,
                         self.pressed_button,
-                        *confirm_selected,
+                        focus.is_confirm(),
                         true,
                     ))
                     .render(frame, use_area, &self.theme);
@@ -7650,13 +7644,13 @@ impl App {
         }
 
         let pending_delete_snapshot = match &self.prompt {
-            PromptState::EditMacros { pending_delete, .. } => pending_delete
-                .as_ref()
-                .map(|p| (p.name.clone(), p.confirm_selected)),
+            PromptState::EditMacros { pending_delete, .. } => {
+                pending_delete.as_ref().map(|p| (p.name.clone(), p.focus))
+            }
             _ => None,
         };
-        if let Some((name, confirm_selected)) = pending_delete_snapshot {
-            self.render_confirm_delete_macro(frame, &name, confirm_selected);
+        if let Some((name, focus)) = pending_delete_snapshot {
+            self.render_confirm_delete_macro(frame, &name, focus);
         }
     }
 
@@ -7932,12 +7926,7 @@ impl App {
         inner
     }
 
-    fn render_confirm_delete_macro(
-        &mut self,
-        frame: &mut Frame,
-        name: &str,
-        confirm_selected: bool,
-    ) {
+    fn render_confirm_delete_macro(&mut self, frame: &mut Frame, name: &str, focus: ConfirmFocus) {
         self.render_dim_overlay(frame);
         let area = centered_rect(56, 30, frame.area());
         self.clear_overlay_area(frame, area);
@@ -7990,7 +7979,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ConfirmDeleteMacroCancel,
                 self.pressed_button,
-                !confirm_selected,
+                !focus.is_confirm(),
                 true,
             ))
             .render(frame, cancel_area, &self.theme);
@@ -8000,7 +7989,7 @@ impl App {
             .state(button_state_for(
                 ButtonPressedTarget::ConfirmDeleteMacroConfirm,
                 self.pressed_button,
-                confirm_selected,
+                focus.is_confirm(),
                 true,
             ))
             .render(frame, delete_area, &self.theme);
@@ -11514,7 +11503,7 @@ mod tests {
             app.prompt = PromptState::ConfirmDeleteTerminal {
                 terminal_id: "term-1".to_string(),
                 terminal_label: "Terminal 1".to_string(),
-                confirm_selected: false,
+                focus: ConfirmFocus::Cancel,
                 foreground_cmd,
             };
             let backend = TestBackend::new(100, 40);

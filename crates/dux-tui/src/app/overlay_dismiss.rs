@@ -428,7 +428,7 @@ mod tests {
         PromptState::ConfirmQuit {
             agent_count: 1,
             terminal_count: 0,
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         }
     }
 
@@ -443,7 +443,7 @@ mod tests {
             editing: None,
             pending_delete: Some(PendingMacroDelete {
                 name: "greet".to_string(),
-                confirm_selected: false,
+                focus: ConfirmFocus::Cancel,
             }),
         }
     }
@@ -1519,7 +1519,7 @@ mod tests {
                     path: "/tmp/plain-folder".to_string(),
                     name: "plain".to_string(),
                     candidates: vec!["node_modules".to_string()],
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                     return_prompt: Box::new(agent_info_prompt()),
                 };
             },
@@ -1540,7 +1540,7 @@ mod tests {
                 app.prompt = PromptState::ConfirmCreateInitialCommit {
                     path: "/tmp/unborn-repo".to_string(),
                     name: "unborn".to_string(),
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 };
             },
             |app| {
@@ -1563,7 +1563,7 @@ mod tests {
                     },
                     action: KillRunningAction::Selected,
                     target_ids: Vec::new(),
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 });
             },
             |app| {

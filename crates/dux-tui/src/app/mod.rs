@@ -1192,7 +1192,7 @@ pub(crate) struct ConfirmKillRunningPrompt {
     pub(crate) previous: KillRunningPrompt,
     pub(crate) action: KillRunningAction,
     pub(crate) target_ids: Vec<RuntimeTargetId>,
-    pub(crate) confirm_selected: bool,
+    pub(crate) focus: ConfirmFocus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1283,7 +1283,7 @@ pub(crate) enum PromptState {
         /// Starter-.gitignore candidate directory names found in the folder
         /// (display only; the worker re-derives the real list when seeding).
         candidates: Vec<String>,
-        confirm_selected: bool, // false = Cancel (default), true = Initialize & Add
+        focus: ConfirmFocus, // Cancel (default) or Initialize & Add
         /// The prompt to restore on cancel (the project browser with the
         /// user's location and typed path intact), the `AddProjectFailed`
         /// pattern.
@@ -1362,7 +1362,7 @@ pub(crate) enum PromptState {
         /// killed" warning is shown only when an app is present, since closing
         /// an idle terminal merely ends the shell.
         foreground_cmd: Option<String>,
-        confirm_selected: bool, // false = Cancel (default), true = Delete
+        focus: ConfirmFocus, // Cancel (default) or Delete
     },
     /// Close/detach an agent tab. Closing the session-slot tab (`is_main`) detaches the
     /// agent (non-destructive, stays in Projects); closing an extra tab ends
@@ -1372,12 +1372,12 @@ pub(crate) enum PromptState {
         tab_id: String,
         provider_label: String,
         is_main: bool,
-        confirm_selected: bool, // false = Cancel (default), true = Close/Detach
+        focus: ConfirmFocus, // Cancel (default) or Close/Detach
     },
     ConfirmQuit {
         agent_count: usize,
         terminal_count: usize,
-        confirm_selected: bool, // false = Cancel (default), true = Quit
+        focus: ConfirmFocus, // Cancel (default) or Quit
     },
     ConfirmDiscardFile {
         file_path: String,
@@ -1387,7 +1387,7 @@ pub(crate) enum PromptState {
         // confirms (an agent may be mutating the worktree). The classification is
         // therefore re-derived from LIVE git status at confirm time via
         // `git::discard_classify`, never snapshotted here.
-        confirm_selected: bool, // false = Cancel (default), true = Discard
+        focus: ConfirmFocus, // Cancel (default) or Discard
     },
     /// Shown when adding a project whose repo has no commits yet (a fresh
     /// `git init` with an unborn HEAD). Confirming creates an empty initial
@@ -1397,7 +1397,7 @@ pub(crate) enum PromptState {
         path: String,
         /// Display name entered by the user (empty → derived from the path).
         name: String,
-        confirm_selected: bool, // false = Cancel (default), true = Create & Add
+        focus: ConfirmFocus, // Cancel (default) or Create & Add
     },
     RenameSession {
         session_id: String,
@@ -1447,7 +1447,7 @@ pub(crate) enum PromptState {
         request: CreateAgentRequest,
         branch_name: String,
         location: crate::git::BranchLocation,
-        confirm_selected: bool, // false = Cancel (default), true = Use Existing
+        focus: ConfirmFocus, // Cancel (default) or Use Existing
     },
     DebugInput {
         lines: Vec<Line<'static>>,
@@ -1683,10 +1683,44 @@ impl ConfigureFieldFocus {
     }
 }
 
+/// Which control has focus in a two-button confirmation.
+///
+/// Nine confirmations used to carry a bare `confirm_selected: bool` for this.
+/// Two states is the right CARDINALITY (there are exactly two buttons), so the
+/// defect was never the arity: it was that a `bool` cannot SAY which control
+/// has focus, and `confirm_selected: false` at a construction site reads as a
+/// checkbox that is off rather than as focus resting on Cancel. Every other
+/// modal in dux names its focus with an enum, and these do now too; the shared
+/// type is what stops nine near-identical `…Focus` enums appearing instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ConfirmFocus {
+    /// The safe default: a confirmation opens with Cancel focused.
+    #[default]
+    Cancel,
+    /// The committing button (Delete, Quit, Discard, Use Existing, …).
+    Confirm,
+}
+
+impl ConfirmFocus {
+    /// Move focus to the other button. A two-control focus ring is its own
+    /// inverse, so forwards and backwards are the same step.
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Cancel => Self::Confirm,
+            Self::Confirm => Self::Cancel,
+        }
+    }
+
+    /// Whether the committing button is the one focus is on.
+    pub(crate) fn is_confirm(self) -> bool {
+        matches!(self, Self::Confirm)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PendingMacroDelete {
     pub(crate) name: String,
-    pub(crate) confirm_selected: bool,
+    pub(crate) focus: ConfirmFocus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

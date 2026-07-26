@@ -69,7 +69,7 @@ impl App {
             self.prompt = PromptState::ConfirmCreateInitialCommit {
                 path: path.to_string_lossy().to_string(),
                 name,
-                confirm_selected: false,
+                focus: ConfirmFocus::Cancel,
             };
             return Ok(());
         }
@@ -1059,7 +1059,7 @@ impl App {
             tab_id,
             provider_label,
             is_main,
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         };
     }
 
@@ -1619,7 +1619,7 @@ impl App {
             terminal_id: (*terminal_id).clone(),
             terminal_label: terminal.label.clone(),
             foreground_cmd: terminal.foreground_cmd.clone(),
-            confirm_selected: false, // Cancel is default
+            focus: ConfirmFocus::Cancel, // Cancel is default
         };
         Ok(())
     }
@@ -3204,7 +3204,7 @@ impl App {
             previous: prompt,
             action,
             target_ids,
-            confirm_selected: false,
+            focus: ConfirmFocus::Cancel,
         });
         self.set_info(format!(
             "{} is ready. Review the warning and press Enter to confirm, or Esc to keep your running sessions alive.",

@@ -582,7 +582,7 @@ mod tests {
             editing: None,
             pending_delete: Some(PendingMacroDelete {
                 name: "m".to_string(),
-                confirm_selected: false,
+                focus: ConfirmFocus::Cancel,
             }),
         };
         assert_eq!(
@@ -616,7 +616,7 @@ mod tests {
         AgentInfoPrompt, AgentInfoTone, ChangeAgentProviderMode, ChangeAgentProviderOption,
         ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
         ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
-        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmKillRunningPrompt,
+        ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt,
         ConfirmNonDefaultBranchFocus, DeleteAgentFocus, KillRunningAction, KillRunningFocus,
         KillRunningPrompt, MacroEditFocus, MacroEditState, NameNewAgentFocus, PendingMacroDelete,
         PickProjectWorktreePrompt, ProjectChooserIntent, RenameSessionFocus, SearchableList,
@@ -705,7 +705,7 @@ mod tests {
                     path: "/tmp/x".to_string(),
                     name: "x".to_string(),
                     candidates: Vec::new(),
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                     return_prompt: Box::new(PromptState::None),
                 },
             ),
@@ -843,7 +843,7 @@ mod tests {
                     previous: kill_running_prompt(),
                     action: KillRunningAction::Visible,
                     target_ids: Vec::new(),
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 }),
             ),
             (
@@ -871,7 +871,7 @@ mod tests {
                     terminal_id: "t1".to_string(),
                     terminal_label: "Terminal 1".to_string(),
                     foreground_cmd: None,
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 },
             ),
             (
@@ -881,7 +881,7 @@ mod tests {
                     tab_id: "t1".to_string(),
                     provider_label: "Claude".to_string(),
                     is_main: false,
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 },
             ),
             (
@@ -889,14 +889,14 @@ mod tests {
                 PromptState::ConfirmQuit {
                     agent_count: 1,
                     terminal_count: 0,
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 },
             ),
             (
                 "ConfirmDiscardFile",
                 PromptState::ConfirmDiscardFile {
                     file_path: "a.txt".to_string(),
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 },
             ),
             (
@@ -904,7 +904,7 @@ mod tests {
                 PromptState::ConfirmCreateInitialCommit {
                     path: "/tmp/x".to_string(),
                     name: "x".to_string(),
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 },
             ),
             (
@@ -973,7 +973,7 @@ mod tests {
                     editing: None,
                     pending_delete: Some(PendingMacroDelete {
                         name: "m1".to_string(),
-                        confirm_selected: false,
+                        focus: ConfirmFocus::Cancel,
                     }),
                 },
             ),
@@ -999,7 +999,7 @@ mod tests {
                     request: new_project_request(&project),
                     branch_name: "b".to_string(),
                     location: crate::git::BranchLocation::Local,
-                    confirm_selected: false,
+                    focus: ConfirmFocus::Cancel,
                 },
             ),
             (
