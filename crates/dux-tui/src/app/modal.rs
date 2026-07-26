@@ -261,7 +261,10 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         PromptState::EditMacros {
             editing: Some(_), ..
         } => ModalSpec::new(Form, true, true),
-        // The list underneath: rows with a selection cursor, no buttons.
+        // The list underneath: rows with a selection cursor, no buttons. It
+        // resolves every key through the bindings and publishes its rows as
+        // `OverlayMouseLayout::EditMacroList`, so it is a Picker in behaviour
+        // and not only in the table.
         PromptState::EditMacros { .. } => ModalSpec::new(Picker, false, false),
     };
     Some(spec)
@@ -353,6 +356,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::PickProjectWorktree { .. }
         | OverlayMouseLayout::PickProject { .. }
         | OverlayMouseLayout::ChangeTheme { .. }
+        | OverlayMouseLayout::EditMacroList { .. }
         | OverlayMouseLayout::ResourceMonitor { .. }
         | OverlayMouseLayout::StartupCommandLogs { .. }
         | OverlayMouseLayout::RenameSession { .. }

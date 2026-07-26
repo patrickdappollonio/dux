@@ -106,10 +106,15 @@ the palette is the intended entry point.
 Inside the list:
 
 - The list shows all defined macros in declaration order.
-- **n** creates a new macro; **Enter** on a highlighted entry opens it for
-  editing. Either one opens the macro form described below.
-- **d** or **Delete** stages a deletion and shows a confirmation dialog.
-- **Esc** closes the overlay.
+- The list is an ordinary picker: the movement keys walk it, `confirm`
+  (**Enter** by default) on a highlighted entry opens it for editing, and
+  `close_overlay` (**Esc** by default) closes the overlay. Every key is
+  resolved through `[keys]`, so rebinding one moves the footer hint with it.
+- `new_macro` (**n** by default) creates a new macro. Either it or `confirm`
+  opens the macro form described below.
+- `delete_macro` (**d** or **Delete** by default) stages a deletion and shows
+  a confirmation dialog.
+- Rows are clickable: one click highlights a macro, a double click opens it.
 
 The macro form is an ordinary modal, not a wizard. It shows the name field, the
 text field, the Agent / Terminal / Both selector, and **Cancel** and **Save**

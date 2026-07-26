@@ -181,6 +181,7 @@ enum PromptMouseTarget {
     MacroTextInput,
     /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
     MacroSurfaceOption(usize),
+    MacroListItem(usize),
     MacroCancel,
     MacroSave,
     ConfigureFieldCancel,
@@ -298,7 +299,8 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::PullRequestInput
             | PromptMouseTarget::MacroNameInput
             | PromptMouseTarget::MacroTextInput
-            | PromptMouseTarget::MacroSurfaceOption(_) => None,
+            | PromptMouseTarget::MacroSurfaceOption(_)
+            | PromptMouseTarget::MacroListItem(_) => None,
         }
     }
 }
@@ -3789,36 +3791,33 @@ impl App {
             return Ok(false);
         };
 
-        // List view — no active editing.
-        match key.code {
-            KeyCode::Esc => {
+        // ── List view: an ordinary Picker ─────────────────────────────────
+        //
+        // Every key is resolved through the bindings, exactly as the provider
+        // and theme pickers resolve theirs. The list used to hardcode `Esc`,
+        // `j`/`k`, `Enter`, `n` and `d`, so a user who rebound any of them got
+        // a footer naming one key and a modal answering another. The modal's
+        // own scope is consulted first (it owns the two macro-specific
+        // actions), then the shared picker vocabulary.
+        let action = self
+            .bindings
+            .lookup(&key, BindingScope::MacroList)
+            .or_else(|| self.bindings.lookup(&key, BindingScope::Palette))
+            .or_else(|| self.bindings.lookup(&key, BindingScope::Dialog));
+        match action {
+            Some(Action::CloseOverlay) => {
                 self.prompt = PromptState::None;
             }
-            KeyCode::Char('j') | KeyCode::Down
-                if !entries.is_empty() && *selected + 1 < entries.len() =>
-            {
+            Some(Action::MoveDown) if !entries.is_empty() && *selected + 1 < entries.len() => {
                 *selected += 1;
             }
-            KeyCode::Char('k') | KeyCode::Up if *selected > 0 => {
+            Some(Action::MoveUp) if *selected > 0 => {
                 *selected -= 1;
             }
-            KeyCode::Enter => {
-                // Edit selected macro
-                if let Some((name, text, surface)) = entries.get(*selected) {
-                    let name = name.clone();
-                    let text = text.clone();
-                    let surface = *surface;
-                    *editing = Some(MacroEditState {
-                        id: Some(name.clone()),
-                        name_input: TextInput::with_text(name),
-                        text_input: TextInput::with_text(text).with_multiline(8),
-                        surface,
-                        focus: MacroEditFocus::Name,
-                    });
-                }
+            Some(Action::Confirm) => {
+                self.open_selected_macro_for_edit();
             }
-            KeyCode::Char('n') => {
-                // New macro
+            Some(Action::NewMacro) => {
                 *editing = Some(MacroEditState {
                     id: None,
                     name_input: TextInput::new(),
@@ -3827,7 +3826,7 @@ impl App {
                     focus: MacroEditFocus::Name,
                 });
             }
-            KeyCode::Char('d') | KeyCode::Delete => {
+            Some(Action::DeleteMacro) => {
                 // Stage confirmation for deleting the selected macro.
                 if let Some((name, _, _)) = entries.get(*selected) {
                     let name = name.clone();
@@ -3843,6 +3842,44 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Open the highlighted macro in the editor. Shared by the confirm key and
+    /// by a double click on the row, so the two cannot drift.
+    pub(super) fn open_selected_macro_for_edit(&mut self) {
+        let PromptState::EditMacros {
+            entries,
+            selected,
+            editing,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        let Some((name, text, surface)) = entries.get(*selected) else {
+            return;
+        };
+        let name = name.clone();
+        let text = text.clone();
+        let surface = *surface;
+        *editing = Some(MacroEditState {
+            id: Some(name.clone()),
+            name_input: TextInput::with_text(name),
+            text_input: TextInput::with_text(text).with_multiline(8),
+            surface,
+            focus: MacroEditFocus::Name,
+        });
+    }
+
+    /// Move the macro list's selection cursor, as a click on a row does.
+    pub(super) fn set_macro_list_selection(&mut self, index: usize) {
+        if let PromptState::EditMacros {
+            entries, selected, ..
+        } = &mut self.prompt
+            && index < entries.len()
+        {
+            *selected = index;
+        }
     }
 
     /// The macro EDITOR's key handling: an ordinary modal with a focus model.
@@ -4410,6 +4447,12 @@ impl App {
                 column,
                 row,
             ),
+            OverlayMouseLayout::EditMacroList {
+                list,
+                items,
+                offset,
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::MacroListItem),
             OverlayMouseLayout::EditMacros {
                 name_input,
                 text_input,
@@ -6442,6 +6485,17 @@ impl App {
                 self.set_macro_text_cursor_from_mouse(mouse.column, mouse.row);
                 if double_click {
                     self.input_target = InputTarget::MacroText;
+                }
+            }
+            PromptMouseTarget::MacroListItem(index) => {
+                // The picker idiom: one click moves the selection cursor, a
+                // double click opens the row. Same as the theme and provider
+                // pickers, which is why it reuses their click registry slot.
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+                self.set_macro_list_selection(index);
+                if double_click {
+                    self.open_selected_macro_for_edit();
                 }
             }
             PromptMouseTarget::MacroSurfaceOption(index) => {
@@ -18843,6 +18897,151 @@ cyan = "#00ffff"
         );
         app.open_edit_macros();
         app
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Change A: the macro LIST is a Picker, so it must behave like one
+    //
+    // Its keys were hardcoded (`Esc`, `j`/`k`, `Enter`, `n`, `d`) instead of
+    // resolved through the bindings, and it published no click targets at all
+    // (`render_edit_macros` claimed `OverlayMouseLayout::None`), so its rows
+    // were the only picker rows in dux a mouse could not reach.
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn app_with_two_macros_bound(bindings: RuntimeBindings) -> App {
+        let mut app = test_app(bindings);
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.engine.config.macros.entries.insert(
+            "farewell".to_string(),
+            crate::config::MacroEntry {
+                text: "goodbye".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.open_edit_macros();
+        app
+    }
+
+    fn macro_list_selected(app: &App) -> usize {
+        match &app.prompt {
+            PromptState::EditMacros { selected, .. } => *selected,
+            other => panic!("expected the macro list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn macro_list_moves_its_selection_with_the_bound_movement_key() {
+        let mut app = app_with_two_macros_bound(bindings_with_overrides(&[
+            (Action::MoveDown, &["ctrl-n"]),
+            (Action::MoveUp, &["ctrl-e"]),
+        ]));
+        assert_eq!(macro_list_selected(&app), 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .expect("handle rebound move-down");
+        assert_eq!(
+            macro_list_selected(&app),
+            1,
+            "the macro list must resolve movement through the bindings, not hardcode j/Down"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .expect("handle rebound move-up");
+        assert_eq!(macro_list_selected(&app), 0);
+    }
+
+    #[test]
+    fn macro_list_closes_and_confirms_through_the_bindings() {
+        let mut app = app_with_two_macros_bound(bindings_with_overrides(&[
+            (Action::Confirm, &["ctrl-y"]),
+            (Action::CloseOverlay, &["ctrl-q"]),
+        ]));
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))
+            .expect("handle rebound confirm");
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::EditMacros {
+                    editing: Some(_),
+                    ..
+                }
+            ),
+            "the rebound confirm key must open the selected macro for editing"
+        );
+
+        let mut app = app_with_two_macros_bound(bindings_with_overrides(&[(
+            Action::CloseOverlay,
+            &["ctrl-q"],
+        )]));
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+            .expect("handle rebound close");
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the rebound close key must close the macro list"
+        );
+    }
+
+    #[test]
+    fn macro_list_new_and_delete_are_bindings_not_hardcoded_letters() {
+        let mut app =
+            app_with_two_macros_bound(bindings_with_overrides(&[(Action::NewMacro, &["ctrl-t"])]));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .expect("handle rebound new-macro");
+        assert!(
+            matches!(
+                app.prompt,
+                PromptState::EditMacros {
+                    editing: Some(ref state),
+                    ..
+                } if state.id.is_none()
+            ),
+            "the rebound new-macro key must open a blank editor"
+        );
+
+        let mut app = app_with_two_macros_bound(bindings_with_overrides(&[(
+            Action::DeleteMacro,
+            &["ctrl-x"],
+        )]));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+            .expect("handle rebound delete-macro");
+        assert_eq!(
+            pending_delete_state(&app).map(|(name, _)| name),
+            Some("greet")
+        );
+    }
+
+    #[test]
+    fn macro_list_rows_are_clickable() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = app_with_two_macros_bound(default_bindings());
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+
+        let OverlayMouseLayout::EditMacroList { list, .. } = app.overlay_layout.active else {
+            panic!(
+                "the macro list must publish its rows, got {:?}",
+                app.overlay_layout.active
+            );
+        };
+        // Coordinates come from the published rect, never from a string offset.
+        let second_row = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x + 2,
+            row: list.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(second_row);
+        assert_eq!(
+            macro_list_selected(&app),
+            1,
+            "clicking a macro row must select it"
+        );
     }
 
     fn pending_delete_state(app: &App) -> Option<(&str, bool)> {

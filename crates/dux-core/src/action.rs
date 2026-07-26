@@ -124,6 +124,10 @@ pub enum Action {
     SortAgents,
     RemoveGitPane,
     EditMacros,
+    /// Create a new macro from the macro list.
+    NewMacro,
+    /// Delete the highlighted macro from the macro list.
+    DeleteMacro,
     DebugInput,
     ToggleDiffLineNumbers,
     ResourceMonitor,
@@ -263,6 +267,8 @@ impl Action {
             Action::ForceRedraw => "force_redraw",
             Action::RemoveGitPane => "remove_git_pane",
             Action::EditMacros => "edit_macros",
+            Action::NewMacro => "new_macro",
+            Action::DeleteMacro => "delete_macro",
             Action::DebugInput => "debug_input",
             Action::ToggleDiffLineNumbers => "toggle_diff_line_numbers",
             Action::ResourceMonitor => "resource_monitor",
@@ -413,6 +419,8 @@ impl Action {
             Action::ForceRedraw => "Force a full terminal redraw.",
             Action::RemoveGitPane => "Remove or restore the git pane.",
             Action::EditMacros => "Open the text macros editor.",
+            Action::NewMacro => "Create a new macro from the macro list.",
+            Action::DeleteMacro => "Delete the highlighted macro from the macro list.",
             Action::DebugInput => "Open input event debugger to inspect keyboard and mouse events.",
             Action::ToggleDiffLineNumbers => "Toggle line numbers in diff view.",
             Action::ResourceMonitor => "Show CPU and memory usage for dux and all running agents.",
@@ -562,7 +570,9 @@ impl Action {
             | Action::OpenStartupCommandLogFolder
             | Action::Confirm
             | Action::ToggleSelection
-            | Action::ToggleMarked => Some("Overlays"),
+            | Action::ToggleMarked
+            | Action::NewMacro
+            | Action::DeleteMacro => Some("Overlays"),
             Action::KillRunning
             | Action::EditConfig
             | Action::RenameWebInstance

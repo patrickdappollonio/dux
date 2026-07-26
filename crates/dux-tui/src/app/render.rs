@@ -7543,10 +7543,10 @@ impl App {
         self.render_dim_overlay(frame);
         self.clear_overlay_area(frame, popup);
 
-        // The macro LIST has no click targets of its own; the editor publishes
-        // its own layout below and the nested delete-confirm publishes over the
-        // top of either. Claiming None here stops a previous modal's stale rects
-        // from being hit-tested against this one.
+        // Claim None up front so a previous modal's stale rects can never be
+        // hit-tested against this one. Each of the three states below then
+        // publishes its own: the list its rows, the editor its controls, and
+        // the nested delete-confirm its buttons, over the top of either.
         self.overlay_layout.active = OverlayMouseLayout::None;
 
         if let Some(edit_state) = editing_snapshot {
@@ -7573,17 +7573,18 @@ impl App {
                     ])
                     .areas(inner);
 
+                let new_key = self.bindings.label_for(Action::NewMacro);
                 Paragraph::new(vec![
                     Line::from(""),
                     Line::from(Span::styled(
-                        " No macros defined. Press n to create one.",
+                        format!(" No macros defined. Press {new_key} to create one."),
                         Style::default().fg(self.theme.hint_desc_fg),
                     )),
                 ])
                 .render(msg_area, frame.buffer_mut());
 
-                let hints = self.edit_macro_hints(&[("n", "new"), ("Esc", "close")]);
-                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
+                    .render(hint_area, frame.buffer_mut());
             } else {
                 let [list_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
@@ -7603,7 +7604,8 @@ impl App {
                                 surface_label.clone(),
                                 Style::default().fg(self.theme.hint_dim_desc_fg),
                             ),
-                            Span::styled(" — ", Style::default().fg(self.theme.input_label_fg)),
+                            // Three characters, matching `prefix_len` below.
+                            Span::styled(" - ", Style::default().fg(self.theme.input_label_fg)),
                         ];
                         let text_preview = text.replace('\n', "↵");
                         // " " + name + " (label)" + " — ", counted in CHARACTERS:
@@ -7620,6 +7622,7 @@ impl App {
                     })
                     .collect();
 
+                let item_count = items.len();
                 let list = List::new(items)
                     .highlight_style(self.theme.selection_style())
                     .highlight_symbol("");
@@ -7631,14 +7634,18 @@ impl App {
                     frame.buffer_mut(),
                     &mut state,
                 );
+                // A picker's rows are clickable everywhere else in dux; this
+                // one published nothing, so it was the one list a mouse could
+                // not reach.
+                let list_layout = OverlayMouseLayout::EditMacroList {
+                    list: list_area,
+                    items: item_count,
+                    offset: state.offset(),
+                };
 
-                let hints = self.edit_macro_hints(&[
-                    ("Enter", "edit"),
-                    ("n", "new"),
-                    ("d", "delete"),
-                    ("Esc", "close"),
-                ]);
-                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                Paragraph::new(modal_hint_line(&self.theme, &self.macro_list_hints()))
+                    .render(hint_area, frame.buffer_mut());
+                self.overlay_layout.active = list_layout;
             }
         }
 
@@ -7662,7 +7669,7 @@ impl App {
     /// see is not focus.
     fn render_macro_editor(&mut self, frame: &mut Frame, popup: Rect, state: &MacroEditState) {
         let title = match &state.id {
-            Some(name) => format!("Edit Macro — {name}"),
+            Some(name) => format!("Edit Macro: {name}"),
             None => "New Macro".to_string(),
         };
         let outer = self.themed_overlay_block(&title);
@@ -7848,36 +7855,34 @@ impl App {
             .render(frame, save_button, &self.theme);
 
         // ── Hints. Every key is resolved through the bindings. ────────────
-        let move_key = self
-            .bindings
-            .label_for_text_field_dialog(Action::ToggleSelection);
-        let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut hints: Vec<(String, &str)> = Vec::new();
-        if focus == MacroEditFocus::Text && engaged {
-            hints.push((
-                self.bindings.labels_for(Action::ExitCommitInput),
-                "stop editing",
-            ));
-            hints.push(("Ctrl-d".to_string(), "clear"));
+        let hints: Vec<Hint> = if focus == MacroEditFocus::Text && engaged {
+            vec![
+                Hint::key(
+                    self.bindings.labels_for(Action::ExitCommitInput),
+                    "stop editing",
+                ),
+                Hint::key("Ctrl-d", "clear"),
+            ]
         } else {
-            if let Some(move_key) = move_key {
-                hints.push((move_key, "move focus"));
-            }
+            let mut hints = vec![Hint::maybe_key(
+                self.bindings
+                    .label_for_text_field_dialog(Action::ToggleSelection),
+                "move focus",
+            )];
             if focus == MacroEditFocus::Text {
-                hints.push((
+                hints.push(Hint::key(
                     self.bindings.label_for(Action::EngageCommitInput),
                     "edit text",
                 ));
             }
-            hints.push(("Space".to_string(), "act on focus"));
-            hints.push((close_key, "cancel"));
-        }
-        let pairs: Vec<(&str, &str)> = hints
-            .iter()
-            .map(|(key, desc)| (key.as_str(), *desc))
-            .collect();
-        let hint_spans = self.edit_macro_hints(&pairs);
-        Paragraph::new(Line::from(hint_spans)).render(hint_area, frame.buffer_mut());
+            hints.push(Hint::plain("Space act on focus"));
+            hints.push(Hint::key(
+                self.bindings.label_for(Action::CloseOverlay),
+                "cancel",
+            ));
+            hints
+        };
+        Paragraph::new(modal_hint_line(&self.theme, &hints)).render(hint_area, frame.buffer_mut());
 
         self.overlay_layout.active = OverlayMouseLayout::EditMacros {
             name_input: name_inner,
@@ -8006,24 +8011,16 @@ impl App {
         };
     }
 
-    /// Build hint spans from alternating key/description pairs.
-    /// Each pair is (key_label, description). Spans are fully owned.
-    fn edit_macro_hints(&self, pairs: &[(&str, &str)]) -> Vec<Span<'static>> {
-        let mut spans = vec![Span::raw(" ")];
-        for (key, desc) in pairs {
-            // key_badge ties lifetime to &str, so we convert to owned spans.
-            let badge = self.theme.key_badge_default(key);
-            spans.extend(
-                badge
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.to_string(), s.style)),
-            );
-            spans.push(Span::styled(
-                format!(" {desc}  "),
-                Style::default().fg(self.theme.hint_desc_fg),
-            ));
-        }
-        spans
+    /// The macro LIST's footer. Every key is resolved through the bindings,
+    /// so a rebind moves the hint with it; the four labels used to be the
+    /// literals `Enter`, `n`, `d` and `Esc`.
+    fn macro_list_hints(&self) -> Vec<Hint> {
+        vec![
+            Hint::key(self.bindings.label_for(Action::Confirm), "edit"),
+            Hint::key(self.bindings.label_for(Action::NewMacro), "new"),
+            Hint::key(self.bindings.label_for(Action::DeleteMacro), "delete"),
+            Hint::key(self.bindings.label_for(Action::CloseOverlay), "close"),
+        ]
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
@@ -14604,5 +14601,143 @@ mod tests {
                  got {other:?}"
             );
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Change A: the macro modals' footers and title
+    //
+    // `edit_macro_hints` was a second copy of `components::hint_bar::
+    // modal_hint_line` that PADDED each segment with two trailing spaces
+    // instead of JOINING with them, so its output was not byte-identical and
+    // the list footer ended in whitespace. The list's four labels were also
+    // hardcoded literals, and the editor's title carried an em-dash.
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn macro_list_app(bindings: RuntimeBindings) -> App {
+        let mut app = test_app(bindings);
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.open_edit_macros();
+        app
+    }
+
+    fn render_to_buffer(app: &mut App) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The macro modal's footer row, read out of the popup's own inner rect
+    /// rather than off the whole terminal row (which carries the dimmed app
+    /// behind it).
+    fn macro_modal_footer(buf: &ratatui::buffer::Buffer) -> String {
+        let popup = super::centered_rect_exact(
+            super::MACRO_EDIT_POPUP.0,
+            super::MACRO_EDIT_POPUP.1,
+            buf.area,
+        );
+        let y = popup.y + popup.height - 2;
+        ((popup.x + 1)..(popup.x + popup.width - 1))
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect::<String>()
+    }
+
+    /// The list footer is the shared component's output, verbatim: one leading
+    /// space, two-space joins, and NO trailing pad.
+    #[test]
+    fn the_macro_list_footer_is_the_shared_hint_line() {
+        let mut app = macro_list_app(default_bindings());
+        let buf = render_to_buffer(&mut app);
+        let expected = {
+            let line = modal_hint_line(&app.theme, &app.macro_list_hints());
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let footer = macro_modal_footer(&buf);
+        assert!(
+            footer.trim_end() == expected,
+            "footer {:?} is not the shared hint line {:?}",
+            footer.trim_end(),
+            expected
+        );
+        assert!(
+            !expected.ends_with(' '),
+            "the shared hint line never pads: {expected:?}"
+        );
+        // The hand-rolled copy PADDED each segment with two trailing spaces
+        // rather than joining with them, and those two cells were painted in
+        // the description colour. The shared line leaves them untouched, so
+        // the pad is visible in the buffer even though the text trims equal.
+        let popup = super::centered_rect_exact(
+            super::MACRO_EDIT_POPUP.0,
+            super::MACRO_EDIT_POPUP.1,
+            buf.area,
+        );
+        let y = popup.y + popup.height - 2;
+        let last_text_col = popup.x + 1 + expected.chars().count() as u16;
+        assert_ne!(
+            buf[(last_text_col, y)].fg,
+            app.theme.hint_desc_fg,
+            "the footer still paints a trailing pad past its last segment"
+        );
+    }
+
+    /// Rebinding any of the four macro-list keys moves its footer label.
+    #[test]
+    fn the_macro_list_footer_names_the_bound_keys() {
+        let bindings = RuntimeBindings::new(
+            |action| match action {
+                Action::NewMacro => vec![crokey::parse("ctrl-t").expect("binding")],
+                Action::DeleteMacro => vec![crokey::parse("ctrl-x").expect("binding")],
+                other => crate::keybindings::BINDING_DEFS
+                    .iter()
+                    .find(|d| d.action == other)
+                    .map(|d| d.default_keys.to_vec())
+                    .unwrap_or_default(),
+            },
+            true,
+        );
+        let mut app = macro_list_app(bindings);
+        let buf = render_to_buffer(&mut app);
+        let footer = macro_modal_footer(&buf);
+        assert!(
+            footer.contains("Ctrl-t") && footer.contains("Ctrl-x"),
+            "the footer must name the rebound keys, got {footer:?}"
+        );
+    }
+
+    /// No em-dash in anything a user can see.
+    #[test]
+    fn the_macro_editor_title_carries_no_em_dash() {
+        let mut app = macro_list_app(default_bindings());
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ))
+        .expect("open the editor");
+        let buf = render_to_buffer(&mut app);
+        let title = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("Edit Macro"))
+            .expect("the editor must paint its title");
+        assert!(
+            !title.contains('\u{2014}'),
+            "shipped title still holds an em-dash: {title:?}"
+        );
+        assert!(title.contains("Edit Macro: greet"), "got {title:?}");
     }
 }

@@ -2021,6 +2021,14 @@ pub(crate) enum OverlayMouseLayout {
     /// straight onto a text position. `surface_options` is one rect per
     /// [`MacroSurface`] variant in `Agent, Terminal, Both` order, so clicking
     /// one selects exactly that option rather than advancing the cycle.
+    /// The macro LIST: a Picker, so it publishes its rows and nothing else.
+    /// (The EDITOR that opens on top of it publishes
+    /// [`OverlayMouseLayout::EditMacros`] instead.)
+    EditMacroList {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
     EditMacros {
         name_input: Rect,
         text_input: Rect,
