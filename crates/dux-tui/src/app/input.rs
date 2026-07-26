@@ -6485,8 +6485,14 @@ impl App {
                 self.set_pull_request_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::StartupCommandInput => {
+                // Single click focuses, double click engages, the same two-step
+                // the macro body uses. Focusing FIRST is the load-bearing half:
+                // without it the visible focus ring stays on whichever button
+                // last had it, and the next confirm key runs that button instead
+                // of the field, silently discarding everything just typed.
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::StartupCommandInput, None);
+                self.focus_configure_control(ConfigureFieldFocus::Input);
                 self.set_startup_command_cursor_from_mouse(mouse.column, mouse.row);
                 if double_click {
                     self.input_target = InputTarget::StartupCommand;
@@ -7788,7 +7794,7 @@ mod tests {
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::ConfirmFocus;
-    use crate::app::input::configure_project_text_input;
+    use crate::app::input::{configure_focus, configure_project_text_input};
     use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
@@ -8993,6 +8999,86 @@ not_a_real_action = ["x"]
                 app.input_target,
                 InputTarget::StartupCommand,
                 "{which}: a double click engages the field"
+            );
+        }
+    }
+
+    /// A click on the body must MOVE FOCUS onto the body, not merely place the
+    /// caret in it. `modal::click_target` states the two-step contract, focus
+    /// then act, and skipping the first step strands the visible focus ring on
+    /// whichever control last had it. With focus left behind on Cancel, the very
+    /// next confirm key abandons the modal and throws the typing away.
+    #[test]
+    fn configure_modal_clicking_the_field_moves_focus_to_it() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, "one\ntwo\nthree");
+            app.focus_configure_control(ConfigureFieldFocus::Cancel);
+            let (input, _, _) = configure_modal_rects(&mut app);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                input.x + 2,
+                input.y + 1,
+            ));
+
+            assert_eq!(
+                configure_focus(&app.prompt),
+                Some(ConfigureFieldFocus::Input),
+                "{which}: clicking the body must move focus onto it"
+            );
+        }
+    }
+
+    /// The text-loss journey end to end: click into the body from a button,
+    /// engage, type, leave edit mode, confirm. Every step must keep the typing
+    /// and keep the modal open.
+    #[test]
+    fn configure_modal_text_typed_after_a_click_is_not_discarded_by_confirm() {
+        for which in CONFIGURE_MODALS {
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, "");
+            app.focus_configure_control(ConfigureFieldFocus::Cancel);
+            let (input, _, _) = configure_modal_rects(&mut app);
+            let (x, y) = (input.x + 1, input.y);
+
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+            assert_eq!(
+                app.input_target,
+                InputTarget::StartupCommand,
+                "{which}: the double click engages the field"
+            );
+            for ch in CONFIGURE_BODY.chars() {
+                app.handle_key(key(KeyCode::Char(ch))).expect("type");
+            }
+
+            // Leave edit mode. The modal stays open, and focus stays on the body.
+            app.handle_key(key(KeyCode::Esc)).expect("exit edit mode");
+            assert_eq!(
+                configure_focus(&app.prompt),
+                Some(ConfigureFieldFocus::Input),
+                "{which}: leaving edit mode keeps focus on the field"
+            );
+            assert_eq!(
+                configure_project_text_input(&app.prompt).map(|field| field.text.as_str()),
+                Some(CONFIGURE_BODY),
+                "{which}: the typed text is still in the field"
+            );
+
+            // The confirm key acts on the FOCUSED control, which is the body, so
+            // it re-engages rather than running a button the user never focused.
+            app.handle_key(key(KeyCode::Enter)).expect("confirm");
+            assert!(
+                !matches!(app.prompt, PromptState::None),
+                "{which}: confirm on the body must not close the modal"
+            );
+            assert_eq!(
+                configure_project_text_input(&app.prompt).map(|field| field.text.as_str()),
+                Some(CONFIGURE_BODY),
+                "{which}: the typed text survives the confirm key"
             );
         }
     }
