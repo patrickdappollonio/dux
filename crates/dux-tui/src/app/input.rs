@@ -1309,6 +1309,15 @@ impl App {
             self.input_target = InputTarget::None;
             return Ok(());
         }
+        // The advertised "empty the focused full-text field" key. The commit
+        // pane IS a focused full-text field, and `TextInput` does not answer
+        // the binding itself, so the surface has to, exactly as the configure
+        // modals and the macro body do.
+        if let Some(Action::ClearTextField) = self.bindings.lookup(&key, BindingScope::CommitInput)
+        {
+            self.commit_input.clear();
+            return Ok(());
+        }
         // TextInput handles Enter (newline), Up/Down (line nav), and all
         // editing keys in multiline mode.
         self.commit_input.handle_key(key);
@@ -3954,6 +3963,16 @@ impl App {
                 self.focus_next_macro_edit_control(!focus_move_is_reverse(key));
                 return Ok(false);
             }
+            Some(Action::ClearTextField) if focus == MacroEditFocus::Text => {
+                // "Empty the FOCUSED full-text field", which the body is
+                // whether or not it is engaged. It used to answer only from
+                // inside the engaged branch, so the key was dead on exactly the
+                // state the modal opens the body in.
+                if let Some(state) = self.macro_edit_state_mut() {
+                    state.text_input.clear();
+                }
+                return Ok(false);
+            }
             Some(Action::Confirm) => {
                 // Enter acts on the focused control. On the unengaged BODY that
                 // means ENGAGE, not save: Enter is content once the body is
@@ -4019,12 +4038,16 @@ impl App {
             return Ok(false);
         }
 
-        // Clearing the body is reachable from every focus stop, as it was
-        // before the modal had more than one.
-        if matches!(
-            self.bindings.lookup(&key, BindingScope::Dialog),
-            Some(Action::ClearTextField)
-        ) {
+        // "Empty the FOCUSED full-text field": the body has to have focus. It
+        // used to answer from every stop, which read as a modal-wide "clear"
+        // and disagreed with both the help text and the macro editor, whose
+        // body is one focus stop among five.
+        if focus == ConfigureFieldFocus::Input
+            && matches!(
+                self.bindings.lookup(&key, BindingScope::Dialog),
+                Some(Action::ClearTextField)
+            )
+        {
             if let Some(input) = configure_project_text_input_mut(&mut self.prompt) {
                 input.clear();
             }
@@ -21718,6 +21741,160 @@ cyan = "#00ffff"
             "the rebound clear key must empty the macro body, got {:?}",
             state.text_input.text
         );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // `ClearTextField` is advertised in the help overlay as "Empty the focused
+    // full-text field", scoped `[Dialog, CommitInput]`. Two of the three
+    // full-text surfaces ignored it, and the third answered it from focus
+    // stops that are not the field. These pin the one rule: the key empties
+    // the full-text field when THAT FIELD has focus, engaged or not, and does
+    // nothing from any other focus stop.
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn clear_text_field_key(app: &App) -> KeyEvent {
+        press(
+            app.bindings
+                .first_key_reaching(Action::ClearTextField, |_| true)
+                .expect("a clear-text-field binding"),
+        )
+    }
+
+    #[test]
+    fn clear_text_field_empties_the_commit_message_pane() {
+        let mut app = test_app(default_bindings());
+        app.commit_input.set_text("hello world".to_string());
+        app.input_target = InputTarget::CommitMessage;
+
+        let clear = clear_text_field_key(&app);
+        app.handle_key(clear).expect("clear");
+
+        assert_eq!(
+            app.commit_input.text, "",
+            "the commit pane is a full-text field and must answer the advertised key"
+        );
+        assert_eq!(app.commit_input.cursor, 0);
+        assert_eq!(
+            app.input_target,
+            InputTarget::CommitMessage,
+            "clearing must not leave the field"
+        );
+    }
+
+    /// A macro-editor fixture with a filled name and body, focused where asked.
+    fn macro_editor_with_focus(focus: MacroEditFocus) -> App {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::EditMacros {
+            entries: vec![(
+                "greet".to_string(),
+                "body".to_string(),
+                crate::config::MacroSurface::Both,
+            )],
+            selected: 0,
+            editing: Some(MacroEditState {
+                id: Some("greet".to_string()),
+                name_input: TextInput::with_text("greet".to_string()),
+                text_input: TextInput::with_text("body".to_string()).with_multiline(8),
+                surface: crate::config::MacroSurface::Both,
+                focus,
+            }),
+            pending_delete: None,
+        };
+        app
+    }
+
+    fn macro_editor_body(app: &App) -> String {
+        match &app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => state.text_input.text.clone(),
+            other => panic!("expected the macro editor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_text_field_empties_the_unengaged_macro_body() {
+        let mut app = macro_editor_with_focus(MacroEditFocus::Text);
+        assert_eq!(app.input_target, InputTarget::None, "not engaged");
+
+        let clear = clear_text_field_key(&app);
+        app.handle_key(clear).expect("clear");
+
+        assert_eq!(
+            macro_editor_body(&app),
+            "",
+            "focus is on the body, so the advertised key must empty it whether \
+             or not it is engaged"
+        );
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "clearing an unengaged body must not engage it"
+        );
+    }
+
+    #[test]
+    fn clear_text_field_leaves_the_macro_body_alone_from_another_focus_stop() {
+        for focus in [
+            MacroEditFocus::Name,
+            MacroEditFocus::Surface,
+            MacroEditFocus::Cancel,
+            MacroEditFocus::Save,
+        ] {
+            let mut app = macro_editor_with_focus(focus);
+            let clear = clear_text_field_key(&app);
+            app.handle_key(clear).expect("clear");
+
+            assert_eq!(
+                macro_editor_body(&app),
+                "body",
+                "{focus:?}: the body does not have focus, so it must not be emptied"
+            );
+            assert!(
+                matches!(
+                    app.prompt,
+                    PromptState::EditMacros {
+                        editing: Some(_),
+                        ..
+                    }
+                ),
+                "{focus:?}: the key must not close anything"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_text_field_in_a_configure_modal_only_answers_the_focused_body() {
+        for which in CONFIGURE_MODALS {
+            // Focused body: cleared.
+            let mut app = test_app(default_bindings());
+            let project_id = app.engine.projects[0].id.clone();
+            app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+            let clear = clear_text_field_key(&app);
+            app.handle_key(clear).expect("clear");
+            assert_eq!(
+                configure_project_text_input(&app.prompt).map(|field| field.text.as_str()),
+                Some(""),
+                "{which}: the focused body answers the advertised key"
+            );
+
+            // Focus on a button: untouched, the same rule the macro editor now
+            // follows.
+            for focus in [ConfigureFieldFocus::Cancel, ConfigureFieldFocus::Save] {
+                let mut app = test_app(default_bindings());
+                let project_id = app.engine.projects[0].id.clone();
+                app.prompt = configure_prompt(which, &project_id, CONFIGURE_BODY);
+                app.focus_configure_control(focus);
+                let clear = clear_text_field_key(&app);
+                app.handle_key(clear).expect("clear");
+                assert_eq!(
+                    configure_project_text_input(&app.prompt).map(|field| field.text.as_str()),
+                    Some(CONFIGURE_BODY),
+                    "{which}: {focus:?} is not the body, so nothing is emptied"
+                );
+            }
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════

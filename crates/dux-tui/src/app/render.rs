@@ -4632,10 +4632,16 @@ impl App {
                         ));
                     }
                     hints.push(Hint::plain("Space act on focus"));
-                    hints.push(Hint::key(
-                        self.bindings.label_for(Action::ClearTextField),
-                        "clear",
-                    ));
+                    if field_focused {
+                        // The clear key empties the FOCUSED full-text field, so
+                        // it only answers while the body has focus; naming it
+                        // from a button stop would promise a key nothing
+                        // answers.
+                        hints.push(Hint::key(
+                            self.bindings.label_for(Action::ClearTextField),
+                            "clear",
+                        ));
+                    }
                     hints.push(Hint::key(close_key, "cancel"));
                     hints
                 };
@@ -7918,6 +7924,11 @@ impl App {
                 ));
             }
             hints.push(Hint::plain("Space act on focus"));
+            // The clear key answers on the focused body here too, but the
+            // editor's footer is already at the popup's 64-cell inner width
+            // with the four hints above, so naming a fifth would truncate the
+            // line. The help overlay stays the authoritative reference; a
+            // footer may be incomplete, it may never be WRONG.
             hints.push(Hint::key(
                 self.bindings.label_for(Action::CloseOverlay),
                 "cancel",
@@ -13842,6 +13853,38 @@ mod tests {
                 "{name}: an unengaged field must name the key that starts editing; \
                  looked for {engage_key:?} and \"edit text\""
             );
+        }
+    }
+
+    /// The clear key empties the FOCUSED full-text field, so the footer may
+    /// only name it while that field has focus. Naming it from a button stop
+    /// would promise a key nothing answers, which is the class of bug the
+    /// focus gate on `Action::ClearTextField` was added to close.
+    #[test]
+    fn a_configure_modal_names_the_clear_key_only_while_the_body_has_focus() {
+        let clear_key = {
+            let app = test_app(default_bindings());
+            app.bindings.label_for(Action::ClearTextField)
+        };
+        for name in CONFIGURE_MODAL_NAMES {
+            let mut app = test_app(default_bindings());
+            app.prompt = configure_modal_prompt(name, "cargo build", ConfigureFieldFocus::Input);
+            app.input_target = InputTarget::None;
+            let on_body = rendered_rows(&mut app).join("\n");
+            assert!(
+                on_body.contains(&clear_key) && on_body.contains("clear"),
+                "{name}: the focused body must name the clear key"
+            );
+
+            for focus in [ConfigureFieldFocus::Cancel, ConfigureFieldFocus::Save] {
+                app.prompt = configure_modal_prompt(name, "cargo build", focus);
+                let on_button = rendered_rows(&mut app).join("\n");
+                assert!(
+                    !on_button.contains("clear"),
+                    "{name}: {focus:?} does not answer the clear key, so the footer \
+                     must not name it"
+                );
+            }
         }
     }
 
