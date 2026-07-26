@@ -652,6 +652,29 @@ impl Theme {
         }
     }
 
+    /// Border style for one focusable control inside an overlay — a text
+    /// field's frame, a filter box's frame — where the unfocused state is the
+    /// modal's own `overlay_border`.
+    ///
+    /// This deliberately does NOT use `border_focused`. `overlay_border`
+    /// DEFAULTS to `border_focused` (see `register_default_token`), so a
+    /// focused/unfocused pair drawn from those two tokens resolves to the very
+    /// same colour in the default theme and the user cannot see what has
+    /// focus. Instead the focused state uses the app's existing focused-control
+    /// idiom — `button_active_fg` plus BOLD, the same one the overlay checkbox
+    /// and the macro editor's fields use — so the two states differ in both
+    /// colour and weight even if a theme ever maps the colours together.
+    /// `the_overlay_field_focus_is_visible_in_every_loadable_theme` pins it.
+    pub fn overlay_field_border_style(&self, focused: bool) -> Style {
+        if focused {
+            Style::default()
+                .fg(self.button_active_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.overlay_border)
+        }
+    }
+
     pub fn selection_style(&self) -> Style {
         Style::default()
             .fg(self.selection_fg)
@@ -784,6 +807,53 @@ mod tests {
             assert_ne!(
                 theme.overlay_border_refused, theme.overlay_border,
                 "theme {} would render the refusal flash invisibly",
+                listing.id
+            );
+        }
+    }
+
+    /// Focus you cannot see is not focus. Every overlay that frames a focusable
+    /// field draws it through `overlay_field_border_style`, so the focused and
+    /// unfocused presentations must actually DIFFER in every theme dux can
+    /// load. Reading the render code cannot catch this class of bug: the naive
+    /// `border_focused`/`overlay_border` pair looks correct and resolves to one
+    /// colour, because `overlay_border` defaults to `border_focused`. Only
+    /// comparing resolved styles finds it.
+    #[test]
+    fn the_overlay_field_focus_is_visible_in_every_loadable_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            root,
+        };
+        let listings = discover_available(&paths);
+        assert!(
+            listings.len() > 1,
+            "expected the bundled theme plus built-ins, got {}",
+            listings.len()
+        );
+        for listing in listings {
+            let theme = load(&listing.id, &paths)
+                .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
+            let focused = theme.overlay_field_border_style(true);
+            let unfocused = theme.overlay_field_border_style(false);
+            assert_ne!(
+                focused, unfocused,
+                "theme {} renders a focused overlay field identically to an unfocused one \
+                 (focused fg {:?} / unfocused fg {:?}); focus you cannot see is not focus",
+                listing.id, focused.fg, unfocused.fg
+            );
+            // Not just the BOLD weight: the colours must differ too, so the cue
+            // survives a terminal that renders bold as a font weight only (or
+            // ignores it). This holds for all 40 loadable themes today.
+            assert_ne!(
+                focused.fg, unfocused.fg,
+                "theme {} distinguishes a focused overlay field by weight alone; \
+                 a terminal that ignores BOLD would show no focus at all",
                 listing.id
             );
         }

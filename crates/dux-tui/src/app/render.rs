@@ -4743,14 +4743,14 @@ impl App {
                 .render(label_area, frame.buffer_mut());
 
                 let focused = self.input_target == InputTarget::StartupCommand;
+                // Shared focused-control idiom, not `border_focused`: that token
+                // is what `overlay_border` defaults to, so the pair renders
+                // identically in every shipped theme. See
+                // `Theme::overlay_field_border_style`.
                 let input_block = Block::default()
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(if focused {
-                        self.theme.border_focused
-                    } else {
-                        self.theme.overlay_border
-                    }));
+                    .border_style(self.theme.overlay_field_border_style(focused));
                 let text_area = input_block.inner(input_area);
                 input_block.render(input_area, frame.buffer_mut());
 
@@ -4934,11 +4934,10 @@ impl App {
                         .title(" Filter ")
                         .borders(Borders::ALL)
                         .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(if prompt.searching {
-                            self.theme.border_focused
-                        } else {
-                            self.theme.overlay_border
-                        }))
+                        // See `Theme::overlay_field_border_style`: drawing the
+                        // unfocused state from `overlay_border` and the focused
+                        // one from `border_focused` is the same colour.
+                        .border_style(self.theme.overlay_field_border_style(prompt.searching))
                         .style(Style::default().bg(self.theme.overlay_bg));
                     let filter_inner = filter_block.inner(filter_area);
                     filter_block.render(filter_area, frame.buffer_mut());
@@ -8100,11 +8099,10 @@ impl App {
 
     /// Draw one macro-editor text field's border and return its inner area.
     ///
-    /// The focused field uses `button_active_fg` plus BOLD rather than
-    /// `border_focused`: `overlay_border` DEFAULTS to `border_focused` (see
-    /// `theme.rs`), so a focused/unfocused pair drawn from those two tokens is
-    /// literally the same colour in the default theme. BOLD makes the two
-    /// states differ even if a theme ever maps the colours together.
+    /// The focused field is drawn by the shared `overlay_field_border_style`
+    /// (`button_active_fg` plus BOLD), never from `border_focused`: that token
+    /// is exactly what `overlay_border` defaults to, so a focused/unfocused
+    /// pair built from the two is one colour in every shipped theme.
     ///
     /// `engaged_exit_key`, when present, marks the field as ENGAGED (taking
     /// keystrokes) and names the key that leaves edit mode.
@@ -8115,13 +8113,7 @@ impl App {
         focused: bool,
         engaged_exit_key: Option<String>,
     ) -> Rect {
-        let border_style = if focused {
-            Style::default()
-                .fg(self.theme.button_active_fg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.theme.overlay_border)
-        };
+        let border_style = self.theme.overlay_field_border_style(focused);
         let mut block = Block::default()
             .borders(Borders::ALL)
             .border_set(border::ROUNDED)
@@ -13698,6 +13690,169 @@ mod tests {
             checkbox_marker_style(&mut app, COPY),
             copy_unfocused,
             "the focused copy-changes checkbox must look focused"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Overlay text fields must LOOK focused. These assert on drawn cells, not
+    // on state: the bug they guard drew the focused border from
+    // `border_focused` and the unfocused one from `overlay_border`, which the
+    // state was perfectly happy about and which resolves to a single colour in
+    // every loadable theme (see
+    // `theme::tests::the_overlay_field_focus_is_visible_in_every_loadable_theme`).
+    // ------------------------------------------------------------------
+
+    /// Style of a cell in a rendered frame, folding in the modifier so a BOLD
+    /// border is not mistaken for a plain one.
+    fn cell_style(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> Style {
+        let cell = &buf[(x, y)];
+        Style::default()
+            .fg(cell.fg)
+            .bg(cell.bg)
+            .add_modifier(cell.modifier)
+    }
+
+    /// Style of the top-left corner of the startup-command/env modal's text
+    /// field frame, from a real rendered frame.
+    ///
+    /// The field rect comes from the mouse hit-test layout the renderer
+    /// publishes, so the test reads the border of the very box the user clicks
+    /// into rather than guessing at layout math.
+    fn startup_command_field_corner_style(app: &mut App) -> Style {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let OverlayMouseLayout::ConfigureStartupCommand { input } = app.overlay_layout.active
+        else {
+            panic!("the modal must publish its text field's hit-test rect");
+        };
+        let buf = terminal.backend().buffer();
+        assert_eq!(
+            buf[(input.x - 1, input.y - 1)].symbol(),
+            "╭",
+            "expected the text field's top-left border corner"
+        );
+        cell_style(buf, input.x - 1, input.y - 1)
+    }
+
+    #[test]
+    fn startup_command_and_env_modals_render_their_focused_field_as_focused() {
+        let field = || {
+            TextInput::with_text("cargo build".to_string())
+                .with_multiline(6)
+                .with_placeholder("Enter startup command...")
+        };
+        let prompts = [
+            (
+                "ConfigureStartupCommand",
+                PromptState::ConfigureStartupCommand {
+                    project_id: "p1".to_string(),
+                    project_name: "demo".to_string(),
+                    input: field(),
+                },
+            ),
+            (
+                "ConfigureProjectEnv",
+                PromptState::ConfigureProjectEnv {
+                    project_id: "p1".to_string(),
+                    project_name: "demo".to_string(),
+                    input: field(),
+                },
+            ),
+            (
+                "ConfigureGlobalEnv",
+                PromptState::ConfigureGlobalEnv {
+                    project_name: "demo".to_string(),
+                    input: field(),
+                },
+            ),
+        ];
+
+        for (name, prompt) in prompts {
+            let mut app = test_app(default_bindings());
+            app.prompt = prompt;
+
+            app.input_target = InputTarget::None;
+            let unfocused = startup_command_field_corner_style(&mut app);
+
+            app.input_target = InputTarget::StartupCommand;
+            let focused = startup_command_field_corner_style(&mut app);
+
+            assert_ne!(
+                focused, unfocused,
+                "{name}: the engaged text field must render as focused; \
+                 focus you cannot see is not focus"
+            );
+            assert_ne!(
+                focused.fg, unfocused.fg,
+                "{name}: the focused field must differ in colour, not only in weight"
+            );
+        }
+    }
+
+    /// Style of the startup-log modal's filter-box top-left corner. The box
+    /// carries a " Filter " title on its top border row, which is what locates
+    /// it in the buffer.
+    fn startup_log_filter_corner_style(app: &mut App) -> Style {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if !row.contains(" Filter ") {
+                continue;
+            }
+            let corner = row.find('╭').expect("the filter box has a top-left corner");
+            let x = row
+                .char_indices()
+                .position(|(byte, _)| byte == corner)
+                .expect("corner column") as u16;
+            return cell_style(buf, x, y);
+        }
+        panic!("the filter box was not rendered");
+    }
+
+    #[test]
+    fn startup_log_filter_box_renders_as_focused_while_searching() {
+        let log_prompt = |searching: bool| {
+            PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+                scope_label: "demo".to_string(),
+                entries: Vec::new(),
+                selected: 0,
+                // A non-empty filter keeps the box on screen while NOT
+                // searching, which is the unfocused presentation.
+                filter: TextInput::with_text("boot".to_string()),
+                searching,
+                content: String::new(),
+                scroll_offset: 0,
+            })
+        };
+
+        let mut app = test_app(default_bindings());
+        app.prompt = log_prompt(false);
+        let unfocused = startup_log_filter_corner_style(&mut app);
+
+        app.prompt = log_prompt(true);
+        let focused = startup_log_filter_corner_style(&mut app);
+
+        assert_ne!(
+            focused, unfocused,
+            "the filter box must render as focused while it is taking keystrokes"
+        );
+        assert_ne!(
+            focused.fg, unfocused.fg,
+            "the focused filter box must differ in colour, not only in weight"
         );
     }
 
