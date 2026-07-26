@@ -8198,6 +8198,14 @@ impl App {
     }
 
     fn render_overlay(&mut self, frame: &mut Frame) {
+        // No fullscreen surface draws a tab strip, and the windowed center
+        // pane skips `render_agent_tab_strip_if_needed` (the only place that
+        // clears the registry) while one is up. Drop the rects here so the
+        // geometry a maximized frame leaves behind can never be clicked, even
+        // if some future path reaches the tab hit-test.
+        if !matches!(self.fullscreen_overlay, FullscreenOverlay::None) {
+            self.agent_tab_regions.clear();
+        }
         match self.fullscreen_overlay {
             FullscreenOverlay::Agent => {
                 self.render_fullscreen_agent(frame);

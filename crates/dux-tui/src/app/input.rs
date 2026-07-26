@@ -7160,16 +7160,27 @@ impl App {
             return false;
         }
 
+        // A maximized surface covers the windowed layout, but that layout is
+        // still computed (and its rects still recorded) underneath every
+        // frame. Neither of the two questions below makes sense while it is
+        // up, and asking them let a click INSIDE the maximized surface act on
+        // chrome that is not on screen: grab an invisible pane divider, or hit
+        // a tab rect the maximized renderer never drew. Both are gated on
+        // there being no fullscreen overlay. (The wheel arms are deliberately
+        // NOT gated — a wheel over the maximized surface must keep reaching
+        // the child; see `handle_center_mouse_wheel`.)
+        let windowed = matches!(self.fullscreen_overlay, FullscreenOverlay::None);
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
+                if windowed && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row) {
                     self.mouse_drag = Some(drag);
                     self.update_dragged_panes(mouse.column, mouse.row);
                     return false;
                 }
 
                 // Agent tab strip: click a tab to focus it, or `+` to add one.
-                if self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
+                if windowed && self.handle_agent_tab_strip_click(mouse.column, mouse.row) {
                     return false;
                 }
 
@@ -7730,6 +7741,7 @@ mod tests {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use dux_core::engine::InFlightKey;
     use dux_core::worker::ResolvedPullRequest;
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
     use std::process::Command;
@@ -12213,6 +12225,286 @@ not_a_real_action = ["x"]
         assert_eq!(
             offset, 13,
             "the fullscreen surface shares the 3-line wheel step"
+        );
+    }
+
+    // -- Maximized (fullscreen) surfaces must not answer windowed geometry --
+    //
+    // These tests deliberately RENDER into a `TestBackend` instead of using
+    // `install_mouse_layout`. The synthetic fixture records no tab regions at
+    // all and hand-picks divider columns, so it cannot reproduce the bug:
+    // the stale rects only exist because a real frame recorded them.
+
+    /// Draw the whole widget tree so every mouse-geometry registry
+    /// (`mouse_layout`, `agent_tab_regions`) holds the rects a real frame
+    /// recorded.
+    fn draw_frame(app: &mut App, terminal: &mut ratatui::Terminal<TestBackend>) {
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+    }
+
+    fn test_terminal() -> ratatui::Terminal<TestBackend> {
+        ratatui::Terminal::new(TestBackend::new(100, 30)).expect("terminal")
+    }
+
+    fn seed_input_tab(app: &mut App, session_id: &str, tab_id: &str, provider: &str, order: i64) {
+        app.engine.agent_tabs.insert(
+            tab_id.to_string(),
+            crate::model::AgentTab {
+                id: tab_id.to_string(),
+                session_id: session_id.to_string(),
+                provider: ProviderKind::from_str(provider),
+                sort_order: order,
+                created_at: Utc::now(),
+            },
+        );
+    }
+
+    /// A maximized agent draws no pane dividers, but the windowed layout's
+    /// divider columns are still recorded. A click inside the maximized
+    /// surface that happens to land on one of those columns must not start a
+    /// resize drag on an invisible divider.
+    #[test]
+    fn click_inside_maximized_agent_starts_no_resize_drag() {
+        let mut app = test_app(default_bindings());
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+
+        // The windowed left divider column, as the real layout recorded it.
+        let divider = app.mouse_layout.left.x + app.mouse_layout.left.width.saturating_sub(1);
+
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        draw_frame(&mut app, &mut terminal);
+
+        let term = app
+            .mouse_layout
+            .agent_term
+            .expect("the maximized surface records its terminal area");
+        assert!(
+            divider >= term.x && divider < term.x + term.width,
+            "the divider column must fall INSIDE the maximized surface or this test proves nothing"
+        );
+        let row = term.y + term.height / 2;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), divider, row));
+
+        assert!(
+            app.mouse_drag.is_none(),
+            "a click inside the maximized agent must not grab an invisible pane divider"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::Agent,
+            "the click was inside, so the surface stays maximized"
+        );
+    }
+
+    /// The maximized agent renders no tab strip, so the tab rects left over
+    /// from the last windowed frame must not be clickable. The ordering is the
+    /// bug: render windowed (recording the rects), maximize, then click.
+    #[test]
+    fn click_inside_maximized_agent_switches_no_tab() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.center_mode = CenterMode::Agent;
+
+        let mut terminal = test_terminal();
+        // The WINDOWED frame is what records the clickable tab rects.
+        draw_frame(&mut app, &mut terminal);
+        let focused_before = app.focused_tab_id(&session_id);
+        let (other_tab, rect) = app
+            .agent_tab_regions
+            .iter()
+            .find(|(id, _)| *id != focused_before)
+            .cloned()
+            .expect("the windowed frame records a rect for the unfocused tab");
+
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        draw_frame(&mut app, &mut terminal);
+
+        let term = app
+            .mouse_layout
+            .agent_term
+            .expect("the maximized surface records its terminal area");
+        let row = (rect.y..rect.y + rect.height)
+            .find(|r| *r >= term.y && *r < term.y + term.height)
+            .expect("the stale tab rect must overlap the maximized surface");
+        let col = rect.x + rect.width / 2;
+        assert!(
+            col >= term.x && col < term.x + term.width,
+            "the stale tab rect must overlap the maximized surface"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+
+        assert_eq!(
+            app.focused_tab_id(&session_id),
+            focused_before,
+            "clicking inside the maximized agent must not switch to {other_tab} through a stale tab rect"
+        );
+        assert!(
+            app.agent_tab_regions.is_empty(),
+            "a maximized frame draws no tabs, so it must leave no clickable tab rects behind"
+        );
+    }
+
+    /// The click-outside dismiss must keep working: it is the only way out of
+    /// the maximized surface with the mouse.
+    #[test]
+    fn click_outside_maximized_agent_still_minimizes() {
+        let mut app = test_app(default_bindings());
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+
+        let term = app
+            .mouse_layout
+            .agent_term
+            .expect("the maximized surface records its terminal area");
+        assert!(
+            term.x > 0,
+            "the maximized surface must leave a margin to click in"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, term.y));
+
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "a click outside the maximized agent still minimizes it"
+        );
+    }
+
+    /// The maximized TERMINAL surface falls through the same arm, so it shares
+    /// the invisible-divider bug.
+    #[test]
+    fn click_inside_maximized_terminal_starts_no_resize_drag() {
+        let mut app = test_app(default_bindings());
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+        let divider = app.mouse_layout.left.x + app.mouse_layout.left.width.saturating_sub(1);
+
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        draw_frame(&mut app, &mut terminal);
+
+        let term = app
+            .mouse_layout
+            .agent_term
+            .expect("the maximized terminal records its terminal area");
+        let row = term.y + term.height / 2;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), divider, row));
+
+        assert!(
+            app.mouse_drag.is_none(),
+            "a click inside the maximized terminal must not grab an invisible pane divider"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+    }
+
+    /// The startup-log viewer handles its own mouse events and returns before
+    /// the windowed arm, so it never had the bug. Pin that.
+    #[test]
+    fn click_inside_maximized_startup_log_starts_no_resize_drag() {
+        let mut app = test_app(default_bindings());
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+        let divider = app.mouse_layout.left.x + app.mouse_layout.left.width.saturating_sub(1);
+
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        draw_frame(&mut app, &mut terminal);
+
+        let term = app
+            .mouse_layout
+            .agent_term
+            .expect("the maximized startup log records its body area");
+        let row = term.y + term.height / 2;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), divider, row));
+
+        assert!(
+            app.mouse_drag.is_none(),
+            "a click inside the maximized startup log must not grab an invisible pane divider"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::StartupLog);
+    }
+
+    /// The maximized-surface guard must not turn dux into a client that
+    /// swallows the events the agent was meant to receive. With the child in
+    /// the alt screen with mouse reporting on, a wheel tick over the MAXIMIZED
+    /// agent is still forwarded to it as an SGR report. `cat -v` echoes what it
+    /// receives, so the child's own grid is the proof.
+    #[test]
+    fn wheel_over_maximized_agent_still_forwards_to_the_child() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        let args = vec![
+            "-c".to_string(),
+            "stty raw -echo; printf '\\033[?1049h\\033[?1000h'; exec cat -v".to_string(),
+        ];
+        let client = PtyClient::spawn("/bin/sh", &args, std::path::Path::new("."), 24, 80, 100)
+            .expect("spawn pty");
+        app.engine.providers.insert(session_id, client);
+        app.session_surface = SessionSurface::Agent;
+
+        // Poll until the child's own escape sequences have been parsed, rather
+        // than guessing a sleep.
+        let mut ready = false;
+        for _ in 0..400 {
+            let provider = app
+                .selected_terminal_surface_client()
+                .expect("provider for selected session");
+            if provider.is_alt_screen() && provider.has_mouse_mode() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            ready,
+            "the child never entered the alt screen with mouse reporting"
+        );
+
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+        let term = app
+            .mouse_layout
+            .agent_term
+            .expect("the maximized surface records its terminal area");
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, term.x + 5, term.y + 3));
+
+        let mut echoed = false;
+        for _ in 0..400 {
+            let rendered: String = app
+                .selected_terminal_surface_client()
+                .expect("provider for selected session")
+                .snapshot()
+                .cells
+                .iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect();
+            // `cat -v` renders ESC as `^[`, so the SGR wheel report reads
+            // `^[[<64;col;rowM` once the child has it.
+            if rendered.contains("[<64;") {
+                echoed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            echoed,
+            "a wheel tick over the maximized agent must still reach the child as an SGR report"
+        );
+        assert_eq!(
+            app.selected_terminal_surface_client()
+                .expect("provider for selected session")
+                .scrollback_offset(),
+            0,
+            "a forwarded wheel must not also scroll dux's own scrollback"
         );
     }
 
