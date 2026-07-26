@@ -122,11 +122,21 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ConfirmNonDefaultBranch { .. }
         | PromptState::ConfirmUseExistingBranch { .. } => Cancel,
 
-        // The macro editor is two modals in one variant. Its nested
-        // delete-confirm is a confirmation like any other and dismisses; the
-        // editor underneath holds unsaved free text and does not.
+        // `EditMacros` is three modals in one variant, so it answers three
+        // ways. Its nested delete-confirm is a confirmation like any other and
+        // dismisses. Its LIST is a Picker over saved rows, holding no unsaved
+        // text and no built-up selection, so it dismisses too, like every
+        // other picker above; it used to blink, alone among them, on a
+        // justification ("unsaved free text, or a multi-step selection") that
+        // is true of the EDITOR and not of the list. The editor itself, below,
+        // is the half that really does hold unsaved text.
         PromptState::EditMacros {
             pending_delete: Some(_),
+            ..
+        }
+        | PromptState::EditMacros {
+            editing: None,
+            pending_delete: None,
             ..
         } => Cancel,
 
@@ -300,17 +310,29 @@ impl App {
                 self.resolve_confirm_delete_macro(false);
             }
 
+            // The macro LIST closes the overlay, exactly as its close binding
+            // does. Nothing is saved and nothing is lost: the rows on screen
+            // are the ones already in config.
+            PromptState::EditMacros {
+                editing: None,
+                pending_delete: None,
+                ..
+            } => {
+                self.prompt = PromptState::None;
+            }
+
             // Not dismissible by an outside click (see `outside_click_policy`).
             // Reached only if a caller ignores the policy, so it is a no-op
             // rather than a surprise close.
             //
-            // The macro editor is deliberately absent from the "matches its Esc
-            // arm" contract above, and cannot be added to it: its Esc is
+            // The macro EDITOR is deliberately absent from the "matches its
+            // Esc arm" contract above, and cannot be added to it: its Esc is
             // state-dependent (in the engaged body it leaves edit mode; in the
-            // editor it cancels the edit back to the list; in the list it closes
-            // the overlay), so there is no single statement to mirror. A stray
-            // click gets the blink instead, which is the right answer for a
-            // surface holding unsaved text.
+            // editor it cancels the edit back to the list), so there is no
+            // single statement to mirror. A stray click gets the blink
+            // instead, which is the right answer for a surface holding
+            // unsaved text. (The list state is handled above: it has a single
+            // unambiguous Esc, which closes the overlay.)
             PromptState::EditMacros { .. }
             | PromptState::BrowseProjects { .. }
             | PromptState::ConfigureStartupCommand { .. }
@@ -448,6 +470,28 @@ mod tests {
         }
     }
 
+    /// The macro EDITOR open over the list: the one `EditMacros` state that
+    /// refuses an outside click, because it is the one holding unsaved text.
+    fn edit_macros_with_open_editor() -> PromptState {
+        PromptState::EditMacros {
+            entries: vec![(
+                "greet".to_string(),
+                "hello".to_string(),
+                crate::config::MacroSurface::Agent,
+            )],
+            selected: 0,
+            editing: Some(crate::app::MacroEditState {
+                id: Some("greet".to_string()),
+                name_input: crate::app::TextInput::with_text("greet".to_string()),
+                text_input: crate::app::TextInput::with_text("hello, unsaved".to_string())
+                    .with_multiline(8),
+                surface: crate::config::MacroSurface::Agent,
+                focus: crate::app::MacroEditFocus::Text,
+            }),
+            pending_delete: None,
+        }
+    }
+
     /// Every modal that refuses an outside click, paired with the text (or
     /// built-up selection) whose loss is the reason it refuses. Built from the
     /// app so the two variants that carry real project/request payloads can use
@@ -455,19 +499,7 @@ mod tests {
     fn refusing_prompts(app: &App) -> Vec<(&'static str, PromptState)> {
         let project = app.engine.projects[0].clone();
         vec![
-            (
-                "EditMacros",
-                PromptState::EditMacros {
-                    entries: vec![(
-                        "greet".to_string(),
-                        "hello".to_string(),
-                        crate::config::MacroSurface::Agent,
-                    )],
-                    selected: 0,
-                    editing: None,
-                    pending_delete: None,
-                },
-            ),
+            ("EditMacros", edit_macros_with_open_editor()),
             (
                 "BrowseProjects",
                 PromptState::BrowseProjects {
@@ -757,6 +789,38 @@ mod tests {
         assert!(!app.refusal_blink_running());
     }
 
+    /// The macro LIST is a Picker over saved rows. It holds no unsaved text and
+    /// no multi-step selection, so it must cancel on an outside click like
+    /// every other picker. It used to blink, alone among them, on a
+    /// justification that was true of the editor and not of the list.
+    #[test]
+    fn the_macro_list_cancels_on_an_outside_click_like_every_other_picker() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::EditMacros {
+            entries: vec![(
+                "greet".to_string(),
+                "hello".to_string(),
+                crate::config::MacroSurface::Agent,
+            )],
+            selected: 0,
+            editing: None,
+            pending_delete: None,
+        };
+        render(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "the macro list must close, got {:?}",
+            app.prompt
+        );
+        assert!(
+            !app.refusal_blink_running(),
+            "a modal that dismissed also blinked"
+        );
+    }
+
     #[test]
     fn the_open_macro_editor_blinks_and_keeps_the_unsaved_edit() {
         // The refusing-prompts fixture covers the macro LIST. The editor is the
@@ -938,8 +1002,9 @@ mod tests {
             outside_click_policy(&rename_session_prompt()),
             OutsideClickPolicy::Blink
         );
-        // The macro editor blinks, but the delete-confirm nested inside it is a
-        // confirmation and dismisses.
+        // `EditMacros` answers three ways. Its nested delete-confirm is a
+        // confirmation and dismisses; its list is a picker and dismisses; only
+        // the open editor, which holds unsaved text, refuses.
         assert_eq!(
             outside_click_policy(&edit_macros_with_pending_delete()),
             OutsideClickPolicy::Cancel
@@ -951,6 +1016,10 @@ mod tests {
                 editing: None,
                 pending_delete: None,
             }),
+            OutsideClickPolicy::Cancel
+        );
+        assert_eq!(
+            outside_click_policy(&edit_macros_with_open_editor()),
             OutsideClickPolicy::Blink
         );
     }
