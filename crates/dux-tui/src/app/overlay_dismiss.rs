@@ -303,6 +303,14 @@ impl App {
             // Not dismissible by an outside click (see `outside_click_policy`).
             // Reached only if a caller ignores the policy, so it is a no-op
             // rather than a surprise close.
+            //
+            // The macro editor is deliberately absent from the "matches its Esc
+            // arm" contract above, and cannot be added to it: its Esc is
+            // state-dependent (in the engaged body it leaves edit mode; in the
+            // editor it cancels the edit back to the list; in the list it closes
+            // the overlay), so there is no single statement to mirror. A stray
+            // click gets the blink instead, which is the right answer for a
+            // surface holding unsaved text.
             PromptState::EditMacros { .. }
             | PromptState::BrowseProjects { .. }
             | PromptState::ConfigureStartupCommand { .. }
@@ -744,6 +752,45 @@ mod tests {
             }
         ));
         assert!(!app.refusal_blink_running());
+    }
+
+    #[test]
+    fn the_open_macro_editor_blinks_and_keeps_the_unsaved_edit() {
+        // The refusing-prompts fixture covers the macro LIST. The editor is the
+        // half that actually holds unsaved text, so it gets its own case.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::EditMacros {
+            entries: vec![(
+                "greet".to_string(),
+                "hello".to_string(),
+                crate::config::MacroSurface::Agent,
+            )],
+            selected: 0,
+            editing: Some(crate::app::MacroEditState {
+                id: Some("greet".to_string()),
+                name_input: crate::app::TextInput::with_text("greet".to_string()),
+                text_input: crate::app::TextInput::with_text("hello, unsaved".to_string())
+                    .with_multiline(8),
+                surface: crate::config::MacroSurface::Agent,
+                focus: crate::app::MacroEditFocus::Text,
+            }),
+            pending_delete: None,
+        };
+        render(&mut app);
+
+        app.handle_mouse(left_down(0, 0));
+
+        match &app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => assert_eq!(state.text_input.text, "hello, unsaved"),
+            other => panic!("the editor must survive an outside click, got {other:?}"),
+        }
+        assert!(
+            app.refusal_blink_running(),
+            "the refusal must be visible, not silent"
+        );
     }
 
     #[test]

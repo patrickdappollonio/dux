@@ -1559,13 +1559,64 @@ pub(crate) struct MacroEditState {
     pub(crate) name_input: TextInput,
     pub(crate) text_input: TextInput,
     pub(crate) surface: MacroSurface,
-    pub(crate) stage: MacroEditStage,
+    pub(crate) focus: MacroEditFocus,
 }
 
+/// Which control has focus in the macro editor.
+///
+/// The macro editor used to be a one-way two-stage wizard (`EditName` then
+/// `EditText`) where Escape SAVED from the second stage and the surface
+/// selector was unreachable once you left the first. It is now an ordinary
+/// modal: every control is a focus stop, movement keys move between them and
+/// change nothing, Space acts on whichever one has focus, and Escape cancels.
+///
+/// Declared in visual order, which is also the forward focus order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MacroEditStage {
-    EditName,
-    EditText,
+pub(crate) enum MacroEditFocus {
+    /// The single-line name field. Typing is immediate: there is no mode,
+    /// because nothing a single-line field consumes collides with a modal key.
+    Name,
+    /// The multiline body. Needs the engage step (see
+    /// [`App::macro_text_engaged`]) because Enter is CONTENT here and is also
+    /// every modal's confirm key, so the two cannot share an unmoded field.
+    Text,
+    /// The Agent/Terminal/Both selector. Space advances it; movement keys move
+    /// past it without touching its value.
+    Surface,
+    Cancel,
+    Save,
+}
+
+impl MacroEditFocus {
+    /// Visual order, which is also the forward focus order.
+    pub(crate) const ORDER: [MacroEditFocus; 5] = [
+        MacroEditFocus::Name,
+        MacroEditFocus::Text,
+        MacroEditFocus::Surface,
+        MacroEditFocus::Cancel,
+        MacroEditFocus::Save,
+    ];
+
+    /// The next focus stop in `forward` direction, wrapping at both ends.
+    pub(crate) fn step(self, forward: bool) -> Self {
+        let order = Self::ORDER;
+        let index = order
+            .iter()
+            .position(|f| *f == self)
+            .expect("every variant is in ORDER");
+        let next = if forward {
+            (index + 1) % order.len()
+        } else {
+            (index + order.len() - 1) % order.len()
+        };
+        order[next]
+    }
+
+    /// Whether this stop is a text field, and so owns the plain characters and
+    /// the horizontal arrows that would otherwise reach the bindings.
+    pub(crate) fn is_text_field(self) -> bool {
+        matches!(self, MacroEditFocus::Name | MacroEditFocus::Text)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1581,6 +1632,10 @@ pub(crate) enum InputTarget {
     Terminal,
     CommitMessage,
     StartupCommand,
+    /// The macro editor's multiline body is engaged for typing. Its own variant
+    /// rather than a reuse of `StartupCommand` so a future reader cannot mistake
+    /// one modal's engage state for the other's.
+    MacroText,
 }
 
 #[derive(Clone, Copy)]
@@ -1892,6 +1947,21 @@ pub(crate) enum OverlayMouseLayout {
         /// `CreateAgentRequest::NewProject` prompts.
         copy_checkbox: Option<OverlayCheckbox>,
     },
+    /// The macro EDITOR (not the macro list, which has no click targets of its
+    /// own, and not the nested delete-confirm, which publishes
+    /// `ConfirmDeleteMacro` over the top of this).
+    ///
+    /// The two input rects are the fields' INNER areas, so a click maps
+    /// straight onto a text position. `surface_options` is one rect per
+    /// [`MacroSurface`] variant in `Agent, Terminal, Both` order, so clicking
+    /// one selects exactly that option rather than advancing the cycle.
+    EditMacros {
+        name_input: Rect,
+        text_input: Rect,
+        surface_options: [Rect; 3],
+        cancel_button: Rect,
+        save_button: Rect,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1912,6 +1982,7 @@ pub(crate) enum MouseClickTarget {
     StagedPane,
     CommandPalette,
     StartupCommandInput,
+    MacroTextInput,
 }
 
 #[derive(Clone, Copy, Debug)]

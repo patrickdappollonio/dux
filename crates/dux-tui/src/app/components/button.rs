@@ -90,6 +90,10 @@ pub(crate) enum ButtonPressedTarget {
     ConfirmCloseTabConfirm,
     ConfirmDeleteMacroCancel,
     ConfirmDeleteMacroConfirm,
+    /// The macro EDITOR's own buttons (distinct from the nested delete-confirm
+    /// above): Cancel abandons the edit, Save writes the macro to config.
+    EditMacroCancel,
+    EditMacroSave,
     ConfirmQuitCancel,
     ConfirmQuitConfirm,
     ConfirmDiscardCancel,

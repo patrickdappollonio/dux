@@ -103,17 +103,35 @@ can reach it through the command palette (open with **Ctrl-P** by default and
 search for `edit-macros`). The `EditMacros` action has no default key binding;
 the palette is the intended entry point.
 
-Inside the editor:
+Inside the list:
 
 - The list shows all defined macros in declaration order.
-- **n** creates a new macro. dux asks for a name first, then the text, then
-  lets you cycle the surface with **Tab** / **Shift-Tab**.
-- **Enter** on a highlighted entry opens it for editing, following the same
-  name → text → surface flow.
+- **n** creates a new macro; **Enter** on a highlighted entry opens it for
+  editing. Either one opens the macro form described below.
 - **d** or **Delete** stages a deletion and shows a confirmation dialog.
-- **Esc** in the name step cancels the edit; **Esc** in the text step saves
-  the entry (provided the text is non-empty).
-- **Esc** in the list view closes the overlay.
+- **Esc** closes the overlay.
+
+The macro form is an ordinary modal, not a wizard. It shows the name field, the
+text field, the Agent / Terminal / Both selector, and **Cancel** and **Save**
+buttons all at once, and every one of them is a focus stop:
+
+- The movement keys (`toggle_selection` in `[keys]`, **Tab** / **Shift-Tab** by
+  default) move focus between the five controls. They never change a value.
+- **Space** acts on whichever control has focus: it types a space in a text
+  field, advances the surface selector, and activates a button.
+- The name field takes typing immediately. The text field is multiline, so
+  **Enter** there has to mean "new line" rather than "confirm" — it therefore
+  has an edit mode: engage it with `engage_commit_input` (**i** by default),
+  and leave edit mode with `exit_commit_input` (**Esc** or **Ctrl-G**), which
+  keeps the form open and your text intact.
+- **Esc** outside the text field's edit mode cancels the edit and writes
+  nothing.
+- Everything is clickable: clicking a field focuses it (clicking the text field
+  again engages it), clicking a selector option picks it, clicking a button
+  activates it.
+
+Saving requires a name and some text, and refuses a name another macro already
+uses; dux says which in the status line and keeps the form open.
 
 All changes (additions, edits, and deletions) are persisted immediately to
 `config.toml`. Hand-edits to the file are also respected: dux rewrites with

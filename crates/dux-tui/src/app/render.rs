@@ -636,18 +636,37 @@ fn wrapped_line_count(lines: &[Line<'_>], width: u16, trim: bool) -> u16 {
     total
 }
 
-fn macro_edit_text_inner_area(popup: Rect) -> Rect {
+/// The macro editor's popup size. Tall enough that the body still gets a
+/// usable field once the name field, the selector, the misclick-safe spacer,
+/// the buttons, and the hint row have taken their rows.
+pub(crate) const MACRO_EDIT_POPUP: (u16, u16) = (66, 24);
+
+/// The macro editor's vertical layout, as a single source of truth: the
+/// renderer draws through it and `macro_edit_text_inner_area` measures through
+/// it, so the text input's wrap width can never drift from what is painted.
+///
+/// Order: name label, name field, body label, body field, blank, selector,
+/// misclick-safe spacer, buttons, hints.
+fn macro_edit_rows(popup: Rect) -> [Rect; 9] {
     let outer_inner = Block::bordered().inner(popup);
-    let [_, bordered_area, _] = Layout::default()
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
         ])
-        .areas(outer_inner);
+        .areas(outer_inner)
+}
 
-    Block::bordered().inner(bordered_area)
+fn macro_edit_text_inner_area(popup: Rect) -> Rect {
+    Block::bordered().inner(macro_edit_rows(popup)[3])
 }
 
 fn sync_macro_text_input_layout(input: &mut TextInput, popup: Rect) {
@@ -7723,141 +7742,46 @@ impl App {
     }
 
     fn render_edit_macros(&mut self, frame: &mut Frame) {
-        use super::MacroEditStage;
-
         // Pre-compute the popup layout so we can set the display width for
         // soft-wrapping before taking the immutable borrow on self.prompt.
-        let popup = centered_rect_exact(64, 20, frame.area());
+        let popup = centered_rect_exact(MACRO_EDIT_POPUP.0, MACRO_EDIT_POPUP.1, frame.area());
         {
             // Temporarily borrow prompt mutably to set the text input's
             // viewport to match the available inner area after all borders,
-            // labels, and hint rows have been removed.
+            // labels, and hint rows have been removed. The body is a permanent
+            // field now rather than a wizard stage, so it is always synced.
             if let PromptState::EditMacros {
                 editing: Some(edit_state),
                 ..
             } = &mut self.prompt
-                && edit_state.stage == MacroEditStage::EditText
             {
                 sync_macro_text_input_layout(&mut edit_state.text_input, popup);
             }
         }
 
-        let PromptState::EditMacros {
-            entries,
-            selected,
-            editing,
-            pending_delete,
-        } = &self.prompt
-        else {
-            return;
+        let editing_snapshot = match &self.prompt {
+            PromptState::EditMacros { editing, .. } => editing.clone(),
+            _ => return,
         };
 
         self.render_dim_overlay(frame);
         self.clear_overlay_area(frame, popup);
 
-        if let Some(edit_state) = editing {
-            // ── Edit view ──
-            let title = match &edit_state.id {
-                Some(name) => format!("Edit Macro — {name}"),
-                None => "New Macro".to_string(),
-            };
-            let outer = self.themed_overlay_block(&title);
-            let inner = outer.inner(popup);
-            outer.render(popup, frame.buffer_mut());
+        // The macro LIST has no click targets of its own; the editor publishes
+        // its own layout below and the nested delete-confirm publishes over the
+        // top of either. Claiming None here stops a previous modal's stale rects
+        // from being hit-tested against this one.
+        self.overlay_layout.active = OverlayMouseLayout::None;
 
-            match edit_state.stage {
-                MacroEditStage::EditName => {
-                    let [label_area, input_area, _, surface_area, _, hint_area] = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(1),
-                            Constraint::Length(3),
-                            Constraint::Length(1),
-                            Constraint::Length(1),
-                            Constraint::Min(1),
-                            Constraint::Length(1),
-                        ])
-                        .areas(inner);
-
-                    Paragraph::new(Line::from(Span::styled(
-                        " Name (identifies this macro):",
-                        Style::default().fg(self.theme.input_label_fg),
-                    )))
-                    .render(label_area, frame.buffer_mut());
-
-                    self.render_single_line_input(&edit_state.name_input, input_area, frame);
-
-                    // Surface radio buttons
-                    let current = edit_state.surface;
-                    let options = [
-                        (MacroSurface::Agent, "Agent"),
-                        (MacroSurface::Terminal, "Terminal"),
-                        (MacroSurface::Both, "Both"),
-                    ];
-                    let mut radio_spans: Vec<Span> = vec![Span::styled(
-                        " Surface:  ",
-                        Style::default().fg(self.theme.input_label_fg),
-                    )];
-                    for (i, (variant, label)) in options.iter().enumerate() {
-                        if i > 0 {
-                            radio_spans.push(Span::styled("    ", Style::default()));
-                        }
-                        let bullet = if *variant == current { "● " } else { "○ " };
-                        let style = if *variant == current {
-                            Style::default().fg(self.theme.input_label_fg)
-                        } else {
-                            Style::default().fg(self.theme.hint_desc_fg)
-                        };
-                        radio_spans.push(Span::styled(bullet, style));
-                        radio_spans.push(Span::styled(*label, style));
-                    }
-                    Paragraph::new(Line::from(radio_spans))
-                        .render(surface_area, frame.buffer_mut());
-
-                    let hints = self.edit_macro_hints(&[
-                        ("Enter", "next"),
-                        ("Tab/Shift-Tab", "surface"),
-                        ("Esc", "cancel"),
-                    ]);
-                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                }
-                MacroEditStage::EditText => {
-                    let [label_area, bordered_area, hint_area] = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(1),
-                            Constraint::Min(3),
-                            Constraint::Length(1),
-                        ])
-                        .areas(inner);
-
-                    let surface_desc = match edit_state.surface {
-                        MacroSurface::Agent => "agent macro",
-                        MacroSurface::Terminal => "terminal macro",
-                        MacroSurface::Both => "agent + terminal macro",
-                    };
-                    Paragraph::new(Line::from(Span::styled(
-                        format!(" Text for the {surface_desc}:"),
-                        Style::default().fg(self.theme.input_label_fg),
-                    )))
-                    .render(label_area, frame.buffer_mut());
-
-                    // Draw border around the text area; pass inner rect to renderer.
-                    let block = Block::default()
-                        .borders(Borders::ALL)
-                        .border_set(border::ROUNDED)
-                        .border_style(Style::default().fg(self.theme.overlay_border));
-                    let text_inner = block.inner(bordered_area);
-                    block.render(bordered_area, frame.buffer_mut());
-
-                    self.render_multiline_input(&edit_state.text_input, text_inner, frame);
-
-                    let hints =
-                        self.edit_macro_hints(&[("Enter", "newline"), ("Esc", "save & close")]);
-                    Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                }
-            }
+        if let Some(edit_state) = editing_snapshot {
+            self.render_macro_editor(frame, popup, &edit_state);
         } else {
+            let PromptState::EditMacros {
+                entries, selected, ..
+            } = &self.prompt
+            else {
+                return;
+            };
             // ── List view ──
             let outer = self.themed_overlay_block("Text Macros");
             let inner = outer.inner(popup);
@@ -7944,12 +7868,280 @@ impl App {
             }
         }
 
-        let pending_delete_snapshot = pending_delete
-            .as_ref()
-            .map(|p| (p.name.clone(), p.confirm_selected));
+        let pending_delete_snapshot = match &self.prompt {
+            PromptState::EditMacros { pending_delete, .. } => pending_delete
+                .as_ref()
+                .map(|p| (p.name.clone(), p.confirm_selected)),
+            _ => None,
+        };
         if let Some((name, confirm_selected)) = pending_delete_snapshot {
             self.render_confirm_delete_macro(frame, &name, confirm_selected);
         }
+    }
+
+    /// The macro EDITOR: an ordinary modal with a focus concept.
+    ///
+    /// Layout, top to bottom: name label, name field, body label, body field,
+    /// blank, the surface selector, a blank misclick-safe spacer, the
+    /// Cancel/Save buttons, and the hint row. Every one of the five controls is
+    /// a focus stop and every one renders its focus, because focus you cannot
+    /// see is not focus.
+    fn render_macro_editor(&mut self, frame: &mut Frame, popup: Rect, state: &MacroEditState) {
+        let title = match &state.id {
+            Some(name) => format!("Edit Macro — {name}"),
+            None => "New Macro".to_string(),
+        };
+        let outer = self.themed_overlay_block(&title);
+        outer.render(popup, frame.buffer_mut());
+
+        let [
+            name_label,
+            name_area,
+            text_label,
+            text_area,
+            _,
+            surface_area,
+            _,
+            buttons_area,
+            hint_area,
+        ] = macro_edit_rows(popup);
+
+        let focus = state.focus;
+        let engaged = self.macro_text_engaged();
+        let label_style = Style::default().fg(self.theme.input_label_fg);
+
+        // ── Name (single line: typing is immediate, no mode) ──────────────
+        Paragraph::new(Line::from(Span::styled(
+            " Name (identifies this macro):",
+            label_style,
+        )))
+        .render(name_label, frame.buffer_mut());
+        let name_inner =
+            self.render_macro_field_frame(frame, name_area, focus == MacroEditFocus::Name, None);
+        Paragraph::new(Line::from(Span::raw(format!(" {}", state.name_input.text))))
+            .render(name_inner, frame.buffer_mut());
+
+        // ── Body (multiline: needs the engage step, Enter is content) ─────
+        let surface_desc = match state.surface {
+            MacroSurface::Agent => "agent macro",
+            MacroSurface::Terminal => "terminal macro",
+            MacroSurface::Both => "agent + terminal macro",
+        };
+        Paragraph::new(Line::from(Span::styled(
+            format!(" Text for the {surface_desc}:"),
+            label_style,
+        )))
+        .render(text_label, frame.buffer_mut());
+        let text_inner = self.render_macro_field_frame(
+            frame,
+            text_area,
+            focus == MacroEditFocus::Text,
+            engaged.then(|| {
+                self.bindings
+                    .label_for_reaching(Action::ExitCommitInput, |_| true)
+                    .unwrap_or_default()
+            }),
+        );
+        for (index, line_text) in state.text_input.visible_lines().iter().enumerate() {
+            if index >= text_inner.height as usize {
+                break;
+            }
+            let line_area = Rect::new(
+                text_inner.x,
+                text_inner.y + index as u16,
+                text_inner.width,
+                1,
+            );
+            Paragraph::new(Line::from(Span::raw(format!(" {line_text}"))))
+                .render(line_area, frame.buffer_mut());
+        }
+
+        // Exactly one hardware caret: on the name field while it has focus, or
+        // on the body while the body is ENGAGED. An unengaged body takes no
+        // keystrokes, so showing a caret there would be a lie.
+        if focus == MacroEditFocus::Name {
+            let cursor_col = state.name_input.text
+                [..state.name_input.cursor.min(state.name_input.text.len())]
+                .chars()
+                .count();
+            let (cx, cy) = (name_inner.x + cursor_col as u16 + 1, name_inner.y);
+            if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
+                frame.set_cursor_position((cx, cy));
+            }
+        } else if focus == MacroEditFocus::Text && engaged {
+            let (cursor_row, cursor_col) = state.text_input.cursor_display_position();
+            let (cx, cy) = (
+                text_inner.x + cursor_col as u16 + 1,
+                text_inner.y + cursor_row as u16,
+            );
+            if cx < text_inner.x + text_inner.width && cy < text_inner.y + text_inner.height {
+                frame.set_cursor_position((cx, cy));
+            }
+        }
+
+        // ── Surface selector ──────────────────────────────────────────────
+        let selector_focused = focus == MacroEditFocus::Surface;
+        let options = [
+            (MacroSurface::Agent, "Agent"),
+            (MacroSurface::Terminal, "Terminal"),
+            (MacroSurface::Both, "Both"),
+        ];
+        const SURFACE_PREFIX: &str = " Surface:  ";
+        const SURFACE_GAP: &str = "    ";
+        let mut radio_spans: Vec<Span> = vec![Span::styled(SURFACE_PREFIX, label_style)];
+        let mut surface_options = [Rect::default(); 3];
+        let mut cursor_x = surface_area.x + SURFACE_PREFIX.chars().count() as u16;
+        for (i, (variant, label)) in options.iter().enumerate() {
+            if i > 0 {
+                radio_spans.push(Span::raw(SURFACE_GAP));
+                cursor_x += SURFACE_GAP.chars().count() as u16;
+            }
+            let selected = *variant == state.surface;
+            let bullet = if selected { "● " } else { "○ " };
+            // Focus wins over selection: the focused GROUP is what the user is
+            // about to act on, and it uses the same `button_active_fg` the
+            // focused checkbox marker does.
+            let style = if selector_focused {
+                Style::default()
+                    .fg(self.theme.button_active_fg)
+                    .add_modifier(Modifier::BOLD)
+            } else if selected {
+                label_style
+            } else {
+                Style::default().fg(self.theme.hint_desc_fg)
+            };
+            radio_spans.push(Span::styled(bullet, style));
+            radio_spans.push(Span::styled(*label, style));
+            let width = (bullet.chars().count() + label.chars().count()) as u16;
+            surface_options[i] = Rect::new(cursor_x, surface_area.y, width, 1);
+            cursor_x += width;
+        }
+        Paragraph::new(Line::from(radio_spans)).render(surface_area, frame.buffer_mut());
+
+        // ── Cancel / Save ─────────────────────────────────────────────────
+        // Cancel discards typing, so the two targets are separated by more than
+        // the usual gap and by a blank row above (the misclick-safety tenet).
+        let btn_width = 16u16;
+        let gap = 6u16;
+        let total = btn_width * 2 + gap;
+        let left_offset = buttons_area.width.saturating_sub(total) / 2;
+        let cancel_button = Rect {
+            x: buttons_area.x + left_offset,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+        let save_button = Rect {
+            x: cancel_button.x + btn_width + gap,
+            y: buttons_area.y,
+            width: btn_width,
+            height: 3,
+        };
+
+        Button::new("Cancel")
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::EditMacroCancel,
+                self.pressed_button,
+                focus == MacroEditFocus::Cancel,
+                true,
+            ))
+            .render(frame, cancel_button, &self.theme);
+        Button::new("Save")
+            .kind(ButtonKind::Confirm)
+            .state(button_state_for(
+                ButtonPressedTarget::EditMacroSave,
+                self.pressed_button,
+                focus == MacroEditFocus::Save,
+                true,
+            ))
+            .render(frame, save_button, &self.theme);
+
+        // ── Hints. Every key is resolved through the bindings. ────────────
+        let move_key = self
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection);
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let mut hints: Vec<(String, &str)> = Vec::new();
+        if focus == MacroEditFocus::Text && engaged {
+            hints.push((
+                self.bindings.labels_for(Action::ExitCommitInput),
+                "stop editing",
+            ));
+            hints.push(("Ctrl-d".to_string(), "clear"));
+        } else {
+            if let Some(move_key) = move_key {
+                hints.push((move_key, "move focus"));
+            }
+            if focus == MacroEditFocus::Text {
+                hints.push((
+                    self.bindings.label_for(Action::EngageCommitInput),
+                    "edit text",
+                ));
+            }
+            hints.push(("Space".to_string(), "act on focus"));
+            hints.push((close_key, "cancel"));
+        }
+        let pairs: Vec<(&str, &str)> = hints
+            .iter()
+            .map(|(key, desc)| (key.as_str(), *desc))
+            .collect();
+        let hint_spans = self.edit_macro_hints(&pairs);
+        Paragraph::new(Line::from(hint_spans)).render(hint_area, frame.buffer_mut());
+
+        self.overlay_layout.active = OverlayMouseLayout::EditMacros {
+            name_input: name_inner,
+            text_input: text_inner,
+            surface_options,
+            cancel_button,
+            save_button,
+        };
+    }
+
+    /// Draw one macro-editor text field's border and return its inner area.
+    ///
+    /// The focused field uses `button_active_fg` plus BOLD rather than
+    /// `border_focused`: `overlay_border` DEFAULTS to `border_focused` (see
+    /// `theme.rs`), so a focused/unfocused pair drawn from those two tokens is
+    /// literally the same colour in the default theme. BOLD makes the two
+    /// states differ even if a theme ever maps the colours together.
+    ///
+    /// `engaged_exit_key`, when present, marks the field as ENGAGED (taking
+    /// keystrokes) and names the key that leaves edit mode.
+    fn render_macro_field_frame(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        focused: bool,
+        engaged_exit_key: Option<String>,
+    ) -> Rect {
+        let border_style = if focused {
+            Style::default()
+                .fg(self.theme.button_active_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.theme.overlay_border)
+        };
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .border_style(border_style);
+        if let Some(exit_key) = engaged_exit_key {
+            block = block.title_bottom(
+                Line::from(vec![
+                    Span::styled(
+                        " editing — ",
+                        Style::default().fg(self.theme.button_active_fg),
+                    ),
+                    Span::styled(exit_key, Style::default().fg(self.theme.hint_key_fg)),
+                    Span::styled(" to stop ", Style::default().fg(self.theme.hint_desc_fg)),
+                ])
+                .right_aligned(),
+            );
+        }
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+        inner
     }
 
     fn render_confirm_delete_macro(
@@ -8029,59 +8221,6 @@ impl App {
             cancel_button: cancel_area,
             delete_button: delete_area,
         };
-    }
-
-    /// Render a single-line TextInput with cursor in a bordered box.
-    /// Uses the terminal's hardware cursor for a blinking caret.
-    fn render_single_line_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
-        let display = Line::from(Span::raw(format!(" {}", &input.text)));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(border::ROUNDED)
-            .border_style(Style::default().fg(self.theme.overlay_border));
-        let inner = block.inner(area);
-        Paragraph::new(display)
-            .block(block)
-            .render(area, frame.buffer_mut());
-
-        // Position the hardware cursor (blinking caret).
-        // Cursor column in chars + 1 for the leading space padding.
-        let cursor_col = input.text[..input.cursor.min(input.text.len())]
-            .chars()
-            .count();
-        let cx = inner.x + cursor_col as u16 + 1;
-        let cy = inner.y;
-        if cx < inner.x + inner.width && cy < inner.y + inner.height {
-            frame.set_cursor_position((cx, cy));
-        }
-    }
-
-    /// Render a multiline TextInput into the given area.
-    ///
-    /// The caller is responsible for drawing any border — this method renders
-    /// text directly into `area`. Uses the terminal's hardware cursor for a
-    /// blinking caret.
-    fn render_multiline_input(&self, input: &TextInput, area: Rect, frame: &mut Frame) {
-        let visible = input.visible_lines();
-        let (cursor_row, cursor_col) = input.cursor_display_position();
-
-        for (i, line_text) in visible.iter().enumerate() {
-            if i >= area.height as usize {
-                break;
-            }
-            let y = area.y + i as u16;
-            let line_area = Rect::new(area.x, y, area.width, 1);
-            let line = Line::from(Span::raw(format!(" {line_text}")));
-            Paragraph::new(line).render(line_area, frame.buffer_mut());
-        }
-
-        // Position the hardware cursor (blinking caret).
-        // +1 for the leading space padding on each line.
-        let cx = area.x + cursor_col as u16 + 1;
-        let cy = area.y + cursor_row as u16;
-        if cx < area.x + area.width && cy < area.y + area.height {
-            frame.set_cursor_position((cx, cy));
-        }
     }
 
     /// Build hint spans from alternating key/description pairs.
@@ -11054,35 +11193,185 @@ mod tests {
         assert_eq!(centered_rect_exact(56, 9, area), area);
     }
 
+    /// The macro editor's popup, at the size the renderer actually asks for.
+    fn macro_edit_popup() -> Rect {
+        Rect::new(0, 0, MACRO_EDIT_POPUP.0, MACRO_EDIT_POPUP.1)
+    }
+
     #[test]
     fn macro_edit_text_inner_area_accounts_for_borders_and_chrome() {
-        let popup = Rect::new(0, 0, 64, 20);
-
-        assert_eq!(macro_edit_text_inner_area(popup), Rect::new(2, 3, 60, 14));
+        // The body no longer owns the whole modal: it shares it with the name
+        // field above and the selector, spacer, buttons, and hint row below.
+        assert_eq!(
+            macro_edit_text_inner_area(macro_edit_popup()),
+            Rect::new(2, 7, 62, 8)
+        );
     }
 
     #[test]
     fn macro_text_input_layout_uses_drawable_inner_height() {
-        let popup = Rect::new(0, 0, 64, 20);
         let text = (0..20)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut input = TextInput::with_text(text).with_multiline(8);
+        let mut input = TextInput::with_text(text).with_multiline(3);
+
+        assert_eq!(input.visible_lines().len(), 3);
+
+        sync_macro_text_input_layout(&mut input, macro_edit_popup());
 
         assert_eq!(input.visible_lines().len(), 8);
-
-        sync_macro_text_input_layout(&mut input, popup);
-
-        assert_eq!(input.visible_lines().len(), 14);
-        assert_eq!(input.scroll_offset(), 6);
+        assert_eq!(input.scroll_offset(), 12);
         assert_eq!(
             input.visible_lines().first().map(String::as_str),
-            Some("line 6")
+            Some("line 12")
         );
         assert_eq!(
             input.visible_lines().last().map(String::as_str),
             Some("line 19")
+        );
+    }
+
+    /// Open the macro editor on a single stored macro, with focus on `focus`.
+    fn macro_editor_app(focus: super::MacroEditFocus) -> App {
+        let mut app = test_app(default_bindings());
+        app.engine.config.macros.entries.insert(
+            "greet".to_string(),
+            crate::config::MacroEntry {
+                text: "hello".to_string(),
+                surface: crate::config::MacroSurface::Agent,
+            },
+        );
+        app.open_edit_macros();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("open the editor");
+        match &mut app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => state.focus = focus,
+            other => panic!("expected an open macro editor, got {other:?}"),
+        }
+        app
+    }
+
+    /// The style of the top-left corner cell of a rect, from a real frame.
+    fn corner_style(app: &mut App, pick: impl Fn(&OverlayMouseLayout) -> Rect) -> Style {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let rect = pick(&app.overlay_layout.active);
+        // The published rect is the field's INNER area; step out onto its border.
+        let cell =
+            &terminal.backend().buffer()[(rect.x.saturating_sub(1), rect.y.saturating_sub(1))];
+        Style::default()
+            .fg(cell.fg)
+            .bg(cell.bg)
+            .add_modifier(cell.modifier)
+    }
+
+    fn macro_name_rect(layout: &OverlayMouseLayout) -> Rect {
+        match layout {
+            OverlayMouseLayout::EditMacros { name_input, .. } => *name_input,
+            other => panic!("expected the macro editor layout, got {other:?}"),
+        }
+    }
+
+    fn macro_text_rect(layout: &OverlayMouseLayout) -> Rect {
+        match layout {
+            OverlayMouseLayout::EditMacros { text_input, .. } => *text_input,
+            other => panic!("expected the macro editor layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn macro_editor_focused_control_renders_differently_from_the_unfocused_ones() {
+        use super::MacroEditFocus;
+
+        // The two text fields: whichever has focus draws a focused border.
+        let name_when_name_focused =
+            corner_style(&mut macro_editor_app(MacroEditFocus::Name), macro_name_rect);
+        let name_when_body_focused =
+            corner_style(&mut macro_editor_app(MacroEditFocus::Text), macro_name_rect);
+        assert_ne!(
+            name_when_name_focused, name_when_body_focused,
+            "the name field must look focused only while it has focus"
+        );
+
+        let body_when_body_focused =
+            corner_style(&mut macro_editor_app(MacroEditFocus::Text), macro_text_rect);
+        let body_when_name_focused =
+            corner_style(&mut macro_editor_app(MacroEditFocus::Name), macro_text_rect);
+        assert_eq!(
+            body_when_body_focused, name_when_name_focused,
+            "both fields use the one focused-field idiom"
+        );
+        assert_ne!(
+            body_when_body_focused, body_when_name_focused,
+            "focus you cannot see is not focus"
+        );
+
+        // The selector marker.
+        let selector_marker = |focus: MacroEditFocus| -> Style {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            let mut app = macro_editor_app(focus);
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let buf = terminal.backend().buffer();
+            let OverlayMouseLayout::EditMacros {
+                surface_options, ..
+            } = app.overlay_layout.active
+            else {
+                panic!("expected the macro editor layout");
+            };
+            let rect = surface_options[0];
+            let cell = &buf[(rect.x, rect.y)];
+            Style::default()
+                .fg(cell.fg)
+                .bg(cell.bg)
+                .add_modifier(cell.modifier)
+        };
+        assert_ne!(
+            selector_marker(MacroEditFocus::Surface),
+            selector_marker(MacroEditFocus::Name),
+            "the focused surface selector must look focused"
+        );
+
+        // The two buttons, read off their own published rects (never a byte
+        // offset into a row string: the modal's box-drawing glyphs are
+        // multi-byte, so a byte index is not a column).
+        let save_rect = |layout: &OverlayMouseLayout| match layout {
+            OverlayMouseLayout::EditMacros { save_button, .. } => *save_button,
+            other => panic!("expected the macro editor layout, got {other:?}"),
+        };
+        let cancel_rect = |layout: &OverlayMouseLayout| match layout {
+            OverlayMouseLayout::EditMacros { cancel_button, .. } => *cancel_button,
+            other => panic!("expected the macro editor layout, got {other:?}"),
+        };
+        // `corner_style` steps one cell out of the rect it is given; the button
+        // rects are OUTER rects, so offset back in to land on the border.
+        let button_border = |focus: MacroEditFocus, pick: &dyn Fn(&OverlayMouseLayout) -> Rect| {
+            corner_style(&mut macro_editor_app(focus), |layout| {
+                let r = pick(layout);
+                Rect::new(r.x + 1, r.y + 1, r.width, r.height)
+            })
+        };
+        assert_ne!(
+            button_border(MacroEditFocus::Save, &save_rect),
+            button_border(MacroEditFocus::Cancel, &save_rect),
+            "the focused Save button must look focused"
+        );
+        assert_ne!(
+            button_border(MacroEditFocus::Cancel, &cancel_rect),
+            button_border(MacroEditFocus::Save, &cancel_rect),
+            "the focused Cancel button must look focused"
         );
     }
 

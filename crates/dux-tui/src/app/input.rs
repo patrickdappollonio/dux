@@ -147,6 +147,12 @@ enum PromptMouseTarget {
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
+    MacroNameInput,
+    MacroTextInput,
+    /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
+    MacroSurfaceOption(usize),
+    MacroCancel,
+    MacroSave,
 }
 
 impl ButtonPressedTarget {
@@ -206,6 +212,8 @@ impl ButtonPressedTarget {
             PromptMouseTarget::ConfirmDeleteMacroConfirm => {
                 Some(ButtonPressedTarget::ConfirmDeleteMacroConfirm)
             }
+            PromptMouseTarget::MacroCancel => Some(ButtonPressedTarget::EditMacroCancel),
+            PromptMouseTarget::MacroSave => Some(ButtonPressedTarget::EditMacroSave),
             PromptMouseTarget::ConfirmQuitCancel => Some(ButtonPressedTarget::ConfirmQuitCancel),
             PromptMouseTarget::ConfirmQuitConfirm => Some(ButtonPressedTarget::ConfirmQuitConfirm),
             PromptMouseTarget::ConfirmDiscardCancel => {
@@ -268,7 +276,10 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::RuntimeKillItem(_)
             | PromptMouseTarget::Checkbox(_)
             | PromptMouseTarget::RenameInput
-            | PromptMouseTarget::NameNewAgentInput => None,
+            | PromptMouseTarget::NameNewAgentInput
+            | PromptMouseTarget::MacroNameInput
+            | PromptMouseTarget::MacroTextInput
+            | PromptMouseTarget::MacroSurfaceOption(_) => None,
         }
     }
 }
@@ -3797,6 +3808,29 @@ impl App {
         Ok(false)
     }
 
+    /// Whether the macro editor's multiline body is engaged for typing.
+    ///
+    /// The engage step exists for exactly one reason: **Enter is content in a
+    /// multiline field and is also the confirm key in every modal.** Tab is NOT
+    /// content (dux cannot insert a tab character anywhere), so the mode is
+    /// deliberately not built around Tab. Mirrors
+    /// [`PromptState::ConfigureStartupCommand`]'s contract.
+    pub(super) fn macro_text_engaged(&self) -> bool {
+        self.input_target == InputTarget::MacroText
+    }
+
+    /// The macro editor's current focus, or `None` when the editor is not open.
+    fn macro_edit_focus(&self) -> Option<MacroEditFocus> {
+        match &self.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                pending_delete: None,
+                ..
+            } => Some(state.focus),
+            _ => None,
+        }
+    }
+
     fn handle_edit_macros_key(&mut self, key: KeyEvent) -> Result<bool> {
         if matches!(
             self.prompt,
@@ -3806,6 +3840,10 @@ impl App {
             }
         ) {
             return self.handle_confirm_delete_macro_key(key);
+        }
+
+        if let Some(focus) = self.macro_edit_focus() {
+            return self.handle_macro_editor_key(key, focus);
         }
 
         let PromptState::EditMacros {
@@ -3818,112 +3856,7 @@ impl App {
             return Ok(false);
         };
 
-        if let Some(edit_state) = editing {
-            match edit_state.stage {
-                MacroEditStage::EditName => {
-                    if key.code == KeyCode::Esc {
-                        *editing = None;
-                        return Ok(false);
-                    }
-                    if key.code == KeyCode::Tab {
-                        edit_state.surface = edit_state.surface.next();
-                        return Ok(false);
-                    }
-                    if is_reverse_tab(key) {
-                        edit_state.surface = edit_state.surface.prev();
-                        return Ok(false);
-                    }
-                    if key.code == KeyCode::Enter && !edit_state.name_input.is_empty() {
-                        let name = edit_state.name_input.text.clone();
-                        // For new macros, check for duplicate names
-                        if edit_state.id.is_none() && entries.iter().any(|(n, _, _)| *n == name) {
-                            self.set_warning(format!(
-                                "Name \"{name}\" is already in use. Choose another."
-                            ));
-                            return Ok(false);
-                        }
-                        edit_state.stage = MacroEditStage::EditText;
-                        return Ok(false);
-                    }
-                    edit_state.name_input.handle_key(key);
-                }
-                MacroEditStage::EditText => {
-                    if key.code == KeyCode::Esc {
-                        // Save the macro
-                        let name = edit_state.name_input.text.clone();
-                        let text = edit_state.text_input.text.clone();
-                        let surface = edit_state.surface;
-                        let old_id = edit_state.id.clone();
-
-                        if text.is_empty() {
-                            // Empty text — don't save
-                            *editing = None;
-                            return Ok(false);
-                        }
-
-                        // If renaming, remove the old entry
-                        if let Some(ref old_name) = old_id
-                            && *old_name != name
-                        {
-                            self.engine.config.macros.entries.shift_remove(old_name);
-                        }
-
-                        // Update config
-                        self.engine.config.macros.entries.insert(
-                            name.clone(),
-                            crate::config::MacroEntry {
-                                text: text.clone(),
-                                surface,
-                            },
-                        );
-
-                        // Update the entries snapshot in PromptState
-                        let PromptState::EditMacros {
-                            entries, editing, ..
-                        } = &mut self.prompt
-                        else {
-                            return Ok(false);
-                        };
-                        *editing = None;
-
-                        // Update entries list
-                        if let Some(old_name) = old_id {
-                            if let Some(existing) =
-                                entries.iter_mut().find(|(n, _, _)| *n == old_name)
-                            {
-                                existing.0 = name.clone();
-                                existing.1 = text;
-                                existing.2 = surface;
-                            } else {
-                                entries.push((name.clone(), text, surface));
-                            }
-                        } else {
-                            entries.push((name.clone(), text, surface));
-                        }
-                        entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-
-                        // Persist
-                        if let Err(err) = self
-                            .engine
-                            .config_writer
-                            .save_eager(self.engine.config.clone())
-                        {
-                            self.set_error(format!(
-                                "Macro \"{name}\" is active this session, but saving to config failed: {err}"
-                            ));
-                        } else {
-                            self.set_info(format!("Macro \"{name}\" saved."));
-                        }
-                        return Ok(false);
-                    }
-                    // In multiline mode, TextInput handles Enter/Up/Down
-                    edit_state.text_input.handle_key(key);
-                }
-            }
-            return Ok(false);
-        }
-
-        // List view — no active editing
+        // List view — no active editing.
         match key.code {
             KeyCode::Esc => {
                 self.prompt = PromptState::None;
@@ -3947,7 +3880,7 @@ impl App {
                         name_input: TextInput::with_text(name),
                         text_input: TextInput::with_text(text).with_multiline(8),
                         surface,
-                        stage: MacroEditStage::EditName,
+                        focus: MacroEditFocus::Name,
                     });
                 }
             }
@@ -3958,7 +3891,7 @@ impl App {
                     name_input: TextInput::new(),
                     text_input: TextInput::new().with_multiline(8),
                     surface: MacroSurface::default(),
-                    stage: MacroEditStage::EditName,
+                    focus: MacroEditFocus::Name,
                 });
             }
             KeyCode::Char('d') | KeyCode::Delete => {
@@ -3977,6 +3910,239 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// The macro EDITOR's key handling: an ordinary modal with a focus model.
+    ///
+    /// Movement keys move focus and change nothing. Space acts on whatever has
+    /// focus (types a space in a text field, advances the selector, activates a
+    /// button). Escape cancels — except inside the engaged body, where it exits
+    /// edit mode and leaves the modal open, the same contract
+    /// `configure_startup_command_escape_exits_edit_mode_only` pins.
+    fn handle_macro_editor_key(&mut self, key: KeyEvent, focus: MacroEditFocus) -> Result<bool> {
+        // ── The engaged body owns every key but the exit binding ──────────
+        if focus == MacroEditFocus::Text && self.macro_text_engaged() {
+            if let Some(Action::ExitCommitInput) =
+                self.bindings.lookup(&key, BindingScope::CommitInput)
+            {
+                self.input_target = InputTarget::None;
+                return Ok(false);
+            }
+            if let Some(state) = self.macro_edit_state_mut() {
+                if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    state.text_input.clear();
+                } else {
+                    state.text_input.handle_key(key);
+                }
+            }
+            return Ok(false);
+        }
+
+        // A focused text field owns the plain characters and the horizontal
+        // arrows, so those never reach the bindings and can never be read as a
+        // movement key. Same predicate the rename/new-agent modals use, and the
+        // same one the footer picks its hint keys with.
+        let owned_by_field = focus.is_text_field() && text_field_owns_key(key);
+        let action = if owned_by_field {
+            None
+        } else {
+            self.bindings.lookup(&key, BindingScope::Dialog)
+        };
+
+        // Space is hardcoded, never a binding: it is the universal "act on the
+        // focused control" key.
+        let is_space = key.code == KeyCode::Char(' ');
+
+        match action {
+            Some(Action::CloseOverlay) => {
+                self.cancel_macro_edit();
+                return Ok(false);
+            }
+            Some(Action::ToggleSelection) => {
+                self.focus_next_macro_edit_control(!focus_move_is_reverse(key));
+                return Ok(false);
+            }
+            Some(Action::Confirm) => {
+                // Enter activates the focused control, and confirms the modal
+                // from anywhere that is not a button.
+                match focus {
+                    MacroEditFocus::Cancel => self.cancel_macro_edit(),
+                    _ => self.save_macro_edit(),
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+
+        match focus {
+            MacroEditFocus::Surface if is_space => {
+                if let Some(state) = self.macro_edit_state_mut() {
+                    state.surface = state.surface.next();
+                }
+            }
+            MacroEditFocus::Cancel if is_space => self.cancel_macro_edit(),
+            MacroEditFocus::Save if is_space => self.save_macro_edit(),
+            MacroEditFocus::Name => {
+                if let Some(state) = self.macro_edit_state_mut() {
+                    state.name_input.handle_key(key);
+                }
+            }
+            MacroEditFocus::Text => {
+                // Unengaged body: the explicit engage binding engages it, and so
+                // does typing anything the field would take — the same
+                // auto-engage `ConfigureStartupCommand` offers, so a user who
+                // just starts typing is not silently dropping keystrokes.
+                let engage = matches!(
+                    self.bindings.lookup(&key, BindingScope::Files),
+                    Some(Action::EngageCommitInput)
+                );
+                if engage {
+                    self.input_target = InputTarget::MacroText;
+                    if let Some(state) = self.macro_edit_state_mut() {
+                        state.text_input.move_end();
+                    }
+                } else if matches!(
+                    key.code,
+                    KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                ) {
+                    self.input_target = InputTarget::MacroText;
+                    if let Some(state) = self.macro_edit_state_mut() {
+                        state.text_input.handle_key(key);
+                    }
+                }
+            }
+            MacroEditFocus::Surface | MacroEditFocus::Cancel | MacroEditFocus::Save => {}
+        }
+        Ok(false)
+    }
+
+    fn macro_edit_state_mut(&mut self) -> Option<&mut MacroEditState> {
+        match &mut self.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => Some(state),
+            _ => None,
+        }
+    }
+
+    /// Move focus between the macro editor's controls.
+    ///
+    /// Leaving the body always drops edit mode, so focus can never sit on a
+    /// different control while the body still swallows keystrokes.
+    pub(super) fn focus_next_macro_edit_control(&mut self, forward: bool) {
+        self.input_target = InputTarget::None;
+        if let Some(state) = self.macro_edit_state_mut() {
+            state.focus = state.focus.step(forward);
+        }
+    }
+
+    /// Point focus at one control, for the mouse. Focusing anything other than
+    /// the body leaves edit mode.
+    pub(super) fn focus_macro_edit_control(&mut self, focus: MacroEditFocus) {
+        if focus != MacroEditFocus::Text {
+            self.input_target = InputTarget::None;
+        }
+        if let Some(state) = self.macro_edit_state_mut() {
+            state.focus = focus;
+        }
+    }
+
+    /// Abandon the edit and return to the macro list. Writes nothing.
+    pub(super) fn cancel_macro_edit(&mut self) {
+        if self.macro_text_engaged() {
+            self.input_target = InputTarget::None;
+        }
+        if let PromptState::EditMacros { editing, .. } = &mut self.prompt {
+            *editing = None;
+        }
+    }
+
+    /// Write the edited macro to config and return to the macro list.
+    ///
+    /// Refuses (and says why, keeping the modal open) on an empty name, an
+    /// empty body, or a name already taken by a different macro.
+    pub(super) fn save_macro_edit(&mut self) {
+        let Some(state) = self.macro_edit_state_mut() else {
+            return;
+        };
+        let name = state.name_input.text.trim().to_string();
+        let text = state.text_input.text.clone();
+        let surface = state.surface;
+        let old_id = state.id.clone();
+
+        if name.is_empty() {
+            self.set_warning("A macro needs a name before it can be saved.");
+            return;
+        }
+        if text.is_empty() {
+            self.set_warning(format!(
+                "Macro \"{name}\" has no text yet, so nothing was saved."
+            ));
+            return;
+        }
+
+        let PromptState::EditMacros { entries, .. } = &self.prompt else {
+            return;
+        };
+        let taken = entries
+            .iter()
+            .any(|(n, _, _)| *n == name && old_id.as_deref() != Some(n.as_str()));
+        if taken {
+            self.set_warning(format!(
+                "Name \"{name}\" is already in use. Choose another."
+            ));
+            return;
+        }
+
+        // If renaming, drop the old entry so the rename does not duplicate it.
+        if let Some(ref old_name) = old_id
+            && *old_name != name
+        {
+            self.engine.config.macros.entries.shift_remove(old_name);
+        }
+        self.engine.config.macros.entries.insert(
+            name.clone(),
+            crate::config::MacroEntry {
+                text: text.clone(),
+                surface,
+            },
+        );
+
+        if self.macro_text_engaged() {
+            self.input_target = InputTarget::None;
+        }
+        let PromptState::EditMacros {
+            entries, editing, ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        *editing = None;
+        if let Some(old_name) = old_id {
+            if let Some(existing) = entries.iter_mut().find(|(n, _, _)| *n == old_name) {
+                existing.0 = name.clone();
+                existing.1 = text;
+                existing.2 = surface;
+            } else {
+                entries.push((name.clone(), text, surface));
+            }
+        } else {
+            entries.push((name.clone(), text, surface));
+        }
+        entries.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+        if let Err(err) = self
+            .engine
+            .config_writer
+            .save_eager(self.engine.config.clone())
+        {
+            self.set_error(format!(
+                "Macro \"{name}\" is active this session, but saving to config failed: {err}"
+            ));
+        } else {
+            self.set_info(format!("Macro \"{name}\" saved."));
+        }
     }
 
     fn handle_confirm_delete_macro_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -4166,6 +4332,28 @@ impl App {
             }
             OverlayMouseLayout::ConfigureStartupCommand { input } => {
                 contains_point(input, column, row).then_some(PromptMouseTarget::StartupCommandInput)
+            }
+            OverlayMouseLayout::EditMacros {
+                name_input,
+                text_input,
+                surface_options,
+                cancel_button,
+                save_button,
+            } => {
+                if contains_point(name_input, column, row) {
+                    Some(PromptMouseTarget::MacroNameInput)
+                } else if contains_point(text_input, column, row) {
+                    Some(PromptMouseTarget::MacroTextInput)
+                } else if contains_point(cancel_button, column, row) {
+                    Some(PromptMouseTarget::MacroCancel)
+                } else if contains_point(save_button, column, row) {
+                    Some(PromptMouseTarget::MacroSave)
+                } else {
+                    surface_options
+                        .iter()
+                        .position(|rect| contains_point(*rect, column, row))
+                        .map(PromptMouseTarget::MacroSurfaceOption)
+                }
             }
             OverlayMouseLayout::ChangeTheme {
                 list,
@@ -5639,6 +5827,31 @@ impl App {
         }
     }
 
+    fn set_macro_name_cursor_from_mouse(&mut self, column: u16) {
+        let OverlayMouseLayout::EditMacros { name_input, .. } = self.overlay_layout.active else {
+            return;
+        };
+        if let Some(state) = self.macro_edit_state_mut() {
+            // The single-line renderer pads by one leading space.
+            state.name_input.cursor =
+                cursor_from_single_line_position(&state.name_input.text, name_input, 1, column);
+        }
+    }
+
+    fn set_macro_text_cursor_from_mouse(&mut self, column: u16, row: u16) {
+        let OverlayMouseLayout::EditMacros { text_input, .. } = self.overlay_layout.active else {
+            return;
+        };
+        if let Some(state) = self.macro_edit_state_mut() {
+            let display_row = usize::from(row.saturating_sub(text_input.y));
+            // The multiline renderer pads by one leading space per line.
+            let display_col = usize::from(column.saturating_sub(text_input.x)).saturating_sub(1);
+            state
+                .text_input
+                .set_cursor_from_display_pos(display_row, display_col);
+        }
+    }
+
     fn set_startup_command_cursor_from_mouse(&mut self, column: u16, row: u16) {
         let input_area = match self.overlay_layout.active {
             OverlayMouseLayout::ConfigureStartupCommand { input } => input,
@@ -6173,6 +6386,37 @@ impl App {
                     self.input_target = InputTarget::StartupCommand;
                 }
             }
+            PromptMouseTarget::MacroNameInput => {
+                self.focus_macro_edit_control(MacroEditFocus::Name);
+                self.set_macro_name_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::MacroTextInput => {
+                // Single click focuses, double click engages — the same two-step
+                // the startup-command and commit inputs use, so a stray click on
+                // a body full of text cannot start swallowing keystrokes.
+                let double_click =
+                    self.register_mouse_click(MouseClickTarget::MacroTextInput, None);
+                self.focus_macro_edit_control(MacroEditFocus::Text);
+                self.set_macro_text_cursor_from_mouse(mouse.column, mouse.row);
+                if double_click {
+                    self.input_target = InputTarget::MacroText;
+                }
+            }
+            PromptMouseTarget::MacroSurfaceOption(index) => {
+                self.focus_macro_edit_control(MacroEditFocus::Surface);
+                // Clicking picks the option under the cursor rather than
+                // advancing the cycle: a click names its target.
+                let picked = [
+                    MacroSurface::Agent,
+                    MacroSurface::Terminal,
+                    MacroSurface::Both,
+                ]
+                .get(index)
+                .copied();
+                if let (Some(picked), Some(state)) = (picked, self.macro_edit_state_mut()) {
+                    state.surface = picked;
+                }
+            }
             // Button targets are handled by `activate_button` and never
             // reach this path — `from_prompt_target` returns `Some(_)`
             // for all of them, sending mouse-down through the press
@@ -6197,6 +6441,8 @@ impl App {
             | PromptMouseTarget::ConfirmCloseTabConfirm
             | PromptMouseTarget::ConfirmDeleteMacroCancel
             | PromptMouseTarget::ConfirmDeleteMacroConfirm
+            | PromptMouseTarget::MacroCancel
+            | PromptMouseTarget::MacroSave
             | PromptMouseTarget::ConfirmQuitCancel
             | PromptMouseTarget::ConfirmQuitConfirm
             | PromptMouseTarget::ConfirmDiscardCancel
@@ -6312,6 +6558,18 @@ impl App {
             }
             ButtonPressedTarget::ConfirmDeleteMacroConfirm => {
                 self.resolve_confirm_delete_macro(true)
+            }
+            // Focus follows the click first, so the button that renders as armed
+            // is the one that acts.
+            ButtonPressedTarget::EditMacroCancel => {
+                self.focus_macro_edit_control(MacroEditFocus::Cancel);
+                self.cancel_macro_edit();
+                false
+            }
+            ButtonPressedTarget::EditMacroSave => {
+                self.focus_macro_edit_control(MacroEditFocus::Save);
+                self.save_macro_edit();
+                false
             }
             ButtonPressedTarget::ConfirmQuitCancel => self.resolve_confirm_quit(false),
             ButtonPressedTarget::ConfirmQuitConfirm => self.resolve_confirm_quit(true),
@@ -7430,11 +7688,12 @@ mod tests {
         CreateAgentBranchInspection, CreateAgentRequest, DeleteAgentFocus, FocusPane,
         FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus,
         KillRunningFooterAction, KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem,
-        LeftSection, MacroBarState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
-        NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
-        PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry,
-        PromptState, PullTarget, RenameSessionFocus, ResourceKind, ResourceStats, RightSection,
-        RuntimeTargetId, SearchableList, StartupCommandLogPrompt, TextInput, WorkerEvent,
+        LeftSection, MacroBarState, MacroEditFocus, MacroEditState, MouseClickTarget,
+        MouseLayoutState, NameNewAgentFocus, NonDefaultBranchAction, OverlayCheckbox,
+        OverlayCheckboxId, OverlayMouseLayout, PickProjectWorktreePrompt, ProcessInfo,
+        ProjectChooserIntent, ProjectWorktreeEntry, PromptState, PullTarget, RenameSessionFocus,
+        ResourceKind, ResourceStats, RightSection, RuntimeTargetId, SearchableList,
+        StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
@@ -18175,6 +18434,413 @@ cyan = "#00ffff"
         }
     }
 
+    /// Open the macro editor on the selected macro and put the body under the
+    /// cursor, ready to type into.
+    ///
+    /// The ONE model-specific step the macro tests share, so the tests
+    /// themselves read the same before and after the focus rework.
+    fn open_macro_editor_on_body(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("open the editor on the selected macro");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("move focus to the body");
+        let engage = app
+            .bindings
+            .first_key_reaching(Action::EngageCommitInput, |_| true)
+            .expect("an engage binding");
+        app.handle_key(press(engage)).expect("engage the body");
+    }
+
+    /// The text stored in config for a macro, or `None` when it is absent.
+    fn macro_text(app: &App, name: &str) -> Option<String> {
+        app.engine
+            .config
+            .macros
+            .entries
+            .get(name)
+            .map(|entry| entry.text.clone())
+    }
+
+    #[test]
+    fn macro_edit_escape_from_the_body_cancels_and_leaves_config_untouched() {
+        // The whole point of the rework: Escape must ABANDON the edit, exactly
+        // like every other text surface in dux. It used to SAVE from the body,
+        // which left no way to back out of a change.
+        let mut app = app_with_two_macros();
+        open_macro_editor_on_body(&mut app);
+        type_chars(&mut app, "!");
+
+        // First Escape leaves the body's edit mode; the second cancels the edit.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("first esc");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("second esc");
+
+        assert_eq!(
+            macro_text(&app, "greet").as_deref(),
+            Some("hello"),
+            "cancelling must leave the previously saved macro body untouched"
+        );
+        assert!(
+            matches!(app.prompt, PromptState::EditMacros { .. }),
+            "cancelling the edit returns to the macro list, it does not close the modal"
+        );
+    }
+
+    /// The live macro-edit state, or a panic naming what was open instead.
+    fn macro_edit(app: &App) -> &MacroEditState {
+        match &app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => state,
+            other => panic!("expected an open macro editor, got {other:?}"),
+        }
+    }
+
+    fn macro_focus(app: &App) -> MacroEditFocus {
+        macro_edit(app).focus
+    }
+
+    /// Point focus at `focus` without going through the keyboard, so a test can
+    /// start from any control.
+    fn set_macro_focus(app: &mut App, focus: MacroEditFocus) {
+        match &mut app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => state.focus = focus,
+            other => panic!("expected an open macro editor, got {other:?}"),
+        }
+    }
+
+    /// Open the editor on the selected macro, leaving focus where it lands.
+    fn open_macro_editor(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("open the editor on the selected macro");
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A single-code key combination as the key event a user would produce.
+    fn press(combo: crokey::KeyCombination) -> KeyEvent {
+        let crokey::OneToThree::One(code) = combo.codes else {
+            panic!("test fixtures use single-code combinations only");
+        };
+        KeyEvent::new(code, combo.modifiers)
+    }
+
+    /// Every focus stop, in forward order.
+    const MACRO_FOCUS_ORDER: [MacroEditFocus; 5] = [
+        MacroEditFocus::Name,
+        MacroEditFocus::Text,
+        MacroEditFocus::Surface,
+        MacroEditFocus::Cancel,
+        MacroEditFocus::Save,
+    ];
+
+    #[test]
+    fn macro_edit_save_writes_the_macro_and_cancel_does_not() {
+        let mut app = app_with_two_macros();
+        open_macro_editor_on_body(&mut app);
+        type_chars(&mut app, " there");
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        set_macro_focus(&mut app, MacroEditFocus::Save);
+        app.handle_key(key(KeyCode::Enter)).expect("activate Save");
+
+        assert_eq!(
+            macro_text(&app, "greet").as_deref(),
+            Some("hello there"),
+            "Save must write the edited body to config"
+        );
+
+        // And now the same edit, abandoned through Cancel.
+        open_macro_editor_on_body(&mut app);
+        type_chars(&mut app, " again");
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        set_macro_focus(&mut app, MacroEditFocus::Cancel);
+        app.handle_key(key(KeyCode::Enter))
+            .expect("activate Cancel");
+
+        assert_eq!(
+            macro_text(&app, "greet").as_deref(),
+            Some("hello there"),
+            "Cancel must not write anything"
+        );
+        assert!(
+            !macro_editing_is_open(&app),
+            "Cancel returns to the macro list"
+        );
+    }
+
+    fn macro_editing_is_open(app: &App) -> bool {
+        matches!(
+            &app.prompt,
+            PromptState::EditMacros {
+                editing: Some(_),
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn macro_edit_movement_keys_cycle_focus_both_ways_and_change_no_value() {
+        let mut app = app_with_two_macros();
+        open_macro_editor(&mut app);
+
+        let before = macro_edit(&app).clone();
+        assert_eq!(macro_focus(&app), MacroEditFocus::Name);
+
+        // Forwards through every stop and back to the start.
+        for expected in MACRO_FOCUS_ORDER
+            .iter()
+            .skip(1)
+            .chain([&MacroEditFocus::Name])
+        {
+            app.handle_key(key(KeyCode::Tab)).expect("focus forward");
+            assert_eq!(macro_focus(&app), *expected, "forward focus order");
+        }
+
+        // Backwards through every stop and back to the start.
+        // Reversing the visual order from `Name` is exactly the order back.
+        for expected in MACRO_FOCUS_ORDER.iter().rev() {
+            app.handle_key(key(KeyCode::BackTab)).expect("focus back");
+            assert_eq!(macro_focus(&app), *expected, "reverse focus order");
+        }
+
+        let after = macro_edit(&app);
+        assert_eq!(after.name_input.text, before.name_input.text, "name intact");
+        assert_eq!(after.text_input.text, before.text_input.text, "body intact");
+        assert_eq!(after.surface, before.surface, "surface intact");
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "movement never engages the body"
+        );
+    }
+
+    #[test]
+    fn macro_edit_space_acts_on_the_focused_control() {
+        let mut app = app_with_two_macros();
+
+        // A text field takes the space as a character.
+        open_macro_editor(&mut app);
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        assert_eq!(macro_edit(&app).name_input.text, "greet ");
+
+        set_macro_focus(&mut app, MacroEditFocus::Text);
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        assert_eq!(macro_edit(&app).text_input.text, "hello ");
+
+        // The selector advances.
+        set_macro_focus(&mut app, MacroEditFocus::Surface);
+        let before = macro_edit(&app).surface;
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        assert_eq!(macro_edit(&app).surface, before.next());
+
+        // The buttons activate. Cancel first, so nothing is written.
+        set_macro_focus(&mut app, MacroEditFocus::Cancel);
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        assert!(!macro_editing_is_open(&app), "Space cancelled");
+        assert_eq!(macro_text(&app, "greet").as_deref(), Some("hello"));
+
+        open_macro_editor(&mut app);
+        set_macro_focus(&mut app, MacroEditFocus::Text);
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        set_macro_focus(&mut app, MacroEditFocus::Save);
+        app.handle_key(key(KeyCode::Char(' '))).expect("space");
+        assert!(!macro_editing_is_open(&app), "Space saved");
+        assert_eq!(macro_text(&app, "greet").as_deref(), Some("hello "));
+    }
+
+    #[test]
+    fn macro_edit_surface_selector_is_reachable_from_every_focus_position() {
+        for start in MACRO_FOCUS_ORDER {
+            let mut app = app_with_two_macros();
+            open_macro_editor(&mut app);
+            set_macro_focus(&mut app, start);
+            let before = macro_edit(&app).surface;
+
+            // Walk forward until the selector has focus. Five stops means the
+            // walk always terminates in at most four presses.
+            for _ in 0..MACRO_FOCUS_ORDER.len() {
+                if macro_focus(&app) == MacroEditFocus::Surface {
+                    break;
+                }
+                app.handle_key(key(KeyCode::Tab)).expect("focus forward");
+            }
+            assert_eq!(
+                macro_focus(&app),
+                MacroEditFocus::Surface,
+                "the selector must be reachable from {start:?}"
+            );
+
+            app.handle_key(key(KeyCode::Char(' '))).expect("space");
+            assert_eq!(
+                macro_edit(&app).surface,
+                before.next(),
+                "the selector must be changeable from {start:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macro_edit_engaged_body_takes_enter_as_a_newline_and_escape_only_exits_edit_mode() {
+        let mut app = app_with_two_macros();
+        open_macro_editor_on_body(&mut app);
+        assert_eq!(
+            app.input_target,
+            InputTarget::MacroText,
+            "reaching the body engages it for typing"
+        );
+
+        type_chars(&mut app, "one");
+        app.handle_key(key(KeyCode::Enter)).expect("newline");
+        type_chars(&mut app, "two");
+        assert_eq!(
+            macro_edit(&app).text_input.text,
+            "helloone\ntwo",
+            "Enter is content in the engaged body, not a confirm"
+        );
+
+        app.handle_key(key(KeyCode::Esc)).expect("exit edit mode");
+
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "Escape leaves edit mode"
+        );
+        assert!(
+            macro_editing_is_open(&app),
+            "Escape from edit mode leaves the modal open"
+        );
+        assert_eq!(
+            macro_edit(&app).text_input.text,
+            "helloone\ntwo",
+            "leaving edit mode keeps the text"
+        );
+        assert_eq!(
+            macro_focus(&app),
+            MacroEditFocus::Text,
+            "leaving edit mode keeps focus on the body"
+        );
+    }
+
+    /// Render a real frame so the macro editor publishes its true hit rects.
+    fn render_macro_editor(app: &mut App) -> super::super::OverlayMouseLayout {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        app.overlay_layout.active
+    }
+
+    fn macro_editor_rects(app: &mut App) -> (Rect, Rect, [Rect; 3], Rect, Rect) {
+        match render_macro_editor(app) {
+            OverlayMouseLayout::EditMacros {
+                name_input,
+                text_input,
+                surface_options,
+                cancel_button,
+                save_button,
+            } => (
+                name_input,
+                text_input,
+                surface_options,
+                cancel_button,
+                save_button,
+            ),
+            other => panic!("expected the macro editor layout, got {other:?}"),
+        }
+    }
+
+    fn click_at(app: &mut App, rect: Rect) {
+        let (x, y) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
+    }
+
+    #[test]
+    fn macro_edit_clicking_a_control_focuses_or_activates_it() {
+        let mut app = app_with_two_macros();
+        open_macro_editor(&mut app);
+
+        let (name, text, surfaces, cancel, save) = macro_editor_rects(&mut app);
+
+        // Clicking the body focuses it; clicking it again engages it.
+        click_at(&mut app, text);
+        assert_eq!(macro_focus(&app), MacroEditFocus::Text);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "one click only focuses"
+        );
+        click_at(&mut app, text);
+        assert_eq!(
+            app.input_target,
+            InputTarget::MacroText,
+            "double click engages"
+        );
+
+        // Clicking the name field focuses it back (and leaves edit mode).
+        click_at(&mut app, name);
+        assert_eq!(macro_focus(&app), MacroEditFocus::Name);
+        assert_eq!(app.input_target, InputTarget::None);
+
+        // Clicking a selector option selects exactly that option.
+        click_at(&mut app, surfaces[2]);
+        assert_eq!(macro_edit(&app).surface, crate::config::MacroSurface::Both);
+        assert_eq!(macro_focus(&app), MacroEditFocus::Surface);
+
+        // Clicking Save writes it.
+        let (_, _, _, _, save_now) = macro_editor_rects(&mut app);
+        assert_eq!(save_now, save, "layout is stable across redraws");
+        click_at(&mut app, save_now);
+        assert!(!macro_editing_is_open(&app), "Save closed the editor");
+        assert_eq!(
+            app.engine.config.macros.entries["greet"].surface,
+            crate::config::MacroSurface::Both,
+            "Save wrote the clicked surface"
+        );
+
+        // Clicking Cancel abandons.
+        open_macro_editor(&mut app);
+        set_macro_focus(&mut app, MacroEditFocus::Text);
+        app.handle_key(key(KeyCode::Char('X'))).expect("type");
+        let (_, _, _, cancel_now, _) = macro_editor_rects(&mut app);
+        assert_eq!(cancel_now, cancel, "layout is stable across redraws");
+        click_at(&mut app, cancel_now);
+        assert!(!macro_editing_is_open(&app), "Cancel closed the editor");
+        assert_eq!(
+            macro_text(&app, "greet").as_deref(),
+            Some("hello"),
+            "Cancel wrote nothing"
+        );
+    }
+
+    /// Drive the macro editor the way a user does: open a new macro, type the
+    /// name, move focus to the body, engage it, type, leave edit mode, confirm.
+    fn add_macro_through_the_editor(app: &mut App, name: &str, text: &str) {
+        app.handle_key(key(KeyCode::Char('n')))
+            .expect("open new macro editor");
+        type_chars(app, name);
+        app.handle_key(key(KeyCode::Tab))
+            .expect("move focus to the body");
+        let engage = app
+            .bindings
+            .first_key_reaching(Action::EngageCommitInput, |_| true)
+            .expect("an engage binding");
+        app.handle_key(press(engage)).expect("engage the body");
+        type_chars(app, text);
+        app.handle_key(key(KeyCode::Esc)).expect("leave edit mode");
+        app.handle_key(key(KeyCode::Enter)).expect("save");
+    }
+
     #[test]
     fn macro_add_two_both_survive_flush_to_disk() {
         // Regression: when the config snapshot passed to save_eager is built from
@@ -18185,29 +18851,14 @@ cyan = "#00ffff"
         app.open_edit_macros();
 
         // Add macro A --------------------------------------------------
-        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-            .expect("open new macro editor");
-        type_chars(&mut app, "alpha");
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("move to EditText");
-        type_chars(&mut app, "Hello A");
-        // Esc saves from EditText
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .expect("save macro A");
+        add_macro_through_the_editor(&mut app, "alpha", "Hello A");
         assert!(
             app.engine.config.macros.entries.contains_key("alpha"),
             "macro A must be in config after save"
         );
 
         // Add macro B --------------------------------------------------
-        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
-            .expect("open new macro editor");
-        type_chars(&mut app, "bravo");
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .expect("move to EditText");
-        type_chars(&mut app, "Hello B");
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
-            .expect("save macro B");
+        add_macro_through_the_editor(&mut app, "bravo", "Hello B");
         assert!(
             app.engine.config.macros.entries.contains_key("bravo"),
             "macro B must be in config after save"
