@@ -617,6 +617,18 @@ fn print_restore_report(restored: &config::RestoredConfig) {
             println!("  {path}");
         }
     }
+    // Not reachable through any config the canonical renderer can produce, and
+    // printed anyway: a key that could not be placed is data loss, and the one
+    // thing worse than losing it is losing it quietly.
+    if !restored.unplaceable.is_empty() {
+        println!(
+            "\nCOULD NOT BE KEPT (this is a dux bug, please report it, and \
+             recover these from the backup above):"
+        );
+        for path in &restored.unplaceable {
+            println!("  {path}");
+        }
+    }
 }
 
 /// Write `raw` beside the config as `config.toml.backup-<UTC timestamp>`.

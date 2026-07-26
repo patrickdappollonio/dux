@@ -908,6 +908,10 @@ pub struct RestoredConfig {
     pub dropped: Vec<String>,
     /// Unknown keys carried over verbatim, as dotted paths.
     pub preserved: Vec<String>,
+    /// Unknown keys the merge could not place anywhere, as dotted paths. These
+    /// are absent from `text`; naming them is what keeps the loss from being
+    /// silent. Empty for every config the canonical renderer can produce.
+    pub unplaceable: Vec<String>,
 }
 
 impl RestoredConfig {
@@ -977,6 +981,7 @@ pub fn restore_documentation(raw: &str) -> Result<RestoredConfig> {
         text,
         dropped: report.dropped,
         preserved: report.preserved,
+        unplaceable: report.unplaceable,
     })
 }
 

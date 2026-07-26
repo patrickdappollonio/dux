@@ -819,11 +819,19 @@ pub struct RestoreMergeReport {
     pub dropped: Vec<String>,
     /// Dotted paths of unknown keys that were carried over verbatim.
     pub preserved: Vec<String>,
+    /// Dotted paths of unknown keys the merge could NOT place anywhere in the
+    /// rendered document, and which are therefore absent from the result.
+    ///
+    /// Distinct from [`Self::dropped`], which names sections dux removes ON
+    /// PURPOSE. This list names a failure, and it exists so the failure can
+    /// never be silent. It is empty for every config the canonical renderer
+    /// can produce (see `insert_at_path`), so a non-empty one is a bug report.
+    pub unplaceable: Vec<String>,
 }
 
 impl RestoreMergeReport {
     pub fn is_empty(&self) -> bool {
-        self.dropped.is_empty() && self.preserved.is_empty()
+        self.dropped.is_empty() && self.preserved.is_empty() && self.unplaceable.is_empty()
     }
 }
 
@@ -855,11 +863,17 @@ pub fn merge_unmanaged_keys(
         let display = path_display(&leaf.path);
         if insert_at_path(rendered, &leaf.path, leaf.key, leaf.item) {
             report.preserved.push(display);
+        } else {
+            // Neither preserved nor deliberately dropped: the key is GONE and
+            // the user has to be told. Falling through to neither list is how
+            // a merge loses data in silence.
+            report.unplaceable.push(display);
         }
     }
     report.dropped.sort();
     report.dropped.dedup();
     report.preserved.sort();
+    report.unplaceable.sort();
     report
 }
 
@@ -1798,6 +1812,49 @@ id = \"b\"
         );
         assert_eq!(report.preserved, vec!["projects[0].custom_note"]);
         assert!(report.dropped.is_empty());
+    }
+
+    /// A key `insert_at_path` cannot place must be REPORTED, not silently
+    /// vanished.
+    ///
+    /// **This is currently unreachable through any real config.** The canonical
+    /// renderer emits one `[[projects]]` block per parsed project, so the
+    /// rendered document always has an entry at every index the original has,
+    /// and `insert_at_path` never returns false. The input below is doctored
+    /// (a rendered document with FEWER array entries than the original) to
+    /// exercise the branch directly. The guard exists so that if the renderer
+    /// ever stops emitting one block per project, the failure is loud.
+    #[test]
+    fn merge_reports_a_key_it_could_not_place_instead_of_dropping_it_silently() {
+        let original: DocumentMut = "\
+[[projects]]
+id = \"a\"
+note = \"kept\"
+
+[[projects]]
+id = \"b\"
+second_note = \"nowhere to go\"
+"
+        .parse()
+        .expect("parse original");
+        // Doctored: only ONE rendered project, so `projects[1]` has no home.
+        let mut rendered: DocumentMut = "[[projects]]\nid = \"a\"\n".parse().expect("parse");
+
+        let report = merge_unmanaged_keys(&mut rendered, &original);
+
+        let out = rendered.to_string();
+        assert!(out.contains("note = \"kept\""), "out:\n{out}");
+        assert!(!out.contains("second_note"), "out:\n{out}");
+        assert_eq!(report.preserved, vec!["projects[0].note"]);
+        assert_eq!(
+            report.unplaceable,
+            vec!["projects[1].id", "projects[1].second_note"],
+            "a key that could not be placed must be named, not vanish"
+        );
+        assert!(
+            !report.is_empty(),
+            "a report naming a lost key is not empty"
+        );
     }
 
     #[test]
