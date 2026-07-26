@@ -70,12 +70,6 @@ pub(crate) enum ButtonState {
 /// arm those cases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ButtonPressedTarget {
-    ChangeAgentProviderCancel,
-    ChangeAgentProviderApply,
-    ChangeDefaultProviderCancel,
-    ChangeDefaultProviderApply,
-    ChangeProjectDefaultProviderCancel,
-    ChangeProjectDefaultProviderApply,
     RuntimeKillCancel,
     RuntimeKillHovered,
     RuntimeKillSelected,

@@ -6,8 +6,10 @@
 //! in `mod.rs`).
 
 use crate::app::{
-    App, CenterMode, FocusPane, FullscreenOverlay, InputTarget, MouseLayoutState,
-    OverlayMouseLayoutState, PromptState, RightSection, TextInput,
+    App, CenterMode, ChangeAgentProviderMode, ChangeAgentProviderOption, ChangeAgentProviderPrompt,
+    ChangeDefaultProviderOption, ChangeDefaultProviderPrompt, ChangeProjectDefaultProviderOption,
+    ChangeProjectDefaultProviderPrompt, FocusPane, FullscreenOverlay, InputTarget,
+    MouseLayoutState, OverlayMouseLayoutState, PromptState, RightSection, TextInput,
 };
 use crate::clipboard::Clipboard;
 use crate::config::{Config, DuxPaths, ProjectConfig};
@@ -318,4 +320,73 @@ pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
         "PTY did not park its cursor at row {row}, col {col} within 2s (got {:?})",
         app.snapshot_buf.cursor
     );
+}
+
+/// Build the three provider pickers in a state a user can really reach:
+/// two options, the FIRST one already active (so it is the no-op row) and
+/// the second one a real change.
+pub(crate) fn agent_provider_prompt() -> ChangeAgentProviderPrompt {
+    ChangeAgentProviderPrompt {
+        session_id: "s1".to_string(),
+        tab_id: "s1".to_string(),
+        session_label: "agent".to_string(),
+        worktree_path: "/tmp/wt".to_string(),
+        options: vec![
+            ChangeAgentProviderOption {
+                provider: ProviderKind::new("claude"),
+                supports_resume: true,
+                resume_available: false,
+                is_current: true,
+            },
+            ChangeAgentProviderOption {
+                provider: ProviderKind::new("codex"),
+                supports_resume: true,
+                resume_available: false,
+                is_current: false,
+            },
+        ],
+        selected: 0,
+        mode: ChangeAgentProviderMode::Retarget,
+    }
+}
+
+pub(crate) fn default_provider_prompt() -> ChangeDefaultProviderPrompt {
+    ChangeDefaultProviderPrompt {
+        current: ProviderKind::new("claude"),
+        options: vec![
+            ChangeDefaultProviderOption {
+                provider: ProviderKind::new("claude"),
+                is_current: true,
+            },
+            ChangeDefaultProviderOption {
+                provider: ProviderKind::new("codex"),
+                is_current: false,
+            },
+        ],
+        selected: 0,
+    }
+}
+
+pub(crate) fn project_default_provider_prompt(
+    project_id: String,
+    project_name: String,
+) -> ChangeProjectDefaultProviderPrompt {
+    ChangeProjectDefaultProviderPrompt {
+        project_id,
+        project_name,
+        current: ProviderKind::new("claude"),
+        global_default: ProviderKind::new("claude"),
+        inherits_global_default: true,
+        options: vec![
+            ChangeProjectDefaultProviderOption {
+                provider: None,
+                is_current: true,
+            },
+            ChangeProjectDefaultProviderOption {
+                provider: Some(ProviderKind::new("codex")),
+                is_current: false,
+            },
+        ],
+        selected: 0,
+    }
 }

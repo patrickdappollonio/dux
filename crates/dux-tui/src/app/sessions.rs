@@ -1005,7 +1005,6 @@ impl App {
             worktree_path: session.worktree_path.clone(),
             options,
             selected,
-            focus: ChangeAgentProviderFocus::List,
             mode: ChangeAgentProviderMode::NewTab,
         });
         self.set_info(
@@ -1681,7 +1680,6 @@ impl App {
             worktree_path: session.worktree_path.clone(),
             options: self.change_agent_provider_options(&session),
             selected: 0,
-            focus: ChangeAgentProviderFocus::List,
             mode: ChangeAgentProviderMode::Retarget,
         });
         self.set_info(
@@ -1830,7 +1828,6 @@ impl App {
             current,
             options,
             selected,
-            focus: ChangeDefaultProviderFocus::List,
         });
         self.set_info(
             "Choose the global default provider for newly created agent sessions. Projects with an explicit project provider keep their override, and existing agents keep their current provider.",
@@ -1867,7 +1864,6 @@ impl App {
                 inherits_global_default,
                 options,
                 selected,
-                focus: ChangeDefaultProviderFocus::List,
             });
         self.set_info(
             "Choose the selected project's default provider for future agents. Choose \"inherit global default\" to remove a project-specific override. Existing agents keep their current provider.",

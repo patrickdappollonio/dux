@@ -778,13 +778,6 @@ pub(crate) enum KillRunningFocus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChangeAgentProviderFocus {
-    List,
-    Cancel,
-    Apply,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeAgentProviderMode {
     /// The ctrl+p retarget of an existing focused tab (change_tab_provider).
     Retarget,
@@ -829,15 +822,7 @@ pub(crate) struct ChangeAgentProviderPrompt {
     pub(crate) worktree_path: String,
     pub(crate) options: Vec<ChangeAgentProviderOption>,
     pub(crate) selected: usize,
-    pub(crate) focus: ChangeAgentProviderFocus,
     pub(crate) mode: ChangeAgentProviderMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChangeDefaultProviderFocus {
-    List,
-    Cancel,
-    Apply,
 }
 
 #[derive(Clone, Debug)]
@@ -851,7 +836,6 @@ pub(crate) struct ChangeDefaultProviderPrompt {
     pub(crate) current: ProviderKind,
     pub(crate) options: Vec<ChangeDefaultProviderOption>,
     pub(crate) selected: usize,
-    pub(crate) focus: ChangeDefaultProviderFocus,
 }
 
 #[derive(Clone, Debug)]
@@ -869,7 +853,6 @@ pub(crate) struct ChangeProjectDefaultProviderPrompt {
     pub(crate) inherits_global_default: bool,
     pub(crate) options: Vec<ChangeProjectDefaultProviderOption>,
     pub(crate) selected: usize,
-    pub(crate) focus: ChangeDefaultProviderFocus,
 }
 
 /// Semantic tone of an Agent Info body line, computed once at build time so the
@@ -1819,22 +1802,16 @@ pub(crate) enum OverlayMouseLayout {
         list: Rect,
         items: usize,
         offset: usize,
-        cancel_button: Rect,
-        apply_button: Rect,
     },
     ChangeDefaultProvider {
         list: Rect,
         items: usize,
         offset: usize,
-        cancel_button: Rect,
-        apply_button: Rect,
     },
     ChangeProjectDefaultProvider {
         list: Rect,
         items: usize,
         offset: usize,
-        cancel_button: Rect,
-        apply_button: Rect,
     },
     PickEditor {
         list: Rect,

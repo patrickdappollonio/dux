@@ -3952,46 +3952,11 @@ impl App {
                 let area = centered_rect(72, 42, frame.area());
                 self.clear_overlay_area(frame, area);
 
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let bottom_spans = self.provider_picker_footer();
 
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&toggle_key));
-                bottom_spans.push(Span::styled(
-                    " buttons  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " choose  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area, buttons_area] = Layout::default()
+                let [details_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(4),
-                        Constraint::Min(6),
-                        Constraint::Length(3),
-                    ])
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
                     .areas(area);
 
                 let detail_lines = vec![
@@ -4048,9 +4013,14 @@ impl App {
                         } else {
                             "no prior session; will start fresh"
                         };
+                        // Only a Retarget can be a no-op: a NewTab always
+                        // creates something, whatever provider it names.
+                        let is_no_op =
+                            prompt.mode == ChangeAgentProviderMode::Retarget && option.is_current;
                         let name =
                             format!("{:width$}", option.provider.as_str(), width = provider_col);
                         ListItem::new(Line::from(vec![
+                            active_provider_marker_span(is_no_op, &self.theme),
                             Span::styled(
                                 name,
                                 Style::default()
@@ -4072,13 +4042,9 @@ impl App {
                     .border_style(Style::default().fg(self.theme.overlay_border))
                     .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
-                let highlight_style = if matches!(prompt.focus, ChangeAgentProviderFocus::List) {
-                    self.theme.selection_style()
-                } else {
-                    Style::default()
-                        .fg(self.theme.help_section_header_fg)
-                        .add_modifier(Modifier::BOLD)
-                };
+                // The rows are the only thing in here, so the selection is
+                // always live: there is no button for focus to move to.
+                let highlight_style = self.theme.selection_style();
                 StatefulWidget::render(
                     List::new(items)
                         .block(list_block)
@@ -4088,59 +4054,10 @@ impl App {
                     &mut state,
                 );
 
-                let btn_width = 18u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let apply_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                // In NewTab mode there is no existing tab to compare against,
-                // so `is_current` (which reflects the session's overall
-                // provider, not the new tab) never gates the Apply button.
-                let apply_enabled = prompt.mode == ChangeAgentProviderMode::NewTab
-                    || prompt
-                        .options
-                        .get(prompt.selected)
-                        .map(|option| !option.is_current)
-                        .unwrap_or(false);
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ChangeAgentProviderCancel,
-                        self.pressed_button,
-                        matches!(prompt.focus, ChangeAgentProviderFocus::Cancel),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Use Provider")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ChangeAgentProviderApply,
-                        self.pressed_button,
-                        matches!(prompt.focus, ChangeAgentProviderFocus::Apply),
-                        apply_enabled,
-                    ))
-                    .render(frame, apply_area, &self.theme);
-
                 self.overlay_layout.active = OverlayMouseLayout::ChangeAgentProvider {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),
-                    cancel_button: cancel_area,
-                    apply_button: apply_area,
                 };
             }
             PromptState::ChangeDefaultProvider(prompt) => {
@@ -4148,46 +4065,11 @@ impl App {
                 let area = centered_rect(72, 42, frame.area());
                 self.clear_overlay_area(frame, area);
 
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let toggle_key = self.bindings.label_for(Action::ToggleSelection);
-                let confirm_key = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let bottom_spans = self.provider_picker_footer();
 
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    " down  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " up  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&toggle_key));
-                bottom_spans.push(Span::styled(
-                    " buttons  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm_key));
-                bottom_spans.push(Span::styled(
-                    " choose  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area, buttons_area] = Layout::default()
+                let [details_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(4),
-                        Constraint::Min(6),
-                        Constraint::Length(3),
-                    ])
+                    .constraints([Constraint::Length(4), Constraint::Min(6)])
                     .areas(area);
 
                 let detail_lines = vec![
@@ -4234,6 +4116,7 @@ impl App {
                         let name =
                             format!("{:width$}", option.provider.as_str(), width = provider_col);
                         ListItem::new(Line::from(vec![
+                            active_provider_marker_span(option.is_current, &self.theme),
                             Span::styled(
                                 name,
                                 Style::default()
@@ -4255,13 +4138,7 @@ impl App {
                     .border_style(Style::default().fg(self.theme.overlay_border))
                     .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
-                let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
-                    self.theme.selection_style()
-                } else {
-                    Style::default()
-                        .fg(self.theme.help_section_header_fg)
-                        .add_modifier(Modifier::BOLD)
-                };
+                let highlight_style = self.theme.selection_style();
                 StatefulWidget::render(
                     List::new(items)
                         .block(list_block)
@@ -4271,55 +4148,10 @@ impl App {
                     &mut state,
                 );
 
-                let btn_width = 18u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let apply_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                let apply_enabled = prompt
-                    .options
-                    .get(prompt.selected)
-                    .map(|option| !option.is_current)
-                    .unwrap_or(false);
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ChangeDefaultProviderCancel,
-                        self.pressed_button,
-                        matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Set Global")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ChangeDefaultProviderApply,
-                        self.pressed_button,
-                        matches!(prompt.focus, ChangeDefaultProviderFocus::Apply),
-                        apply_enabled,
-                    ))
-                    .render(frame, apply_area, &self.theme);
-
                 self.overlay_layout.active = OverlayMouseLayout::ChangeDefaultProvider {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),
-                    cancel_button: cancel_area,
-                    apply_button: apply_area,
                 };
             }
             PromptState::ChangeProjectDefaultProvider(prompt) => {
@@ -4327,46 +4159,11 @@ impl App {
                 let area = centered_rect(64, 60, frame.area());
                 self.clear_overlay_area(frame, area);
 
-                let move_down = self.bindings.label_for(Action::MoveDown);
-                let move_up = self.bindings.label_for(Action::MoveUp);
-                let toggle = self.bindings.label_for(Action::ToggleSelection);
-                let confirm = self.bindings.label_for(Action::Confirm);
-                let close_key = self.bindings.label_for(Action::CloseOverlay);
+                let bottom_spans = self.provider_picker_footer();
 
-                let mut bottom_spans = vec![Span::raw(" ")];
-                bottom_spans.extend(self.theme.key_badge_default(&move_down));
-                bottom_spans.push(Span::styled(
-                    "/",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&move_up));
-                bottom_spans.push(Span::styled(
-                    " move  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&toggle));
-                bottom_spans.push(Span::styled(
-                    " buttons  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&confirm));
-                bottom_spans.push(Span::styled(
-                    " choose  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                bottom_spans.extend(self.theme.key_badge_default(&close_key));
-                bottom_spans.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-
-                let [details_area, list_area, buttons_area] = Layout::default()
+                let [details_area, list_area] = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(5),
-                        Constraint::Min(6),
-                        Constraint::Length(3),
-                    ])
+                    .constraints([Constraint::Length(5), Constraint::Min(6)])
                     .areas(area);
 
                 let project_mode = if prompt.inherits_global_default {
@@ -4451,6 +4248,7 @@ impl App {
                         };
                         let name = format!("{name:width$}", width = provider_col);
                         ListItem::new(Line::from(vec![
+                            active_provider_marker_span(option.is_current, &self.theme),
                             Span::styled(
                                 name,
                                 Style::default()
@@ -4472,13 +4270,7 @@ impl App {
                     .border_style(Style::default().fg(self.theme.overlay_border))
                     .style(Style::default().bg(self.theme.overlay_bg));
                 let list_inner = list_block.inner(list_area);
-                let highlight_style = if matches!(prompt.focus, ChangeDefaultProviderFocus::List) {
-                    self.theme.selection_style()
-                } else {
-                    Style::default()
-                        .fg(self.theme.help_section_header_fg)
-                        .add_modifier(Modifier::BOLD)
-                };
+                let highlight_style = self.theme.selection_style();
                 StatefulWidget::render(
                     List::new(items)
                         .block(list_block)
@@ -4488,55 +4280,10 @@ impl App {
                     &mut state,
                 );
 
-                let btn_width = 18u16;
-                let gap = 2u16;
-                let total = btn_width * 2 + gap;
-                let left_offset = buttons_area.width.saturating_sub(total) / 2;
-                let cancel_area = Rect {
-                    x: buttons_area.x + left_offset,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-                let apply_area = Rect {
-                    x: cancel_area.x + btn_width + gap,
-                    y: buttons_area.y,
-                    width: btn_width,
-                    height: 3,
-                };
-
-                let apply_enabled = prompt
-                    .options
-                    .get(prompt.selected)
-                    .map(|option| !option.is_current)
-                    .unwrap_or(false);
-
-                Button::new("Cancel")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ChangeProjectDefaultProviderCancel,
-                        self.pressed_button,
-                        matches!(prompt.focus, ChangeDefaultProviderFocus::Cancel),
-                        true,
-                    ))
-                    .render(frame, cancel_area, &self.theme);
-
-                Button::new("Set Project")
-                    .kind(ButtonKind::Confirm)
-                    .state(button_state_for(
-                        ButtonPressedTarget::ChangeProjectDefaultProviderApply,
-                        self.pressed_button,
-                        matches!(prompt.focus, ChangeDefaultProviderFocus::Apply),
-                        apply_enabled,
-                    ))
-                    .render(frame, apply_area, &self.theme);
-
                 self.overlay_layout.active = OverlayMouseLayout::ChangeProjectDefaultProvider {
                     list: list_inner,
                     items: prompt.options.len(),
                     offset: state.offset(),
-                    cancel_button: cancel_area,
-                    apply_button: apply_area,
                 };
             }
             PromptState::ChangeTheme(prompt) => {
@@ -5732,6 +5479,17 @@ impl App {
                     KillRunningFooterAction::Visible,
                 ];
                 let gap = 2u16;
+                // NOTE for whoever comes here to "finish" the picker cleanup:
+                // the three provider pickers lost their Cancel/Apply pair
+                // because a picker confirms by PICKING and a button label
+                // cannot stay truthful once a key is rebound. That rule does
+                // not reach these four. They are not a confirm/cancel pair
+                // restating Enter; they are four DISTINCT actions (cancel, kill
+                // the hovered runtime, kill the marked ones, kill everything
+                // the filter currently shows), and three of them have no
+                // keyboard equivalent that a footer hint could name instead.
+                // Leave them.
+                //
                 // This footer pre-dates the Button widget's standard sizing —
                 // its labels are long ("Kill Hovered" etc.) and it lays four
                 // buttons in a row. The wider per-label width (label_chars + 6)
@@ -9334,6 +9092,66 @@ pub(crate) fn top_bar_branch_suffix(current: &str, initial: &str) -> String {
     }
 }
 
+/// The one footer the three provider pickers share.
+///
+/// Every key is resolved through the bindings, never spelled out: a rebound
+/// key must not be able to make this hint lie. The list of stops is short
+/// because a picker HAS no other controls, only rows.
+impl App {
+    fn provider_picker_footer(&self) -> Vec<Span<'static>> {
+        let move_down = self.bindings.label_for(Action::MoveDown);
+        let move_up = self.bindings.label_for(Action::MoveUp);
+        let confirm = self.bindings.label_for(Action::Confirm);
+        let close = self.bindings.label_for(Action::CloseOverlay);
+        let desc = Style::default().fg(self.theme.hint_desc_fg);
+
+        // The badges borrow their key string, so take ownership before the
+        // locals go out of scope.
+        let badge = |key: &str| -> Vec<Span<'static>> {
+            self.theme
+                .key_badge_default(key)
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect()
+        };
+
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(badge(&move_down));
+        spans.push(Span::styled("/", desc));
+        spans.extend(badge(&move_up));
+        spans.push(Span::styled(" move  ", desc));
+        spans.extend(badge(&confirm));
+        spans.push(Span::styled(" choose  ", desc));
+        spans.extend(badge(&close));
+        spans.push(Span::styled(" cancel", desc));
+        spans
+    }
+}
+
+/// The leading marker column every provider row carries: the marker itself on
+/// the row that is already in effect, and blanks of the SAME WIDTH on the rest
+/// so the provider names still line up.
+fn active_provider_marker_span(is_active: bool, theme: &Theme) -> Span<'static> {
+    let marker = if is_active {
+        format!(" {ACTIVE_PROVIDER_MARKER} ")
+    } else {
+        " ".repeat(ACTIVE_PROVIDER_MARKER.chars().count() + 2)
+    };
+    Span::styled(marker, Style::default().fg(theme.hint_desc_fg))
+}
+
+/// Marks the provider row that is ALREADY in effect, so picking it would do
+/// nothing.
+///
+/// This cue used to be the Apply button greying out. The button is gone (a
+/// picker confirms by picking, see the `Picker` family in `super::modal`), so
+/// the cue moved onto the row that owns the information. It is a marker IN THE
+/// TEXT rather than a dimmed style on purpose: the moment the cue matters most
+/// is when that row is HIGHLIGHTED, and `Theme::selection_style` sets fg, bg
+/// and BOLD, so any style the row set for itself is patched away underneath the
+/// selection. A glyph in the string survives.
+pub(crate) const ACTIVE_PROVIDER_MARKER: &str = "\u{2713}";
+
 pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -9703,7 +9521,10 @@ fn confirm_close_tab_tail(only_tab: bool, is_main: bool) -> &'static str {
 mod tests {
     use super::*;
 
-    use crate::app::test_support::{default_bindings, test_app, wait_for_agent_cursor};
+    use crate::app::test_support::{
+        agent_provider_prompt, default_bindings, default_provider_prompt,
+        project_default_provider_prompt, test_app, wait_for_agent_cursor,
+    };
     use crate::model::{CompanionTerminal, SessionSurface};
     use crate::pty::PtyClient;
 
@@ -14068,49 +13889,77 @@ mod tests {
         }
     }
 
+    /// The text-field dialogs suppress the typing keys when they pick a focus
+    /// hint. That suppression must stay LOCAL to them: the shared label the
+    /// rest of the app renders is still the action's real first key.
+    ///
+    /// This used to be checked by rendering the provider pickers, which
+    /// advertised the unsuppressed `<h>` for "move to the buttons". They have
+    /// no buttons now, so there is nothing left to render that would show it,
+    /// and the claim is asserted against the bindings directly instead.
     #[test]
-    fn button_only_dialogs_keep_their_first_key_hint() {
-        // The 22 other Dialog-scope consumers have no text field, so `h` really
-        // does toggle there and their hints must stay exactly as they are.
+    fn suppressing_the_focus_key_in_a_text_field_dialog_leaves_the_shared_label_alone() {
+        let app = test_app(default_bindings());
+        assert_eq!(
+            app.bindings.label_for(Action::ToggleSelection),
+            "h",
+            "default first key of the shared action"
+        );
+        let in_text_field_dialog = app
+            .bindings
+            .label_for_text_field_dialog(Action::ToggleSelection)
+            .expect("some key of the action still reaches focus movement");
+        assert_ne!(
+            in_text_field_dialog, "h",
+            "a dialog with a text field must not advertise a key that types"
+        );
+    }
+
+    /// The provider pickers are the counterpart to the test above: they have no
+    /// buttons for focus to move between, so naming a focus key would be a
+    /// hint pointing at nothing. Their footers advertise move / choose / cancel
+    /// and each of those keys is resolved through the bindings.
+    #[test]
+    fn the_provider_pickers_advertise_only_the_keys_they_answer() {
         let mut app = test_app(default_bindings());
-        let unchanged = app.bindings.label_for(Action::ToggleSelection);
-        assert_eq!(unchanged, "h", "default first key of the shared action");
-
-        app.prompt = PromptState::ChangeAgentProvider(ChangeAgentProviderPrompt {
-            session_id: "session-1".to_string(),
-            tab_id: "session-1".to_string(),
-            session_label: "agent".to_string(),
-            worktree_path: "/tmp/wt".to_string(),
-            options: vec![ChangeAgentProviderOption {
-                provider: ProviderKind::from_str("codex"),
-                supports_resume: true,
-                resume_available: false,
-                is_current: true,
-            }],
-            selected: 0,
-            focus: ChangeAgentProviderFocus::List,
-            mode: ChangeAgentProviderMode::Retarget,
-        });
-        let screen = rendered_screen(&mut app);
-        assert!(
-            screen.contains("<h> buttons"),
-            "the agent-provider dialog keeps its <h> hint:\n{screen}"
-        );
-
-        app.prompt = PromptState::ChangeDefaultProvider(ChangeDefaultProviderPrompt {
-            current: ProviderKind::from_str("codex"),
-            options: vec![ChangeDefaultProviderOption {
-                provider: ProviderKind::from_str("codex"),
-                is_current: true,
-            }],
-            selected: 0,
-            focus: ChangeDefaultProviderFocus::List,
-        });
-        let screen = rendered_screen(&mut app);
-        assert!(
-            screen.contains("<h> buttons"),
-            "the default-provider dialog keeps its <h> hint:\n{screen}"
-        );
+        let project = app.engine.projects[0].clone();
+        let prompts = [
+            (
+                "ChangeAgentProvider",
+                PromptState::ChangeAgentProvider(agent_provider_prompt()),
+            ),
+            (
+                "ChangeDefaultProvider",
+                PromptState::ChangeDefaultProvider(default_provider_prompt()),
+            ),
+            (
+                "ChangeProjectDefaultProvider",
+                PromptState::ChangeProjectDefaultProvider(project_default_provider_prompt(
+                    project.id.clone(),
+                    project.name.clone(),
+                )),
+            ),
+        ];
+        for (name, prompt) in prompts {
+            app.prompt = prompt;
+            let screen = rendered_screen(&mut app);
+            assert!(
+                !screen.contains("buttons"),
+                "{name}: there are no buttons left to advertise:\n{screen}"
+            );
+            for (action, word) in [
+                (Action::MoveDown, "move"),
+                (Action::Confirm, "choose"),
+                (Action::CloseOverlay, "cancel"),
+            ] {
+                let key = app.bindings.label_for(action);
+                assert!(
+                    screen.contains(&format!("<{key}>")) && screen.contains(word),
+                    "{name}: the footer must name the bound key for {word:?}, \
+                     expected <{key}>:\n{screen}"
+                );
+            }
+        }
     }
 
     /// The diff pane's outer rect, reconstructed from the content rect it
@@ -14411,5 +14260,78 @@ mod tests {
         let line = render_single_line_cursor_input("", "áb", 1, Color::White, Color::Black, true);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "áb");
+    }
+
+    // ── Change A: the no-op cue lives on the row, not on a button ───────────
+
+    /// Read one screen row of `rect` back out of a rendered buffer.
+    fn row_text(buf: &ratatui::buffer::Buffer, rect: Rect, row: u16) -> String {
+        (rect.x..rect.x + rect.width)
+            .map(|x| buf[(x, rect.y + row)].symbol().to_string())
+            .collect()
+    }
+
+    fn render_provider_picker(prompt: PromptState) -> (App, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = test_app(default_bindings());
+        app.prompt = prompt;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (app, buf)
+    }
+
+    /// The Apply button used to grey out when the highlighted row was already
+    /// the active provider. With the button gone that cue has to live on the
+    /// row, and it has to survive the selection highlight (the cue matters
+    /// exactly when that row IS highlighted), so it is a MARKER IN THE TEXT and
+    /// not a style. Row 0 is the active provider in every fixture here.
+    #[test]
+    fn the_already_active_provider_row_is_marked_as_a_no_op() {
+        let cases: Vec<(&str, PromptState)> = {
+            let app = test_app(default_bindings());
+            let project = app.engine.projects[0].clone();
+            vec![
+                (
+                    "ChangeAgentProvider",
+                    PromptState::ChangeAgentProvider(agent_provider_prompt()),
+                ),
+                (
+                    "ChangeDefaultProvider",
+                    PromptState::ChangeDefaultProvider(default_provider_prompt()),
+                ),
+                (
+                    "ChangeProjectDefaultProvider",
+                    PromptState::ChangeProjectDefaultProvider(project_default_provider_prompt(
+                        project.id.clone(),
+                        project.name.clone(),
+                    )),
+                ),
+            ]
+        };
+        for (name, prompt) in cases {
+            let (app, buf) = render_provider_picker(prompt);
+            let list = match app.overlay_layout.active {
+                OverlayMouseLayout::ChangeAgentProvider { list, .. }
+                | OverlayMouseLayout::ChangeDefaultProvider { list, .. }
+                | OverlayMouseLayout::ChangeProjectDefaultProvider { list, .. } => list,
+                ref other => panic!("{name}: expected a provider picker layout, got {other:?}"),
+            };
+            let active = row_text(&buf, list, 0);
+            let other = row_text(&buf, list, 1);
+            assert!(
+                active.contains(super::ACTIVE_PROVIDER_MARKER),
+                "{name}: the already-active row must carry the no-op marker, got {active:?}"
+            );
+            assert!(
+                !other.contains(super::ACTIVE_PROVIDER_MARKER),
+                "{name}: a row that would really change the provider must not be marked, \
+                 got {other:?}"
+            );
+        }
     }
 }

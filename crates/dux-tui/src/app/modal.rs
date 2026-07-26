@@ -208,21 +208,29 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         // A selection cursor over rows; Enter picks. The filter rows these
         // carry are deliberately type-immediately and are single-line, so no
         // dual-mode question arises.
+        //
+        // **A picker gets no Cancel and no Apply.** Its footer already names
+        // the keys, resolved through the bindings, and a button LABEL cannot
+        // stay truthful once a user rebinds. The three provider pickers used to
+        // carry a pair and no longer do; the cue their Apply button carried (it
+        // greyed out when the highlighted row was already the active provider)
+        // moved onto the row itself, see `render::ACTIVE_PROVIDER_MARKER`.
         PromptState::Command { .. }
         | PromptState::BrowseProjects { .. }
         | PromptState::PickEditor { .. }
         | PromptState::PickProject { .. }
         | PromptState::PickProjectWorktree(_)
-        | PromptState::ChangeTheme(_) => ModalSpec::new(Picker, false, false),
-
-        // The three provider pickers pair the row list with Cancel/Apply, so
-        // they DO publish a commit button. Still Pickers: the vertical keys
-        // move a selection value, not focus.
-        PromptState::ChangeAgentProvider(_)
+        | PromptState::ChangeTheme(_)
+        | PromptState::ChangeAgentProvider(_)
         | PromptState::ChangeDefaultProvider(_)
-        | PromptState::ChangeProjectDefaultProvider(_) => ModalSpec::new(Picker, false, true),
+        | PromptState::ChangeProjectDefaultProvider(_) => ModalSpec::new(Picker, false, false),
 
-        // Kill-running is a multi-select picker with three commit buttons.
+        // Kill-running is the ONE picker that keeps its buttons, and it is not
+        // an oversight to finish. Its three footer buttons are DISTINCT ACTIONS
+        // (kill the hovered runtime, kill the marked ones, kill everything the
+        // filter shows), not a confirm/cancel pair restating what Enter does,
+        // so "a picker confirms by picking" says nothing about them. Do not
+        // remove them for consistency.
         PromptState::KillRunning(_) => ModalSpec::new(Picker, false, true),
 
         // ── Form ────────────────────────────────────────────────────────
@@ -338,6 +346,9 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::Help
         | OverlayMouseLayout::Command { .. }
         | OverlayMouseLayout::BrowseProjects { .. }
+        | OverlayMouseLayout::ChangeAgentProvider { .. }
+        | OverlayMouseLayout::ChangeDefaultProvider { .. }
+        | OverlayMouseLayout::ChangeProjectDefaultProvider { .. }
         | OverlayMouseLayout::AddProjectFailed { .. }
         | OverlayMouseLayout::AgentInfo { .. }
         | OverlayMouseLayout::FirstLoad { .. }
@@ -353,10 +364,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::NameNewAgent { .. } => false,
 
         // A button that commits.
-        OverlayMouseLayout::ChangeAgentProvider { .. }
-        | OverlayMouseLayout::ChangeDefaultProvider { .. }
-        | OverlayMouseLayout::ChangeProjectDefaultProvider { .. }
-        | OverlayMouseLayout::KillRunning { .. }
+        OverlayMouseLayout::KillRunning { .. }
         | OverlayMouseLayout::ConfirmKillRunning { .. }
         | OverlayMouseLayout::ConfirmDeleteAgent { .. }
         | OverlayMouseLayout::ConfirmDeleteTerminal { .. }
@@ -604,9 +612,8 @@ mod tests {
     use super::super::first_load::{FirstLoadButton, FirstLoadPrompt};
     use super::super::test_support::{default_bindings, test_app};
     use super::super::{
-        AgentInfoPrompt, AgentInfoTone, ChangeAgentProviderFocus, ChangeAgentProviderMode,
-        ChangeAgentProviderOption, ChangeAgentProviderPrompt, ChangeDefaultProviderFocus,
-        ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
+        AgentInfoPrompt, AgentInfoTone, ChangeAgentProviderMode, ChangeAgentProviderOption,
+        ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
         ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
         ConfigReloadFailedFocus, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
         DeleteAgentFocus, KillRunningAction, KillRunningFocus, KillRunningPrompt, MacroEditFocus,
@@ -714,7 +721,6 @@ mod tests {
                         is_current: true,
                     }],
                     selected: 0,
-                    focus: ChangeAgentProviderFocus::List,
                     mode: ChangeAgentProviderMode::Retarget,
                 }),
             ),
@@ -744,7 +750,6 @@ mod tests {
                         is_current: true,
                     }],
                     selected: 0,
-                    focus: ChangeDefaultProviderFocus::List,
                 }),
             ),
             (
@@ -760,7 +765,6 @@ mod tests {
                         is_current: true,
                     }],
                     selected: 0,
-                    focus: ChangeDefaultProviderFocus::List,
                 }),
             ),
             (

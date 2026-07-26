@@ -100,14 +100,8 @@ enum PromptMouseTarget {
     PickProjectItem(usize),
     ChangeThemeItem(usize),
     ChangeAgentProviderItem(usize),
-    ChangeAgentProviderCancel,
-    ChangeAgentProviderApply,
     ChangeDefaultProviderItem(usize),
-    ChangeDefaultProviderCancel,
-    ChangeDefaultProviderApply,
     ChangeProjectDefaultProviderItem(usize),
-    ChangeProjectDefaultProviderCancel,
-    ChangeProjectDefaultProviderApply,
     RuntimeKillInput,
     RuntimeKillItem(usize),
     RuntimeKillCancel,
@@ -164,24 +158,6 @@ impl ButtonPressedTarget {
     /// those targets keep their existing on-Down behavior.
     fn from_prompt_target(target: PromptMouseTarget) -> Option<Self> {
         match target {
-            PromptMouseTarget::ChangeAgentProviderCancel => {
-                Some(ButtonPressedTarget::ChangeAgentProviderCancel)
-            }
-            PromptMouseTarget::ChangeAgentProviderApply => {
-                Some(ButtonPressedTarget::ChangeAgentProviderApply)
-            }
-            PromptMouseTarget::ChangeDefaultProviderCancel => {
-                Some(ButtonPressedTarget::ChangeDefaultProviderCancel)
-            }
-            PromptMouseTarget::ChangeDefaultProviderApply => {
-                Some(ButtonPressedTarget::ChangeDefaultProviderApply)
-            }
-            PromptMouseTarget::ChangeProjectDefaultProviderCancel => {
-                Some(ButtonPressedTarget::ChangeProjectDefaultProviderCancel)
-            }
-            PromptMouseTarget::ChangeProjectDefaultProviderApply => {
-                Some(ButtonPressedTarget::ChangeProjectDefaultProviderApply)
-            }
             PromptMouseTarget::RuntimeKillCancel => Some(ButtonPressedTarget::RuntimeKillCancel),
             PromptMouseTarget::RuntimeKillHovered => Some(ButtonPressedTarget::RuntimeKillHovered),
             PromptMouseTarget::RuntimeKillSelected => {
@@ -2734,55 +2710,27 @@ impl App {
             return Ok(false);
         }
 
+        // The three provider pickers are rows and nothing else: no Cancel, no
+        // Apply, so no focus concept and no Tab. The close key cancels and the
+        // confirm key picks, which is what their footers say.
         if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let is_space = key.code == KeyCode::Char(' ');
-            let reverse_tab = is_reverse_tab(key);
 
-            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
-                self.prompt = PromptState::None;
-                return Ok(false);
-            }
-
-            if reverse_tab {
-                prompt.focus = Self::next_change_agent_provider_focus(prompt.focus, false);
-                return Ok(false);
-            }
-
-            match prompt.focus {
-                ChangeAgentProviderFocus::List => match palette_action.or(dialog_action) {
-                    Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                        prompt.selected += 1;
-                    }
-                    Some(Action::MoveUp) if prompt.selected > 0 => {
-                        prompt.selected -= 1;
-                    }
-                    Some(Action::Confirm) => {
-                        self.apply_change_agent_provider()?;
-                    }
-                    Some(Action::ToggleSelection) => {
-                        prompt.focus = Self::next_change_agent_provider_focus(prompt.focus, true);
-                    }
-                    _ => {}
-                },
-                ChangeAgentProviderFocus::Cancel | ChangeAgentProviderFocus::Apply => {
-                    if matches!(dialog_action, Some(Action::ToggleSelection)) {
-                        prompt.focus = Self::next_change_agent_provider_focus(prompt.focus, true);
-                        return Ok(false);
-                    }
-                    if matches!(dialog_action, Some(Action::Confirm)) || is_space {
-                        match prompt.focus {
-                            ChangeAgentProviderFocus::Cancel => {
-                                self.prompt = PromptState::None;
-                            }
-                            ChangeAgentProviderFocus::Apply => {
-                                self.apply_change_agent_provider()?;
-                            }
-                            ChangeAgentProviderFocus::List => {}
-                        }
-                    }
+            match palette_action.or(dialog_action) {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
                 }
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_change_agent_provider()?;
+                }
+                _ => {}
             }
             return Ok(false);
         }
@@ -2790,52 +2738,21 @@ impl App {
         if let PromptState::ChangeDefaultProvider(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let is_space = key.code == KeyCode::Char(' ');
-            let reverse_tab = is_reverse_tab(key);
 
-            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
-                self.prompt = PromptState::None;
-                return Ok(false);
-            }
-
-            if reverse_tab {
-                prompt.focus = Self::next_change_default_provider_focus(prompt.focus, false);
-                return Ok(false);
-            }
-
-            match prompt.focus {
-                ChangeDefaultProviderFocus::List => match palette_action.or(dialog_action) {
-                    Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                        prompt.selected += 1;
-                    }
-                    Some(Action::MoveUp) if prompt.selected > 0 => {
-                        prompt.selected -= 1;
-                    }
-                    Some(Action::Confirm) => {
-                        self.apply_change_default_provider()?;
-                    }
-                    Some(Action::ToggleSelection) => {
-                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
-                    }
-                    _ => {}
-                },
-                ChangeDefaultProviderFocus::Cancel | ChangeDefaultProviderFocus::Apply => {
-                    if matches!(dialog_action, Some(Action::ToggleSelection)) {
-                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
-                        return Ok(false);
-                    }
-                    if matches!(dialog_action, Some(Action::Confirm)) || is_space {
-                        match prompt.focus {
-                            ChangeDefaultProviderFocus::Cancel => {
-                                self.prompt = PromptState::None;
-                            }
-                            ChangeDefaultProviderFocus::Apply => {
-                                self.apply_change_default_provider()?;
-                            }
-                            ChangeDefaultProviderFocus::List => {}
-                        }
-                    }
+            match palette_action.or(dialog_action) {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
                 }
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_change_default_provider()?;
+                }
+                _ => {}
             }
             return Ok(false);
         }
@@ -2843,52 +2760,21 @@ impl App {
         if let PromptState::ChangeProjectDefaultProvider(prompt) = &mut self.prompt {
             let palette_action = self.bindings.lookup(&key, BindingScope::Palette);
             let dialog_action = self.bindings.lookup(&key, BindingScope::Dialog);
-            let is_space = key.code == KeyCode::Char(' ');
-            let reverse_tab = key.code == KeyCode::BackTab;
 
-            if matches!(palette_action.or(dialog_action), Some(Action::CloseOverlay)) {
-                self.prompt = PromptState::None;
-                return Ok(false);
-            }
-
-            if reverse_tab {
-                prompt.focus = Self::next_change_default_provider_focus(prompt.focus, false);
-                return Ok(false);
-            }
-
-            match prompt.focus {
-                ChangeDefaultProviderFocus::List => match palette_action.or(dialog_action) {
-                    Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
-                        prompt.selected += 1;
-                    }
-                    Some(Action::MoveUp) if prompt.selected > 0 => {
-                        prompt.selected -= 1;
-                    }
-                    Some(Action::Confirm) => {
-                        self.apply_change_project_default_provider()?;
-                    }
-                    Some(Action::ToggleSelection) => {
-                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
-                    }
-                    _ => {}
-                },
-                ChangeDefaultProviderFocus::Cancel | ChangeDefaultProviderFocus::Apply => {
-                    if matches!(dialog_action, Some(Action::ToggleSelection)) {
-                        prompt.focus = Self::next_change_default_provider_focus(prompt.focus, true);
-                        return Ok(false);
-                    }
-                    if matches!(dialog_action, Some(Action::Confirm)) || is_space {
-                        match prompt.focus {
-                            ChangeDefaultProviderFocus::Cancel => {
-                                self.prompt = PromptState::None;
-                            }
-                            ChangeDefaultProviderFocus::Apply => {
-                                self.apply_change_project_default_provider()?;
-                            }
-                            ChangeDefaultProviderFocus::List => {}
-                        }
-                    }
+            match palette_action.or(dialog_action) {
+                Some(Action::CloseOverlay) => {
+                    self.prompt = PromptState::None;
                 }
+                Some(Action::MoveDown) if prompt.selected + 1 < prompt.options.len() => {
+                    prompt.selected += 1;
+                }
+                Some(Action::MoveUp) if prompt.selected > 0 => {
+                    prompt.selected -= 1;
+                }
+                Some(Action::Confirm) => {
+                    self.apply_change_project_default_provider()?;
+                }
+                _ => {}
             }
             return Ok(false);
         }
@@ -4375,53 +4261,20 @@ impl App {
                 list,
                 items,
                 offset,
-                cancel_button,
-                apply_button,
-            } => {
-                if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
-                    Some(PromptMouseTarget::ChangeAgentProviderItem(index))
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ChangeAgentProviderCancel)
-                } else if contains_point(apply_button, column, row) {
-                    Some(PromptMouseTarget::ChangeAgentProviderApply)
-                } else {
-                    None
-                }
-            }
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ChangeAgentProviderItem),
             OverlayMouseLayout::ChangeDefaultProvider {
                 list,
                 items,
                 offset,
-                cancel_button,
-                apply_button,
-            } => {
-                if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
-                    Some(PromptMouseTarget::ChangeDefaultProviderItem(index))
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ChangeDefaultProviderCancel)
-                } else if contains_point(apply_button, column, row) {
-                    Some(PromptMouseTarget::ChangeDefaultProviderApply)
-                } else {
-                    None
-                }
-            }
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ChangeDefaultProviderItem),
             OverlayMouseLayout::ChangeProjectDefaultProvider {
                 list,
                 items,
                 offset,
-                cancel_button,
-                apply_button,
-            } => {
-                if let Some(index) = Self::overlay_row_at(list, offset, items, column, row) {
-                    Some(PromptMouseTarget::ChangeProjectDefaultProviderItem(index))
-                } else if contains_point(cancel_button, column, row) {
-                    Some(PromptMouseTarget::ChangeProjectDefaultProviderCancel)
-                } else if contains_point(apply_button, column, row) {
-                    Some(PromptMouseTarget::ChangeProjectDefaultProviderApply)
-                } else {
-                    None
-                }
-            }
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::ChangeProjectDefaultProviderItem),
             OverlayMouseLayout::KillRunning {
                 input,
                 list,
@@ -5409,20 +5262,6 @@ impl App {
         self.open_name_new_agent_prompt_for_request(request)
     }
 
-    fn next_change_agent_provider_focus(
-        current: ChangeAgentProviderFocus,
-        forward: bool,
-    ) -> ChangeAgentProviderFocus {
-        match (current, forward) {
-            (ChangeAgentProviderFocus::List, true) => ChangeAgentProviderFocus::Cancel,
-            (ChangeAgentProviderFocus::Cancel, true) => ChangeAgentProviderFocus::Apply,
-            (ChangeAgentProviderFocus::Apply, true) => ChangeAgentProviderFocus::List,
-            (ChangeAgentProviderFocus::List, false) => ChangeAgentProviderFocus::Apply,
-            (ChangeAgentProviderFocus::Apply, false) => ChangeAgentProviderFocus::Cancel,
-            (ChangeAgentProviderFocus::Cancel, false) => ChangeAgentProviderFocus::List,
-        }
-    }
-
     fn set_change_agent_provider_selection(&mut self, index: usize) {
         let count = match &self.prompt {
             PromptState::ChangeAgentProvider(prompt) => prompt.options.len(),
@@ -5433,21 +5272,6 @@ impl App {
         }
         if let PromptState::ChangeAgentProvider(prompt) = &mut self.prompt {
             prompt.selected = index.min(count.saturating_sub(1));
-            prompt.focus = ChangeAgentProviderFocus::List;
-        }
-    }
-
-    fn next_change_default_provider_focus(
-        current: ChangeDefaultProviderFocus,
-        forward: bool,
-    ) -> ChangeDefaultProviderFocus {
-        match (current, forward) {
-            (ChangeDefaultProviderFocus::List, true) => ChangeDefaultProviderFocus::Cancel,
-            (ChangeDefaultProviderFocus::Cancel, true) => ChangeDefaultProviderFocus::Apply,
-            (ChangeDefaultProviderFocus::Apply, true) => ChangeDefaultProviderFocus::List,
-            (ChangeDefaultProviderFocus::List, false) => ChangeDefaultProviderFocus::Apply,
-            (ChangeDefaultProviderFocus::Apply, false) => ChangeDefaultProviderFocus::Cancel,
-            (ChangeDefaultProviderFocus::Cancel, false) => ChangeDefaultProviderFocus::List,
         }
     }
 
@@ -5461,7 +5285,6 @@ impl App {
         }
         if let PromptState::ChangeDefaultProvider(prompt) = &mut self.prompt {
             prompt.selected = index.min(count.saturating_sub(1));
-            prompt.focus = ChangeDefaultProviderFocus::List;
         }
     }
 
@@ -5475,7 +5298,6 @@ impl App {
         }
         if let PromptState::ChangeProjectDefaultProvider(prompt) = &mut self.prompt {
             prompt.selected = index.min(count.saturating_sub(1));
-            prompt.focus = ChangeDefaultProviderFocus::List;
         }
     }
 
@@ -6459,13 +6281,7 @@ impl App {
             // reach this path — `from_prompt_target` returns `Some(_)`
             // for all of them, sending mouse-down through the press
             // flow instead.
-            PromptMouseTarget::ChangeAgentProviderCancel
-            | PromptMouseTarget::ChangeAgentProviderApply
-            | PromptMouseTarget::ChangeDefaultProviderCancel
-            | PromptMouseTarget::ChangeDefaultProviderApply
-            | PromptMouseTarget::ChangeProjectDefaultProviderCancel
-            | PromptMouseTarget::ChangeProjectDefaultProviderApply
-            | PromptMouseTarget::RuntimeKillCancel
+            PromptMouseTarget::RuntimeKillCancel
             | PromptMouseTarget::RuntimeKillHovered
             | PromptMouseTarget::RuntimeKillSelected
             | PromptMouseTarget::RuntimeKillVisible
@@ -6517,36 +6333,6 @@ impl App {
     /// arms one-for-one — only the trigger event differs.
     fn activate_button(&mut self, button: ButtonPressedTarget) -> bool {
         match button {
-            ButtonPressedTarget::ChangeAgentProviderCancel => {
-                self.prompt = PromptState::None;
-                false
-            }
-            ButtonPressedTarget::ChangeAgentProviderApply => {
-                if let Err(err) = self.apply_change_agent_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
-                false
-            }
-            ButtonPressedTarget::ChangeDefaultProviderCancel => {
-                self.prompt = PromptState::None;
-                false
-            }
-            ButtonPressedTarget::ChangeDefaultProviderApply => {
-                if let Err(err) = self.apply_change_default_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
-                false
-            }
-            ButtonPressedTarget::ChangeProjectDefaultProviderCancel => {
-                self.prompt = PromptState::None;
-                false
-            }
-            ButtonPressedTarget::ChangeProjectDefaultProviderApply => {
-                if let Err(err) = self.apply_change_project_default_provider() {
-                    self.set_error(format!("{err:#}"));
-                }
-                false
-            }
             ButtonPressedTarget::RuntimeKillCancel => {
                 if let Err(e) =
                     self.execute_kill_running_footer_action(KillRunningFooterAction::Cancel)
@@ -20367,5 +20153,188 @@ cyan = "#00ffff"
             PromptState::NameNewAgent { input, .. } => assert_eq!(input.cursor, 2),
             other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
+    }
+
+    // ── Change A: pickers confirm by picking, not by a button ───────────────
+
+    fn render_once(app: &mut App) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+    }
+
+    /// The rect of visible row `index` in a rendered provider list, taken from
+    /// the PUBLISHED layout rather than from any string offset.
+    fn provider_row_point(list: Rect, offset: usize, index: usize) -> (u16, u16) {
+        (
+            list.x + 1,
+            list.y + u16::try_from(index - offset).expect("row on screen"),
+        )
+    }
+
+    fn double_click(app: &mut App, column: u16, row: u16) {
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
+    }
+
+    #[test]
+    fn provider_picker_rows_confirm_on_double_click() {
+        // ChangeAgentProvider.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ChangeAgentProvider(agent_provider_prompt());
+        render_once(&mut app);
+        let OverlayMouseLayout::ChangeAgentProvider { list, offset, .. } =
+            app.overlay_layout.active
+        else {
+            panic!("agent provider picker must publish its list rect");
+        };
+        let (cx, cy) = provider_row_point(list, offset, 1);
+        double_click(&mut app, cx, cy);
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "double-clicking a row must confirm the pick and close the agent-provider picker"
+        );
+
+        // ChangeDefaultProvider.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ChangeDefaultProvider(default_provider_prompt());
+        render_once(&mut app);
+        let OverlayMouseLayout::ChangeDefaultProvider { list, offset, .. } =
+            app.overlay_layout.active
+        else {
+            panic!("default provider picker must publish its list rect");
+        };
+        let (cx, cy) = provider_row_point(list, offset, 1);
+        double_click(&mut app, cx, cy);
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "double-clicking a row must confirm the pick and close the default-provider picker"
+        );
+
+        // ChangeProjectDefaultProvider.
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.prompt = PromptState::ChangeProjectDefaultProvider(project_default_provider_prompt(
+            project.id.clone(),
+            project.name.clone(),
+        ));
+        render_once(&mut app);
+        let OverlayMouseLayout::ChangeProjectDefaultProvider { list, offset, .. } =
+            app.overlay_layout.active
+        else {
+            panic!("project provider picker must publish its list rect");
+        };
+        let (cx, cy) = provider_row_point(list, offset, 1);
+        double_click(&mut app, cx, cy);
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "double-clicking a row must confirm the pick and close the project-provider picker"
+        );
+    }
+
+    /// With the buttons gone, EVERY click that lands inside a provider picker
+    /// must resolve to a row or to nothing. This walks every cell of the
+    /// modal's frame rather than probing the two rects that used to hold the
+    /// buttons, so a button re-added anywhere in the modal fails the test.
+    #[test]
+    fn nothing_inside_a_provider_picker_is_a_button() {
+        use super::super::modal::layout_publishes_confirm_button;
+
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        let cases: Vec<(&str, PromptState)> = vec![
+            (
+                "ChangeAgentProvider",
+                PromptState::ChangeAgentProvider(agent_provider_prompt()),
+            ),
+            (
+                "ChangeDefaultProvider",
+                PromptState::ChangeDefaultProvider(default_provider_prompt()),
+            ),
+            (
+                "ChangeProjectDefaultProvider",
+                PromptState::ChangeProjectDefaultProvider(project_default_provider_prompt(
+                    project.id.clone(),
+                    project.name.clone(),
+                )),
+            ),
+        ];
+        for (name, prompt) in cases {
+            app.prompt = prompt;
+            render_once(&mut app);
+            assert!(
+                !layout_publishes_confirm_button(&app.overlay_layout.active),
+                "{name}: a picker confirms by picking and must publish no commit button"
+            );
+            let frame = app
+                .overlay_layout
+                .frame
+                .get()
+                .expect("the modal must claim a frame rect");
+            for row in frame.y..frame.y + frame.height {
+                for column in frame.x..frame.x + frame.width {
+                    if let Some(target) = app.prompt_mouse_target(column, row) {
+                        assert!(
+                            ButtonPressedTarget::from_prompt_target(target).is_none(),
+                            "{name}: ({column},{row}) hit-tests to the button target {target:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Kill-running is deliberately NOT part of this rule, so it keeps its
+    /// footer buttons. See the comment at its render site.
+    #[test]
+    fn kill_running_keeps_its_footer_buttons() {
+        use super::super::modal::layout_publishes_confirm_button;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(KillRunningPrompt {
+            runtimes: Vec::new(),
+            list: SearchableList::new(),
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::List,
+        });
+        render_once(&mut app);
+        assert!(
+            layout_publishes_confirm_button(&app.overlay_layout.active),
+            "kill-running's footer buttons are distinct actions, not a confirm/cancel pair"
+        );
+    }
+
+    /// Removing the buttons must not cost the keyboard its confirm.
+    #[test]
+    fn provider_pickers_still_confirm_from_the_keyboard() {
+        let confirm = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+
+        let mut app = test_app(default_bindings());
+        let mut prompt = agent_provider_prompt();
+        prompt.selected = 1;
+        app.prompt = PromptState::ChangeAgentProvider(prompt);
+        app.handle_key(confirm).expect("confirm");
+        assert!(matches!(app.prompt, PromptState::None));
+
+        let mut app = test_app(default_bindings());
+        let mut prompt = default_provider_prompt();
+        prompt.selected = 1;
+        app.prompt = PromptState::ChangeDefaultProvider(prompt);
+        app.handle_key(confirm).expect("confirm");
+        assert!(matches!(app.prompt, PromptState::None));
+
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        let mut prompt = project_default_provider_prompt(project.id.clone(), project.name.clone());
+        prompt.selected = 1;
+        app.prompt = PromptState::ChangeProjectDefaultProvider(prompt);
+        app.handle_key(confirm).expect("confirm");
+        assert!(matches!(app.prompt, PromptState::None));
     }
 }
