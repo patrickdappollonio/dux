@@ -1150,22 +1150,31 @@ impl App {
                     }
                     return;
                 }
-                _ if binding_lookup_is_suppressed(key, true)
-                    || matches!(key.code, KeyCode::Backspace | KeyCode::Delete) =>
-                {
-                    let changed = self
-                        .startup_log_viewer
-                        .as_mut()
-                        .is_some_and(|viewer| viewer.search.handle_key(key));
-                    if changed {
-                        self.update_startup_log_search_scroll();
+                // Which keys the search row owns is not a list to hand-write:
+                // it is exactly the set `TextInput::handle_key` consumes, and
+                // asking it is the only way that set cannot drift. A written
+                // list ("plain characters, the horizontal arrows, Backspace and
+                // Delete") is what dropped `Home`, `End` and the word-erase
+                // chord, and `Home` then reached the scroll ladder and scrolled
+                // the log out from under the query. A single-line field
+                // consumes none of the vertical or paging keys, so those still
+                // fall through to the viewer's own ladder below, which is what
+                // makes the arrows scroll while searching.
+                _ => {
+                    let Some(viewer) = self.startup_log_viewer.as_mut() else {
+                        return;
+                    };
+                    let before = viewer.search.text.clone();
+                    if viewer.search.handle_key(key) {
+                        // Only a changed QUERY re-aims the scroll; a caret move
+                        // is consumed but must leave the view where it is.
+                        let changed = viewer.search.text != before;
+                        if changed {
+                            self.update_startup_log_search_scroll();
+                        }
+                        return;
                     }
-                    return;
                 }
-                // Anything the search row does not own (the vertical keys, the
-                // paging keys) falls through to the viewer's own ladder below,
-                // which is what makes the arrows work while searching.
-                _ => {}
             }
         }
 
@@ -2910,16 +2919,26 @@ impl App {
                         // the narrowed list stays up to be navigated.
                         prompt.searching = false;
                     }
-                    _ if !binding_lookup_is_suppressed(key, true)
-                        && !matches!(key.code, KeyCode::Backspace | KeyCode::Delete) =>
-                    {
-                        handled = false;
-                    }
+                    // Same rule as the fullscreen viewer's search row: the set
+                    // the field owns IS the set `TextInput::handle_key`
+                    // consumes, asked rather than hand-listed, so `Home`, `End`
+                    // and the word-erase chord cannot fall out of it again. A
+                    // single-line field consumes none of the vertical or paging
+                    // keys, so those still reach the ladder below.
                     _ => {
-                        prompt.filter.handle_key(key);
-                        select_after_filter = Self::startup_command_log_filtered_indices(prompt)
-                            .first()
-                            .copied();
+                        let before = prompt.filter.text.clone();
+                        if prompt.filter.handle_key(key) {
+                            // Only a changed QUERY re-aims the selection; a
+                            // caret move is consumed but must leave it alone.
+                            if prompt.filter.text != before {
+                                select_after_filter =
+                                    Self::startup_command_log_filtered_indices(prompt)
+                                        .first()
+                                        .copied();
+                            }
+                        } else {
+                            handled = false;
+                        }
                     }
                 }
                 if let Some(index) = select_after_filter {
@@ -21647,6 +21666,99 @@ cyan = "#00ffff"
         assert!(
             app.startup_log_viewer.is_none(),
             "the second close key shuts the viewer"
+        );
+    }
+
+    /// The caret keys a single-line search field owns and the scroll ladder
+    /// both want `Home`/`End`, and while the search row is up the field wins.
+    ///
+    /// A previous change narrowed both search rows to "plain characters, the
+    /// horizontal arrows, Backspace and Delete", which is not the set
+    /// `TextInput` actually consumes: `Home`, `End` and the word-erase chord
+    /// fell out of it, and `Home` then reached `Action::ScrollToTop` and
+    /// scrolled the log out from under the query.
+    #[test]
+    fn the_log_viewer_search_row_keeps_its_caret_and_word_erase_keys() {
+        let mut app = startup_log_viewer_app();
+        begin_search(&mut app);
+        type_text(&mut app, "line 40");
+        let (_, _, scrolled_to_match) = viewer_state(&app);
+
+        let cursor = |app: &App| {
+            app.startup_log_viewer
+                .as_ref()
+                .expect("viewer")
+                .search
+                .cursor
+        };
+
+        tap(&mut app, KeyCode::Home);
+        assert_eq!(cursor(&app), 0, "Home belongs to the caret while searching");
+        let (_, query, after_home) = viewer_state(&app);
+        assert_eq!(query, "line 40", "Home must not touch the query");
+        assert_eq!(
+            after_home, scrolled_to_match,
+            "Home must not reach the scroll ladder while the search row is up"
+        );
+
+        tap(&mut app, KeyCode::End);
+        assert_eq!(
+            cursor(&app),
+            "line 40".len(),
+            "End belongs to the caret too"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .expect("word erase");
+        let (_, query, _) = viewer_state(&app);
+        assert_eq!(query, "line ", "the word-erase chord belongs to the field");
+    }
+
+    /// The startup-log PICKER's search row, same rule. This surface is only
+    /// reachable under `cfg(test)` today (the real journey lands in the
+    /// fullscreen viewer above, which
+    /// `the_startup_log_journey_opens_the_fullscreen_viewer_not_the_modal`
+    /// pins), but the two rows are the same widget and must not drift.
+    #[test]
+    fn the_startup_log_picker_search_row_keeps_its_caret_and_word_erase_keys() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
+            scope_label: "demo".to_string(),
+            entries: Vec::new(),
+            selected: 0,
+            filter: TextInput::with_text("line 40".to_string()),
+            searching: true,
+            content: String::new(),
+            scroll_offset: 0,
+        });
+
+        let query = |app: &App| match &app.prompt {
+            PromptState::StartupCommandLogs(prompt) => {
+                (prompt.filter.text.clone(), prompt.filter.cursor)
+            }
+            other => panic!("expected the startup-log picker, got {other:?}"),
+        };
+
+        tap(&mut app, KeyCode::Home);
+        assert_eq!(
+            query(&app),
+            ("line 40".to_string(), 0),
+            "Home belongs to the caret while searching"
+        );
+
+        tap(&mut app, KeyCode::End);
+        assert_eq!(
+            query(&app),
+            ("line 40".to_string(), "line 40".len()),
+            "End belongs to the caret too"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .expect("word erase");
+        assert_eq!(
+            query(&app).0,
+            "line ",
+            "the word-erase chord belongs to the field"
         );
     }
 
