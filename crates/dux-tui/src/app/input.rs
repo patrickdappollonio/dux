@@ -12738,9 +12738,42 @@ not_a_real_action = ["x"]
         );
     }
 
-    /// The maximized agent renders no tab strip, so the tab rects left over
-    /// from the last windowed frame must not be clickable. The ordering is the
-    /// bug: render windowed (recording the rects), maximize, then click.
+    /// The maximized agent renders no tab strip, so a frame drawn while it is
+    /// up must leave no clickable tab rects behind. This is the RENDERER half
+    /// of the defence (`render_overlay` clears the registry).
+    #[test]
+    fn maximized_agent_frame_leaves_no_clickable_tab_rects() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
+        app.center_mode = CenterMode::Agent;
+
+        let mut terminal = test_terminal();
+        draw_frame(&mut app, &mut terminal);
+        assert!(
+            !app.agent_tab_regions.is_empty(),
+            "the windowed frame must record tab rects or this test proves nothing"
+        );
+
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        draw_frame(&mut app, &mut terminal);
+
+        assert!(
+            app.agent_tab_regions.is_empty(),
+            "a maximized frame draws no tabs, so it must leave no clickable tab rects behind"
+        );
+    }
+
+    /// The INPUT half of the same defence: the `windowed` gate on the tab
+    /// hit-test.
+    ///
+    /// The renderer clearing the registry is what makes this unreachable
+    /// today, which is exactly why a test that lets the clear happen proves
+    /// nothing about the gate: with the registry empty the hit-test returns
+    /// `false` whatever the gate says, and the previous version of this test
+    /// passed with `windowed &&` deleted. So the rects are deliberately put
+    /// BACK after the maximized frame, standing in for "some future path
+    /// reaches the tab hit-test" that the guard's own comment names.
     #[test]
     fn click_inside_maximized_agent_switches_no_tab() {
         let mut app = test_app(default_bindings());
@@ -12752,8 +12785,8 @@ not_a_real_action = ["x"]
         // The WINDOWED frame is what records the clickable tab rects.
         draw_frame(&mut app, &mut terminal);
         let focused_before = app.focused_tab_id(&session_id);
-        let (other_tab, rect) = app
-            .agent_tab_regions
+        let stale_regions = app.agent_tab_regions.clone();
+        let (other_tab, rect) = stale_regions
             .iter()
             .find(|(id, _)| *id != focused_before)
             .cloned()
@@ -12761,6 +12794,10 @@ not_a_real_action = ["x"]
 
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         draw_frame(&mut app, &mut terminal);
+        // Put the stale geometry back, so the click really does reach the
+        // hit-test and the `windowed` gate is the only thing standing in
+        // front of it.
+        app.agent_tab_regions = stale_regions;
 
         let term = app
             .mouse_layout
@@ -12781,10 +12818,6 @@ not_a_real_action = ["x"]
             app.focused_tab_id(&session_id),
             focused_before,
             "clicking inside the maximized agent must not switch to {other_tab} through a stale tab rect"
-        );
-        assert!(
-            app.agent_tab_regions.is_empty(),
-            "a maximized frame draws no tabs, so it must leave no clickable tab rects behind"
         );
     }
 
@@ -21815,115 +21848,196 @@ cyan = "#00ffff"
     // so nine near-identical `…Focus` enums did not appear instead.
     // ══════════════════════════════════════════════════════════════════════
 
-    /// Every two-button confirmation opens with focus on the SAFE control, and
+    /// The nine two-button confirmations, each named by the way the APP opens
+    /// it. Every entry drives a REAL construction site; nothing here writes a
+    /// `focus:` literal, which is the whole point.
+    const TWO_BUTTON_CONFIRMATIONS: [&str; 9] = [
+        "ConfirmDeleteTerminal",
+        "ConfirmCloseTab",
+        "ConfirmQuit",
+        "ConfirmDiscardFile",
+        "ConfirmCreateInitialCommit",
+        "ConfirmInitRepo",
+        "ConfirmUseExistingBranch",
+        "ConfirmKillRunning",
+        "PendingMacroDelete",
+    ];
+
+    /// Spawn a throwaway long-lived PTY, the way the kill-running tests do.
+    fn spawn_idle_pty(worktree: &std::path::Path) -> PtyClient {
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        PtyClient::spawn("/bin/sh", &args, worktree, 24, 80, 1_000).expect("spawn pty")
+    }
+
+    /// A git repository with no commits yet, so `add_project` takes the
+    /// initial-commit rung. Leaked rather than returned so the caller keeps one
+    /// return type.
+    fn leaked_unborn_repo() -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        run_git(&path, &["init", "-b", "main"]);
+        run_git(&path, &["config", "user.name", "test"]);
+        run_git(&path, &["config", "user.email", "t@t"]);
+        path.to_string_lossy().to_string()
+    }
+
+    /// A plain directory that is not a repository at all.
+    fn leaked_plain_dir() -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        path.to_string_lossy().to_string()
+    }
+
+    /// Open one confirmation through the production path that opens it.
+    ///
+    /// This is the load-bearing half of the test below. The previous version
+    /// built each `PromptState` inline with `focus: ConfirmFocus::Cancel` and
+    /// then asserted the focus was `Cancel`, so it read back the literal it had
+    /// just written: flipping the REAL `begin_quit` site to
+    /// `ConfirmFocus::Confirm` (Enter on the quit dialog would then kill every
+    /// running agent) left the whole suite green.
+    fn open_two_button_confirmation(which: &str) -> App {
+        let mut app = test_app(default_bindings());
+        match which {
+            "ConfirmDeleteTerminal" => {
+                app.show_companion_terminal()
+                    .expect("launch companion terminal");
+                app.selected_terminal_index = 0;
+                app.confirm_delete_selected_terminal()
+                    .expect("open the delete-terminal confirmation");
+            }
+            "ConfirmCloseTab" => {
+                app.selected_left = app
+                    .left_items()
+                    .iter()
+                    .position(|item| matches!(item, LeftItem::Session(_)))
+                    .expect("a session row");
+                app.close_focused_tab_prompt();
+            }
+            "ConfirmQuit" => {
+                let worktree = PathBuf::from(&app.engine.sessions[0].worktree_path);
+                let session_id = app.engine.sessions[0].id.clone();
+                app.engine
+                    .providers
+                    .insert(session_id, spawn_idle_pty(&worktree));
+                assert!(
+                    !app.begin_quit(),
+                    "a running agent must ask before quitting"
+                );
+            }
+            "ConfirmDiscardFile" => {
+                app.engine.unstaged_files = vec![ChangedFile {
+                    path: "a.txt".into(),
+                    status: "M".into(),
+                    additions: 1,
+                    deletions: 0,
+                    binary: false,
+                }];
+                app.right_section = RightSection::Unstaged;
+                app.files_index = 0;
+                app.confirm_discard_selected_file()
+                    .expect("open the discard confirmation");
+            }
+            "ConfirmCreateInitialCommit" => {
+                app.add_project(leaked_unborn_repo(), "Fresh".to_string())
+                    .expect("add an unborn repo");
+            }
+            "ConfirmInitRepo" => {
+                app.add_project_from_browser_path(leaked_plain_dir());
+            }
+            "ConfirmUseExistingBranch" => {
+                let project = app.engine.projects[0].clone();
+                app.prompt = PromptState::NameNewAgent {
+                    request: CreateAgentRequest::NewProject {
+                        project,
+                        custom_name: None,
+                        use_existing_branch: false,
+                        pull_before_create: false,
+                        copy_uncommitted_changes: false,
+                    },
+                    // `main` already exists in the test repo, so the preflight
+                    // takes the existing-branch rung.
+                    input: TextInput::with_text("main".to_string()),
+                    randomize_name: false,
+                    randomized_name: None,
+                    copy_changes: false,
+                    focus: NameNewAgentFocus::Input,
+                };
+                tap(&mut app, KeyCode::Enter);
+            }
+            "ConfirmKillRunning" => {
+                let worktree = PathBuf::from(&app.engine.sessions[0].worktree_path);
+                let session_id = app.engine.sessions[0].id.clone();
+                app.engine
+                    .providers
+                    .insert(session_id, spawn_idle_pty(&worktree));
+                app.open_kill_running().expect("open the kill picker");
+                app.open_confirm_kill_running_action(KillRunningAction::Hovered)
+                    .expect("open the kill confirmation");
+            }
+            "PendingMacroDelete" => {
+                app.engine.config.macros.entries.insert(
+                    "greet".to_string(),
+                    crate::config::MacroEntry {
+                        text: "hello".to_string(),
+                        surface: crate::config::MacroSurface::Both,
+                    },
+                );
+                app.open_edit_macros();
+                let delete = app
+                    .bindings
+                    .first_key_reaching(Action::DeleteMacro, |_| true)
+                    .expect("a delete-macro binding");
+                app.handle_key(press(delete)).expect("stage the delete");
+            }
+            other => panic!("unknown confirmation {other}"),
+        }
+        app
+    }
+
+    /// The focus a confirmation is currently reporting.
+    fn two_button_confirmation_focus(app: &App, which: &str) -> ConfirmFocus {
+        match &app.prompt {
+            PromptState::ConfirmDeleteTerminal { focus, .. }
+            | PromptState::ConfirmCloseTab { focus, .. }
+            | PromptState::ConfirmQuit { focus, .. }
+            | PromptState::ConfirmDiscardFile { focus, .. }
+            | PromptState::ConfirmCreateInitialCommit { focus, .. }
+            | PromptState::ConfirmInitRepo { focus, .. }
+            | PromptState::ConfirmUseExistingBranch { focus, .. } => *focus,
+            PromptState::ConfirmKillRunning(prompt) => prompt.focus,
+            PromptState::EditMacros {
+                pending_delete: Some(pending),
+                ..
+            } => pending.focus,
+            other => panic!("{which}: expected a confirmation, got {other:?}"),
+        }
+    }
+
+    /// Every two-button confirmation OPENS with focus on the SAFE control, and
     /// the movement key moves that focus to the committing one and back.
     #[test]
     fn every_two_button_confirmation_names_its_focus_and_opens_on_cancel() {
-        let project = {
-            let app = test_app(default_bindings());
-            app.engine.projects[0].clone()
-        };
-        let request = || dux_core::worker::CreateAgentRequest::NewProject {
-            project: project.clone(),
-            custom_name: None,
-            use_existing_branch: false,
-            pull_before_create: false,
-            copy_uncommitted_changes: false,
-        };
-        let prompts: Vec<(&str, PromptState)> = vec![
-            (
-                "ConfirmDeleteTerminal",
-                PromptState::ConfirmDeleteTerminal {
-                    terminal_id: "t1".to_string(),
-                    terminal_label: "Terminal 1".to_string(),
-                    foreground_cmd: None,
-                    focus: ConfirmFocus::Cancel,
-                },
-            ),
-            (
-                "ConfirmCloseTab",
-                PromptState::ConfirmCloseTab {
-                    session_id: "s1".to_string(),
-                    tab_id: "t1".to_string(),
-                    provider_label: "Claude".to_string(),
-                    is_main: false,
-                    focus: ConfirmFocus::Cancel,
-                },
-            ),
-            (
-                "ConfirmQuit",
-                PromptState::ConfirmQuit {
-                    agent_count: 1,
-                    terminal_count: 0,
-                    focus: ConfirmFocus::Cancel,
-                },
-            ),
-            (
-                "ConfirmDiscardFile",
-                PromptState::ConfirmDiscardFile {
-                    file_path: "a.txt".to_string(),
-                    focus: ConfirmFocus::Cancel,
-                },
-            ),
-            (
-                "ConfirmCreateInitialCommit",
-                PromptState::ConfirmCreateInitialCommit {
-                    path: "/tmp/x".to_string(),
-                    name: "x".to_string(),
-                    focus: ConfirmFocus::Cancel,
-                },
-            ),
-            (
-                "ConfirmInitRepo",
-                PromptState::ConfirmInitRepo {
-                    path: "/tmp/x".to_string(),
-                    name: "x".to_string(),
-                    candidates: Vec::new(),
-                    focus: ConfirmFocus::Cancel,
-                    return_prompt: Box::new(PromptState::None),
-                },
-            ),
-            (
-                "ConfirmUseExistingBranch",
-                PromptState::ConfirmUseExistingBranch {
-                    request: request(),
-                    branch_name: "b".to_string(),
-                    location: crate::git::BranchLocation::Local,
-                    focus: ConfirmFocus::Cancel,
-                },
-            ),
-        ];
-        let read = |app: &App| -> ConfirmFocus {
-            match &app.prompt {
-                PromptState::ConfirmDeleteTerminal { focus, .. }
-                | PromptState::ConfirmCloseTab { focus, .. }
-                | PromptState::ConfirmQuit { focus, .. }
-                | PromptState::ConfirmDiscardFile { focus, .. }
-                | PromptState::ConfirmCreateInitialCommit { focus, .. }
-                | PromptState::ConfirmInitRepo { focus, .. }
-                | PromptState::ConfirmUseExistingBranch { focus, .. } => *focus,
-                other => panic!("expected a confirmation, got {other:?}"),
-            }
-        };
-        for (name, prompt) in prompts {
-            let mut app = test_app(default_bindings());
-            app.prompt = prompt;
+        for which in TWO_BUTTON_CONFIRMATIONS {
+            let mut app = open_two_button_confirmation(which);
             assert_eq!(
-                read(&app),
+                two_button_confirmation_focus(&app, which),
                 ConfirmFocus::Cancel,
-                "{name}: a confirmation opens with focus on the safe control"
+                "{which}: a confirmation opens with focus on the safe control"
             );
             tap(&mut app, KeyCode::Tab);
             assert_eq!(
-                read(&app),
+                two_button_confirmation_focus(&app, which),
                 ConfirmFocus::Confirm,
-                "{name}: the movement key moves focus onto the committing button"
+                "{which}: the movement key moves focus onto the committing button"
             );
             tap(&mut app, KeyCode::Tab);
             assert_eq!(
-                read(&app),
+                two_button_confirmation_focus(&app, which),
                 ConfirmFocus::Cancel,
-                "{name}: a two-control focus ring is its own inverse"
+                "{which}: a two-control focus ring is its own inverse"
             );
         }
     }
