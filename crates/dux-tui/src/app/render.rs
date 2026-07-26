@@ -4776,17 +4776,35 @@ impl App {
                     } else {
                         prompt.filter.text.as_str()
                     };
-                    Paragraph::new(text)
-                        .style(Style::default().fg(if prompt.filter.is_empty() {
-                            self.theme.hint_desc_fg
-                        } else {
-                            self.theme.text_fg
-                        }))
+                    if prompt.filter.is_empty() {
+                        Paragraph::new(text)
+                            .style(Style::default().fg(self.theme.hint_desc_fg))
+                            .render(filter_inner, frame.buffer_mut());
+                    } else {
+                        // The one single-line renderer, never a hand-rolled
+                        // copy.
+                        Paragraph::new(render_single_line_cursor_input(
+                            "",
+                            &prompt.filter.text,
+                            prompt.filter.cursor,
+                            self.theme.input_cursor_fg,
+                            self.theme.input_cursor_bg,
+                            prompt.searching,
+                        ))
+                        .style(Style::default().fg(self.theme.text_fg))
                         .render(filter_inner, frame.buffer_mut());
+                    }
                     if prompt.searching {
+                        // A caret column is a DISPLAY column. `filter.cursor`
+                        // is a byte offset, so using it directly put the caret
+                        // past the end of anything non-ASCII.
                         let cursor_x = filter_inner
                             .x
-                            .saturating_add(prompt.filter.cursor as u16)
+                            .saturating_add(single_line_caret_column(
+                                &prompt.filter.text,
+                                prompt.filter.cursor,
+                                0,
+                            ))
                             .min(filter_inner.x + filter_inner.width.saturating_sub(1));
                         frame.set_cursor_position((cursor_x, filter_inner.y));
                     }
@@ -7751,8 +7769,17 @@ impl App {
             focus == MacroEditFocus::Name,
             None,
         );
-        Paragraph::new(Line::from(Span::raw(format!(" {}", state.name_input.text))))
-            .render(name_inner, frame.buffer_mut());
+        // The one single-line renderer, never a hand-rolled copy: it owns the
+        // caret model and the character-boundary clamp.
+        Paragraph::new(render_single_line_cursor_input(
+            " ",
+            &state.name_input.text,
+            state.name_input.cursor,
+            self.theme.input_cursor_fg,
+            self.theme.input_cursor_bg,
+            focus == MacroEditFocus::Name,
+        ))
+        .render(name_inner, frame.buffer_mut());
 
         // ── Body (multiline: needs the engage step, Enter is content) ─────
         let surface_desc = match state.surface {
@@ -7805,11 +7832,9 @@ impl App {
         // on the body while the body is ENGAGED. An unengaged body takes no
         // keystrokes, so showing a caret there would be a lie.
         if focus == MacroEditFocus::Name {
-            let cursor_col = state.name_input.text
-                [..state.name_input.cursor.min(state.name_input.text.len())]
-                .chars()
-                .count();
-            let (cx, cy) = (name_inner.x + cursor_col as u16 + 1, name_inner.y);
+            let cursor_col =
+                single_line_caret_column(&state.name_input.text, state.name_input.cursor, 1);
+            let (cx, cy) = (name_inner.x + cursor_col, name_inner.y);
             if cx < name_inner.x + name_inner.width && cy < name_inner.y + name_inner.height {
                 frame.set_cursor_position((cx, cy));
             }
@@ -8334,8 +8359,8 @@ impl App {
         .block(input_block)
         .render(bar_area, frame.buffer_mut());
 
-        let cursor_col = query[..cursor].chars().count() + 2;
-        let cx = input_inner.x + cursor_col as u16;
+        let cursor_col = single_line_caret_column(&query, cursor, 2);
+        let cx = input_inner.x + cursor_col;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
             frame.set_cursor_position((cx, cy));
@@ -8411,8 +8436,8 @@ impl App {
         .render(input_area, frame.buffer_mut());
 
         // Place hardware cursor inside the input.
-        let cursor_col = query[..cursor].chars().count();
-        let cx = input_inner.x + cursor_col as u16;
+        let cursor_col = single_line_caret_column(&query, cursor, 0);
+        let cx = input_inner.x + cursor_col;
         let cy = input_inner.y;
         if cx < input_inner.x + input_inner.width && cy < input_inner.y + input_inner.height {
             frame.set_cursor_position((cx, cy));
@@ -9323,6 +9348,24 @@ fn truncate_macro_preview(text: &str, max_len: usize) -> String {
     let mut out: String = text.chars().take(max_len.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Column offset, in DISPLAY CELLS, of a single-line field's caret.
+///
+/// `cursor` is a BYTE offset into `text` (that is what `TextInput` stores) and
+/// `prefix_width` is the cell width of whatever the renderer pads the field
+/// with. Neither a byte offset nor a character count is a column: a CJK glyph
+/// or an emoji is two cells wide, and a byte offset is wider still. Placing the
+/// hardware caret from either drifts right of the glyph it belongs to.
+///
+/// This is the exact inverse of `input::cursor_from_single_line_position`, so a
+/// click and the caret it produces agree about where the caret is.
+fn single_line_caret_column(text: &str, cursor: usize, prefix_width: u16) -> u16 {
+    let mut cursor = cursor.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    prefix_width.saturating_add(text[..cursor].cell_width())
 }
 
 /// The one single-line text-field renderer.
@@ -11281,6 +11324,68 @@ mod tests {
             OverlayMouseLayout::EditMacros { text_input, .. } => *text_input,
             other => panic!("expected the macro editor layout, got {other:?}"),
         }
+    }
+
+    /// A caret column is a DISPLAY column. Feeding a byte offset (what
+    /// `TextInput::cursor` holds) straight into a column, as the startup-log
+    /// filter used to, puts the caret three cells past the end of a CJK word.
+    #[test]
+    fn single_line_caret_column_counts_cells_not_bytes_or_chars() {
+        use super::single_line_caret_column;
+
+        let text = "日本語";
+        assert_eq!(text.len(), 9, "nine bytes");
+        assert_eq!(text.chars().count(), 3, "three characters");
+        assert_eq!(
+            single_line_caret_column(text, text.len(), 0),
+            6,
+            "six display cells"
+        );
+        assert_eq!(single_line_caret_column(text, 0, 0), 0);
+        assert_eq!(single_line_caret_column(text, 3, 0), 2, "after one glyph");
+        assert_eq!(single_line_caret_column(text, 3, 1), 3, "plus the pad");
+        // A cursor landing inside a character clamps back to its boundary.
+        assert_eq!(single_line_caret_column(text, 4, 0), 2);
+        // Past the end clamps to the end.
+        assert_eq!(single_line_caret_column(text, 99, 0), 6);
+        assert_eq!(single_line_caret_column("🚀a", "🚀".len(), 0), 2);
+    }
+
+    /// The macro editor's name field is a SINGLE-LINE field, so it must be
+    /// rendered by the one single-line renderer and its hardware caret must sit
+    /// on the DISPLAY column of the caret, not on a character count. With a CJK
+    /// name every glyph is two cells wide, so a char count lands the caret in
+    /// the middle of the text.
+    #[test]
+    fn macro_editor_name_caret_is_display_width_aware() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = macro_editor_app(super::MacroEditFocus::Name);
+        match &mut app.prompt {
+            PromptState::EditMacros {
+                editing: Some(state),
+                ..
+            } => {
+                state.name_input = TextInput::new();
+                state.name_input.text = "日本語".to_string();
+                state.name_input.cursor = state.name_input.text.len();
+            }
+            other => panic!("expected an open macro editor, got {other:?}"),
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let name_rect = macro_name_rect(&app.overlay_layout.active);
+        let cursor = ratatui::backend::Backend::get_cursor_position(terminal.backend_mut())
+            .expect("a focused name field paints a caret");
+        // The field is padded by one leading space and "日本語" is six cells.
+        assert_eq!(
+            cursor.x,
+            name_rect.x + 1 + 6,
+            "the caret must sit past six display cells, not past three characters"
+        );
     }
 
     #[test]

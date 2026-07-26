@@ -4,6 +4,7 @@ use super::*;
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::statusline::StatusTone;
+use ratatui::buffer::CellWidth;
 /// Lines moved per mouse-wheel tick for LOCAL scrolling: the PTY pane's
 /// scrollback (inline center pane and the fullscreen surface alike), the diff
 /// view, the help overlay, the startup-log viewers, and the commit input all
@@ -351,6 +352,23 @@ fn relative_point_clamped(rect: Rect, column: u16, row: u16) -> (u16, u16) {
     (column.saturating_sub(rect.x), row.saturating_sub(rect.y))
 }
 
+/// Map a clicked terminal column to a BYTE caret offset inside a single-line
+/// field, measured in DISPLAY COLUMNS rather than characters.
+///
+/// A character index is not a column: a CJK glyph or an emoji occupies two
+/// cells, so walking `char_indices().nth(col)` drifts one character further
+/// right for every wide glyph left of the click. On the rename field holding
+/// `"日本語abc"` a click on the letter `a` used to land the caret at the end of
+/// the string.
+///
+/// A click on the SECOND cell of a wide glyph resolves to the caret position
+/// BEFORE that glyph, not after it. That is deliberate: the renderer
+/// ([`super::render::render_single_line_cursor_input`]) paints the caret as an
+/// inverted cell over the WHOLE character at the caret, so "before the glyph"
+/// is the only offset that highlights the glyph the user actually clicked on.
+/// Rounding to the nearest boundary would highlight the NEXT glyph instead.
+///
+/// A click past the end of the text yields `text.len()`.
 fn cursor_from_single_line_position(
     text: &str,
     text_area: Rect,
@@ -358,13 +376,22 @@ fn cursor_from_single_line_position(
     column: u16,
 ) -> usize {
     let relative_col = usize::from(column.saturating_sub(text_area.x));
-    let target_col = relative_col
-        .saturating_sub(prefix_width)
-        .min(text.chars().count());
-    text.char_indices()
-        .nth(target_col)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len())
+    let mut target_col = relative_col.saturating_sub(prefix_width);
+    for (idx, ch) in text.char_indices() {
+        let width = char_display_width(ch);
+        if target_col < width.max(1) {
+            return idx;
+        }
+        target_col -= width.max(1);
+    }
+    text.len()
+}
+
+/// Display width of one character in terminal cells, measured by the same
+/// unicode-width table the renderer uses, so a click agrees with what is drawn.
+fn char_display_width(ch: char) -> usize {
+    let mut buf = [0u8; 4];
+    usize::from(ch.encode_utf8(&mut buf).cell_width())
 }
 
 fn clamp_left_width_pct(left_width_pct: u16, right_width_pct: u16) -> u16 {
@@ -7836,7 +7863,9 @@ mod tests {
     use super::DOUBLE_CLICK_THRESHOLD;
     use super::components::{ButtonPressedTarget, PressedButton};
     use crate::app::ConfirmFocus;
-    use crate::app::input::{configure_focus, configure_project_text_input};
+    use crate::app::input::{
+        configure_focus, configure_project_text_input, cursor_from_single_line_position,
+    };
     use crate::app::test_support::*;
     use crate::app::{
         AgentLaunchKind, App, BranchWarningKind, CenterMode, ChangeAgentProviderMode,
@@ -22377,5 +22406,39 @@ cyan = "#00ffff"
             "and never in PromptState::StartupCommandLogs, which nothing in \
              production constructs"
         );
+    }
+
+    /// Reproduction: a click column maps to a CHARACTER index, ignoring
+    /// display width, so a click on a field holding CJK lands the caret up to
+    /// three characters away from the glyph that was clicked.
+    #[test]
+    fn cursor_from_single_line_position_is_display_width_aware() {
+        let area = Rect::new(0, 0, 40, 1);
+        // Rendered as " 日本語abc" with prefix_width 1; the CJK glyphs are two
+        // cells each, so the cells are:
+        //   0 = pad, 1..2 = 日, 3..4 = 本, 5..6 = 語, 7 = a, 8 = b, 9 = c
+        let text = "日本語abc";
+        let at = |col: u16| cursor_from_single_line_position(text, area, 1, col);
+        assert_eq!(at(1), 0, "first cell of 日 -> before 日");
+        assert_eq!(at(2), 0, "second cell of 日 -> before 日");
+        assert_eq!(at(3), "日".len(), "first cell of 本 -> before 本");
+        assert_eq!(at(4), "日".len(), "second cell of 本 -> before 本");
+        assert_eq!(at(5), "日本".len(), "first cell of 語 -> before 語");
+        assert_eq!(at(7), "日本語".len(), "the letter a -> before a");
+        assert_eq!(at(8), "日本語a".len(), "the letter b -> before b");
+        assert_eq!(at(9), "日本語ab".len(), "the letter c -> before c");
+        assert_eq!(at(30), text.len(), "past the end -> end of text");
+    }
+
+    #[test]
+    fn cursor_from_single_line_position_handles_emoji() {
+        let area = Rect::new(0, 0, 40, 1);
+        let text = "🚀ab";
+        let at = |col: u16| cursor_from_single_line_position(text, area, 1, col);
+        assert_eq!(at(1), 0);
+        assert_eq!(at(2), 0);
+        assert_eq!(at(3), "🚀".len());
+        assert_eq!(at(4), "🚀a".len());
+        assert_eq!(at(99), text.len());
     }
 }
