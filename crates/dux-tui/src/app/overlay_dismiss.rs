@@ -864,7 +864,8 @@ mod tests {
         };
 
         // Click a couple of characters into the field: the caret must move
-        // there, and nothing may blink.
+        // there, and nothing may blink. The field renders one leading space,
+        // so the fourth column into the box is text character 3.
         app.handle_mouse(left_down(input.x + 4, input.y));
 
         match &app.prompt {
@@ -874,7 +875,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(input.text, "half-typed-name");
-                assert_eq!(input.cursor, 4);
+                assert_eq!(input.cursor, 3);
             }
             other => panic!("expected the rename input to take the click, got {other:?}"),
         }

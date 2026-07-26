@@ -147,6 +147,7 @@ enum PromptMouseTarget {
     Checkbox(OverlayCheckboxId),
     RenameInput,
     NameNewAgentInput,
+    PullRequestInput,
     MacroNameInput,
     MacroTextInput,
     /// Index into `MacroSurface`'s `Agent, Terminal, Both` order.
@@ -277,6 +278,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::Checkbox(_)
             | PromptMouseTarget::RenameInput
             | PromptMouseTarget::NameNewAgentInput
+            | PromptMouseTarget::PullRequestInput
             | PromptMouseTarget::MacroNameInput
             | PromptMouseTarget::MacroTextInput
             | PromptMouseTarget::MacroSurfaceOption(_) => None,
@@ -4620,6 +4622,9 @@ impl App {
                     None
                 }
             }
+            OverlayMouseLayout::PullRequestInput { input } => {
+                contains_point(input, column, row).then_some(PromptMouseTarget::PullRequestInput)
+            }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
                 if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
                     checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
@@ -5811,8 +5816,20 @@ impl App {
             _ => return,
         };
         if let PromptState::RenameSession { input, focus, .. } = &mut self.prompt {
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
+            // The single-line renderer pads by one leading space.
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
             *focus = RenameSessionFocus::Input;
+        }
+    }
+
+    fn set_pull_request_cursor_from_mouse(&mut self, column: u16) {
+        let input_area = match self.overlay_layout.active {
+            OverlayMouseLayout::PullRequestInput { input } => input,
+            _ => return,
+        };
+        if let PromptState::PullRequestInput { input, .. } = &mut self.prompt {
+            // The single-line renderer pads by one leading space.
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
         }
     }
 
@@ -5822,7 +5839,8 @@ impl App {
             _ => return,
         };
         if let PromptState::NameNewAgent { input, focus, .. } = &mut self.prompt {
-            input.cursor = cursor_from_single_line_position(&input.text, input_area, 0, column);
+            // The single-line renderer pads by one leading space.
+            input.cursor = cursor_from_single_line_position(&input.text, input_area, 1, column);
             *focus = NameNewAgentFocus::Input;
         }
     }
@@ -6377,6 +6395,9 @@ impl App {
             }
             PromptMouseTarget::NameNewAgentInput => {
                 self.set_name_new_agent_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::PullRequestInput => {
+                self.set_pull_request_cursor_from_mouse(mouse.column);
             }
             PromptMouseTarget::StartupCommandInput => {
                 let double_click =
@@ -15931,8 +15952,10 @@ cyan = "#00ffff"
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 29, 10));
 
+        // The synthetic rect starts at column 24 and the field renders one
+        // leading space, so column 29 sits on text character 4.
         match &app.prompt {
-            PromptState::RenameSession { input, .. } => assert_eq!(input.cursor, 5),
+            PromptState::RenameSession { input, .. } => assert_eq!(input.cursor, 4),
             _ => panic!("expected rename prompt"),
         }
     }
@@ -19916,6 +19939,124 @@ cyan = "#00ffff"
                 }
                 other => panic!("expected NameNewAgent, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn mouse_click_pull_request_input_moves_caret_to_the_clicked_column() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let project = app.engine.projects[0].clone();
+        app.prompt = PromptState::PullRequestInput {
+            project,
+            input: TextInput::with_text("https://x/pull/12".to_string()),
+        };
+
+        // The rect only exists once the modal has rendered, and the click
+        // coordinate is derived FROM that rect — never from a string index,
+        // which would read the wrong cell once box drawing is in play.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+
+        let OverlayMouseLayout::PullRequestInput { input } = app.overlay_layout.active else {
+            panic!(
+                "the PR modal must publish its input rect, got {:?}",
+                app.overlay_layout.active
+            );
+        };
+
+        // The field renders one leading space, so text character N sits at
+        // inner.x + 1 + N.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input.x + 1 + 4,
+            input.y,
+        ));
+
+        match &app.prompt {
+            PromptState::PullRequestInput { input, .. } => assert_eq!(input.cursor, 4),
+            other => panic!("expected pull-request prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_rename_input_lands_on_the_character_under_the_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        let sid = app.engine.sessions[0].id.clone();
+        app.prompt = PromptState::RenameSession {
+            session_id: sid,
+            input: TextInput::with_text("abcdef".to_string()),
+            rename_branch: false,
+            focus: RenameSessionFocus::Input,
+        };
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let OverlayMouseLayout::RenameSession { input, .. } = app.overlay_layout.active else {
+            panic!("rename modal must publish its input rect");
+        };
+
+        // The field renders one leading space, so 'c' is drawn at inner.x + 1 + 2.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input.x + 1 + 2,
+            input.y,
+        ));
+
+        match &app.prompt {
+            PromptState::RenameSession { input, .. } => assert_eq!(input.cursor, 2),
+            other => panic!("expected rename prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mouse_click_name_new_agent_input_lands_on_the_character_under_the_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input: TextInput::with_text("abcdef".to_string()),
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus: NameNewAgentFocus::Input,
+        };
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let OverlayMouseLayout::NameNewAgent { input, .. } = app.overlay_layout.active else {
+            panic!("new-agent modal must publish its input rect");
+        };
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            input.x + 1 + 2,
+            input.y,
+        ));
+
+        match &app.prompt {
+            PromptState::NameNewAgent { input, .. } => assert_eq!(input.cursor, 2),
+            other => panic!("expected name-new-agent prompt, got {other:?}"),
         }
     }
 }

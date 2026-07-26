@@ -1940,6 +1940,10 @@ pub(crate) enum OverlayMouseLayout {
         input: Rect,
         checkbox: Option<OverlayCheckbox>,
     },
+    /// The create-agent-from-PR modal's single text field.
+    PullRequestInput {
+        input: Rect,
+    },
     NameNewAgent {
         input: Rect,
         checkbox: Option<OverlayCheckbox>,

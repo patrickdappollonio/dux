@@ -1577,6 +1577,7 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
+                true,
             ))
             .block(
                 Block::default()
@@ -3630,6 +3631,7 @@ impl App {
                     input.cursor,
                     self.theme.input_cursor_fg,
                     self.theme.input_cursor_bg,
+                    true,
                 ))
                 .block(input_block)
                 .render(input_area, frame.buffer_mut());
@@ -3784,6 +3786,7 @@ impl App {
                         cursor,
                         self.theme.input_cursor_fg,
                         self.theme.input_cursor_bg,
+                        true,
                     ))
                     .block(input_block)
                     .render(filter_area, frame.buffer_mut());
@@ -5402,6 +5405,7 @@ impl App {
                         list.filter.cursor,
                         self.theme.input_cursor_fg,
                         self.theme.input_cursor_bg,
+                        true,
                     ))
                     .block(details_block)
                     .render(details_area, frame.buffer_mut());
@@ -5638,6 +5642,7 @@ impl App {
                         prompt.list.filter.cursor,
                         self.theme.input_cursor_fg,
                         self.theme.input_cursor_bg,
+                        true,
                     ))
                     .block(input_block)
                     .render(input_area, frame.buffer_mut());
@@ -7236,39 +7241,26 @@ impl App {
                 )))
                 .render(label_area, frame.buffer_mut());
 
-                // Show the input with a cursor indicator.
-                let display = if input.cursor < input.text.len() {
-                    let (before, after) = input.text.split_at(input.cursor);
-                    let (cursor_char, rest) = after.split_at(1);
-                    Line::from(vec![
-                        Span::raw(format!(" {before}")),
-                        Span::styled(
-                            cursor_char.to_string(),
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                        Span::raw(rest.to_string()),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(format!(" {}", &input.text)),
-                        Span::styled(
-                            " ",
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                    ])
-                };
+                // The field draws its caret only while it HAS focus: with the
+                // checkbox focused the field takes no keystrokes, so a caret
+                // there would be a lie (and the key handler already drops
+                // every key on that basis).
+                let input_focused = *focus == RenameSessionFocus::Input;
                 let input_block = Block::default()
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(self.theme.overlay_field_border_style(input_focused));
                 let input_inner = input_block.inner(input_area);
-                Paragraph::new(display)
-                    .block(input_block)
-                    .render(input_area, frame.buffer_mut());
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    input_focused,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
 
                 let (checkbox_rect, _) = self.render_overlay_checkbox(
                     frame,
@@ -7537,39 +7529,24 @@ impl App {
                     .render(context_area, frame.buffer_mut());
                 }
 
-                // Input field with cursor indicator.
-                let display = if input.cursor < input.text.len() {
-                    let (before, after) = input.text.split_at(input.cursor);
-                    let (cursor_char, rest) = after.split_at(1);
-                    Line::from(vec![
-                        Span::raw(format!(" {before}")),
-                        Span::styled(
-                            cursor_char.to_string(),
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                        Span::raw(rest.to_string()),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(format!(" {}", &input.text)),
-                        Span::styled(
-                            " ",
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                    ])
-                };
+                // Same rule as the rename modal: the caret only appears while
+                // the field itself has focus.
+                let input_focused = *focus == NameNewAgentFocus::Input;
                 let input_block = Block::default()
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
+                    .border_style(self.theme.overlay_field_border_style(input_focused));
                 let input_inner = input_block.inner(input_area);
-                Paragraph::new(display)
-                    .block(input_block)
-                    .render(input_area, frame.buffer_mut());
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    input_focused,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
 
                 let (randomized_name_checkbox_rect, _) = self.render_overlay_checkbox(
                     frame,
@@ -7688,37 +7665,23 @@ impl App {
                 ])
                 .render(label_area, frame.buffer_mut());
 
-                let display = if input.cursor < input.text.len() {
-                    let (before, after) = input.text.split_at(input.cursor);
-                    let (cursor_char, rest) = after.split_at(1);
-                    Line::from(vec![
-                        Span::raw(format!(" {before}")),
-                        Span::styled(
-                            cursor_char.to_string(),
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                        Span::raw(rest.to_string()),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(format!(" {}", &input.text)),
-                        Span::styled(
-                            " ",
-                            Style::default()
-                                .fg(self.theme.input_cursor_fg)
-                                .bg(self.theme.input_cursor_bg),
-                        ),
-                    ])
-                };
+                // The title box is this modal's only control, so it always has
+                // focus and always draws its caret and focused border.
                 let input_block = Block::default()
                     .borders(Borders::ALL)
                     .border_set(border::ROUNDED)
-                    .border_style(Style::default().fg(self.theme.overlay_border));
-                Paragraph::new(display)
-                    .block(input_block)
-                    .render(input_area, frame.buffer_mut());
+                    .border_style(self.theme.overlay_field_border_style(true));
+                let input_inner = input_block.inner(input_area);
+                Paragraph::new(render_single_line_cursor_input(
+                    " ",
+                    &input.text,
+                    input.cursor,
+                    self.theme.input_cursor_fg,
+                    self.theme.input_cursor_bg,
+                    true,
+                ))
+                .block(input_block)
+                .render(input_area, frame.buffer_mut());
 
                 let confirm_key = self.bindings.label_for(Action::Confirm);
                 let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -7734,7 +7697,8 @@ impl App {
                     Style::default().fg(self.theme.hint_desc_fg),
                 ));
                 Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
-                self.overlay_layout.active = OverlayMouseLayout::None;
+                self.overlay_layout.active =
+                    OverlayMouseLayout::PullRequestInput { input: input_inner };
             }
             PromptState::None => {}
         }
@@ -7829,16 +7793,14 @@ impl App {
                             Span::styled(" — ", Style::default().fg(self.theme.input_label_fg)),
                         ];
                         let text_preview = text.replace('\n', "↵");
-                        // " " + name + " (label)" + " — "
-                        let prefix_len = 1 + name.len() + surface_label.len() + 3;
+                        // " " + name + " (label)" + " — ", counted in CHARACTERS:
+                        // a macro name or surface label can hold multi-byte text
+                        // just as the preview can.
+                        let prefix_len =
+                            1 + name.chars().count() + surface_label.chars().count() + 3;
                         let max_len = (list_area.width as usize).saturating_sub(prefix_len + 2);
-                        let truncated = if text_preview.len() > max_len {
-                            format!("{}…", &text_preview[..max_len.saturating_sub(1)])
-                        } else {
-                            text_preview
-                        };
                         spans.push(Span::styled(
-                            truncated,
+                            truncate_macro_preview(&text_preview, max_len),
                             Style::default().fg(self.theme.hint_desc_fg),
                         ));
                         ListItem::new(Line::from(spans))
@@ -8485,6 +8447,7 @@ impl App {
             cursor,
             self.theme.input_cursor_fg,
             self.theme.input_cursor_bg,
+            true,
         ))
         .block(input_block)
         .render(bar_area, frame.buffer_mut());
@@ -8560,7 +8523,7 @@ impl App {
             .title_bottom(Line::from(bottom_spans));
         let input_inner = input_block.inner(input_area);
         Paragraph::new(render_single_line_cursor_input(
-            "", &query, cursor, cursor_fg, cursor_bg,
+            "", &query, cursor, cursor_fg, cursor_bg, true,
         ))
         .block(input_block)
         .render(input_area, frame.buffer_mut());
@@ -9401,14 +9364,47 @@ pub(crate) fn centered_rect_exact(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+/// Trim a macro-list preview to `max_len` COLUMNS, appending an ellipsis when
+/// it had to cut.
+///
+/// Counts and cuts by character, never by byte: the previous byte slice
+/// panicked whenever the cut landed inside a multi-byte character, which any
+/// macro body holding an accent or an emoji could arrange.
+fn truncate_macro_preview(text: &str, max_len: usize) -> String {
+    if text.chars().count() <= max_len {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max_len.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// The one single-line text-field renderer.
+///
+/// `focused` decides whether the caret is painted at all: a field that cannot
+/// take a keystroke must not look like it can, so callers whose modal has more
+/// than one control pass whether focus actually sits on the field. Callers that
+/// own the only control pass `true`.
+///
+/// The caret offset is a BYTE offset and is clamped to a character boundary
+/// before any slicing. Hand-rolled copies of this that split by byte panicked
+/// on any name holding an accent or an emoji; that is why they were removed in
+/// favour of this function.
 fn render_single_line_cursor_input(
     prefix: &str,
     text: &str,
     cursor: usize,
     cursor_fg: Color,
     cursor_bg: Color,
+    focused: bool,
 ) -> Line<'static> {
-    let cursor = cursor.min(text.len());
+    if !focused {
+        return Line::from(Span::raw(format!("{prefix}{text}")));
+    }
+    let mut cursor = cursor.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
     if cursor < text.len() {
         let (before, after) = text.split_at(cursor);
         let cursor_char = after.chars().next().expect("cursor within text");
@@ -11133,7 +11129,8 @@ mod tests {
 
     #[test]
     fn render_single_line_cursor_input_supports_empty_prefix() {
-        let line = render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black);
+        let line =
+            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, true);
 
         assert_eq!(line.spans.len(), 4);
         assert_eq!(line.spans[0].content.as_ref(), "");
@@ -14132,5 +14129,290 @@ mod tests {
             content.width + 2,
             content.height + 2 + 2,
         )
+    }
+
+    // ── Single-line modal text fields: UTF-8 safety and honest focus ──────
+    //
+    // Three modals used to hand-roll their caret with a BYTE split, so a caret
+    // sitting before a multi-byte character panicked, and they drew the caret
+    // unconditionally, so the field looked focused while a checkbox had focus.
+    // These tests pin both, against the drawn buffer.
+
+    /// A name with a two-byte character and a four-byte one, so a byte-based
+    /// split has two different ways to land inside a character.
+    const MULTIBYTE_NAME: &str = "café 🙂 x";
+
+    /// Every valid caret byte offset in `text`, including the end.
+    fn caret_positions(text: &str) -> Vec<usize> {
+        text.char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect()
+    }
+
+    fn draw(app: &mut App) -> ratatui::buffer::Buffer {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        terminal.backend().buffer().clone()
+    }
+
+    /// Columns of `row` inside `inner` painted with the caret background.
+    fn caret_columns(buf: &ratatui::buffer::Buffer, inner: Rect, cursor_bg: Color) -> Vec<u16> {
+        (inner.x..inner.x + inner.width)
+            .filter(|x| buf[(*x, inner.y)].style().bg == Some(cursor_bg))
+            .collect()
+    }
+
+    /// The foreground colour and modifiers of the field frame's left border
+    /// cell, derived from the published INNER rect (never from a string index,
+    /// which would read the wrong cell once box drawing is in play). The cell's
+    /// background comes from the modal underneath, so it is not compared.
+    fn field_border_look(buf: &ratatui::buffer::Buffer, inner: Rect) -> (Option<Color>, Modifier) {
+        let style = buf[(inner.x - 1, inner.y)].style();
+        (style.fg, style.add_modifier)
+    }
+
+    fn expected_border_look(theme: &Theme, focused: bool) -> (Option<Color>, Modifier) {
+        let style = theme.overlay_field_border_style(focused);
+        (style.fg, style.add_modifier)
+    }
+
+    fn multibyte_rename_prompt(app: &App, cursor: usize, focus: RenameSessionFocus) -> PromptState {
+        let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
+        input.cursor = cursor;
+        PromptState::RenameSession {
+            session_id: app.engine.sessions[0].id.clone(),
+            input,
+            rename_branch: false,
+            focus,
+        }
+    }
+
+    fn multibyte_name_new_agent_prompt(
+        app: &App,
+        cursor: usize,
+        focus: NameNewAgentFocus,
+    ) -> PromptState {
+        let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
+        input.cursor = cursor;
+        PromptState::NameNewAgent {
+            request: CreateAgentRequest::NewProject {
+                project: app.engine.projects[0].clone(),
+                custom_name: None,
+                use_existing_branch: false,
+                pull_before_create: false,
+                copy_uncommitted_changes: false,
+            },
+            input,
+            randomize_name: false,
+            randomized_name: None,
+            copy_changes: false,
+            focus,
+        }
+    }
+
+    fn multibyte_pull_request_prompt(app: &App, cursor: usize) -> PromptState {
+        let mut input = TextInput::with_text(MULTIBYTE_NAME.to_string());
+        input.cursor = cursor;
+        PromptState::PullRequestInput {
+            project: app.engine.projects[0].clone(),
+            input,
+        }
+    }
+
+    #[test]
+    fn rename_modal_survives_a_caret_before_every_multibyte_character() {
+        for cursor in caret_positions(MULTIBYTE_NAME) {
+            let mut app = test_app(default_bindings());
+            app.prompt = multibyte_rename_prompt(&app, cursor, RenameSessionFocus::Input);
+            draw(&mut app);
+        }
+    }
+
+    #[test]
+    fn name_new_agent_modal_survives_a_caret_before_every_multibyte_character() {
+        for cursor in caret_positions(MULTIBYTE_NAME) {
+            let mut app = test_app(default_bindings());
+            app.prompt = multibyte_name_new_agent_prompt(&app, cursor, NameNewAgentFocus::Input);
+            draw(&mut app);
+        }
+    }
+
+    #[test]
+    fn pull_request_modal_survives_a_caret_before_every_multibyte_character() {
+        for cursor in caret_positions(MULTIBYTE_NAME) {
+            let mut app = test_app(default_bindings());
+            app.prompt = multibyte_pull_request_prompt(&app, cursor);
+            draw(&mut app);
+        }
+    }
+
+    #[test]
+    fn macro_list_preview_survives_every_truncation_boundary() {
+        // The list width is fixed by the popup, so the truncation point is
+        // swept by growing the NAME, which shrinks the room left for the
+        // preview one column at a time and walks it across multi-byte chars.
+        let text = "áéíóú 🙂🙃🙁 ñ";
+        for name_len in 1..40usize {
+            let mut app = test_app(default_bindings());
+            app.prompt = PromptState::EditMacros {
+                entries: vec![("n".repeat(name_len), text.to_string(), MacroSurface::Agent)],
+                selected: 0,
+                editing: None,
+                pending_delete: None,
+            };
+            draw(&mut app);
+        }
+    }
+
+    #[test]
+    fn rename_field_shows_a_caret_only_while_it_has_focus() {
+        let cursor_bg = {
+            let app = test_app(default_bindings());
+            app.theme.input_cursor_bg
+        };
+
+        // Focus on the field: caret drawn, border in the focused style.
+        let mut app = test_app(default_bindings());
+        app.prompt = multibyte_rename_prompt(&app, 2, RenameSessionFocus::Input);
+        let buf = draw(&mut app);
+        let OverlayMouseLayout::RenameSession { input, .. } = app.overlay_layout.active else {
+            panic!("rename modal must publish its input rect");
+        };
+        assert_eq!(
+            caret_columns(&buf, input, cursor_bg).len(),
+            1,
+            "a focused field draws exactly one caret cell"
+        );
+        assert_eq!(
+            field_border_look(&buf, input),
+            expected_border_look(&app.theme, true),
+            "a focused field draws the focused border"
+        );
+
+        // Focus on the checkbox: no caret, unfocused border.
+        let mut app = test_app(default_bindings());
+        app.prompt = multibyte_rename_prompt(&app, 2, RenameSessionFocus::RenameBranchCheckbox);
+        let buf = draw(&mut app);
+        let OverlayMouseLayout::RenameSession { input, .. } = app.overlay_layout.active else {
+            panic!("rename modal must publish its input rect");
+        };
+        assert!(
+            caret_columns(&buf, input, cursor_bg).is_empty(),
+            "an unfocused field must draw no caret: focus you cannot see is not focus"
+        );
+        assert_eq!(
+            field_border_look(&buf, input),
+            expected_border_look(&app.theme, false),
+            "an unfocused field draws the unfocused border"
+        );
+    }
+
+    #[test]
+    fn name_new_agent_field_shows_a_caret_only_while_it_has_focus() {
+        let cursor_bg = {
+            let app = test_app(default_bindings());
+            app.theme.input_cursor_bg
+        };
+
+        let mut app = test_app(default_bindings());
+        app.prompt = multibyte_name_new_agent_prompt(&app, 2, NameNewAgentFocus::Input);
+        let buf = draw(&mut app);
+        let OverlayMouseLayout::NameNewAgent { input, .. } = app.overlay_layout.active else {
+            panic!("new-agent modal must publish its input rect");
+        };
+        assert_eq!(caret_columns(&buf, input, cursor_bg).len(), 1);
+        assert_eq!(
+            field_border_look(&buf, input),
+            expected_border_look(&app.theme, true)
+        );
+
+        let mut app = test_app(default_bindings());
+        app.prompt =
+            multibyte_name_new_agent_prompt(&app, 2, NameNewAgentFocus::RandomizedNameCheckbox);
+        let buf = draw(&mut app);
+        let OverlayMouseLayout::NameNewAgent { input, .. } = app.overlay_layout.active else {
+            panic!("new-agent modal must publish its input rect");
+        };
+        assert!(
+            caret_columns(&buf, input, cursor_bg).is_empty(),
+            "an unfocused field must draw no caret"
+        );
+        assert_eq!(
+            field_border_look(&buf, input),
+            expected_border_look(&app.theme, false)
+        );
+    }
+
+    #[test]
+    fn pull_request_modal_publishes_a_clickable_input_rect() {
+        let mut app = test_app(default_bindings());
+        app.prompt = multibyte_pull_request_prompt(&app, 0);
+        let buf = draw(&mut app);
+
+        let OverlayMouseLayout::PullRequestInput { input } = app.overlay_layout.active else {
+            panic!(
+                "the PR modal must publish its input rect, got {:?}",
+                app.overlay_layout.active
+            );
+        };
+        assert!(input.width > 0 && input.height > 0);
+        // It is the only control, so it is always focused.
+        assert_eq!(
+            caret_columns(&buf, input, app.theme.input_cursor_bg).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn truncate_macro_preview_never_splits_a_character() {
+        let text = "áéíóú 🙂🙃🙁 ñ";
+        for max_len in 0..=text.chars().count() + 4 {
+            let out = truncate_macro_preview(text, max_len);
+            assert!(
+                out.chars().count() <= max_len.max(1),
+                "max_len={max_len} produced {out:?}"
+            );
+        }
+        assert_eq!(truncate_macro_preview("áé🙂", 10), "áé🙂");
+        assert_eq!(truncate_macro_preview("áé🙂ñ", 3), "áé…");
+    }
+
+    #[test]
+    fn render_single_line_cursor_input_drops_the_caret_when_unfocused() {
+        let focused =
+            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, true);
+        assert_eq!(focused.spans.len(), 4);
+
+        let unfocused =
+            render_single_line_cursor_input("", "macro", 2, Color::White, Color::Black, false);
+        let text: String = unfocused
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(text, "macro");
+        assert!(
+            unfocused
+                .spans
+                .iter()
+                .all(|s| s.style.bg != Some(Color::Black)),
+            "an unfocused field paints no caret cell"
+        );
+    }
+
+    #[test]
+    fn render_single_line_cursor_input_clamps_a_caret_inside_a_character() {
+        // A byte offset that is not a char boundary must not panic; it clamps
+        // back to the start of the character it landed in.
+        let line = render_single_line_cursor_input("", "áb", 1, Color::White, Color::Black, true);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "áb");
     }
 }
