@@ -29,6 +29,32 @@
 //! [`crate::keybindings::text_field_owns_key`] has to gate the binding lookup
 //! there (see [`binding_lookup_is_suppressed`]).
 //!
+//! # What this registry actually enforces, and what it only documents
+//!
+//! Be precise about this, because the difference decides how much a green
+//! suite is worth.
+//!
+//! **Genuinely enforced by the compiler:** the exhaustive match in
+//! [`modal_spec`] (and the one in [`prompt_text_inputs`]). Adding a
+//! [`PromptState`] variant is a build error until somebody classifies it. That
+//! gate holds whether or not any code reads the result, and it is the reason
+//! every item in this module carries `#[allow(dead_code)]` rather than being
+//! deleted.
+//!
+//! **Enforced only by the guard tests below:** everything else. [`ModalSpec`],
+//! [`ModalFamily`], [`KNOWN_DUAL_MODE_VIOLATIONS`] and
+//! [`ModalSpec::satisfies_dual_mode_rule`] are read by `mod tests` and by
+//! nothing on the render or input path. `cargo test` is what catches a family
+//! misdeclared or a dual-mode violation, so those checks are as strong as the
+//! fixtures in `every_prompt` are complete, and no stronger.
+//!
+//! **Not enforced at all:** the four families are a DESCRIPTION of what a
+//! keystroke should mean. No dispatcher consults `spec.family` before routing
+//! a key. A modal declared `Report` whose handler moves a selection cursor
+//! compiles, renders and ships; only a human reading both halves will notice.
+//! Write the family down honestly, and when you change a modal's key
+//! behaviour, change its declaration in the same edit.
+//!
 //! # What this registry cannot see
 //!
 //! **Coverage is `PromptState`, not "every typing surface in dux."** Two real
@@ -183,10 +209,17 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::DebugInput { .. }
         | PromptState::StartupCommandLogs(_) => ModalSpec::new(Report, false, false),
 
-        // The resource monitor reads as a report, and its vertical keys scroll,
-        // but Enter expands a row rather than dismissing. Report is still the
-        // right family: there is no focus concept and nothing is committed.
-        PromptState::ResourceMonitor { .. } => ModalSpec::new(Report, false, false),
+        // The resource monitor LOOKS like a report and was declared one, but
+        // the declaration did not match the code. It renders a `ListState`
+        // selection cursor, its vertical keys move that cursor (a value, not a
+        // scroll offset and not focus), and its confirm key acts on the
+        // selected row by expanding it. Rows plus a selection cursor plus a
+        // confirm key that acts on the selection is this registry's own
+        // definition of a Picker, so Picker is what it is. It is the one
+        // picker whose confirm key EXPANDS the selected row instead of
+        // choosing it and closing, which is a legitimate variation on
+        // "Enter acts on the selection", not a different family.
+        PromptState::ResourceMonitor { .. } => ModalSpec::new(Picker, false, false),
 
         // ── Confirm ─────────────────────────────────────────────────────
         PromptState::ConfirmDeleteAgent { .. }
@@ -554,6 +587,28 @@ mod tests {
         assert!(single_line_no_button.satisfies_dual_mode_rule());
         assert!(!multiline_no_button.satisfies_dual_mode_rule());
         assert!(multiline_with_button.satisfies_dual_mode_rule());
+    }
+
+    /// The resource monitor is a Picker, not a Report. It was declared Report
+    /// while its handler moved a `selected_row` and its confirm key expanded
+    /// the selected row, which is a Picker in this registry's own terms. The
+    /// declaration is now pinned so the two halves cannot drift apart again.
+    #[test]
+    fn the_resource_monitor_is_a_picker() {
+        let monitor = PromptState::ResourceMonitor {
+            rows: Vec::new(),
+            scroll_offset: 0,
+            selected_row: 0,
+            expanded: std::collections::HashSet::new(),
+            last_refresh: std::time::Instant::now(),
+            short_window_sample: false,
+        };
+        assert_eq!(
+            modal_spec(&monitor).map(|spec| spec.family),
+            Some(ModalFamily::Picker),
+            "rows plus a selection cursor plus a confirm key acting on the \
+             selection is a Picker"
+        );
     }
 
     #[test]
@@ -1069,10 +1124,12 @@ mod tests {
         }
     }
 
-    /// EXACTLY the three known violators break the dual-mode rule, and nothing
-    /// else does. Fixing one forces its name out of
-    /// `KNOWN_DUAL_MODE_VIOLATIONS`, which is the whole point of asserting the
-    /// set rather than a count or a subset.
+    /// EXACTLY the modals named in `KNOWN_DUAL_MODE_VIOLATIONS` break the
+    /// dual-mode rule, and nothing else does. That list is currently EMPTY, so
+    /// this asserts that no modal breaks the rule at all. Asserting the set
+    /// rather than a count or a subset is what makes a new violator impossible
+    /// to add without writing its name there and defending it in review, and
+    /// what makes fixing one force its name back out.
     #[test]
     fn exactly_the_known_violators_break_the_dual_mode_rule() {
         let app = test_app(default_bindings());

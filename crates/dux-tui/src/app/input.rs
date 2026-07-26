@@ -2283,13 +2283,28 @@ impl App {
             }
             let visual = build_visual_rows(rows, expanded);
             let max_row = visual.len().saturating_sub(1);
+            // The row cursor is a SELECTION, so it answers to the movement
+            // bindings, exactly like every other list in dux. Hardcoding
+            // `Up`/`k` here left this one modal deaf to a rebind while its
+            // close and expand keys already honoured one. `MoveUp`/`MoveDown`
+            // live in the Palette scope, which the lookup above already falls
+            // back to.
+            //
+            // `PageUp`/`PageDown`/`Home`/`End` stay literal below: dux has no
+            // Dialog- or Palette-scoped binding for page or extreme movement
+            // (`ScrollPageUp`/`ScrollPageDown` are Center/Interactive/Help),
+            // so there is nothing to resolve them through yet.
+            if matches!(action, Some(Action::MoveUp)) {
+                *selected_row = selected_row.saturating_sub(1);
+                *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+                return Ok(false);
+            }
+            if matches!(action, Some(Action::MoveDown)) {
+                *selected_row = (*selected_row + 1).min(max_row);
+                *scroll_offset = (*selected_row).saturating_sub(5) as u16;
+                return Ok(false);
+            }
             match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    *selected_row = selected_row.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    *selected_row = (*selected_row + 1).min(max_row);
-                }
                 KeyCode::PageUp => {
                     *selected_row = selected_row.saturating_sub(10);
                 }
@@ -22570,5 +22585,56 @@ cyan = "#00ffff"
             panic!("the picker must stay open");
         };
         assert_eq!(prompt.filter.cursor, 2, "the click must land the caret");
+    }
+
+    /// The resource monitor's row cursor must answer to the movement BINDINGS,
+    /// like every other list in dux. It used to match `KeyCode::Up | Char('k')`
+    /// literally, so a user who rebound movement lost it here alone.
+    #[test]
+    fn the_resource_monitor_row_cursor_answers_to_the_movement_bindings() {
+        let mut app = test_app(bindings_with_overrides(&[
+            (Action::MoveDown, &["ctrl-n"]),
+            (Action::MoveUp, &["ctrl-e"]),
+        ]));
+        app.prompt = PromptState::ResourceMonitor {
+            rows: vec![
+                ResourceStats {
+                    id: None,
+                    kind: ResourceKind::Dux,
+                    label: "dux".into(),
+                    pid: Some(1),
+                    cpu_percent: 0.0,
+                    rss_bytes: 0,
+                    process_count: 1,
+                    children: Vec::new(),
+                },
+                ResourceStats {
+                    id: Some("s1".into()),
+                    kind: ResourceKind::Agent,
+                    label: "Agent".into(),
+                    pid: Some(100),
+                    cpu_percent: 5.0,
+                    rss_bytes: 1024,
+                    process_count: 1,
+                    children: Vec::new(),
+                },
+            ],
+            scroll_offset: 0,
+            selected_row: 0,
+            expanded: std::collections::HashSet::new(),
+            last_refresh: std::time::Instant::now(),
+            short_window_sample: false,
+        };
+        let selected = |app: &App| match &app.prompt {
+            PromptState::ResourceMonitor { selected_row, .. } => *selected_row,
+            other => panic!("expected the resource monitor, got {other:?}"),
+        };
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .expect("move down");
+        assert_eq!(selected(&app), 1, "the bound key must move the cursor down");
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .expect("move up");
+        assert_eq!(selected(&app), 0, "the bound key must move the cursor up");
     }
 }
