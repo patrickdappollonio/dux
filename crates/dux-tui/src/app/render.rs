@@ -1,6 +1,6 @@
 use super::components::{
-    Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, button_state_for,
-    render_scroll_marker, shared_button_width, wrap_styled_lines,
+    Button, ButtonKind, ButtonPressedTarget, Checkbox, CheckboxState, Hint, button_state_for,
+    modal_hint_line, render_scroll_marker, shared_button_width, wrap_styled_lines,
 };
 use super::*;
 use crate::tui_color::{to_ratatui_color, to_ratatui_modifier};
@@ -7193,7 +7193,6 @@ impl App {
                 focus,
                 ..
             } => {
-                self.render_dim_overlay(frame);
                 let checkbox_state = if *focus == RenameSessionFocus::RenameBranchCheckbox {
                     CheckboxState::Focused
                 } else {
@@ -7218,11 +7217,10 @@ impl App {
                     9 + checkbox_spacing + checkbox_height,
                     frame.area(),
                 );
-                self.clear_overlay_area(frame, area);
-
-                let outer = self.themed_overlay_block("Rename Agent");
-                let inner = outer.inner(area);
-                outer.render(area, frame.buffer_mut());
+                // The shared chrome trio (dim, clear-and-claim, titled ring).
+                // See `modal::App::open_modal_frame` for why the rect claim and
+                // the border ring cannot be hand-rolled per modal.
+                let inner = self.open_modal_frame(frame, "Rename Agent", area).inner;
 
                 let [label_area, input_area, _, checkbox_area, hint_area] = Layout::default()
                     .direction(Direction::Vertical)
@@ -7288,29 +7286,20 @@ impl App {
                 let focus_key = self
                     .bindings
                     .label_for_text_field_dialog(Action::ToggleSelection);
-                let mut hints = vec![Span::raw(" ")];
-                hints.extend(self.theme.key_badge_default(&confirm_key));
-                hints.push(Span::styled(
-                    " confirm  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                if let Some(focus_key) = &focus_key {
-                    hints.extend(self.theme.key_badge_default(focus_key));
-                    hints.push(Span::styled(
-                        " focus  ",
-                        Style::default().fg(self.theme.hint_desc_fg),
-                    ));
-                }
-                hints.push(Span::styled(
-                    "Space toggle  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                hints.extend(self.theme.key_badge_default(&close_key));
-                hints.push(Span::styled(
-                    " cancel",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
-                Paragraph::new(Line::from(hints)).render(hint_area, frame.buffer_mut());
+                let hints = modal_hint_line(
+                    &self.theme,
+                    &[
+                        Hint::key(confirm_key, "confirm"),
+                        // Dropped entirely when the field swallows every key the
+                        // movement action is bound to; the builder owns that rule.
+                        Hint::maybe_key(focus_key, "focus"),
+                        // Space-on-focus is hardcoded (the accessibility tenet),
+                        // so there is no binding to resolve for it.
+                        Hint::plain("Space toggle"),
+                        Hint::key(close_key, "cancel"),
+                    ],
+                );
+                Paragraph::new(hints).render(hint_area, frame.buffer_mut());
                 self.overlay_layout.active = OverlayMouseLayout::RenameSession {
                     input: input_inner,
                     checkbox: Some(OverlayCheckbox {
@@ -8641,7 +8630,7 @@ impl App {
     ///
     /// Use [`Self::clear_overlay_bar_area`] instead for a strip that is NOT a
     /// modal of its own.
-    fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn clear_overlay_area(&self, frame: &mut Frame, area: Rect) {
         self.overlay_layout.frame.set(Some(area));
         self.clear_overlay_bar_area(frame, area);
     }
@@ -8659,7 +8648,7 @@ impl App {
             .set_style(area, Style::default().bg(self.theme.overlay_bg));
     }
 
-    fn themed_overlay_block<'a>(&self, title: &'a str) -> Block<'a> {
+    pub(super) fn themed_overlay_block<'a>(&self, title: &'a str) -> Block<'a> {
         Block::default()
             .title(Line::from(Span::styled(
                 title,
@@ -9021,7 +9010,7 @@ impl App {
         hint_para.render(hint_area, frame.buffer_mut());
     }
 
-    fn render_dim_overlay(&self, frame: &mut Frame) {
+    pub(super) fn render_dim_overlay(&self, frame: &mut Frame) {
         let full = frame.area();
         // Keep the statusline (bottom rows) undimmed so errors stay visible.
         let status_text = self

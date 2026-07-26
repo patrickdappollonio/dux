@@ -94,6 +94,19 @@ impl TextInput {
         self
     }
 
+    /// Whether this field is a FULL-TEXT (multiline) field rather than a simple
+    /// single-line one.
+    ///
+    /// This is the flag the "two kinds of text field" tenet is about: what makes
+    /// a field full-text is [`TextInput::with_multiline`] having been called at
+    /// construction, not its rendered height, its label, or the modal it sits
+    /// in. Exposed because the dual-mode rule in [`crate::app::modal`] has to
+    /// ask a LIVE instance the question, "is there a multiline field in this
+    /// modal?" is a runtime fact, not a type-level one.
+    pub fn is_multiline(&self) -> bool {
+        self.multiline.is_some()
+    }
+
     /// Set the display width for soft-wrapping in multiline mode.
     /// Lines longer than this width are wrapped visually. Pass `None` to disable.
     pub fn set_display_width(&mut self, width: Option<usize>) {

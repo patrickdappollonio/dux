@@ -1,4 +1,5 @@
-use super::components::{ButtonPressedTarget, PressedButton};
+use super::components::{ButtonPressedTarget, PressedButton, next_focus};
+use super::modal::{ModalKeyStep, binding_lookup_is_suppressed, click_target, modal_key_step};
 use super::*;
 use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
@@ -3278,26 +3279,23 @@ impl App {
             // preserved, so the checkbox is hidden and the focus cycle skips
             // over it (Cancel ↔ Delete only).
             let shared = *worktree_shared;
+            // Declared focus order, with the checkbox as a CONDITIONAL stop,
+            // exactly the case `next_focus` exists for. Reproduces the previous
+            // hand-written cycle arm for arm, including the recovery walk when
+            // focus is somehow stranded on the hidden checkbox.
+            let ring = [
+                (DeleteAgentFocus::Cancel, true),
+                (DeleteAgentFocus::Delete, true),
+                (DeleteAgentFocus::Checkbox, !shared),
+            ];
             if is_reverse_tab(key) {
-                *focus = match (*focus, shared) {
-                    (DeleteAgentFocus::Cancel, false) => DeleteAgentFocus::Checkbox,
-                    (DeleteAgentFocus::Delete, false) => DeleteAgentFocus::Cancel,
-                    (DeleteAgentFocus::Checkbox, _) => DeleteAgentFocus::Delete,
-                    (DeleteAgentFocus::Cancel, true) => DeleteAgentFocus::Delete,
-                    (DeleteAgentFocus::Delete, true) => DeleteAgentFocus::Cancel,
-                };
+                *focus = next_focus(&ring, *focus, false);
                 return Ok(false);
             }
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *focus = match (*focus, shared) {
-                        (DeleteAgentFocus::Cancel, false) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Delete, false) => DeleteAgentFocus::Checkbox,
-                        (DeleteAgentFocus::Checkbox, _) => DeleteAgentFocus::Cancel,
-                        (DeleteAgentFocus::Cancel, true) => DeleteAgentFocus::Delete,
-                        (DeleteAgentFocus::Delete, true) => DeleteAgentFocus::Cancel,
-                    };
+                    *focus = next_focus(&ring, *focus, true);
                 }
                 Some(Action::Confirm) => match *focus {
                     DeleteAgentFocus::Checkbox => {
@@ -3760,17 +3758,22 @@ impl App {
             // nothing, so every key reaches the bindings and the movement keys
             // navigate. The footer hint is derived from this same predicate, so
             // it can only ever name a key that still reaches the bindings here.
-            let action = if !checkbox_focused && text_field_owns_key(key) {
+            let action = if binding_lookup_is_suppressed(key, !checkbox_focused) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Dialog)
             };
 
-            match action {
-                Some(Action::CloseOverlay) => {
+            // The shared ladder: close, move focus, confirm, activate the
+            // focused control, then fall through to the field. `Confirm` and
+            // `ActivateFocus` are separate rungs precisely because this modal
+            // needs them to differ, Enter submits the rename even while the
+            // checkbox has focus, while Space toggles the box.
+            match modal_key_step(action, key, !checkbox_focused) {
+                ModalKeyStep::Close => {
                     self.prompt = PromptState::None;
                 }
-                Some(Action::Confirm) => {
+                ModalKeyStep::Confirm => {
                     let PromptState::RenameSession {
                         session_id,
                         input,
@@ -3786,20 +3789,24 @@ impl App {
                     self.prompt = PromptState::None;
                     self.apply_rename_session(&id, new_name, also_rename_branch);
                 }
-                Some(Action::ToggleSelection) => {
-                    self.focus_next_rename_session_control(!focus_move_is_reverse(key));
+                ModalKeyStep::MoveFocus(forward) => {
+                    self.focus_next_rename_session_control(forward);
                 }
-                _ => {
+                ModalKeyStep::ActivateFocus => {
+                    // Space, with focus off the text field. The checkbox is the
+                    // only non-field control here.
                     if checkbox_focused {
-                        // A focused checkbox is the only control accepting
-                        // input, and Space is the only key it takes. Every
-                        // other key is dropped rather than routed to the name
-                        // field: the field draws no caret while focus sits on
-                        // the checkbox, so editing it here would be invisible.
-                        if key.code == KeyCode::Char(' ') {
-                            self.toggle_rename_session_branch();
-                        }
-                    } else if let PromptState::RenameSession { input, .. } = &mut self.prompt {
+                        self.toggle_rename_session_branch();
+                    }
+                }
+                ModalKeyStep::FallThroughToField => {
+                    // A focused checkbox takes nothing but Space (handled
+                    // above). Every other key is dropped rather than routed to
+                    // the name field: the field draws no caret while focus sits
+                    // on the checkbox, so editing it here would be invisible.
+                    if !checkbox_focused
+                        && let PromptState::RenameSession { input, .. } = &mut self.prompt
+                    {
                         input.handle_key(key);
                     }
                 }
@@ -4626,11 +4633,14 @@ impl App {
                 contains_point(input, column, row).then_some(PromptMouseTarget::PullRequestInput)
             }
             OverlayMouseLayout::RenameSession { input, checkbox } => {
-                if checkbox.is_some_and(|checkbox| contains_point(checkbox.rect, column, row)) {
-                    checkbox.map(|checkbox| PromptMouseTarget::Checkbox(checkbox.id))
-                } else {
-                    contains_point(input, column, row).then_some(PromptMouseTarget::RenameInput)
+                // Published click rects in priority order; the caller focuses
+                // the hit control and then acts on it (see `modal::click_target`).
+                let mut targets = Vec::with_capacity(2);
+                if let Some(checkbox) = checkbox {
+                    targets.push((checkbox.rect, PromptMouseTarget::Checkbox(checkbox.id)));
                 }
+                targets.push((input, PromptMouseTarget::RenameInput));
+                click_target(&targets, column, row)
             }
             OverlayMouseLayout::NameNewAgent {
                 input,
@@ -5887,12 +5897,19 @@ impl App {
     /// `_forward` is accepted so the call site reads exactly like the new-agent
     /// modal's, but with only two controls both directions land on the other
     /// one, so it has nothing to decide here.
-    fn focus_next_rename_session_control(&mut self, _forward: bool) {
+    fn focus_next_rename_session_control(&mut self, forward: bool) {
         if let PromptState::RenameSession { focus, .. } = &mut self.prompt {
-            *focus = match *focus {
-                RenameSessionFocus::Input => RenameSessionFocus::RenameBranchCheckbox,
-                RenameSessionFocus::RenameBranchCheckbox => RenameSessionFocus::Input,
-            };
+            // Two unconditional stops, so both directions land in the same
+            // place; the ring is used anyway so this modal's focus order is
+            // declared as data like everyone else's.
+            *focus = next_focus(
+                &[
+                    (RenameSessionFocus::Input, true),
+                    (RenameSessionFocus::RenameBranchCheckbox, true),
+                ],
+                *focus,
+                forward,
+            );
         }
     }
 

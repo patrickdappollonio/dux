@@ -2172,6 +2172,7 @@ pub(crate) fn build_left_items(
 mod components;
 mod first_load;
 mod input;
+pub(crate) mod modal;
 mod overlay_dismiss;
 mod render;
 mod reorder;
