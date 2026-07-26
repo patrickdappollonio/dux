@@ -3069,14 +3069,6 @@ impl App {
             ..
         } = &mut self.prompt
         {
-            if is_reverse_tab(key) {
-                *focus = match *focus {
-                    ConfigReloadFailedFocus::Close => ConfigReloadFailedFocus::Checkbox,
-                    ConfigReloadFailedFocus::Apply => ConfigReloadFailedFocus::Close,
-                    ConfigReloadFailedFocus::Checkbox => ConfigReloadFailedFocus::Apply,
-                };
-                return Ok(false);
-            }
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 // Esc takes the same path as the Close BUTTON rather than
                 // blanking the prompt itself, so the two dismissal routes
@@ -3086,11 +3078,14 @@ impl App {
                     return Ok(self.resolve_config_reload_failed(false));
                 }
                 Some(Action::ToggleSelection) => {
-                    *focus = match *focus {
-                        ConfigReloadFailedFocus::Close => ConfigReloadFailedFocus::Apply,
-                        ConfigReloadFailedFocus::Apply => ConfigReloadFailedFocus::Checkbox,
-                        ConfigReloadFailedFocus::Checkbox => ConfigReloadFailedFocus::Close,
-                    };
+                    // The one shared ring, walked in whichever direction the
+                    // key means. This modal used to have no reverse at all.
+                    let ring = [
+                        (ConfigReloadFailedFocus::Close, true),
+                        (ConfigReloadFailedFocus::Apply, true),
+                        (ConfigReloadFailedFocus::Checkbox, true),
+                    ];
+                    *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
                 }
                 Some(Action::Confirm) => match *focus {
                     ConfigReloadFailedFocus::Checkbox => {
@@ -3265,14 +3260,16 @@ impl App {
                 (DeleteAgentFocus::Delete, true),
                 (DeleteAgentFocus::Checkbox, !shared),
             ];
-            if is_reverse_tab(key) {
-                *focus = next_focus(&ring, *focus, false);
-                return Ok(false);
-            }
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    *focus = next_focus(&ring, *focus, true);
+                    // `focus_move_is_reverse`, not `is_reverse_tab`: the
+                    // movement action carries no direction, so the KEY supplies
+                    // one, and the horizontal reverse key means reverse here
+                    // exactly as it does in every migrated modal. Gating on
+                    // reverse-tab alone let the horizontal reverse key fall
+                    // through and walk FORWARD in this three-stop ring.
+                    *focus = next_focus(&ring, *focus, !focus_move_is_reverse(key));
                 }
                 Some(Action::Confirm) => match *focus {
                     DeleteAgentFocus::Checkbox => {
@@ -3435,7 +3432,7 @@ impl App {
             match self.bindings.lookup(&key, BindingScope::Dialog) {
                 Some(Action::CloseOverlay) => self.prompt = PromptState::None,
                 Some(Action::ToggleSelection) => {
-                    let reverse = is_reverse_tab(key);
+                    let reverse = focus_move_is_reverse(key);
                     *focus = match (*focus, has_checkbox, reverse) {
                         (ConfirmNonDefaultBranchFocus::Cancel, true, false) => {
                             ConfirmNonDefaultBranchFocus::Add
@@ -22636,5 +22633,80 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
             .expect("move up");
         assert_eq!(selected(&app), 0, "the bound key must move the cursor up");
+    }
+
+    /// The horizontal reverse key means the same thing in every modal.
+    ///
+    /// Three confirmations were left behind by the focus-ring migration:
+    /// `ConfirmDeleteAgent` and `ConfirmNonDefaultBranch` gated reverse on
+    /// `is_reverse_tab` alone, so the horizontal reverse key fell through to
+    /// the forward arm and walked FORWARD in their three-stop rings, and
+    /// `ConfigReloadFailed` had no reverse at all. Every migrated modal uses
+    /// `focus_move_is_reverse`, which honours both.
+    #[test]
+    fn the_reverse_key_walks_backwards_in_every_three_stop_confirmation() {
+        let reverse = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+
+        // ── ConfirmDeleteAgent: Cancel -> Delete -> Checkbox.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmDeleteAgent {
+            session_id: "s1".to_string(),
+            branch_name: "b".to_string(),
+            focus: DeleteAgentFocus::Cancel,
+            delete_worktree: false,
+            worktree_shared: false,
+        };
+        app.handle_key(reverse).expect("reverse");
+        match &app.prompt {
+            PromptState::ConfirmDeleteAgent { focus, .. } => assert_eq!(
+                *focus,
+                DeleteAgentFocus::Checkbox,
+                "reverse from the first stop must land on the LAST"
+            ),
+            other => panic!("expected the delete confirmation, got {other:?}"),
+        }
+
+        // ── ConfirmNonDefaultBranch: Cancel -> Add -> Checkbox.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfirmNonDefaultBranch {
+            action: NonDefaultBranchAction::AddProject {
+                path: "/tmp/project".to_string(),
+                name: "project".to_string(),
+                leading_branch: "main".to_string(),
+            },
+            current_branch: "feature".to_string(),
+            kind: BranchWarningKind::Known {
+                default_branch: "main".to_string(),
+            },
+            focus: ConfirmNonDefaultBranchFocus::Cancel,
+            checkout_default: true,
+        };
+        app.handle_key(reverse).expect("reverse");
+        match &app.prompt {
+            PromptState::ConfirmNonDefaultBranch { focus, .. } => assert_eq!(
+                *focus,
+                ConfirmNonDefaultBranchFocus::Checkbox,
+                "reverse from the first stop must land on the LAST"
+            ),
+            other => panic!("expected the branch confirmation, got {other:?}"),
+        }
+
+        // ── ConfigReloadFailed: Close -> Apply -> Checkbox.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigReloadFailed {
+            error: "boom".to_string(),
+            recover_old_config: false,
+            focus: ConfigReloadFailedFocus::Close,
+            scroll: 0,
+        };
+        app.handle_key(reverse).expect("reverse");
+        match &app.prompt {
+            PromptState::ConfigReloadFailed { focus, .. } => assert_eq!(
+                *focus,
+                ConfigReloadFailedFocus::Checkbox,
+                "reverse from the first stop must land on the LAST"
+            ),
+            other => panic!("expected the reload failure, got {other:?}"),
+        }
     }
 }

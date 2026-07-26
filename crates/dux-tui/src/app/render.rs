@@ -4631,7 +4631,16 @@ impl App {
                             "edit text",
                         ));
                     }
-                    hints.push(Hint::plain("Space act on focus"));
+                    if !field_focused {
+                        // Space-on-focus is hardcoded (the accessibility
+                        // tenet), so there is no binding to resolve for it.
+                        // The segment is a promise about what Space does RIGHT
+                        // NOW, so it is as state-aware as the `move focus`
+                        // segment above: on the unengaged body Space does
+                        // nothing at all, and a footer may be incomplete but
+                        // may never be WRONG.
+                        hints.push(Hint::plain("Space act on focus"));
+                    }
                     if field_focused {
                         // The clear key empties the FOCUSED full-text field, so
                         // it only answers while the body has focus; naming it
@@ -7175,8 +7184,15 @@ impl App {
                         // movement action is bound to; the builder owns that rule.
                         Hint::maybe_key(focus_key, "focus"),
                         // Space-on-focus is hardcoded (the accessibility tenet),
-                        // so there is no binding to resolve for it.
-                        Hint::plain("Space toggle"),
+                        // so there is no binding to resolve for it. Dropped
+                        // while the name field has focus, where Space is a
+                        // typed character and toggles nothing.
+                        // An empty segment is dropped by the builder.
+                        Hint::plain(if *focus == RenameSessionFocus::Input {
+                            ""
+                        } else {
+                            "Space toggle"
+                        }),
                         Hint::key(close_key, "cancel"),
                     ],
                 );
@@ -7483,10 +7499,14 @@ impl App {
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
                 }
-                hints.push(Span::styled(
-                    "Space toggle  ",
-                    Style::default().fg(self.theme.hint_desc_fg),
-                ));
+                // Dropped while the name field has focus: Space is a typed
+                // character there and toggles nothing.
+                if *focus != NameNewAgentFocus::Input {
+                    hints.push(Span::styled(
+                        "Space toggle  ",
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                }
                 hints.extend(self.theme.key_badge_default(&close_key));
                 hints.push(Span::styled(
                     " cancel",
@@ -7957,7 +7977,13 @@ impl App {
                     "edit text",
                 ));
             }
-            hints.push(Hint::plain("Space act on focus"));
+            if !matches!(focus, MacroEditFocus::Name | MacroEditFocus::Text) {
+                // Space is CONTENT in both kinds of text field: typed into the
+                // single-line name, and swallowed by the unengaged body. The
+                // segment therefore only appears on the selector and the two
+                // buttons, where Space really does act.
+                hints.push(Hint::plain("Space act on focus"));
+            }
             // The clear key answers on the focused body here too, but the
             // editor's footer is already at the popup's 64-cell inner width
             // with the four hints above, so naming a fifth would truncate the
@@ -14219,14 +14245,20 @@ mod tests {
             "rename footer must not advertise `h`:\n{screen}"
         );
         assert!(
-            screen.contains("Space toggle"),
-            "rename footer should say Space toggles the focused checkbox:\n{screen}"
+            !screen.contains("Space toggle"),
+            "with the NAME FIELD focused Space is a typed character, not a \
+             toggle; see `the_space_hint_only_appears_when_space_acts_on_something`:\n{screen}"
         );
 
         // The label is tied to behaviour: the advertised key moves focus, and
         // leaves the checkbox value alone.
         let key = reachable_toggle(&app).expect("reachable toggle key");
         app.handle_key(press(key)).expect("handle key");
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("Space toggle"),
+            "once focus is on the checkbox the footer says Space toggles it:\n{screen}"
+        );
         match &app.prompt {
             PromptState::RenameSession {
                 focus,
@@ -15056,5 +15088,98 @@ mod tests {
             "shipped title still holds an em-dash: {title:?}"
         );
         assert!(title.contains("Edit Macro: greet"), "got {title:?}");
+    }
+
+    /// A footer may be incomplete; it may never be WRONG. The
+    /// `Space act on focus` / `Space toggle` segment is a promise about what
+    /// Space does RIGHT NOW, and with a text field focused Space is content:
+    /// it types a space into a single-line field, and on an unengaged
+    /// full-text field it does nothing at all. The segment must therefore be
+    /// as state-aware as its `move focus` neighbour, which already drops
+    /// itself when no key reaches focus movement.
+    #[test]
+    fn the_space_hint_only_appears_when_space_acts_on_something() {
+        // ── The three configure modals: focus on the unengaged full-text
+        // body, where Space does nothing whatsoever.
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "p1".to_string(),
+            project_name: "p1".to_string(),
+            input: TextInput::with_text("make dev".to_string()).with_multiline(8),
+            focus: super::ConfigureFieldFocus::Input,
+        };
+        let screen = rendered_screen(&mut app);
+        assert!(
+            !screen.contains("Space act on focus"),
+            "the configure body takes no Space; the footer must not promise one:\n{screen}"
+        );
+
+        // On a button, Space really does act, so the segment comes back.
+        app.prompt = PromptState::ConfigureStartupCommand {
+            project_id: "p1".to_string(),
+            project_name: "p1".to_string(),
+            input: TextInput::with_text("make dev".to_string()).with_multiline(8),
+            focus: super::ConfigureFieldFocus::Save,
+        };
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("Space act on focus"),
+            "Space activates the focused button; say so:\n{screen}"
+        );
+
+        // ── The macro editor: the name field is single-line, so Space is
+        // typed into it, and the unengaged body takes nothing.
+        for focus in [super::MacroEditFocus::Name, super::MacroEditFocus::Text] {
+            let mut app = macro_editor_app(focus);
+            let screen = rendered_screen(&mut app);
+            assert!(
+                !screen.contains("Space act on focus"),
+                "{focus:?}: Space is content here, not an action:\n{screen}"
+            );
+        }
+        let mut app = macro_editor_app(super::MacroEditFocus::Save);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("Space act on focus"),
+            "Space activates the focused button; say so:\n{screen}"
+        );
+
+        // ── Rename: Space types into the name field, and toggles the checkbox.
+        let mut app = test_app(default_bindings());
+        app.prompt = rename_prompt();
+        let screen = rendered_screen(&mut app);
+        assert!(
+            !screen.contains("Space toggle"),
+            "the rename name field types a space; it toggles nothing:\n{screen}"
+        );
+        app.prompt = PromptState::RenameSession {
+            session_id: "session-1".to_string(),
+            input: TextInput::with_text("agent".to_string()),
+            rename_branch: false,
+            focus: RenameSessionFocus::RenameBranchCheckbox,
+        };
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("Space toggle"),
+            "with the checkbox focused Space really does toggle:\n{screen}"
+        );
+
+        // ── New agent name: same shape.
+        let mut app = test_app(default_bindings());
+        app.prompt = name_new_agent_prompt(&app);
+        let screen = rendered_screen(&mut app);
+        assert!(
+            !screen.contains("Space toggle"),
+            "the new-agent name field types a space:\n{screen}"
+        );
+        let PromptState::NameNewAgent { focus, .. } = &mut app.prompt else {
+            unreachable!()
+        };
+        *focus = NameNewAgentFocus::RandomizedNameCheckbox;
+        let screen = rendered_screen(&mut app);
+        assert!(
+            screen.contains("Space toggle"),
+            "with the checkbox focused Space really does toggle:\n{screen}"
+        );
     }
 }
