@@ -1062,18 +1062,33 @@ impl App {
             .or(global_action)
             .or(dialog_action);
 
+        // The viewer's search row follows the same rule as the list modals'
+        // with one honest difference: it has rows of TEXT, not rows to pick, so
+        // "move through the results" is a scroll and there is nothing for the
+        // confirm key to pick. Confirm therefore commits the query and leaves
+        // search mode, the way a find bar does; the close key still leaves
+        // search AND clears the query in one press.
         if self
             .startup_log_viewer
             .as_ref()
             .is_some_and(|viewer| viewer.searching)
         {
             match action {
-                Some(Action::CloseOverlay | Action::SearchToggle | Action::Confirm) => {
+                Some(Action::CloseOverlay) => {
+                    if let Some(viewer) = &mut self.startup_log_viewer {
+                        exit_search_clearing_filter(&mut viewer.searching, &mut viewer.search);
+                    }
+                    return;
+                }
+                Some(Action::SearchToggle | Action::Confirm) => {
                     if let Some(viewer) = &mut self.startup_log_viewer {
                         viewer.searching = false;
                     }
+                    return;
                 }
-                _ => {
+                _ if binding_lookup_is_suppressed(key, true)
+                    || matches!(key.code, KeyCode::Backspace | KeyCode::Delete) =>
+                {
                     let changed = self
                         .startup_log_viewer
                         .as_mut()
@@ -1081,9 +1096,13 @@ impl App {
                     if changed {
                         self.update_startup_log_search_scroll();
                     }
+                    return;
                 }
+                // Anything the search row does not own (the vertical keys, the
+                // paging keys) falls through to the viewer's own ladder below,
+                // which is what makes the arrows work while searching.
+                _ => {}
             }
-            return;
         }
 
         match action {
@@ -1258,6 +1277,13 @@ impl App {
     fn handle_macro_bar_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc => {
+                // The palette and the macro bar are the deliberate exception to the
+                // filterable-modal Escape ladder (leave search and clear the query on
+                // the first press, close on the second). Their search cannot be turned
+                // OFF: the input IS the modal, there is no unfiltered list underneath
+                // to return to, so there is no mode to exit and one press correctly
+                // closes them. That is the principled line between the two groups, not
+                // an inconsistency to iron out.
                 self.close_macro_bar();
             }
             KeyCode::Enter => {
@@ -2228,6 +2254,14 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::Command { .. }) {
+            // The palette and the macro bar are the deliberate exception to the
+            // filterable-modal Escape ladder (leave search and clear the query on
+            // the first press, close on the second). Their search cannot be turned
+            // OFF: the input IS the modal, there is no unfiltered list underneath
+            // to return to, so there is no mode to exit and one press correctly
+            // closes them. That is the principled line between the two groups, not
+            // an inconsistency to iron out.
+            //
             // Plain character keys always go to TextInput so j/k etc. can be
             // typed without conflicting with navigation bindings.
             let is_plain_char = matches!(key.code, KeyCode::Char(_))
@@ -2310,9 +2344,7 @@ impl App {
                     ..
                 })
             );
-            let is_plain_char = matches!(key.code, KeyCode::Char(_))
-                && !key.modifiers.contains(KeyModifiers::CONTROL);
-            let action = if is_searching && is_plain_char {
+            let action = if binding_lookup_is_suppressed(key, is_searching) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::RuntimeKill)
@@ -2322,10 +2354,8 @@ impl App {
                 Some(Action::CloseOverlay) => {
                     let mut closed = false;
                     if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                        if prompt.list.searching {
-                            prompt.list.end_search();
-                        } else if !prompt.list.filter.is_empty() {
-                            prompt.list.filter.clear();
+                        // One press leaves search AND drops the query.
+                        if prompt.list.exit_search_clearing_filter() {
                             Self::clamp_kill_running_prompt(prompt);
                         } else {
                             closed = true;
@@ -2385,20 +2415,18 @@ impl App {
                     self.toggle_hovered_kill_running_selection();
                 }
                 Some(Action::Confirm) => {
-                    if is_searching {
-                        if let PromptState::KillRunning(prompt) = &mut self.prompt {
-                            prompt.list.end_search();
-                        }
-                    } else {
-                        let focus = match &self.prompt {
-                            PromptState::KillRunning(prompt) => prompt.focus,
-                            _ => KillRunningFocus::List,
-                        };
-                        match focus {
-                            KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
-                            KillRunningFocus::Footer(action) => {
-                                self.execute_kill_running_footer_action(action)?;
-                            }
+                    // The confirm key acts on the highlighted row whether or
+                    // not the search row is up: search never intercepts it.
+                    // Here "picking" a row means MARKING it, and search stays
+                    // on so the user can keep narrowing and marking.
+                    let focus = match &self.prompt {
+                        PromptState::KillRunning(prompt) => prompt.focus,
+                        _ => KillRunningFocus::List,
+                    };
+                    match focus {
+                        KillRunningFocus::List => self.toggle_hovered_kill_running_selection(),
+                        KillRunningFocus::Footer(action) => {
+                            self.execute_kill_running_footer_action(action)?;
                         }
                     }
                 }
@@ -2508,7 +2536,7 @@ impl App {
             }
 
             // Browser normal/search mode — use binding lookup.
-            let action = if is_searching && is_plain_char {
+            let action = if binding_lookup_is_suppressed(key, is_searching) {
                 None
             } else {
                 self.bindings.lookup(&key, BindingScope::Browser)
@@ -2523,10 +2551,8 @@ impl App {
                         ..
                     } = &mut self.prompt
                     {
-                        if *searching {
-                            *searching = false;
-                        } else if !filter.is_empty() {
-                            filter.clear();
+                        // One press leaves search AND drops the query.
+                        if exit_search_clearing_filter(searching, filter) {
                             *selected = 0;
                         } else {
                             self.prompt = PromptState::None;
@@ -2588,12 +2614,12 @@ impl App {
                     }
                     self.refresh_path_editor_completions();
                 }
-                Some(Action::Confirm) if is_searching => {
-                    if let PromptState::BrowseProjects { searching, .. } = &mut self.prompt {
-                        *searching = false;
-                    }
-                }
-                Some(Action::OpenEntry) if !is_searching => {
+                // `OpenEntry` is the browser's confirm, and it opens the
+                // highlighted entry whether or not the search row is up. Its
+                // other default keys (the right arrow, `l`) belong to the caret
+                // and to typing while searching, and never get here: the
+                // suppression gate above already withheld them.
+                Some(Action::OpenEntry) => {
                     self.open_selected_browser_entry();
                 }
                 Some(Action::AddCurrentDir) if !is_searching => {
@@ -2671,32 +2697,41 @@ impl App {
         }
 
         if matches!(self.prompt, PromptState::PickProject { .. }) {
-            let action = self.bindings.lookup(&key, BindingScope::Palette);
+            let searching = matches!(
+                self.prompt,
+                PromptState::PickProject {
+                    list: SearchableList {
+                        searching: true,
+                        ..
+                    },
+                    ..
+                }
+            );
+            // Typing and the caret keys belong to the search row while it has
+            // the keystrokes; everything else still reaches the bindings, which
+            // is what keeps the vertical keys walking the FILTERED results.
+            let action = if binding_lookup_is_suppressed(key, searching) {
+                None
+            } else {
+                self.bindings.lookup(&key, BindingScope::Palette)
+            };
             // Confirm-while-picking is the one branch that needs `self`; handle it
             // after releasing the prompt borrow so the borrow checker is happy.
             let mut do_confirm = false;
             if let PromptState::PickProject { entries, list, .. } = &mut self.prompt {
-                let is_searching = list.searching;
                 let vis_len = list.visible_indices(entries, pick_project_matches).len();
                 match action {
                     Some(Action::CloseOverlay) => {
-                        if is_searching {
-                            // First Esc leaves search mode (keeps the list open).
-                            list.end_search();
-                        } else {
+                        if !list.exit_search_clearing_filter() {
                             self.prompt = PromptState::None;
                         }
                     }
-                    Some(Action::SearchToggle) if !is_searching => list.begin_search(),
-                    Some(Action::Confirm) if is_searching => {
-                        // Commit the query and return to list navigation.
-                        list.end_search();
-                    }
+                    Some(Action::SearchToggle) if !searching => list.begin_search(),
                     Some(Action::Confirm) => do_confirm = true,
-                    Some(Action::MoveDown) if !is_searching => list.move_down(vis_len),
-                    Some(Action::MoveUp) if !is_searching => list.move_up(),
+                    Some(Action::MoveDown) => list.move_down(vis_len),
+                    Some(Action::MoveUp) => list.move_up(),
                     _ => {
-                        if is_searching && list.filter.handle_key(key) {
+                        if searching && list.filter.handle_key(key) {
                             // The filter changed; keep the selection in range.
                             let new_len = list.visible_indices(entries, pick_project_matches).len();
                             list.clamp_selected(new_len);
@@ -2883,30 +2918,50 @@ impl App {
                 _ => None,
             };
             let page = body.map(|body| body.height.max(1)).unwrap_or(10) as i16;
+            // The search row owns typing and the caret keys; everything else
+            // falls through to the same ladder the unfiltered list uses, so the
+            // vertical keys walk the FILTERED results and the confirm key opens
+            // the highlighted log. Only the two search-specific keys are
+            // handled here.
             if prompt.searching {
                 let mut select_after_filter = None;
+                let mut handled = true;
                 match startup_logs_action.or(dialog_action) {
-                    Some(Action::CloseOverlay | Action::SearchToggle | Action::Confirm) => {
+                    Some(Action::CloseOverlay) => {
+                        // One press leaves search AND drops the query. The
+                        // selection is an ABSOLUTE entry index here, so
+                        // restoring the full list leaves it pointing at the
+                        // same log; there is nothing to reset.
+                        exit_search_clearing_filter(&mut prompt.searching, &mut prompt.filter);
+                    }
+                    Some(Action::SearchToggle) => {
+                        // Leaving search by its own toggle KEEPS the query, so
+                        // the narrowed list stays up to be navigated.
                         prompt.searching = false;
                     }
-                    _ if matches!(
-                        key.code,
-                        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
-                    ) =>
+                    _ if !binding_lookup_is_suppressed(key, true)
+                        && !matches!(key.code, KeyCode::Backspace | KeyCode::Delete) =>
                     {
+                        handled = false;
+                    }
+                    _ => {
                         prompt.filter.handle_key(key);
                         select_after_filter = Self::startup_command_log_filtered_indices(prompt)
                             .first()
                             .copied();
                     }
-                    _ => {}
                 }
                 if let Some(index) = select_after_filter {
                     self.select_startup_command_log(index);
                 }
-                return Ok(false);
+                if handled {
+                    return Ok(false);
+                }
             }
 
+            let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+                return Ok(false);
+            };
             match startup_logs_action
                 .or(palette_action)
                 .or(dialog_action)
@@ -7530,6 +7585,7 @@ mod tests {
         ResourceKind, ResourceStats, RightSection, RuntimeTargetId, SearchableList,
         StartupCommandLogPrompt, TextInput, WorkerEvent,
     };
+    use crate::app::{StartupLogViewer, pick_project_matches};
     use crate::clipboard::Clipboard;
     use crate::config::{Config, ProjectConfig};
     use crate::editor::{DetectedEditor, EditorKind};
@@ -7543,6 +7599,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use dux_core::engine::InFlightKey;
+    use dux_core::worker::BrowserEntry;
     use dux_core::worker::ResolvedPullRequest;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -20336,5 +20393,435 @@ cyan = "#00ffff"
         app.prompt = PromptState::ChangeProjectDefaultProvider(prompt);
         app.handle_key(confirm).expect("confirm");
         assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    // ── Change B: one search behaviour everywhere ───────────────────────────
+    //
+    // Type to filter, the movement keys walk the FILTERED results, the confirm
+    // key acts on the highlighted one, the close key leaves search AND clears
+    // the query in the SAME press, and a second close key shuts the modal.
+    //
+    // Every test below drives real keys through `handle_key` rather than
+    // poking the prompt, because the bug class these guard is a key falling
+    // through the wrong branch.
+
+    fn tap(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+            .expect("handle key");
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            tap(app, KeyCode::Char(ch));
+        }
+    }
+
+    fn begin_search(app: &mut App) {
+        tap(app, KeyCode::Char('/'));
+    }
+
+    fn kill_running_search_prompt() -> KillRunningPrompt {
+        KillRunningPrompt {
+            runtimes: vec![
+                sample_runtime(
+                    RuntimeTargetId::Agent("session-1".to_string()),
+                    KillableRuntimeKind::Agent,
+                    "alpha-agent",
+                    "demo / codex / alpha-agent",
+                ),
+                sample_runtime(
+                    RuntimeTargetId::Terminal("term-1".to_string()),
+                    KillableRuntimeKind::Terminal,
+                    "beta-one",
+                    "demo / alpha-agent",
+                ),
+                sample_runtime(
+                    RuntimeTargetId::Terminal("term-2".to_string()),
+                    KillableRuntimeKind::Terminal,
+                    "beta-two",
+                    "demo / alpha-agent",
+                ),
+            ],
+            list: SearchableList::new(),
+            selected_ids: std::collections::HashSet::new(),
+            focus: KillRunningFocus::List,
+        }
+    }
+
+    fn pick_project_app() -> App {
+        let mut app = test_app(default_bindings());
+        let base = app.engine.projects[0].clone();
+        let mut extra = base.clone();
+        extra.id = "project-2".to_string();
+        extra.name = "beta-one".to_string();
+        let mut extra2 = base.clone();
+        extra2.id = "project-3".to_string();
+        extra2.name = "beta-two".to_string();
+        app.engine.projects.push(extra);
+        app.engine.projects.push(extra2);
+        app.open_project_chooser(ProjectChooserIntent::NewAgent)
+            .expect("open the project chooser");
+        app
+    }
+
+    fn pick_project_state(app: &App) -> (bool, String, usize, usize) {
+        let PromptState::PickProject { entries, list, .. } = &app.prompt else {
+            panic!("expected the project chooser, got {:?}", app.prompt);
+        };
+        (
+            list.searching,
+            list.filter.text.clone(),
+            list.selected,
+            list.visible_indices(entries, pick_project_matches).len(),
+        )
+    }
+
+    #[test]
+    fn pick_project_search_moves_picks_and_escapes_in_one_press() {
+        let mut app = pick_project_app();
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        let (searching, filter, selected, visible) = pick_project_state(&app);
+        assert!(searching && filter == "beta" && selected == 0);
+        assert_eq!(visible, 2, "the query must actually narrow the list");
+
+        // The movement keys walk the FILTERED results while search is on.
+        tap(&mut app, KeyCode::Down);
+        let (_, _, selected, _) = pick_project_state(&app);
+        assert_eq!(selected, 1, "Down must move through the filtered results");
+        tap(&mut app, KeyCode::Up);
+        let (_, _, selected, _) = pick_project_state(&app);
+        assert_eq!(selected, 0, "Up must move through the filtered results");
+
+        // One close key leaves search AND clears the query, in the same press,
+        // and the modal stays open showing everything.
+        tap(&mut app, KeyCode::Esc);
+        let (searching, filter, _, visible) = pick_project_state(&app);
+        assert!(!searching, "the first close key leaves search mode");
+        assert!(filter.is_empty(), "and clears the query in the same press");
+        assert_eq!(visible, 3, "so every row is visible again");
+
+        // The second one closes.
+        tap(&mut app, KeyCode::Esc);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn pick_project_confirm_picks_the_highlighted_row_while_searching() {
+        let mut app = pick_project_app();
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        tap(&mut app, KeyCode::Down);
+        tap(&mut app, KeyCode::Enter);
+        assert!(
+            !matches!(app.prompt, PromptState::PickProject { .. }),
+            "the confirm key must pick the highlighted row, not merely end search"
+        );
+    }
+
+    fn browse_state(app: &App) -> (bool, String, usize, usize) {
+        let PromptState::BrowseProjects {
+            entries,
+            filter,
+            searching,
+            selected,
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected the project browser, got {:?}", app.prompt);
+        };
+        let needle = filter.text.to_lowercase();
+        let visible = entries
+            .iter()
+            .filter(|entry| needle.is_empty() || entry.label.to_lowercase().contains(&needle))
+            .count();
+        (*searching, filter.text.clone(), *selected, visible)
+    }
+
+    fn browse_projects_app() -> App {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::BrowseProjects {
+            current_dir: PathBuf::from("/tmp"),
+            entries: ["alpha", "beta-one", "beta-two"]
+                .iter()
+                .map(|label| BrowserEntry {
+                    label: (*label).to_string(),
+                    path: PathBuf::from("/tmp").join(label),
+                    is_git_repo: false,
+                    is_parent: false,
+                })
+                .collect(),
+            loading: false,
+            selected: 0,
+            filter: TextInput::new(),
+            searching: false,
+            editing_path: false,
+            path_input: TextInput::new(),
+            tab_completions: Vec::new(),
+            tab_index: 0,
+        };
+        app
+    }
+
+    #[test]
+    fn browse_projects_search_moves_and_escapes_in_one_press() {
+        let mut app = browse_projects_app();
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        let (searching, filter, _, visible) = browse_state(&app);
+        assert!(searching && filter == "beta");
+        assert_eq!(visible, 2);
+
+        tap(&mut app, KeyCode::Down);
+        let (_, _, selected, _) = browse_state(&app);
+        assert_eq!(selected, 1, "Down must move through the filtered results");
+
+        tap(&mut app, KeyCode::Esc);
+        let (searching, filter, _, visible) = browse_state(&app);
+        assert!(!searching && filter.is_empty());
+        assert_eq!(visible, 3);
+
+        tap(&mut app, KeyCode::Esc);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn browse_projects_confirm_opens_the_highlighted_entry_while_searching() {
+        let mut app = browse_projects_app();
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        tap(&mut app, KeyCode::Down);
+        let PromptState::BrowseProjects { entries, .. } = &app.prompt else {
+            panic!("expected the browser");
+        };
+        let target = entries[2].path.clone();
+        tap(&mut app, KeyCode::Enter);
+        let PromptState::BrowseProjects { current_dir, .. } = &app.prompt else {
+            panic!("expected the browser to stay open on a directory");
+        };
+        assert_eq!(
+            *current_dir, target,
+            "the confirm key must open the highlighted entry, not merely end search"
+        );
+    }
+
+    fn kill_running_state(app: &App) -> (bool, String, usize, usize) {
+        let PromptState::KillRunning(prompt) = &app.prompt else {
+            panic!("expected the kill-running picker, got {:?}", app.prompt);
+        };
+        (
+            prompt.list.searching,
+            prompt.list.filter.text.clone(),
+            prompt.list.selected,
+            App::visible_kill_running_indices(prompt).len(),
+        )
+    }
+
+    #[test]
+    fn kill_running_search_moves_marks_and_escapes_in_one_press() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::KillRunning(kill_running_search_prompt());
+        begin_search(&mut app);
+        type_text(&mut app, "beta");
+        let (searching, filter, _, visible) = kill_running_state(&app);
+        assert!(searching && filter == "beta");
+        assert_eq!(visible, 2);
+
+        tap(&mut app, KeyCode::Down);
+        let (_, _, selected, _) = kill_running_state(&app);
+        assert_eq!(selected, 1);
+
+        // Confirm acts on the highlighted row. For this picker "picking" a row
+        // means marking it, and search stays on so the user can keep filtering.
+        tap(&mut app, KeyCode::Enter);
+        let PromptState::KillRunning(prompt) = &app.prompt else {
+            panic!("expected the kill-running picker");
+        };
+        assert!(
+            prompt
+                .selected_ids
+                .contains(&RuntimeTargetId::Terminal("term-2".to_string())),
+            "the confirm key must mark the highlighted row while searching"
+        );
+
+        tap(&mut app, KeyCode::Esc);
+        let (searching, filter, _, visible) = kill_running_state(&app);
+        assert!(!searching && filter.is_empty());
+        assert_eq!(visible, 3);
+
+        tap(&mut app, KeyCode::Esc);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    fn startup_logs_state(app: &App) -> (bool, String, usize, usize) {
+        let PromptState::StartupCommandLogs(prompt) = &app.prompt else {
+            panic!("expected the startup-log picker, got {:?}", app.prompt);
+        };
+        (
+            prompt.searching,
+            prompt.filter.text.clone(),
+            prompt.selected,
+            App::startup_command_log_filtered_indices(prompt).len(),
+        )
+    }
+
+    #[test]
+    fn startup_command_logs_search_moves_and_escapes_in_one_press() {
+        let mut app = test_app(default_bindings());
+        let mut prompt = startup_command_logs_prompt();
+        prompt.entries.push(crate::startup::StartupCommandLogEntry {
+            path: PathBuf::from("/tmp/install-extra.log"),
+            display_name: "install-extra.log".to_string(),
+            modified_at: None,
+        });
+        app.prompt = PromptState::StartupCommandLogs(prompt);
+        install_startup_command_logs_overlay(&mut app, 3);
+
+        begin_search(&mut app);
+        type_text(&mut app, "install");
+        let (searching, filter, selected, visible) = startup_logs_state(&app);
+        assert!(searching && filter == "install");
+        assert_eq!(visible, 2, "the query must narrow the list");
+        assert_eq!(selected, 1, "and land on the first match");
+
+        tap(&mut app, KeyCode::Down);
+        let (_, _, selected, _) = startup_logs_state(&app);
+        assert_eq!(selected, 2, "Down must move through the filtered results");
+        tap(&mut app, KeyCode::Up);
+        let (_, _, selected, _) = startup_logs_state(&app);
+        assert_eq!(selected, 1, "Up must move through the filtered results");
+
+        tap(&mut app, KeyCode::Esc);
+        let (searching, filter, _, visible) = startup_logs_state(&app);
+        assert!(!searching && filter.is_empty());
+        assert_eq!(visible, 3);
+
+        tap(&mut app, KeyCode::Esc);
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn startup_command_logs_confirm_opens_the_highlighted_log_while_searching() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
+        install_startup_command_logs_overlay(&mut app, 2);
+        begin_search(&mut app);
+        type_text(&mut app, "install");
+        tap(&mut app, KeyCode::Enter);
+        let (searching, _, selected, _) = startup_logs_state(&app);
+        assert!(
+            searching,
+            "the confirm key must not be swallowed as an implicit end-of-search"
+        );
+        assert_eq!(selected, 1, "and the highlighted log is still the match");
+        // The picker's confirm reaches `open_selected_startup_command_log`,
+        // which reports through the status line. (That function resolves the
+        // path from the fullscreen VIEWER rather than from this picker's
+        // selection, which is a pre-existing bug and deliberately not fixed
+        // here; what this test pins is that the key ARRIVES, which it did not
+        // before: the search branch used to consume it and only end search.)
+        assert!(
+            !app.status.message().is_empty(),
+            "the confirm key must reach the picker's open action while searching"
+        );
+    }
+
+    fn viewer_state(app: &App) -> (bool, String, u16) {
+        let viewer = app
+            .startup_log_viewer
+            .as_ref()
+            .expect("the log viewer must still be open");
+        (
+            viewer.searching,
+            viewer.search.text.clone(),
+            viewer.scroll_offset,
+        )
+    }
+
+    fn startup_log_viewer_app() -> App {
+        let mut app = test_app(default_bindings());
+        app.startup_log_viewer = Some(StartupLogViewer {
+            scope_label: "demo".to_string(),
+            path: Some(PathBuf::from("/tmp/startup-command.log")),
+            display_name: "startup-command.log".to_string(),
+            content: (0..200)
+                .map(|line| format!("startup command output line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            scroll_offset: 0,
+            search: TextInput::new(),
+            searching: false,
+        });
+        app.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app
+    }
+
+    #[test]
+    fn startup_log_viewer_search_scrolls_and_escapes_in_one_press() {
+        let mut app = startup_log_viewer_app();
+        begin_search(&mut app);
+        type_text(&mut app, "line 40");
+        let (searching, query, scrolled_to_match) = viewer_state(&app);
+        assert!(searching && query == "line 40");
+        assert!(scrolled_to_match > 0, "the query must jump to its match");
+
+        // The viewer has rows of TEXT, not rows to pick, so "move through the
+        // results" is a scroll. They were dead while searching.
+        tap(&mut app, KeyCode::Down);
+        let (_, _, after_down) = viewer_state(&app);
+        assert_eq!(
+            after_down,
+            scrolled_to_match + 1,
+            "Down must scroll while searching"
+        );
+        tap(&mut app, KeyCode::Up);
+        let (_, _, after_up) = viewer_state(&app);
+        assert_eq!(
+            after_up, scrolled_to_match,
+            "Up must scroll while searching"
+        );
+
+        tap(&mut app, KeyCode::Esc);
+        let (searching, query, _) = viewer_state(&app);
+        assert!(!searching, "the first close key leaves search mode");
+        assert!(query.is_empty(), "and clears the query in the same press");
+
+        tap(&mut app, KeyCode::Esc);
+        assert!(
+            app.startup_log_viewer.is_none(),
+            "the second close key shuts the viewer"
+        );
+    }
+
+    /// The palette and the macro bar are the deliberate exception, and the
+    /// reason is structural rather than a matter of taste: their search cannot
+    /// be turned OFF. The input IS the modal, there is nothing underneath it to
+    /// return to, so there is no mode to exit and one close key correctly
+    /// closes them. Do not "fix" them into the two-press ladder above.
+    #[test]
+    fn the_palette_and_the_macro_bar_still_close_on_one_press() {
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::Command {
+            input: TextInput::with_text("chan".to_string()),
+            selected: 0,
+        };
+        tap(&mut app, KeyCode::Esc);
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "one close key closes the palette even with a query typed"
+        );
+
+        let mut app = test_app(default_bindings());
+        app.macro_bar = Some(MacroBarState {
+            input: TextInput::with_text("gr".to_string()),
+            selected: 0,
+            previous_input_target: InputTarget::None,
+        });
+        tap(&mut app, KeyCode::Esc);
+        assert!(
+            app.macro_bar.is_none(),
+            "one close key closes the macro bar even with a query typed"
+        );
     }
 }

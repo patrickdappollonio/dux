@@ -1061,6 +1061,32 @@ pub(crate) struct ProjectChooserEntry {
     pub(crate) path_missing: bool,
 }
 
+/// Leave a search row, discarding whatever was typed into it.
+///
+/// The ONE Escape semantics every filterable modal in dux shares: the close key
+/// leaves search mode and clears the query in the SAME press, so the list comes
+/// back whole and the next close key shuts the modal. There used to be a middle
+/// state (leave search but keep filtering, then a second press to unfilter,
+/// then a third to close), which meant a user who typed a query had to press
+/// the close key three times to get out of a two-line dialog.
+///
+/// Returns `true` when there was something to leave, which is exactly the
+/// caller's "stay open" signal; `false` means the search row was already empty
+/// and idle, so the press belongs to the modal and should close it.
+///
+/// Two of the five callers hold a [`SearchableList`] and go through
+/// [`SearchableList::exit_search_clearing_filter`]; the other three keep their
+/// `searching` flag and their query in separate fields for reasons of their own
+/// (the startup-log picker's `selected` is an ABSOLUTE entry index rather than a
+/// visible one, and the fullscreen log viewer has no row selection at all), so
+/// they call this directly. One definition, three call shapes.
+pub(crate) fn exit_search_clearing_filter(searching: &mut bool, filter: &mut TextInput) -> bool {
+    let had_something = *searching || !filter.is_empty();
+    *searching = false;
+    filter.clear();
+    had_something
+}
+
 /// Shared search + selection state for filterable list modals (the project
 /// chooser, the kill-running dialog, …). Owns the `/` query, whether search mode
 /// is active, and the selection index INTO THE VISIBLE (filtered) list. Each
@@ -1108,9 +1134,17 @@ impl SearchableList {
         self.searching = true;
     }
 
-    /// Leave search mode, keeping the committed query.
-    pub(crate) fn end_search(&mut self) {
-        self.searching = false;
+    /// Leave search mode AND drop the query, resetting the selection to the top
+    /// of the restored list (`selected` indexes the VISIBLE list, so the index
+    /// it held meant something different a moment ago).
+    ///
+    /// See [`exit_search_clearing_filter`] for why this is one press.
+    pub(crate) fn exit_search_clearing_filter(&mut self) -> bool {
+        let left = exit_search_clearing_filter(&mut self.searching, &mut self.filter);
+        if left {
+            self.selected = 0;
+        }
+        left
     }
 
     pub(crate) fn move_up(&mut self) {
@@ -5029,8 +5063,16 @@ mod tests {
         assert_eq!(list.selected, 2);
         list.clamp_selected(0);
         assert_eq!(list.selected, 0);
-        list.end_search();
+        // Leaving search is one step: the mode goes off and the query goes
+        // with it, so the next close key belongs to the modal.
+        assert!(list.exit_search_clearing_filter());
         assert!(!list.searching);
+        assert!(list.filter.is_empty());
+        assert_eq!(list.selected, 0);
+        assert!(
+            !list.exit_search_clearing_filter(),
+            "an idle, empty search row has nothing to leave"
+        );
     }
 
     #[test]
