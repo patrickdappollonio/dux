@@ -381,6 +381,28 @@ impl App {
             ),
             "handle_key should not be called in interactive mode"
         );
+        // The agents-pane search box captures the keys it needs (text editing,
+        // result navigation, open, clear) so printable characters — including
+        // ones bound globally like `q` or `?` — edit the query instead of
+        // firing shortcuts. Keys it does not use (Tab, the palette key, …)
+        // leave search and fall through to normal dispatch. Placed before the
+        // global handler so the search box wins for the keys it owns.
+        if self.focus == FocusPane::Left
+            && self.left_search_active
+            && self.handle_left_search_key(key)?
+        {
+            return Ok(false);
+        }
+        // The files-pane search box captures keys the same way while active, so
+        // typing characters that are also global shortcuts (e.g. `q`) edits the
+        // query instead of firing the shortcut. Keys it doesn't use (Tab, the
+        // palette key, …) leave search and fall through to normal dispatch.
+        if self.focus == FocusPane::Files
+            && self.files_search_active
+            && self.handle_files_search_key(key)
+        {
+            return Ok(false);
+        }
         if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
             && self.close_top_overlay()
         {
@@ -666,6 +688,7 @@ impl App {
                 Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor()?,
                 Action::ChooseWorktreeEditor => self.open_worktree_editor_picker()?,
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
+                Action::SearchAgents => self.start_left_search(),
                 Action::InteractAgent => {
                     if self.selected_session().is_some()
                         && self
@@ -695,6 +718,227 @@ impl App {
         Ok(())
     }
 
+    /// Open the in-pane agent search. Forces the Projects section, clears any
+    /// prior query, and keeps the cursor on the currently selected agent (the
+    /// full, unfiltered list is shown until the user types). No-op when the
+    /// sidebar is collapsed to icons (no room for a search box).
+    fn start_left_search(&mut self) {
+        if self.left_collapsed {
+            return;
+        }
+        self.left_section = LeftSection::Projects;
+        // Remember where the cursor was so Esc can return here even if the
+        // query ends up matching nothing.
+        self.left_search_origin_session = self.selected_session().map(|s| s.id.clone());
+        self.left_search_active = true;
+        self.left_search.clear();
+        self.rebuild_left_items();
+        let open = self.bindings.label_for(Action::FocusAgent);
+        let clear = self.bindings.label_for(Action::CloseOverlay);
+        self.set_info(format!(
+            "Searching agents: type to filter by title, branch, or project. {open} opens the highlighted agent, {clear} clears."
+        ));
+    }
+
+    /// Route a key while the agents-pane search box is active. Returns `true`
+    /// when the search box consumed the key; `false` means the key is a
+    /// pane-switch/global action — search has been exited and the caller should
+    /// let normal dispatch handle it. Printable characters edit the query;
+    /// navigation/confirm/close resolve through the user's bindings.
+    fn handle_left_search_key(&mut self, key: KeyEvent) -> Result<bool> {
+        // Plain printable characters always edit the query first, so keys that
+        // are also bound in the Left pane (e.g. vim-style `j`/`k` navigation)
+        // are typed rather than triggering navigation.
+        let is_plain_char = matches!(key.code, KeyCode::Char(_))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if is_plain_char {
+            self.feed_left_search(key);
+            return Ok(true);
+        }
+        if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay) {
+            self.exit_left_search();
+            return Ok(true);
+        }
+        match self.bindings.lookup(&key, BindingScope::Left) {
+            Some(Action::MoveDown) => {
+                if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
+                    self.selected_left = next;
+                    self.after_left_search_selection_change();
+                }
+                return Ok(true);
+            }
+            Some(Action::MoveUp) => {
+                if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
+                    self.selected_left = prev;
+                    self.after_left_search_selection_change();
+                }
+                return Ok(true);
+            }
+            Some(Action::FocusAgent | Action::ExitInteractive) => {
+                self.open_left_search_selection()?;
+                return Ok(true);
+            }
+            _ => {}
+        }
+        // Let the text box handle the remaining editing keys it knows about —
+        // Backspace/Delete, cursor moves, and word operations (Ctrl/Alt+arrows,
+        // Alt+Backspace, Alt+b/f, Ctrl-W). The text box itself declines to insert
+        // Alt/Ctrl character combos, so an unconsumed key falls through below.
+        if self.feed_left_search(key) {
+            return Ok(true);
+        }
+        // A key bound to a global or Left-pane action (Tab/FocusNext, the palette
+        // key, or a rebound Left action such as NewAgent on a function key) leaves
+        // search and runs normally. An unbound key is ignored so a stray keypress
+        // doesn't silently drop the filter.
+        if self.bindings.lookup(&key, BindingScope::Global).is_some()
+            || self.bindings.lookup(&key, BindingScope::Left).is_some()
+        {
+            self.exit_left_search();
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Forward a key to the search text box, re-filtering only when the query
+    /// text actually changed (so cursor moves don't reset the highlight or
+    /// rebuild the list). Returns whether the text box consumed the key.
+    fn feed_left_search(&mut self, key: KeyEvent) -> bool {
+        let before = self.left_search.text.clone();
+        if self.left_search.handle_key(key) {
+            if self.left_search.text != before {
+                self.apply_left_search_query();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Re-filter the list after the query changed and move the highlight to the
+    /// first matching agent. The changed-files pane is intentionally not
+    /// reloaded here — that happens when the selection settles (Up/Down/Enter)
+    /// so typing does not run git on every keystroke.
+    fn apply_left_search_query(&mut self) {
+        // `rebuild_left_items` re-anchors the selection to the current session
+        // (for background refreshes); the typing path deliberately overrides that
+        // with `select_first_left_result` so each keystroke shows the top match.
+        self.rebuild_left_items();
+        self.select_first_left_result();
+        self.close_diff_view();
+    }
+
+    /// Move the highlight to the first agent row in the current (filtered) list.
+    fn select_first_left_result(&mut self) {
+        let first = self
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)));
+        if let Some(idx) = first {
+            self.selected_left = idx;
+        } else {
+            self.ensure_selectable_left_item();
+        }
+    }
+
+    /// Point the left selection at the agent row for `session_id`, if present
+    /// in the current list. Used to keep the highlight stable across the
+    /// filtered → full-list transition when search ends.
+    fn select_left_session_by_id(&mut self, session_id: &str) {
+        let found = self.left_items().iter().position(|item| match item {
+            LeftItem::Session(idx) => self.sessions.get(*idx).is_some_and(|s| s.id == session_id),
+            _ => false,
+        });
+        if let Some(idx) = found {
+            self.selected_left = idx;
+        }
+    }
+
+    /// Expand `session_id`'s project if it is collapsed, so the session is
+    /// present in the non-search list. Search reveals matches inside collapsed
+    /// projects, so a result the user opens (or returns to) must survive the
+    /// rebuild of the collapse-respecting full list.
+    fn uncollapse_project_for_session(&mut self, session_id: &str) {
+        if let Some(project_id) = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.project_id.clone())
+        {
+            self.collapsed_projects.remove(&project_id);
+        }
+    }
+
+    /// Shared teardown for leaving search: clear state, rebuild the full list,
+    /// and re-anchor the highlight to `keep_session` if it is still visible.
+    /// Does NOT change collapse state — cancelling a search must leave the
+    /// user's collapsed projects exactly as they were. Opening an agent inside a
+    /// collapsed project un-collapses explicitly via `open_left_search_selection`.
+    fn teardown_left_search(&mut self, keep_session: Option<String>) {
+        self.left_search_active = false;
+        self.left_search.clear();
+        self.left_search_origin_session = None;
+        self.rebuild_left_items();
+        if let Some(id) = keep_session {
+            self.select_left_session_by_id(&id);
+        }
+    }
+
+    /// Enter opens the highlighted agent and leaves search mode.
+    fn open_left_search_selection(&mut self) -> Result<()> {
+        let Some(session) = self.selected_session().cloned() else {
+            // No agent highlighted (e.g. nothing matched) — just close search.
+            self.teardown_left_search(None);
+            self.set_info("No matching agent to open. Search cleared, showing all agents.");
+            return Ok(());
+        };
+        let session_id = session.id.clone();
+        let label = session.title.unwrap_or(session.branch_name);
+        // Search can reveal an agent inside a collapsed project; opening it must
+        // expand that project so the agent is present in the rebuilt full list.
+        self.uncollapse_project_for_session(&session_id);
+        self.teardown_left_search(Some(session_id));
+        // activate_selected_left_item reloads the changed-files pane itself, so
+        // teardown deliberately skips the selection-change side effects here.
+        let status_before = self.status.message().to_string();
+        self.activate_selected_left_item()?;
+        // If activation set its own status (e.g. reconnecting a stopped agent),
+        // keep it; otherwise confirm the open so the search prompt doesn't linger.
+        if self.status.message() == status_before {
+            self.set_info(format!("Opened agent \"{label}\"."));
+        }
+        Ok(())
+    }
+
+    /// The agent the highlight should return to when search ends: whichever
+    /// agent is highlighted in the filtered view, or — when the query matched
+    /// nothing — the agent selected before search opened.
+    fn left_search_keep_target(&self) -> Option<String> {
+        self.selected_session()
+            .map(|s| s.id.clone())
+            .or_else(|| self.left_search_origin_session.clone())
+    }
+
+    /// Leave search mode (via Esc or a pane-switch key), restore the full
+    /// collapse-respecting list, re-anchor the highlight, and announce it.
+    fn exit_left_search(&mut self) {
+        let keep = self.left_search_keep_target();
+        self.teardown_left_search(keep);
+        self.set_info("Agent search cleared. Showing all agents.");
+        self.after_left_search_selection_change();
+    }
+
+    /// Shared side effects when the left selection settles during search: close
+    /// any open diff, reload the changed-files pane, refresh the missing project
+    /// warning — mirroring normal Up/Down navigation.
+    fn after_left_search_selection_change(&mut self) {
+        self.close_diff_view();
+        self.reload_changed_files();
+        self.update_missing_project_warning();
+    }
+
     fn handle_left_terminal_key(&mut self, key: KeyEvent) -> Result<()> {
         let term_count = self.terminal_items().len();
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
@@ -708,12 +952,14 @@ impl App {
                     } else {
                         // Jump back to projects section.
                         self.left_section = LeftSection::Projects;
-                        if let Some(last) = self
-                            .left_items()
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+                        if let Some(last) =
+                            self.left_items()
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .find_map(|(idx, item)| {
+                                    self.left_item_is_nav_target(*item).then_some(idx)
+                                })
                         {
                             self.selected_left = last;
                             self.close_diff_view();
@@ -984,33 +1230,63 @@ impl App {
         }
     }
 
-    fn handle_files_search_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.clear_files_search();
-                return;
-            }
-            KeyCode::Enter => {
-                self.files_search_active = false;
-                return;
-            }
-            _ => {}
+    /// Route a key while the files-pane search box is active. Returns `true`
+    /// when the box consumed the key; `false` means it is a pane-switch/global
+    /// action — the box has been left and the caller should let normal dispatch
+    /// handle it. Mirrors `handle_left_search_key` so the two in-pane searches
+    /// behave the same (e.g. Tab leaves search rather than being swallowed).
+    fn handle_files_search_key(&mut self, key: KeyEvent) -> bool {
+        let is_plain_char = matches!(key.code, KeyCode::Char(_))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if is_plain_char {
+            self.feed_files_search(key);
+            return true;
         }
+        // Close via the configurable binding (mirrors handle_left_search_key)
+        // rather than a hardcoded Esc, so a rebound close key works in both
+        // searches.
+        if self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay) {
+            self.clear_files_search();
+            return true;
+        }
+        if key.code == KeyCode::Enter {
+            self.files_search_active = false;
+            return true;
+        }
+        if self.feed_files_search(key) {
+            return true;
+        }
+        // A key bound to a global action (Tab/FocusNext, the palette key, …)
+        // fully leaves the search box (clearing the query, matching the agent
+        // search) and runs normally; an unbound key is ignored.
+        if self.bindings.lookup(&key, BindingScope::Global).is_some() {
+            self.clear_files_search();
+            return false;
+        }
+        true
+    }
+
+    /// Forward a key to the files-search text box, refreshing the match on a
+    /// change. Returns whether the text box consumed the key.
+    fn feed_files_search(&mut self, key: KeyEvent) -> bool {
         if self.files_search.handle_key(key) {
             let query = self.files_search.text.clone();
             let found_match = self.update_files_search(query);
             if !found_match && self.has_files_search() {
                 self.set_info("No file matches the current search.");
             }
+            true
+        } else {
+            false
         }
     }
 
     fn handle_files_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.files_search_active {
-            self.handle_files_search_key(key);
-            return Ok(());
-        }
-
+        // While the files search box is active, keys are intercepted at the top
+        // of handle_key (and handle_files_search_key clears the flag for keys it
+        // passes through), so by the time pane dispatch runs the box is inactive.
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Files) {
             match action {
                 Action::MoveDown if self.right_section != RightSection::CommitInput => {
@@ -5768,6 +6044,40 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let status_before = self.status.message().to_string();
+        let handled = self.handle_mouse_dispatch(mouse);
+        // Central enforcement: any mouse interaction that moved focus out of the
+        // projects list ends the agent search, so a filtered list never lingers
+        // in (or behind) an unfocused pane. Clicking/scrolling within the
+        // projects list keeps search active, matching keyboard navigation. The
+        // dispatch above already updated focus and (for activations) the status
+        // line, so this tears down without a second reload that would clobber
+        // that work.
+        if self.left_search_active
+            && !(self.focus == FocusPane::Left && self.left_section == LeftSection::Projects)
+        {
+            let keep = self.left_search_keep_target();
+            self.teardown_left_search(keep);
+            // Refresh the changed-files pane (and missing-project warning) for the
+            // restored selection, matching the keyboard exit path.
+            self.after_left_search_selection_change();
+            // Announce the cleared search only if nothing above set a status
+            // (e.g. opening an agent) — avoids clobbering that message and the
+            // now-stale "Searching agents…" prompt from search-open.
+            if self.status.message() == status_before {
+                self.set_info("Agent search cleared. Showing all agents.");
+            }
+        }
+        // Symmetrically, leaving an active files search fully clears its box
+        // (text included, not just the active flag) so neither a stale
+        // interceptor nor a lingering filter survives — matching the agent search.
+        if self.files_search_active && self.focus != FocusPane::Files {
+            self.clear_files_search();
+        }
+        handled
+    }
+
+    fn handle_mouse_dispatch(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(self.prompt, PromptState::None) {
             return self.handle_prompt_mouse(mouse);
         }
@@ -6505,6 +6815,9 @@ mod tests {
             files_index: 0,
             files_search: TextInput::new(),
             files_search_active: false,
+            left_search: TextInput::new(),
+            left_search_active: false,
+            left_search_origin_session: None,
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
@@ -8638,6 +8951,590 @@ not_a_real_action = ["x"]
 
         assert!(!app.files_search_active);
         assert!(app.files_search.is_empty());
+    }
+
+    /// Give the default fixture two agents under the single project, each with a
+    /// distinct searchable title/branch.
+    fn seed_two_agents(app: &mut App) {
+        app.sessions[0].title = Some("Fix the parser".to_string());
+        app.sessions[0].branch_name = "parser-branch".to_string();
+        let mut second = app.sessions[0].clone();
+        second.id = "session-2".to_string();
+        second.title = Some("Add logging".to_string());
+        second.branch_name = "logging-branch".to_string();
+        app.sessions.push(second);
+        app.rebuild_left_items();
+    }
+
+    fn type_chars(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .unwrap();
+        }
+    }
+
+    /// Two projects with three agents: session-1 (project-1, matches "alpha"),
+    /// session-2 (project-1, no match), session-3 (project-2, matches "alpha").
+    /// Lets tests exercise filtering and navigation across non-contiguous
+    /// session-array indices.
+    fn seed_two_projects(app: &mut App) {
+        let mut project2 = app.projects[0].clone();
+        project2.id = "project-2".to_string();
+        project2.name = "second".to_string();
+        app.projects.push(project2);
+
+        app.sessions[0].title = Some("alpha one".to_string());
+        app.sessions[0].branch_name = "alpha-one".to_string();
+        let mut no_match = app.sessions[0].clone();
+        no_match.id = "session-2".to_string();
+        no_match.title = Some("unrelated".to_string());
+        no_match.branch_name = "unrelated-branch".to_string();
+        let mut other_project = app.sessions[0].clone();
+        other_project.id = "session-3".to_string();
+        other_project.project_id = "project-2".to_string();
+        other_project.title = Some("alpha three".to_string());
+        other_project.branch_name = "alpha-three".to_string();
+        app.sessions.push(no_match);
+        app.sessions.push(other_project);
+        app.rebuild_left_items();
+    }
+
+    #[test]
+    fn slash_enters_left_search_and_filters_to_matching_agent() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.left_search_active);
+
+        type_chars(&mut app, "parser");
+
+        assert_eq!(app.left_search.text, "parser");
+        // The project header stays; only the matching agent remains.
+        assert_eq!(
+            app.left_items(),
+            &[LeftItem::Project(0), LeftItem::Session(0)]
+        );
+        // Highlight parks on the matching agent, not the header.
+        assert!(matches!(
+            app.left_items().get(app.selected_left),
+            Some(LeftItem::Session(0))
+        ));
+    }
+
+    #[test]
+    fn left_search_arrows_move_between_agents_skipping_header() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        // The project name "demo" matches, so both agents are listed.
+        type_chars(&mut app, "demo");
+        assert_eq!(app.left_items().len(), 3);
+        assert!(matches!(
+            app.left_items().get(app.selected_left),
+            Some(LeftItem::Session(0))
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(
+            app.left_items().get(app.selected_left),
+            Some(LeftItem::Session(1))
+        ));
+
+        // Down on the last agent does not wrap.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(
+            app.left_items().get(app.selected_left),
+            Some(LeftItem::Session(1))
+        ));
+
+        // Up returns to the first agent and never lands on the header at index 0.
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert!(matches!(
+            app.left_items().get(app.selected_left),
+            Some(LeftItem::Session(0))
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_ne!(app.selected_left, 0);
+        assert!(matches!(
+            app.left_items().get(app.selected_left),
+            Some(LeftItem::Session(0))
+        ));
+    }
+
+    #[test]
+    fn enter_opens_highlighted_agent_and_exits_left_search() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        // Avoid spawning a provider on activation: point worktrees at a missing
+        // path so reconnect short-circuits.
+        for session in &mut app.sessions {
+            session.worktree_path = "/nonexistent/dux-test-worktree".to_string();
+        }
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.left_search_active);
+        assert!(app.left_search.is_empty());
+        assert_eq!(app.focus, FocusPane::Center);
+        // The full list is restored and the highlight stays on the opened agent.
+        assert_eq!(app.left_items().len(), 3);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+    }
+
+    #[test]
+    fn esc_clears_left_search_and_restores_selection() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "logging");
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-2")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.left_search_active);
+        assert!(app.left_search.is_empty());
+        // Full list restored; highlight returns to the agent we were on.
+        assert_eq!(app.left_items().len(), 3);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-2")
+        );
+    }
+
+    #[test]
+    fn left_search_typed_global_shortcut_chars_edit_query() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        // 'q' is Quit globally and '?' toggles help — while searching they must
+        // be typed into the query, not fire their shortcuts.
+        type_chars(&mut app, "q?");
+
+        assert!(app.left_search_active);
+        assert_eq!(app.left_search.text, "q?");
+        assert!(app.help_scroll.is_none());
+    }
+
+    #[test]
+    fn enter_opens_agent_inside_collapsed_project_after_search() {
+        let mut app = test_app(default_bindings());
+        app.sessions[0].title = Some("Fix the parser".to_string());
+        // Avoid spawning a provider on activation.
+        app.sessions[0].worktree_path = "/nonexistent/dux-test-worktree".to_string();
+        // Collapse the project so its agent is hidden from the normal list.
+        app.collapsed_projects.insert("project-1".to_string());
+        app.rebuild_left_items();
+        app.focus = FocusPane::Left;
+
+        // Search reveals the agent inside the collapsed project.
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+
+        // Enter must un-collapse the project so the right agent is opened.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.left_search_active);
+        assert!(!app.collapsed_projects.contains("project-1"));
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+    }
+
+    #[test]
+    fn esc_cancel_does_not_uncollapse_a_browsed_project() {
+        let mut app = test_app(default_bindings());
+        app.sessions[0].title = Some("Fix the parser".to_string());
+        app.collapsed_projects.insert("project-1".to_string());
+        app.rebuild_left_items();
+        app.focus = FocusPane::Left;
+
+        // Search reveals the agent inside the collapsed project and highlights it.
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+
+        // Esc cancels the search; it must NOT change the user's collapse state.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.left_search_active);
+        assert!(app.collapsed_projects.contains("project-1"));
+    }
+
+    #[test]
+    fn tab_exits_left_search_and_switches_pane() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+        assert!(app.left_search_active);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        // Tab leaves search and moves focus to the next pane instead of being
+        // swallowed.
+        assert!(!app.left_search_active);
+        assert!(app.left_search.is_empty());
+        assert_eq!(app.focus, FocusPane::Center);
+    }
+
+    #[test]
+    fn esc_after_no_match_restores_pre_search_selection() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+        // Start on the second agent.
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(
+                |i| matches!(i, LeftItem::Session(idx) if app.sessions[*idx].id == "session-2"),
+            )
+            .unwrap();
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-2")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "zzz-no-match");
+        assert!(
+            app.left_items()
+                .iter()
+                .all(|i| !matches!(i, LeftItem::Session(_)))
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.left_search_active);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-2")
+        );
+    }
+
+    #[test]
+    fn mouse_selectability_skips_project_header_during_search() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+
+        // Filtered list is [Project(0), Session(0)]; the mouse must not be able
+        // to land on the project header during search (matching keyboard nav).
+        assert!(matches!(
+            app.left_items().first(),
+            Some(LeftItem::Project(_))
+        ));
+        assert!(!app.is_selectable_left_item(0));
+        assert!(app.is_selectable_left_item(1));
+    }
+
+    #[test]
+    fn alt_char_does_not_edit_left_search_query() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "par");
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))
+            .unwrap();
+
+        // Alt+x is a shortcut, not text — it must not be appended to the query,
+        // and (being unbound) it must not drop the user out of search either.
+        assert_eq!(app.left_search.text, "par");
+        assert!(app.left_search_active);
+    }
+
+    #[test]
+    fn files_search_typed_q_edits_query_not_quit() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.files_search_active);
+        type_chars(&mut app, "q");
+
+        // `q` is Quit globally; while searching files it must edit the query.
+        assert!(app.files_search_active);
+        assert_eq!(app.files_search.text, "q");
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    #[test]
+    fn word_delete_edits_left_search_query() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "foo bar");
+        assert_eq!(app.left_search.text, "foo bar");
+
+        // Alt+Backspace deletes the last word of the query without leaving search.
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT))
+            .unwrap();
+
+        assert!(app.left_search_active);
+        assert_eq!(app.left_search.text, "foo ");
+    }
+
+    #[test]
+    fn alt_word_nav_moves_cursor_in_left_search_without_typing() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "foo bar");
+        assert_eq!(app.left_search.cursor, 7);
+
+        // Alt+b is a word-left move handled by the text box: cursor moves to the
+        // start of "bar", the query text is unchanged, and search stays active.
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT))
+            .unwrap();
+
+        assert!(app.left_search_active);
+        assert_eq!(app.left_search.text, "foo bar");
+        assert_eq!(app.left_search.cursor, 4);
+    }
+
+    #[test]
+    fn clicking_another_pane_clears_left_search() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        install_mouse_layout(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+        assert!(app.left_search_active);
+
+        // A click in the center pane moves focus away and must clear search.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 5));
+
+        assert_eq!(app.focus, FocusPane::Center);
+        assert!(!app.left_search_active);
+        assert!(app.left_search.is_empty());
+        // The full, unfiltered list is restored (project header + both agents).
+        assert_eq!(app.left_items().len(), 3);
+    }
+
+    #[test]
+    fn left_search_navigates_matching_agents_across_projects() {
+        let mut app = test_app(default_bindings());
+        seed_two_projects(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "alpha");
+
+        // Both matching agents appear under their own project headers; the
+        // non-matching session-2 is dropped. Note the session indices are the
+        // global sessions-array indices (0 and 2), not filtered positions.
+        assert_eq!(
+            app.left_items(),
+            &[
+                LeftItem::Project(0),
+                LeftItem::Session(0),
+                LeftItem::Project(1),
+                LeftItem::Session(2),
+            ]
+        );
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+
+        // Down skips the second project header and the non-matching agent,
+        // landing on the matching agent in the other project.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-3")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
+    }
+
+    #[test]
+    fn tab_exits_files_search_and_switches_pane() {
+        let mut app = test_app(default_bindings());
+        app.focus = FocusPane::Files;
+        app.right_section = RightSection::Unstaged;
+        app.unstaged_files = vec![ChangedFile {
+            path: "src/main.rs".into(),
+            status: "M".into(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+        }];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "main");
+        assert!(app.files_search_active);
+
+        // Tab must leave the files search instead of being swallowed, and fully
+        // clear it (query included) rather than leaving a lingering filter.
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+
+        assert!(!app.files_search_active);
+        assert!(app.files_search.is_empty());
+        assert!(!app.has_files_search());
+        assert_ne!(app.focus, FocusPane::Files);
+    }
+
+    #[test]
+    fn cancel_in_pane_searches_clears_active_filter() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser");
+        assert!(app.left_search_active);
+        assert_eq!(app.left_items().len(), 2); // filtered: [Project, Session]
+
+        app.cancel_in_pane_searches();
+
+        assert!(!app.left_search_active);
+        assert!(app.left_search.is_empty());
+        assert_eq!(app.left_items().len(), 3); // full list restored
+    }
+
+    #[test]
+    fn background_rebuild_keeps_search_selection_anchored() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        // "demo" matches the project name, so both agents are listed.
+        type_chars(&mut app, "demo");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-2")
+        );
+
+        // A background worker rebuilding the list mid-search must not move the
+        // highlight off the agent the user navigated to.
+        app.rebuild_left_items();
+
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-2")
+        );
+    }
+
+    #[test]
+    fn double_click_agent_during_search_opens_and_clears() {
+        let mut app = test_app(default_bindings());
+        seed_two_agents(&mut app);
+        // Avoid spawning a provider on activation.
+        for session in &mut app.sessions {
+            session.worktree_path = "/nonexistent/dux-test-worktree".to_string();
+        }
+        install_mouse_layout(&mut app);
+        app.focus = FocusPane::Left;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .unwrap();
+        type_chars(&mut app, "parser"); // filtered to [Project(0), Session(0)]
+
+        // First click selects the agent row (list index 1) but keeps search;
+        // the second (double) click opens it and the post-dispatch hook clears.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+        assert!(app.left_search_active);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 2));
+
+        assert!(!app.left_search_active);
+        assert!(app.left_search.is_empty());
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(
+            app.selected_session().map(|s| s.id.clone()).as_deref(),
+            Some("session-1")
+        );
     }
 
     #[test]

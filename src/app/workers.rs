@@ -1116,6 +1116,12 @@ impl App {
         self.agent_launches_in_flight.remove(&session_id);
         self.last_pty_size = request.pty_size;
 
+        // A ready agent takes over the surface (focus moves to it), so leave any
+        // active in-pane search; otherwise a filtered list or search box would
+        // linger behind the agent. Rebuilds the (no-longer-filtered) list even on
+        // the reconnect path, which doesn't rebuild below.
+        self.cancel_in_pane_searches();
+
         if matches!(request.kind, AgentLaunchKind::Create { .. }) {
             self.create_agent_in_flight = false;
             if let Err(err) = self.session_store.upsert_session(&session) {

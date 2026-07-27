@@ -821,23 +821,66 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
-        self.mouse_layout.left_list = self
-            .themed_block(&title, projects_focused)
-            .inner(projects_area);
-        let mut state =
-            ListState::default().with_selected(if self.left_section == LeftSection::Projects {
-                Some(self.selected_left)
+        // Draw the pane border first so the list (and, when searching, the
+        // in-pane search box) can be laid out within its inner area.
+        let projects_block = self.themed_block(&title, projects_focused);
+        let projects_inner = projects_block.inner(projects_area);
+        projects_block.render(projects_area, frame.buffer_mut());
+
+        let show_search = self.left_search_active;
+        let list_area = if show_search && projects_inner.height >= 1 {
+            // Use a 2-row bordered box when there is room; fall back to a single
+            // borderless row in a very short pane so the active filter and its
+            // query stay visible rather than silently filtering an invisible box
+            // (at 1 row the query takes the row and the list is squeezed out).
+            let search_rows = if projects_inner.height >= 3 { 2 } else { 1 };
+            let [search_area, list_area] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(search_rows), Constraint::Min(1)])
+                .areas(projects_inner);
+            let query = render_single_line_cursor_input(
+                "/ ",
+                &self.left_search.text,
+                self.left_search.cursor,
+                self.theme.input_cursor_fg,
+                self.theme.input_cursor_bg,
+            );
+            let search_block = if search_rows == 2 {
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(self.theme.border_normal))
             } else {
-                None
-            });
-        StatefulWidget::render(
-            List::new(items)
-                .block(self.themed_block(&title, projects_focused))
-                .highlight_style(self.theme.selection_style()),
-            projects_area,
-            frame.buffer_mut(),
-            &mut state,
-        );
+                Block::default()
+            };
+            Paragraph::new(query)
+                .block(search_block)
+                .render(search_area, frame.buffer_mut());
+            list_area
+        } else {
+            projects_inner
+        };
+        self.mouse_layout.left_list = list_area;
+
+        if show_search && items.is_empty() {
+            Paragraph::new(Line::from(Span::styled(
+                "No matching agents",
+                Style::default().fg(self.theme.hint_dim_desc_fg),
+            )))
+            .render(list_area, frame.buffer_mut());
+        } else {
+            let mut state =
+                ListState::default().with_selected(if self.left_section == LeftSection::Projects {
+                    Some(self.selected_left)
+                } else {
+                    None
+                });
+            StatefulWidget::render(
+                List::new(items).highlight_style(self.theme.selection_style()),
+                list_area,
+                frame.buffer_mut(),
+                &mut state,
+            );
+        }
 
         // Render terminals section if any terminals exist.
         if let Some(term_area) = terminals_area {
@@ -1939,7 +1982,19 @@ impl App {
             FocusPane::Center => HintContext::Center,
             FocusPane::Files => HintContext::Files,
         };
-        let hints = self.footer_hints_for(ctx);
+        let hints = if self.focus == FocusPane::Left && self.left_search_active {
+            // Search mode owns the keys, so show its affordances instead of the
+            // normal left-pane hints (which would mislead — `/` and letters now
+            // edit the query).
+            vec![
+                (self.bindings.label_for(Action::CloseOverlay), "Exit search"),
+                (self.bindings.label_for(Action::MoveUp), "Up"),
+                (self.bindings.label_for(Action::MoveDown), "Down"),
+                (self.bindings.label_for(Action::FocusAgent), "Open agent"),
+            ]
+        } else {
+            self.footer_hints_for(ctx)
+        };
         let [hints_area, status_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])

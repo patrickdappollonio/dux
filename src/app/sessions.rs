@@ -964,6 +964,11 @@ impl App {
         self.resume_fallback_candidates.remove(&session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
+        // Drop a now-dangling agent-search restore target so a later Esc with no
+        // matches doesn't try to return to a deleted session.
+        if self.left_search_origin_session.as_deref() == Some(session.id.as_str()) {
+            self.left_search_origin_session = None;
+        }
         self.update_branch_sync_sessions();
         let project_still_has_sessions = self
             .sessions
@@ -2724,6 +2729,9 @@ mod tests {
             files_index: 0,
             files_search: TextInput::new(),
             files_search_active: false,
+            left_search: TextInput::new(),
+            left_search_active: false,
+            left_search_origin_session: None,
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),

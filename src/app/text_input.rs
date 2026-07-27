@@ -376,7 +376,9 @@ impl TextInput {
     /// Handle common text-editing keys. Returns `true` if the key was consumed.
     ///
     /// Handled keys:
-    /// - `Char(c)` (without Ctrl) → insert
+    /// - `Char(c)` (without Ctrl or Alt) → insert. Alt/Ctrl character combos are
+    ///   treated as shortcuts (see the Alt+b/Alt+f and Ctrl+W arms) and are not
+    ///   inserted as text, so the caller can dispatch them.
     /// - `Backspace` → delete char backward; `Alt+Backspace` / `Ctrl+W` → delete word backward
     /// - `Delete` → delete char forward; `Alt+Delete` / `Ctrl+Delete` → delete word forward
     /// - `Left` / `Right` → move char; `Alt+Left/Right` / `Ctrl+Left/Right` → move word
@@ -471,7 +473,11 @@ impl TextInput {
                 self.move_right_word();
                 true
             }
-            KeyCode::Char(c) if !has_ctrl => {
+            // Insert only un-modified characters. `Alt`/`Ctrl` combinations are
+            // shortcuts, not text (the word-navigation arms above already claim
+            // the Alt+b/Alt+f and Ctrl-W cases the editor cares about), so they
+            // are left for the caller to dispatch rather than typed into the field.
+            KeyCode::Char(c) if !has_ctrl && !has_alt => {
                 self.insert_char(c);
                 if is_multiline {
                     self.ensure_cursor_visible();

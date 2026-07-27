@@ -67,6 +67,13 @@ pub struct App {
     pub(crate) files_index: usize,
     pub(crate) files_search: TextInput,
     pub(crate) files_search_active: bool,
+    /// Single-line filter for the projects/agents list. Active state lives in
+    /// `left_search_active`; an empty query while active shows the full list.
+    pub(crate) left_search: TextInput,
+    pub(crate) left_search_active: bool,
+    /// Agent selected when search opened, used to restore the highlight if the
+    /// query ends up matching nothing.
+    pub(crate) left_search_origin_session: Option<String>,
     pub(crate) commit_input: TextInput,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
@@ -1310,12 +1317,56 @@ impl LeftItem {
     }
 }
 
-pub(crate) fn build_left_items(
+/// Build the flattened left-pane item list. Module-private so the only
+/// production entry point is [`App::rebuild_left_items`], which supplies the
+/// active search query (`None` when search is inactive) and re-anchors the
+/// selection — calling this directly with `None` while a search is active would
+/// silently produce an unfiltered list.
+fn build_left_items(
     projects: &[Project],
     sessions: &[AgentSession],
     collapsed_projects: &HashSet<String>,
     empty_project_separator_min_projects: u16,
+    search: Option<&str>,
 ) -> Vec<LeftItem> {
+    // When a search query is active, build a flat filtered view: project
+    // headers followed by their matching agents, with non-matching and
+    // agent-less projects dropped entirely. Collapse state and the
+    // empty-project grouping are ignored so matches are always revealed.
+    // Matching is case-insensitive; the needle is lowercased here so callers
+    // do not have to.
+    let search = search.map(str::trim).filter(|n| !n.is_empty());
+    if let Some(needle) = search {
+        let needle = needle.to_lowercase();
+        let needle = needle.as_str();
+        let mut items = Vec::new();
+        for (project_index, project) in projects.iter().enumerate() {
+            let project_matches = project.name.to_lowercase().contains(needle);
+            let matching: Vec<usize> = sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, session)| session.project_id == project.id)
+                .filter(|(_, session)| {
+                    project_matches
+                        || session
+                            .title
+                            .as_deref()
+                            .is_some_and(|t| t.to_lowercase().contains(needle))
+                        || session.branch_name.to_lowercase().contains(needle)
+                })
+                .map(|(session_index, _)| session_index)
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            items.push(LeftItem::Project(project_index));
+            for session_index in matching {
+                items.push(LeftItem::Session(session_index));
+            }
+        }
+        return items;
+    }
+
     let split_empty_projects = empty_project_separator_min_projects > 0
         && projects.len() >= usize::from(empty_project_separator_min_projects);
     let mut items = Vec::new();
@@ -1702,6 +1753,9 @@ impl App {
             files_index: 0,
             files_search: TextInput::new(),
             files_search_active: false,
+            left_search: TextInput::new(),
+            left_search_active: false,
+            left_search_origin_session: None,
             commit_input: TextInput::new()
                 .with_multiline(4)
                 .with_placeholder("Type your commit message\u{2026}"),
@@ -2575,19 +2629,66 @@ impl App {
     }
 
     pub(crate) fn rebuild_left_items(&mut self) {
+        // While searching, keep the highlight anchored to the same agent across
+        // rebuilds (e.g. a background branch/PR refresh re-running the filter)
+        // rather than letting `ensure_selectable_left_item` move it. The typing
+        // path overrides this afterward via `select_first_left_result`.
+        let anchor = self
+            .left_search_active
+            .then(|| self.selected_session().map(|s| s.id.clone()))
+            .flatten();
+        // `build_left_items` trims, lowercases, and ignores an empty query, so
+        // the raw text is passed through when search is active.
+        let search = self
+            .left_search_active
+            .then(|| self.left_search.text.clone());
         self.left_items_cache = build_left_items(
             &self.projects,
             &self.sessions,
             &self.collapsed_projects,
             self.config.ui.empty_project_separator_min_projects,
+            search.as_deref(),
         );
         self.ensure_selectable_left_item();
+        if let Some(id) = anchor
+            && let Some(index) = self.left_items_cache.iter().position(|item| {
+                matches!(item, LeftItem::Session(si) if self.sessions.get(*si).is_some_and(|s| s.id == id))
+            })
+        {
+            self.selected_left = index;
+        }
+    }
+
+    /// Whether keyboard or mouse navigation may land the cursor on `item`. Both
+    /// input paths route selection through this predicate. It matches
+    /// `LeftItem::is_selectable()`, except that while searching, project headers
+    /// act as plain context so selection only moves between agent rows.
+    /// (Deliberate, search-gated state transitions — e.g. re-selecting a project
+    /// after toggling its collapse — set the cursor directly and are exempt.)
+    pub(crate) fn left_item_is_nav_target(&self, item: LeftItem) -> bool {
+        item.is_selectable() && !(self.left_search_active && matches!(item, LeftItem::Project(_)))
+    }
+
+    /// Drop any active in-pane search (agents and files) without restoring a
+    /// prior selection. Used when a background event takes over the UI — e.g. an
+    /// agent launch completes and focus moves to the new agent — so a stale
+    /// filter or search box never lingers. Rebuilds the list when an agent
+    /// search was active so it is no longer filtered.
+    pub(crate) fn cancel_in_pane_searches(&mut self) {
+        let was_searching = self.left_search_active;
+        self.left_search_active = false;
+        self.left_search.clear();
+        self.left_search_origin_session = None;
+        self.clear_files_search();
+        if was_searching {
+            self.rebuild_left_items();
+        }
     }
 
     pub(crate) fn is_selectable_left_item(&self, index: usize) -> bool {
         self.left_items()
             .get(index)
-            .is_some_and(|item| item.is_selectable())
+            .is_some_and(|item| self.left_item_is_nav_target(*item))
     }
 
     pub(crate) fn next_selectable_left_item_after(&self, index: usize) -> Option<usize> {
@@ -2595,7 +2696,7 @@ impl App {
             .iter()
             .enumerate()
             .skip(index.saturating_add(1))
-            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+            .find_map(|(idx, item)| self.left_item_is_nav_target(*item).then_some(idx))
     }
 
     pub(crate) fn previous_selectable_left_item_before(&self, index: usize) -> Option<usize> {
@@ -2604,7 +2705,7 @@ impl App {
             .enumerate()
             .take(index)
             .rev()
-            .find_map(|(idx, item)| item.is_selectable().then_some(idx))
+            .find_map(|(idx, item)| self.left_item_is_nav_target(*item).then_some(idx))
     }
 
     pub(crate) fn ensure_selectable_left_item(&mut self) {
@@ -2615,7 +2716,7 @@ impl App {
         if self.selected_left >= self.left_items_cache.len() {
             self.selected_left = self.left_items_cache.len().saturating_sub(1);
         }
-        if self.left_items_cache[self.selected_left].is_selectable() {
+        if self.left_item_is_nav_target(self.left_items_cache[self.selected_left]) {
             return;
         }
         if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
@@ -3619,7 +3720,7 @@ mod tests {
         ];
         let sessions = vec![test_session("session-1", "project-2", 0)];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5, None);
 
         assert_eq!(
             items,
@@ -3631,6 +3732,92 @@ mod tests {
                 LeftItem::Project(3),
             ]
         );
+    }
+
+    #[test]
+    fn build_left_items_filters_by_title() {
+        let projects = vec![test_project("project-1"), test_project("project-2")];
+        let mut s0 = test_session("session-1", "project-1", 0);
+        s0.title = Some("Fix the parser".to_string());
+        let mut s1 = test_session("session-2", "project-2", 0);
+        s1.title = Some("Add logging".to_string());
+        let sessions = vec![s0, s1];
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0, Some("parser"));
+
+        assert_eq!(items, vec![LeftItem::Project(0), LeftItem::Session(0)]);
+    }
+
+    #[test]
+    fn build_left_items_filters_by_branch_name() {
+        let projects = vec![test_project("project-1")];
+        // test_session sets branch_name == id.
+        let sessions = vec![
+            test_session("feature-login", "project-1", 0),
+            test_session("chore-docs", "project-1", 0),
+        ];
+
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0, Some("login"));
+
+        assert_eq!(items, vec![LeftItem::Project(0), LeftItem::Session(0)]);
+    }
+
+    #[test]
+    fn build_left_items_project_name_match_surfaces_all_agents() {
+        let projects = vec![test_project("backend"), test_project("frontend")];
+        let sessions = vec![
+            test_session("alpha", "backend", 0),
+            test_session("beta", "backend", 0),
+            test_session("gamma", "frontend", 0),
+        ];
+
+        // "backend" matches the project name, so both of its agents appear even
+        // though their own titles/branches don't contain the needle. The
+        // unrelated project is dropped.
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0, Some("backend"));
+
+        assert_eq!(
+            items,
+            vec![
+                LeftItem::Project(0),
+                LeftItem::Session(0),
+                LeftItem::Session(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn build_left_items_filter_hides_empty_projects_and_ignores_collapse() {
+        let projects = vec![
+            test_project("alpha"), // has a matching agent, but is collapsed
+            test_project("beta"),  // no agents at all
+            test_project("gamma"), // an agent that does not match
+        ];
+        let mut s0 = test_session("s0", "alpha", 0);
+        s0.title = Some("login flow".to_string());
+        let mut s1 = test_session("s1", "gamma", 0);
+        s1.title = Some("unrelated".to_string());
+        let sessions = vec![s0, s1];
+
+        let mut collapsed = HashSet::new();
+        collapsed.insert("alpha".to_string());
+
+        let items = build_left_items(&projects, &sessions, &collapsed, 5, Some("login"));
+
+        // alpha is revealed despite being collapsed; the empty project and the
+        // non-matching project are hidden; no spacer/separator in search view.
+        assert_eq!(items, vec![LeftItem::Project(0), LeftItem::Session(0)]);
+    }
+
+    #[test]
+    fn build_left_items_empty_query_is_unfiltered() {
+        let projects = vec![test_project("p1")];
+        let sessions = vec![test_session("s1", "p1", 0)];
+
+        let filtered = build_left_items(&projects, &sessions, &HashSet::new(), 0, Some(""));
+        let unfiltered = build_left_items(&projects, &sessions, &HashSet::new(), 0, None);
+
+        assert_eq!(filtered, unfiltered);
     }
 
     #[test]
@@ -3647,7 +3834,7 @@ mod tests {
             test_session("session-2", "project-4", 0),
         ];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5, None);
 
         assert_eq!(
             items,
@@ -3680,7 +3867,7 @@ mod tests {
             test_session("session-3", "project-3", 0),
         ];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5, None);
 
         assert_eq!(
             items,
@@ -3715,7 +3902,7 @@ mod tests {
         ];
         sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 5, None);
 
         assert_eq!(
             items,
@@ -3745,7 +3932,7 @@ mod tests {
         ];
         let sessions = vec![test_session("session-1", "project-2", 0)];
 
-        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0);
+        let items = build_left_items(&projects, &sessions, &HashSet::new(), 0, None);
 
         assert!(!items.contains(&LeftItem::EmptyProjectsSeparator));
         assert!(!items.contains(&LeftItem::EmptyProjectsSpacer));
@@ -3762,7 +3949,7 @@ mod tests {
             test_project("project-5"),
         ];
 
-        let items = build_left_items(&projects, &[], &HashSet::new(), 5);
+        let items = build_left_items(&projects, &[], &HashSet::new(), 5, None);
 
         assert_eq!(
             items,
