@@ -192,6 +192,12 @@ pub enum EngineRequest {
         String,
         oneshot::Sender<Option<(dux_core::config::DuxPaths, String)>>,
     ),
+    /// Resolve a PROJECT's startup-command-log context: the dux paths, once the
+    /// project id is confirmed to exist. The project id is the log directory key
+    /// itself, so nothing else needs resolving. `None` when the project id is
+    /// unknown, which is what makes the GET 404 instead of reporting an empty
+    /// listing for a project that was never registered.
+    ProjectStartupLogContext(String, oneshot::Sender<Option<dux_core::config::DuxPaths>>),
     /// Read the raw `config.toml` text off the engine thread for the Monaco
     /// config editor. Replies with the file's contents verbatim, or the canonical
     /// plain render of the running config when the file does not exist yet. A
@@ -949,6 +955,26 @@ impl EngineHandle {
         if self
             .req_tx
             .send(EngineRequest::SessionStartupLogContext(session_id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// Resolve a project's startup-command-log context: the dux paths, present
+    /// only when the project id is known. Instant lookup, mirroring
+    /// [`EngineHandle::session_startup_log_context`]; the directory listing / file
+    /// read runs off-thread in the caller. `None` when the project id is unknown.
+    pub async fn project_startup_log_context(
+        &self,
+        project_id: String,
+    ) -> Option<dux_core::config::DuxPaths> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::ProjectStartupLogContext(project_id, tx))
             .await
             .is_err()
         {
@@ -2087,6 +2113,14 @@ fn handle_request(
                 .iter()
                 .find(|s| s.id == session_id)
                 .map(|session| (engine.paths.clone(), session.project_id.clone()));
+            let _ = reply.send(context);
+        }
+        EngineRequest::ProjectStartupLogContext(project_id, reply) => {
+            let context = engine
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|_| engine.paths.clone());
             let _ = reply.send(context);
         }
         EngineRequest::ReadRawConfig(reply) => {
