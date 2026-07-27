@@ -29,9 +29,37 @@ impl SyntaxCache {
 /// Pre-rendered diff ready for display.
 pub struct DiffOutput {
     pub lines: Vec<Line<'static>>,
+    pub rows: Vec<DiffRow>,
     /// Display-column width of the gutter (line numbers + separator + prefix).
     /// Zero when line numbers are disabled.
     pub gutter_width: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DiffSide {
+    Old,
+    New,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffAnchor {
+    pub rel_path: String,
+    pub side: DiffSide,
+    pub line_number: usize,
+    pub line_content: String,
+    pub tag: DiffRowTag,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DiffRowTag {
+    Context,
+    Add,
+    Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffRow {
+    pub anchor: Option<DiffAnchor>,
 }
 
 /// Compute a syntax-highlighted, unified diff for a single file.
@@ -53,6 +81,7 @@ pub fn diff_file(
     if old_bytes == new_bytes {
         return Ok(DiffOutput {
             lines: vec![Line::from("No changes.")],
+            rows: vec![DiffRow { anchor: None }],
             gutter_width: 0,
         });
     }
@@ -112,12 +141,14 @@ pub fn diff_file(
             .fg(theme.diff_file_header)
             .add_modifier(Modifier::BOLD),
     )));
+    let mut rows = vec![DiffRow { anchor: None }];
     lines.push(Line::from(Span::styled(
         format!("+++ b/{rel_path}"),
         Style::default()
             .fg(theme.diff_file_header)
             .add_modifier(Modifier::BOLD),
     )));
+    rows.push(DiffRow { anchor: None });
 
     for hunk in text_diff.unified_diff().context_radius(3).iter_hunks() {
         // Hunk header (@@ ... @@).
@@ -133,6 +164,7 @@ pub fn diff_file(
             Style::default().fg(theme.diff_hunk),
         ));
         lines.push(Line::from(hunk_spans));
+        rows.push(DiffRow { anchor: None });
 
         // We maintain two separate highlighters so that removed lines are
         // highlighted in the context of the old file and added/context lines
@@ -144,6 +176,7 @@ pub fn diff_file(
         for change in hunk.iter_changes() {
             let tag = change.tag();
             let text = change.value();
+            let line_content = text.trim_end_matches('\n').to_string();
 
             let (prefix, base_fg, bg, highlighter) = match tag {
                 ChangeTag::Delete => (
@@ -154,6 +187,29 @@ pub fn diff_file(
                 ),
                 ChangeTag::Insert => ("+", theme.diff_add, Some(theme.diff_add_bg), &mut hl_new),
                 ChangeTag::Equal => (" ", Color::Reset, None, &mut hl_new),
+            };
+            let anchor = match tag {
+                ChangeTag::Delete => change.old_index().map(|idx| DiffAnchor {
+                    rel_path: rel_path.to_string(),
+                    side: DiffSide::Old,
+                    line_number: idx + 1,
+                    line_content: line_content.clone(),
+                    tag: DiffRowTag::Delete,
+                }),
+                ChangeTag::Insert => change.new_index().map(|idx| DiffAnchor {
+                    rel_path: rel_path.to_string(),
+                    side: DiffSide::New,
+                    line_number: idx + 1,
+                    line_content: line_content.clone(),
+                    tag: DiffRowTag::Add,
+                }),
+                ChangeTag::Equal => change.new_index().map(|idx| DiffAnchor {
+                    rel_path: rel_path.to_string(),
+                    side: DiffSide::New,
+                    line_number: idx + 1,
+                    line_content: line_content.clone(),
+                    tag: DiffRowTag::Context,
+                }),
             };
 
             // Attempt syntax highlighting; fall back to plain coloring.
@@ -214,12 +270,14 @@ pub fn diff_file(
                 }
             };
             lines.push(Line::from(spans));
+            rows.push(DiffRow { anchor });
         }
     }
 
     if lines.len() <= 2 {
         // Only headers, no actual hunks (e.g. binary file or mode change).
         lines.push(Line::from("No text diff available."));
+        rows.push(DiffRow { anchor: None });
     }
 
     // Gutter width includes line numbers, separator, and the +/-/space prefix.
@@ -232,6 +290,7 @@ pub fn diff_file(
 
     Ok(DiffOutput {
         lines,
+        rows,
         gutter_width,
     })
 }
@@ -264,6 +323,13 @@ fn binary_diff_output(
             Line::from(format!("Old size: {old_size} bytes")),
             Line::from(format!("New size: {new_size} bytes")),
             Line::from("No text diff available for binary or non-UTF-8 content."),
+        ],
+        rows: vec![
+            DiffRow { anchor: None },
+            DiffRow { anchor: None },
+            DiffRow { anchor: None },
+            DiffRow { anchor: None },
+            DiffRow { anchor: None },
         ],
         gutter_width: 0,
     }
@@ -415,6 +481,7 @@ fn find_soft_break(spans: &[Span<'static>], max_col: usize) -> Option<usize> {
 ///
 /// When `gutter_width` is 0 this is a no-op — the caller should fall back to
 /// `Paragraph::wrap()`.
+#[allow(dead_code)]
 pub fn wrap_diff_lines(
     lines: &[Line<'static>],
     total_width: usize,
@@ -465,6 +532,62 @@ pub fn wrap_diff_lines(
             };
             row_spans.extend(chunk);
             out.push(Line::from(row_spans));
+
+            remaining = rest;
+            first = false;
+        }
+    }
+
+    out
+}
+
+pub fn wrap_diff_lines_with_indices(
+    lines: &[Line<'static>],
+    total_width: usize,
+    gutter_width: usize,
+) -> Vec<(Line<'static>, usize)> {
+    if gutter_width == 0 || total_width <= gutter_width {
+        return lines
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, line)| (line, idx))
+            .collect();
+    }
+
+    let content_width = total_width - gutter_width;
+    let mut out: Vec<(Line<'static>, usize)> = Vec::with_capacity(lines.len());
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_width = line.width();
+        if line_width <= total_width {
+            out.push((line.clone(), idx));
+            continue;
+        }
+
+        let (gutter_spans, content_spans) = split_spans_at(&line.spans, gutter_width);
+        let continuation_gutter = blank_gutter_keeping_separator(&gutter_spans);
+        let mut remaining = content_spans;
+        let mut first = true;
+        loop {
+            let remaining_width: usize = remaining.iter().map(|s| s.content.chars().count()).sum();
+            if remaining_width == 0 {
+                break;
+            }
+            let take = if remaining_width > content_width {
+                find_soft_break(&remaining, content_width).unwrap_or(content_width)
+            } else {
+                remaining_width
+            };
+            let (chunk, rest) = split_spans_at(&remaining, take);
+
+            let mut row_spans: Vec<Span<'static>> = if first {
+                gutter_spans.clone()
+            } else {
+                continuation_gutter.clone()
+            };
+            row_spans.extend(chunk);
+            out.push((Line::from(row_spans), idx));
 
             remaining = rest;
             first = false;
@@ -547,6 +670,78 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("New size: 5 bytes"))
         );
+    }
+
+    #[test]
+    fn diff_rows_include_line_anchors_for_added_removed_and_context_lines() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        std::fs::write(repo.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        Command::new("git")
+            .args(["add", "notes.txt"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        std::fs::write(repo.join("notes.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+
+        let cache = SyntaxCache::new();
+        let output = diff_file(
+            repo,
+            "notes.txt",
+            &AppTheme::default_dark(),
+            &cache,
+            true,
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(output.lines.len(), output.rows.len());
+        let anchors: Vec<_> = output
+            .rows
+            .iter()
+            .filter_map(|row| row.anchor.as_ref())
+            .collect();
+        assert!(anchors.iter().any(|anchor| {
+            anchor.tag == DiffRowTag::Context
+                && anchor.side == DiffSide::New
+                && anchor.line_number == 1
+                && anchor.line_content == "one"
+        }));
+        assert!(anchors.iter().any(|anchor| {
+            anchor.tag == DiffRowTag::Delete
+                && anchor.side == DiffSide::Old
+                && anchor.line_number == 2
+                && anchor.line_content == "two"
+        }));
+        assert!(anchors.iter().any(|anchor| {
+            anchor.tag == DiffRowTag::Add
+                && anchor.side == DiffSide::New
+                && anchor.line_number == 2
+                && anchor.line_content == "TWO"
+        }));
     }
 
     /// Helper: create a git repo with a committed file and then modify it.
@@ -911,6 +1106,19 @@ mod tests {
         let wrapped = wrap_diff_lines(&lines, 10, 0);
         assert_eq!(wrapped.len(), 1);
         assert_eq!(wrapped[0].to_string(), lines[0].to_string());
+    }
+
+    #[test]
+    fn wrap_diff_lines_with_indices_preserves_source_rows() {
+        let lines = vec![Line::from("  │+hello world"), Line::from("  │+short")];
+        let wrapped = wrap_diff_lines_with_indices(&lines, 9, 5);
+        let rendered: Vec<_> = wrapped
+            .iter()
+            .map(|(line, idx)| (line.to_string(), *idx))
+            .collect();
+
+        assert_eq!(rendered[0], ("  │+hello".to_string(), 0));
+        assert_eq!(rendered.last().unwrap().1, 1);
     }
 
     #[test]
