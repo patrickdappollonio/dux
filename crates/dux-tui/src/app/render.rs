@@ -4750,7 +4750,7 @@ impl App {
                                 .modified_at
                                 .map(|ts| ts.format("%Y-%m-%d %H:%M:%S").to_string())
                                 .unwrap_or_else(|| "unknown time".to_string());
-                            ListItem::new(vec![
+                            let lines = vec![
                                 Line::from(Span::styled(
                                     entry.display_name.clone(),
                                     Style::default()
@@ -4761,7 +4761,15 @@ impl App {
                                     modified,
                                     Style::default().fg(self.theme.hint_desc_fg),
                                 )),
-                            ])
+                            ];
+                            // The click mapping divides a screen row by this
+                            // height to reach an item index; a third line here
+                            // would silently select the wrong run.
+                            debug_assert_eq!(
+                                lines.len(),
+                                usize::from(crate::app::input::STARTUP_LOG_ROW_HEIGHT)
+                            );
+                            ListItem::new(lines)
                         })
                         .collect::<Vec<_>>()
                 };

@@ -16,6 +16,11 @@ use ratatui::buffer::CellWidth;
 /// scrolling is unaffected: arrows stay one line, PgUp/PgDn stay a page. The
 /// web surface matches via xterm's `scrollSensitivity: 3` in TerminalPane.tsx.
 const MOUSE_WHEEL_LINES: usize = 3;
+/// Terminal rows one run occupies in the startup-log picker's list: the file
+/// name, then its modified timestamp. Shared with the renderer that builds
+/// those two lines (which asserts against it) so the click mapping and the
+/// drawing cannot drift apart.
+pub(crate) const STARTUP_LOG_ROW_HEIGHT: u16 = 2;
 const MIN_LEFT_WIDTH_PCT: u16 = 14;
 const MAX_LEFT_WIDTH_PCT: u16 = 38;
 const MIN_RIGHT_WIDTH_PCT: u16 = 14;
@@ -4465,11 +4470,31 @@ impl App {
         column: u16,
         row: u16,
     ) -> Option<usize> {
+        Self::overlay_row_at_sized(rect, offset, items, 1, column, row)
+    }
+
+    /// `overlay_row_at` for a list whose items are more than one terminal row
+    /// tall.
+    ///
+    /// `ListState::offset()` counts ITEMS, but a click arrives as a screen ROW,
+    /// so the two only line up when an item is one row. The startup-log picker
+    /// draws each run as a name line plus a timestamp line, and the one-row
+    /// assumption mapped a click on run N onto run 2N: the second run's name
+    /// line resolved past the end of the list and selected nothing at all. It
+    /// went unnoticed because nothing outside tests could open that picker.
+    fn overlay_row_at_sized(
+        rect: Rect,
+        offset: usize,
+        items: usize,
+        rows_per_item: u16,
+        column: u16,
+        row: u16,
+    ) -> Option<usize> {
         if !contains_point(rect, column, row) {
             return None;
         }
         let relative_row = usize::from(row.saturating_sub(rect.y));
-        let index = offset.saturating_add(relative_row);
+        let index = offset.saturating_add(relative_row / usize::from(rows_per_item.max(1)));
         (index < items).then_some(index)
     }
 
@@ -4545,8 +4570,16 @@ impl App {
                 } else if contains_point(close_button, column, row) {
                     Some(PromptMouseTarget::StartupCommandLogsClose)
                 } else {
-                    Self::overlay_row_at(list, offset, items, column, row)
-                        .map(PromptMouseTarget::StartupCommandLogItem)
+                    // Two rows per run: the file name, then its timestamp.
+                    Self::overlay_row_at_sized(
+                        list,
+                        offset,
+                        items,
+                        STARTUP_LOG_ROW_HEIGHT,
+                        column,
+                        row,
+                    )
+                    .map(PromptMouseTarget::StartupCommandLogItem)
                 }
             }
             OverlayMouseLayout::ConfigureStartupCommand {
@@ -22582,6 +22615,46 @@ cyan = "#00ffff"
             panic!("the picker must stay open");
         };
         assert_eq!(prompt.filter.cursor, 2, "the click must land the caret");
+    }
+
+    /// The row-to-item mapping for a list whose items are taller than one row.
+    /// With `rows_per_item == 1` (every other overlay list) it is unchanged; at
+    /// 2 both of a run's lines resolve to that run, which is what the one-row
+    /// assumption got wrong.
+    #[test]
+    fn overlay_row_mapping_accounts_for_multi_row_items() {
+        let list = Rect::new(10, 5, 30, 12);
+        let at = |rows_per_item, row| {
+            App::overlay_row_at_sized(list, 0, 3, rows_per_item, list.x + 1, row)
+        };
+
+        assert_eq!(at(1, list.y), Some(0));
+        assert_eq!(at(1, list.y + 1), Some(1));
+        assert_eq!(at(1, list.y + 2), Some(2));
+
+        assert_eq!(at(2, list.y), Some(0), "a run's name line selects it");
+        assert_eq!(
+            at(2, list.y + 1),
+            Some(0),
+            "and so does its timestamp line, which used to select the NEXT run"
+        );
+        assert_eq!(
+            at(2, list.y + 2),
+            Some(1),
+            "the second run starts two rows down; this used to resolve to 2"
+        );
+        assert_eq!(at(2, list.y + 5), Some(2));
+        assert_eq!(
+            at(2, list.y + 6),
+            None,
+            "and past the last run there is nothing to select"
+        );
+
+        // Scrolled: the offset counts ITEMS, not rows, on both paths.
+        assert_eq!(
+            App::overlay_row_at_sized(list, 4, 8, 2, list.x + 1, list.y + 2),
+            Some(5)
+        );
     }
 
     /// The resource monitor's row cursor must answer to the movement BINDINGS,
