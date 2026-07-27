@@ -2,6 +2,7 @@ import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import mdx from "@astrojs/mdx";
 import pagefind from "astro-pagefind";
+import tailwindcss from "@tailwindcss/vite";
 import { unified } from "@astrojs/markdown-remark";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
@@ -35,6 +36,23 @@ export default defineConfig({
   ],
   build: {
     inlineStylesheets: "auto",
+  },
+  // Tailwind 4 through its own Vite plugin, which is the path Astro and
+  // Tailwind both document. The PostCSS plugin is not usable here: under
+  // Vite 8 the bundled postcss-import resolves `@import "tailwindcss"` in
+  // global.css as a relative file and fails before Tailwind's plugin ever
+  // runs. The Vite plugin resolves the bare package import itself.
+  vite: {
+    plugins: [tailwindcss()],
+    build: {
+      // Match Tailwind's own compile targets. Tailwind emits the vendor
+      // prefixes those browsers need (notably `-webkit-backdrop-filter`, which
+      // Safari required before 18 and the sticky header's blur depends on),
+      // but Vite 8 minifies the result with Lightning CSS against a newer
+      // default target and strips them back out. Stating the floor here keeps
+      // the prefixes in the shipped CSS.
+      cssTarget: ["safari16.4", "chrome111", "firefox128", "edge111"],
+    },
   },
   markdown: {
     // GitHub's dark theme reads cleanly on the site's near-black panels and
