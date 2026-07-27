@@ -13334,6 +13334,7 @@ mod tests {
             scroll_offset: scroll,
             search: crate::app::text_input::TextInput::new(),
             searching: false,
+            return_to: None,
         });
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
         terminal

@@ -2452,6 +2452,10 @@ impl App {
     ///
     /// No I/O: the body the picker is already showing is the body the viewer
     /// gets, so this is instant and cannot disagree with what was on screen.
+    ///
+    /// The picker itself rides along on the viewer as its `return_to` ticket,
+    /// so closing the viewer restores this exact run list rather than dropping
+    /// the user out of the journey (see [`App::close_top_overlay`]).
     pub(crate) fn promote_startup_command_log_to_fullscreen(&mut self) {
         let PromptState::StartupCommandLogs(prompt) = &self.prompt else {
             return;
@@ -2468,6 +2472,7 @@ impl App {
             scroll_offset: 0,
             search: TextInput::new(),
             searching: false,
+            return_to: Some(Box::new(prompt.clone())),
         };
         self.prompt = PromptState::None;
         self.input_target = InputTarget::None;

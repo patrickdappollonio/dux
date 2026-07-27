@@ -17333,6 +17333,7 @@ cyan = "#00ffff"
             scroll_offset: 0,
             search: TextInput::new(),
             searching: false,
+            return_to: None,
         });
 
         assert_eq!(
@@ -17414,6 +17415,7 @@ cyan = "#00ffff"
             scroll_offset: 0,
             search: TextInput::new(),
             searching: false,
+            return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
         app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 10));
@@ -17446,6 +17448,7 @@ cyan = "#00ffff"
             scroll_offset: 0,
             search: TextInput::new(),
             searching: false,
+            return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
 
@@ -22016,6 +22019,7 @@ cyan = "#00ffff"
             scroll_offset: 0,
             search: TextInput::new(),
             searching: false,
+            return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
         app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
@@ -23103,6 +23107,73 @@ cyan = "#00ffff"
         assert!(
             app.startup_log_viewer.is_some(),
             "so the confirm key promotes the clicked run instead of closing"
+        );
+    }
+
+    /// Leaving the promoted viewer returns to the picker it came from, with
+    /// the selection, the filter and the picker's own scroll intact. Reopening
+    /// the whole browser to read the next run is the friction this removes.
+    #[test]
+    fn closing_the_promoted_startup_log_viewer_returns_to_the_picker() {
+        let mut app = test_app(default_bindings());
+        let (older, _newer) = seed_two_startup_runs(&app);
+
+        app.open_startup_command_logs().expect("open logs");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::StartupCommandLogs(_))
+        });
+        render_once(&mut app);
+
+        // Narrow to the older run, then walk onto it.
+        begin_search(&mut app);
+        type_text(&mut app, "old");
+        assert_eq!(
+            startup_logs_prompt(&app).selected,
+            1,
+            "the query must highlight the older run"
+        );
+        drain_until(&mut app, |app| {
+            startup_logs_prompt(app).content == "old log"
+        });
+
+        tap(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.startup_log_viewer
+                .as_ref()
+                .expect("promoted viewer")
+                .display_name,
+            older
+        );
+
+        tap(&mut app, KeyCode::Esc);
+
+        assert!(
+            matches!(app.fullscreen_overlay, FullscreenOverlay::None)
+                && app.startup_log_viewer.is_none(),
+            "the viewer must be gone"
+        );
+        let prompt = startup_logs_prompt(&app);
+        assert_eq!(prompt.selected, 1, "back on the run that was promoted");
+        assert_eq!(prompt.filter.text, "old", "with the query still narrowing");
+        assert!(prompt.searching, "and the search row still up");
+        assert_eq!(prompt.content, "old log", "showing that run's output");
+    }
+
+    /// The return path is a ticket the PROMOTION issues, not an assumption
+    /// about who opened the viewer. A viewer with no ticket still closes
+    /// outright, so no future caller inherits a picker it never opened.
+    #[test]
+    fn closing_a_startup_log_viewer_with_no_parent_picker_closes_outright() {
+        let mut app = startup_log_viewer_app();
+        assert!(matches!(app.prompt, PromptState::None));
+
+        tap(&mut app, KeyCode::Esc);
+
+        assert!(matches!(app.fullscreen_overlay, FullscreenOverlay::None));
+        assert!(app.startup_log_viewer.is_none());
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "no picker may be conjured for a viewer that was not promoted from one"
         );
     }
 

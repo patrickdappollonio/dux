@@ -1036,6 +1036,17 @@ pub(crate) struct StartupLogViewer {
     pub(crate) scroll_offset: u16,
     pub(crate) search: TextInput,
     pub(crate) searching: bool,
+    /// The picker this viewer was PROMOTED from, to be restored when the
+    /// viewer closes, so finishing one run lands back on the run list with the
+    /// selection, filter and scroll the user left there.
+    ///
+    /// A return ticket the promotion issues, not an inference about the
+    /// caller: `None` means nobody promoted this viewer and closing it closes
+    /// outright. Today `promote_startup_command_log_to_fullscreen` is the only
+    /// production path that opens the viewer at all, but encoding that as an
+    /// assumption would silently conjure a picker for the next caller that
+    /// opens the viewer directly.
+    pub(crate) return_to: Option<Box<StartupCommandLogPrompt>>,
 }
 
 #[derive(Clone, Debug)]
@@ -3092,10 +3103,24 @@ impl App {
         }
         if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog) {
             self.fullscreen_overlay = FullscreenOverlay::None;
-            self.startup_log_viewer = None;
+            // A promoted viewer carries a return ticket to the picker it came
+            // from (see `StartupLogViewer::return_to`). Leaving the viewer
+            // hands the run list back exactly as it was left, so reading a
+            // second run is one keypress rather than reopening the browser and
+            // finding your place again. A viewer with no ticket closes
+            // outright, because there is no picker behind it.
+            let returned = self
+                .startup_log_viewer
+                .take()
+                .and_then(|viewer| viewer.return_to);
             self.terminal_selection = None;
             self.startup_log_selection = None;
-            self.set_info("Closed startup command log.");
+            if let Some(prompt) = returned {
+                self.prompt = PromptState::StartupCommandLogs(*prompt);
+                self.set_info("Closed the startup command log. Back in the run list.");
+            } else {
+                self.set_info("Closed startup command log.");
+            }
             return true;
         }
         // The NON-interactive agent fullscreen (e.g. the dormant-tab relaunch
