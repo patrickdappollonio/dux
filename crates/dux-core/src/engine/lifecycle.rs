@@ -5,12 +5,55 @@
 //! each tick so exited agents/terminals don't linger in `providers` /
 //! `companion_terminals` (and therefore the ViewModel).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::model::{AgentSession, SessionStatus, TerminalOwner};
 use crate::pty::PtyClient;
 
 use super::Engine;
+
+/// How long an agent PTY whose child has been REAPED may stay unpruned while
+/// waiting for its reader thread to reach EOF and finish feeding the terminal
+/// buffer.
+///
+/// The two signals disagree on purpose. `try_wait` reaps the child the instant
+/// it dies; the reader thread sets `is_exited` at `Ok(0)`, EOF on the PTY read
+/// side, which is the only moment all of the child's output is guaranteed to be
+/// in the terminal buffer. Pruning on the reap alone captures the crash excerpt
+/// off a buffer the reader has not finished filling, and since `try_wait` yields
+/// the status exactly once there is no second chance later, so the agent gets
+/// reported as exited with an EMPTY excerpt, losing exactly the diagnostic the
+/// message exists to show.
+///
+/// So prune prefers EOF and falls back to the reap only after this grace. The
+/// fallback cannot be dropped: a surviving GRANDCHILD holding the PTY slave open
+/// means the read side never EOFs, and waiting on EOF alone would leak that
+/// provider forever.
+///
+/// 250ms is chosen as the smallest value that is unambiguously both:
+/// - **invisible in the normal case**, where the child is the only holder of the
+///   slave, so EOF lands within microseconds of the exit and prune fires on the
+///   very next engine tick (the web loop at 50ms, the TUI at 33ms while any row
+///   animates and 100ms otherwise) exactly as before, and the grace is never
+///   even consulted; and
+/// - **far more than a scheduler needs**, since the deferral is re-evaluated on
+///   every tick, so the reader thread gets a few dozen chances to be scheduled
+///   and drain a few kilobytes rather than the single chance it had before.
+///
+/// It is also the ceiling on how long a grandchild-held PTY lingers, which is
+/// why it is not larger.
+pub const REAPED_DRAIN_GRACE: Duration = Duration::from_millis(250);
+
+/// Whether an agent PTY whose child has exited is ready to be pruned, given
+/// whether its reader thread reached EOF (so the terminal buffer is complete)
+/// and how long ago the child was reaped.
+///
+/// Pure so the policy is testable without a real PTY: prune on EOF, or once the
+/// reap is older than [`REAPED_DRAIN_GRACE`]. See that constant for why both
+/// arms exist.
+pub fn agent_pty_ready_to_prune(reader_at_eof: bool, since_reap: Option<Duration>) -> bool {
+    reader_at_eof || since_reap.is_some_and(|elapsed| elapsed >= REAPED_DRAIN_GRACE)
+}
 
 /// Which kind of PTY was pruned.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,16 +258,26 @@ impl Engine {
         // exit-success so a clean exit can clear `desired_running` (matching the
         // TUI), which keeps a deliberately-exited agent from auto-reopening.
         // Capture the minimal-output excerpt in the SAME pass, before
-        // `clear_tab_runtime` below drops the client: `try_wait` reaps the child
-        // and yields its status exactly once, and the TUI's exit-status message
-        // needs this data off the returned value (a second reap by any surface
-        // would see `None`). The web ignores these two fields.
+        // `clear_tab_runtime` below drops the client: the TUI's exit-status
+        // message needs this data off the returned value, and once the tab is
+        // cleared there is no client left to re-read it from.
+        //
+        // The excerpt is only truthful once the READER thread has reached EOF,
+        // which is a strictly later event than the reap. See
+        // `REAPED_DRAIN_GRACE`. So a child that has been reaped while its PTY
+        // read side is still open is left in place and reconsidered on a later
+        // tick, up to that grace. `PtyClient::try_wait` memoizes the status, so
+        // deferring costs nothing: the reap observed on the first tick is still
+        // available on the tick that finally prunes.
         let exited_agents: Vec<(String, Option<bool>, bool, String)> = self
             .providers
             .iter_mut()
             .filter_map(|(id, client)| {
                 let exit_success = client.try_wait().map(|status| status.success());
-                if exit_success.is_some() || client.is_exited() {
+                if agent_pty_ready_to_prune(
+                    client.is_exited(),
+                    client.reaped_at().map(|at| at.elapsed()),
+                ) {
                     let is_minimal = client.has_minimal_output(5);
                     let output_excerpt = if is_minimal {
                         client.visible_text_excerpt(usize::MAX)
@@ -749,6 +802,7 @@ mod tests {
 
     use super::PrunedPtyKind;
     use super::TerminatingPty;
+    use super::{REAPED_DRAIN_GRACE, agent_pty_ready_to_prune};
     use super::{format_shutdown_result, format_shutdown_start};
     use crate::engine::Engine;
     use crate::engine::test_support::{sample_project, sample_session, sample_tab, test_engine};
@@ -902,6 +956,168 @@ mod tests {
             agent.output_excerpt.contains("boom"),
             "the captured excerpt must carry the agent's final output, got {:?}",
             agent.output_excerpt
+        );
+    }
+
+    /// Engine + project + session `s1` rooted at a scratch worktree, with an
+    /// agent PTY in the exact state the excerpt race lives in: the child has
+    /// EXITED and is reapable, but a surviving GRANDCHILD still holds the PTY
+    /// slave open, so the reader thread never sees EOF and `is_exited()` stays
+    /// false. `trap '' HUP` is what makes the grandchild survive: when the
+    /// session leader (`sh`) exits, the kernel hangs up the controlling terminal
+    /// and SIGHUPs its foreground process group, which would otherwise take the
+    /// background job with it. The trailing `:` keeps the shell from
+    /// exec-optimizing the subshell away, which would drop the ignored
+    /// disposition. This holds the racy state open indefinitely instead of for
+    /// the microseconds CI hits, so the tests below can pin it without racing.
+    ///
+    /// Returns once the child is reaped, and ASSERTS the premise, so a shell
+    /// that behaved differently fails loudly rather than passing vacuously.
+    fn engine_with_reaped_but_undrained_agent(worktree: &Path) -> (Engine, TempDir) {
+        let (mut engine, tmp) = test_engine();
+        engine
+            .projects
+            .push(sample_project("p1", worktree.to_string_lossy().as_ref()));
+        let mut session = sample_session("s1", "p1", "feat");
+        session.worktree_path = worktree.to_string_lossy().to_string();
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+
+        let client = PtyClient::spawn_with_env(
+            "sh",
+            &[
+                "-c".to_string(),
+                // The parent must not exit until the trap is actually installed,
+                // or the SIGHUP wins the race and takes the grandchild with it.
+                // The ready file is the handshake; it is written from inside the
+                // subshell, after the trap.
+                "(trap '' HUP; : > .grandchild-ready; sleep 30; :) & \
+                 while [ ! -f .grandchild-ready ]; do sleep 0.01; done; exit 3"
+                    .to_string(),
+            ],
+            worktree,
+            24,
+            80,
+            1000,
+            &[],
+        )
+        .expect("spawn sh");
+        engine.providers.insert("s1".to_string(), client);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let client = engine.providers.get_mut("s1").expect("provider");
+            if client.try_wait().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the child never exited");
+            sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !engine.providers["s1"].is_exited(),
+            "premise: the grandchild must still hold the PTY read side open, so \
+             the reader has NOT reached EOF; without that this test proves nothing"
+        );
+        (engine, tmp)
+    }
+
+    /// The invariant behind the flaky excerpt test above, pinned without racing.
+    /// `try_wait` reaps the child the instant it dies, but the terminal buffer is
+    /// only complete once the READER thread reaches EOF on the PTY read side.
+    /// Pruning on the reap alone captures `visible_text_excerpt` off a buffer the
+    /// reader has not finished filling, and because `try_wait` yields the status
+    /// exactly once there is no second chance to capture it later, so a crashed
+    /// agent gets reported with an EMPTY excerpt, losing the very diagnostic the
+    /// message exists to show.
+    #[test]
+    fn prune_defers_a_reaped_child_until_its_reader_has_drained() {
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let (mut engine, _tmp) = engine_with_reaped_but_undrained_agent(worktree.path());
+
+        // Comfortably inside the drain grace, measured from the reap the fixture
+        // already observed: the reader can never reach EOF here, so every pass in
+        // this window must hold off.
+        let reaped_at = engine.providers["s1"].reaped_at().expect("reaped");
+        while reaped_at.elapsed() < REAPED_DRAIN_GRACE / 2 {
+            let pruned = engine.prune_exited_ptys();
+            assert!(
+                pruned.is_empty(),
+                "a reaped child whose reader has not reached EOF must not be pruned \
+                 yet (its excerpt would be captured off an undrained buffer), got {pruned:?}"
+            );
+            sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The bound on that deferral: a PTY whose read side is held open by a
+    /// surviving grandchild never reaches EOF, so waiting for EOF alone would
+    /// leak the provider forever. That is precisely why the reap arm of the
+    /// prune condition exists and cannot simply be deleted. Once
+    /// `REAPED_DRAIN_GRACE` has elapsed since the reap, prune takes it anyway,
+    /// carrying the exit status cached at reap time.
+    #[test]
+    fn prune_takes_a_never_draining_pty_once_the_drain_grace_expires() {
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        let (mut engine, _tmp) = engine_with_reaped_but_undrained_agent(worktree.path());
+        let reaped_at = engine.providers["s1"].reaped_at().expect("reaped");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pruned = loop {
+            let pruned = engine.prune_exited_ptys();
+            if let Some(entry) = pruned.into_iter().find(|p| p.id == "s1") {
+                break entry;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a PTY held open by a grandchild must still be pruned once the \
+                 drain grace expires, or it would linger forever"
+            );
+            sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            reaped_at.elapsed() >= REAPED_DRAIN_GRACE,
+            "the prune must have waited out the drain grace, not fired on the reap"
+        );
+        assert_eq!(
+            pruned.exit_success,
+            Some(false),
+            "the status cached at reap time must survive the deferral (the raw \
+             try_wait yields it exactly once)"
+        );
+        assert!(
+            !engine.providers.contains_key("s1"),
+            "the never-draining provider must be gone from the engine"
+        );
+    }
+
+    /// The policy in isolation, with no PTY at all: EOF prunes immediately, a
+    /// fresh reap without EOF waits, and a stale reap without EOF is taken.
+    #[test]
+    fn agent_pty_ready_to_prune_prefers_eof_and_falls_back_to_a_stale_reap() {
+        assert!(
+            !agent_pty_ready_to_prune(false, None),
+            "a live child is not ready to prune"
+        );
+        assert!(
+            agent_pty_ready_to_prune(true, None),
+            "EOF means the buffer is complete, so prune even before a reap"
+        );
+        assert!(
+            !agent_pty_ready_to_prune(false, Some(Duration::ZERO)),
+            "a just-reaped child whose reader is still going must wait"
+        );
+        assert!(
+            !agent_pty_ready_to_prune(false, Some(REAPED_DRAIN_GRACE - Duration::from_millis(1))),
+            "still inside the grace"
+        );
+        assert!(
+            agent_pty_ready_to_prune(false, Some(REAPED_DRAIN_GRACE)),
+            "the grace is the bound: at it, prune anyway"
+        );
+        assert!(
+            agent_pty_ready_to_prune(true, Some(Duration::ZERO)),
+            "EOF wins regardless of how recent the reap was"
         );
     }
 
