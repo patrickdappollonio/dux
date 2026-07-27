@@ -46,10 +46,17 @@ pub enum StartupCommandLogScope {
     },
 }
 
-#[derive(Clone, Debug)]
-pub struct StartupCommandLatestLog {
-    pub path: Option<PathBuf>,
-    pub display_name: String,
+/// Every run recorded for one scope, newest first, plus the newest run's
+/// contents pre-loaded.
+///
+/// The pre-load is what lets a picker render the newest run's output in the
+/// same frame it opens, with no second round of file I/O and no "loading"
+/// placeholder for the row it starts on. `content` is empty exactly when
+/// `entries` is, which is also the signal that the scope has never run its
+/// startup command.
+#[derive(Clone, Debug, Default)]
+pub struct StartupCommandLogListing {
+    pub entries: Vec<StartupCommandLogEntry>,
     pub content: String,
 }
 
@@ -151,30 +158,40 @@ pub fn read_log(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-pub fn latest_log_for_scope(
+/// Every log run recorded for `scope`, newest first.
+///
+/// The one place the scope is matched. Callers that need a scope's runs ask
+/// here rather than re-deriving "agent means this directory, project means
+/// every session directory under it", which is how the two spellings drifted
+/// apart before.
+pub fn list_logs_for_scope(
     paths: &DuxPaths,
     scope: StartupCommandLogScope,
-) -> Result<StartupCommandLatestLog> {
-    let entries = match scope {
+) -> Result<Vec<StartupCommandLogEntry>> {
+    match scope {
         StartupCommandLogScope::Agent {
             project_id,
             session_id,
-        } => list_agent_logs(paths, &project_id, &session_id)?,
-        StartupCommandLogScope::Project { project_id } => list_project_logs(paths, &project_id)?,
-    };
-
-    match entries.first() {
-        Some(entry) => Ok(StartupCommandLatestLog {
-            path: Some(entry.path.clone()),
-            display_name: entry.display_name.clone(),
-            content: read_log(&entry.path)?,
-        }),
-        None => Ok(StartupCommandLatestLog {
-            path: None,
-            display_name: "No startup command log".to_string(),
-            content: "No startup command logs found.".to_string(),
-        }),
+        } => list_agent_logs(paths, &project_id, &session_id),
+        StartupCommandLogScope::Project { project_id } => list_project_logs(paths, &project_id),
     }
+}
+
+/// `scope`'s runs plus the newest run's contents, in one worker-thread trip.
+///
+/// Both halves are file I/O, so they belong on the same off-thread hop: a
+/// caller that listed here and then read the newest on the UI thread would put
+/// exactly the read this exists to avoid back on the UI thread.
+pub fn load_logs_for_scope(
+    paths: &DuxPaths,
+    scope: StartupCommandLogScope,
+) -> Result<StartupCommandLogListing> {
+    let entries = list_logs_for_scope(paths, scope)?;
+    let content = match entries.first() {
+        Some(entry) => read_log(&entry.path)?,
+        None => String::new(),
+    };
+    Ok(StartupCommandLogListing { entries, content })
 }
 
 pub fn open_path(path: &Path) -> Result<()> {
@@ -527,47 +544,111 @@ mod tests {
         assert!(!dir.exists());
     }
 
-    #[test]
-    fn latest_log_for_scope_reads_newest_project_log() {
-        let tmp = tempdir().expect("tempdir");
-        let paths = test_paths(tmp.path());
-        let old_dir = agent_log_dir(&paths, "project-1", "session-1");
-        let new_dir = agent_log_dir(&paths, "project-1", "session-2");
-        fs::create_dir_all(&old_dir).expect("old log dir");
-        fs::create_dir_all(&new_dir).expect("new log dir");
-        fs::write(old_dir.join("20260101T000000Z-old.log"), "old").expect("old log");
-        let newest = new_dir.join("20260101T000001Z-new.log");
-        fs::write(&newest, "new").expect("new log");
+    /// Seed two agent runs an hour apart and return `(older, newer)` paths.
+    /// The listing sorts by mtime then path, so the mtimes are set explicitly
+    /// rather than relying on write order.
+    fn seed_two_runs(paths: &DuxPaths, session_id: &str) -> (PathBuf, PathBuf) {
+        let dir = agent_log_dir(paths, "project-1", session_id);
+        fs::create_dir_all(&dir).expect("log dir");
+        let older = dir.join("20260101T000000Z-old.log");
+        let newer = dir.join("20260101T010000Z-new.log");
+        fs::write(&older, "older run output").expect("older log");
+        fs::write(&newer, "newer run output").expect("newer log");
+        let base =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_225_600);
+        set_mtime(&older, base);
+        set_mtime(&newer, base + std::time::Duration::from_secs(3600));
+        (older, newer)
+    }
 
-        let latest = latest_log_for_scope(
-            &paths,
-            StartupCommandLogScope::Project {
-                project_id: "project-1".to_string(),
-            },
-        )
-        .expect("latest log");
-
-        assert_eq!(latest.path, Some(newest));
-        assert_eq!(latest.display_name, "20260101T000001Z-new.log");
-        assert_eq!(latest.content, "new");
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        let file = fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for mtime");
+        file.set_modified(when).expect("set mtime");
     }
 
     #[test]
-    fn latest_log_for_scope_reports_empty_state() {
+    fn load_logs_for_scope_lists_every_run_newest_first_with_the_newest_preloaded() {
         let tmp = tempdir().expect("tempdir");
         let paths = test_paths(tmp.path());
+        let (older, newer) = seed_two_runs(&paths, "session-1");
 
-        let latest = latest_log_for_scope(
+        let listing = load_logs_for_scope(
             &paths,
             StartupCommandLogScope::Agent {
                 project_id: "project-1".to_string(),
                 session_id: "session-1".to_string(),
             },
         )
-        .expect("latest log");
+        .expect("listing");
 
-        assert!(latest.path.is_none());
-        assert_eq!(latest.display_name, "No startup command log");
-        assert_eq!(latest.content, "No startup command logs found.");
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+            vec![newer, older],
+            "every run must be listed, newest first"
+        );
+        assert_eq!(
+            listing.content, "newer run output",
+            "and the newest run's contents must arrive pre-loaded"
+        );
+    }
+
+    #[test]
+    fn load_logs_for_scope_spans_every_session_of_a_project() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+        seed_two_runs(&paths, "session-1");
+        let (_, newest) = seed_two_runs(&paths, "session-2");
+        // Push session-2's newest past session-1's so the project scope has an
+        // unambiguous head.
+        set_mtime(
+            &newest,
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_400_000),
+        );
+        fs::write(&newest, "session two output").expect("rewrite");
+        set_mtime(
+            &newest,
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_400_000),
+        );
+
+        let listing = load_logs_for_scope(
+            &paths,
+            StartupCommandLogScope::Project {
+                project_id: "project-1".to_string(),
+            },
+        )
+        .expect("listing");
+
+        assert_eq!(listing.entries.len(), 4, "both sessions' runs are in scope");
+        assert_eq!(listing.entries[0].path, newest);
+        assert_eq!(listing.content, "session two output");
+    }
+
+    #[test]
+    fn load_logs_for_scope_reports_a_scope_that_has_never_run() {
+        let tmp = tempdir().expect("tempdir");
+        let paths = test_paths(tmp.path());
+
+        let listing = load_logs_for_scope(
+            &paths,
+            StartupCommandLogScope::Agent {
+                project_id: "project-1".to_string(),
+                session_id: "session-1".to_string(),
+            },
+        )
+        .expect("listing");
+
+        assert!(listing.entries.is_empty());
+        assert!(
+            listing.content.is_empty(),
+            "an empty scope carries no placeholder prose; the caller decides \
+             what to say about it"
+        );
     }
 }

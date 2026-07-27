@@ -3046,7 +3046,15 @@ impl App {
                 Some(Action::ScrollLineUp) => {
                     scroll_startup_command_log(prompt, body, -1);
                 }
-                Some(Action::OpenStartupCommandLogFile | Action::OpenEntry | Action::Confirm) => {
+                // A Picker's confirm key acts on the SELECTION. Here that means
+                // promoting the highlighted run to the fullscreen viewer for
+                // full-screen reading. The separate "open file" binding still
+                // hands the run to the OS opener; the two are different
+                // destinations and must not share a key.
+                Some(Action::OpenEntry | Action::Confirm) => {
+                    self.promote_startup_command_log_to_fullscreen();
+                }
+                Some(Action::OpenStartupCommandLogFile) => {
                     self.open_selected_startup_command_log();
                 }
                 Some(Action::OpenStartupCommandLogFolder) => {
@@ -17138,21 +17146,96 @@ cyan = "#00ffff"
         }
     }
 
-    #[test]
-    fn read_startup_command_logs_opens_latest_log_fullscreen() {
-        let mut app = test_app(default_bindings());
+    /// Write two startup-command runs for the test app's own agent, an hour
+    /// apart, and return `(older_name, newer_name)`. The mtimes are set
+    /// explicitly because the listing sorts by mtime first and two files
+    /// written back to back can share one.
+    fn seed_two_startup_runs(app: &App) -> (String, String) {
         let log_dir = crate::startup::agent_log_dir(&app.engine.paths, "project-1", "session-1");
         std::fs::create_dir_all(&log_dir).expect("log dir");
-        std::fs::write(log_dir.join("20260515T010000Z-old.log"), "old log").expect("old log");
-        std::fs::write(log_dir.join("20260515T020000Z-new.log"), "new log").expect("new log");
+        let older = log_dir.join("20260515T010000Z-old.log");
+        let newer = log_dir.join("20260515T020000Z-new.log");
+        std::fs::write(&older, "old log").expect("old log");
+        std::fs::write(&newer, "new log").expect("new log");
+        let base =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_778_000_000);
+        for (path, when) in [
+            (&older, base),
+            (&newer, base + std::time::Duration::from_secs(3600)),
+        ] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open for mtime")
+                .set_modified(when)
+                .expect("set mtime");
+        }
+        (
+            "20260515T010000Z-old.log".to_string(),
+            "20260515T020000Z-new.log".to_string(),
+        )
+    }
+
+    fn startup_logs_prompt(app: &App) -> &StartupCommandLogPrompt {
+        match &app.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt,
+            other => panic!("expected the startup-log picker, got {other:?}"),
+        }
+    }
+
+    /// The journey now lands in the PICKER, on the newest run, with that run's
+    /// output already showing. "See the last log" is satisfied by what is on
+    /// screen the moment it opens; "choose an older" by the rows beside it.
+    #[test]
+    fn read_startup_command_logs_opens_the_picker_on_the_newest_run() {
+        let mut app = test_app(default_bindings());
+        let (older, newer) = seed_two_startup_runs(&app);
 
         app.open_startup_command_logs().expect("open logs");
-        drain_until(&mut app, |app| app.startup_log_viewer.is_some());
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::StartupCommandLogs(_))
+        });
 
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::StartupLog);
-        let viewer = app.startup_log_viewer.as_ref().expect("log viewer");
-        assert_eq!(viewer.display_name, "20260515T020000Z-new.log");
-        assert_eq!(viewer.content, "new log");
+        let prompt = startup_logs_prompt(&app);
+        assert_eq!(
+            prompt
+                .entries
+                .iter()
+                .map(|entry| entry.display_name.clone())
+                .collect::<Vec<_>>(),
+            vec![newer, older],
+            "every run is reachable, newest first"
+        );
+        assert_eq!(prompt.selected, 0, "and the newest starts selected");
+        assert_eq!(prompt.content, "new log", "with its output already shown");
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "the fullscreen viewer is now a promotion, not the landing surface"
+        );
+    }
+
+    /// Choosing an older run swaps the preview. The read is off-thread, so the
+    /// selection moves immediately and the content follows.
+    #[test]
+    fn moving_the_picker_selection_previews_the_older_run() {
+        let mut app = test_app(default_bindings());
+        seed_two_startup_runs(&app);
+        app.open_startup_command_logs().expect("open logs");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::StartupCommandLogs(_))
+        });
+
+        tap(&mut app, KeyCode::Down);
+        assert_eq!(
+            startup_logs_prompt(&app).selected,
+            1,
+            "the selection moves without waiting on the disk"
+        );
+        drain_until(&mut app, |app| {
+            startup_logs_prompt(app).content == "old log"
+        });
+        assert_eq!(startup_logs_prompt(&app).content, "old log");
     }
 
     /// Reproduction of a shipped bug: the "open in the OS" actions resolved
@@ -17202,6 +17285,59 @@ cyan = "#00ffff"
         assert_eq!(
             app.selected_startup_command_log_path(),
             Some(PathBuf::from("/tmp/viewer.log"))
+        );
+    }
+
+    /// The fullscreen viewer is kept, promoted from the picker for full-screen
+    /// reading of whichever run is selected.
+    #[test]
+    fn the_picker_promotes_the_selected_run_to_the_fullscreen_viewer() {
+        let mut app = test_app(default_bindings());
+        let (older, _) = seed_two_startup_runs(&app);
+        app.open_startup_command_logs().expect("open logs");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::StartupCommandLogs(_))
+        });
+        tap(&mut app, KeyCode::Down);
+        drain_until(&mut app, |app| {
+            startup_logs_prompt(app).content == "old log"
+        });
+
+        tap(&mut app, KeyCode::Enter);
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "promoting closes the picker"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::StartupLog);
+        let viewer = app.startup_log_viewer.as_ref().expect("log viewer");
+        assert_eq!(viewer.display_name, older);
+        assert_eq!(
+            viewer.content, "old log",
+            "the viewer shows the run the picker had selected, not the newest"
+        );
+    }
+
+    /// An empty scope opens nothing. It reports through the same keyed status
+    /// API every other outcome of this load reports through.
+    #[test]
+    fn a_scope_with_no_runs_reports_instead_of_opening_an_empty_picker() {
+        let mut app = test_app(default_bindings());
+
+        app.open_startup_command_logs().expect("open logs");
+        drain_until(&mut app, |app| {
+            app.status.message().contains("No startup command")
+        });
+
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "an empty picker is not a useful surface"
+        );
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert!(
+            app.status.message().contains("No startup command"),
+            "the empty case is reported, not silent: {:?}",
+            app.status.message()
         );
     }
 
@@ -21274,6 +21410,28 @@ cyan = "#00ffff"
             .expect("render frame");
     }
 
+    /// Render once and return everything on screen as text, one line per row.
+    /// For assertions about what a user can SEE, as opposed to what a struct
+    /// happens to hold.
+    fn rendered_text(app: &mut App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// The rect of visible row `index` in a rendered provider list, taken from
     /// the PUBLISHED layout rather than from any string offset.
     fn provider_row_point(list: Rect, offset: usize, index: usize) -> (u16, u16) {
@@ -21750,29 +21908,33 @@ cyan = "#00ffff"
         assert!(matches!(app.prompt, PromptState::None));
     }
 
+    /// The confirm key must reach the picker's action while the search row is
+    /// up, rather than being swallowed as an implicit end-of-search. The action
+    /// it reaches is now the fullscreen PROMOTION, so what proves arrival is
+    /// the viewer opening on the run the query had highlighted.
     #[test]
-    fn startup_command_logs_confirm_opens_the_highlighted_log_while_searching() {
+    fn startup_command_logs_confirm_promotes_the_highlighted_log_while_searching() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::StartupCommandLogs(startup_command_logs_prompt());
         install_startup_command_logs_overlay(&mut app, 2);
         begin_search(&mut app);
         type_text(&mut app, "install");
-        tap(&mut app, KeyCode::Enter);
-        let (searching, _, selected, _) = startup_logs_state(&app);
-        assert!(
-            searching,
-            "the confirm key must not be swallowed as an implicit end-of-search"
+        assert_eq!(
+            startup_logs_state(&app).2,
+            1,
+            "the query highlights the second run"
         );
-        assert_eq!(selected, 1, "and the highlighted log is still the match");
-        // The picker's confirm reaches `open_selected_startup_command_log`,
-        // which reports through the status line. (That function resolves the
-        // path from the fullscreen VIEWER rather than from this picker's
-        // selection, which is a pre-existing bug and deliberately not fixed
-        // here; what this test pins is that the key ARRIVES, which it did not
-        // before: the search branch used to consume it and only end search.)
+
+        tap(&mut app, KeyCode::Enter);
+
         assert!(
-            !app.status.message().is_empty(),
-            "the confirm key must reach the picker's open action while searching"
+            matches!(app.prompt, PromptState::None),
+            "the confirm key reached the picker's action, which closes it"
+        );
+        let viewer = app.startup_log_viewer.as_ref().expect("promoted viewer");
+        assert_eq!(
+            viewer.display_name, "install.log",
+            "and it promoted the run the query had highlighted, not the first"
         );
     }
 
@@ -22516,42 +22678,48 @@ cyan = "#00ffff"
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // Change B2 (as a FINDING): `PromptState::StartupCommandLogs` is not the
-    // startup-log surface a user ever sees.
-    //
-    // The brief asked for a focus concept on this modal. It has none, and it
-    // has four interactive regions, so on the face of it the rule bites. But
-    // NOTHING outside `#[cfg(test)]` ever assigns this variant: the whole
-    // "read startup command logs" journey ends in the FULLSCREEN viewer
-    // (`FullscreenOverlay::StartupLog` + `App::startup_log_viewer`), which is
-    // deliberately not a `PromptState` variant at all (see `modal.rs`'s module
-    // docs). Giving a modal no user can open a focus model would be churn, and
-    // deleting a dead surface is a call for the owner, not for this change.
-    // This test pins where the journey really lands, so the claim above is
-    // measured rather than asserted.
+    // This block used to record the opposite FINDING: that
+    // `PromptState::StartupCommandLogs` was a surface no user could reach,
+    // because nothing outside `#[cfg(test)]` assigned it and the read-logs
+    // journey ended in the fullscreen viewer. That was measured and true, and
+    // it is now deliberately false: the journey opens the PICKER, and the
+    // fullscreen viewer is what the picker promotes to. The test is inverted
+    // rather than deleted so the reachability claim stays measured in whichever
+    // direction it currently points.
     // ══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn the_startup_log_journey_opens_the_fullscreen_viewer_not_the_modal() {
+    fn the_startup_log_journey_opens_the_picker_and_the_viewer_is_its_promotion() {
         let mut app = test_app(default_bindings());
-        app.apply_reaction(dux_core::engine::EventReaction::StartupLogArrived {
+        app.apply_reaction(dux_core::engine::EventReaction::StartupLogsArrived {
             scope_label: "project \"demo\"".to_string(),
-            log: crate::startup::StartupCommandLatestLog {
-                path: None,
-                display_name: "run.log".to_string(),
+            listing: crate::startup::StartupCommandLogListing {
+                entries: vec![crate::startup::StartupCommandLogEntry {
+                    path: PathBuf::from("/tmp/run.log"),
+                    display_name: "run.log".to_string(),
+                    modified_at: None,
+                }],
                 content: "line one\nline two\n".to_string(),
             },
         });
         assert!(
-            matches!(app.fullscreen_overlay, FullscreenOverlay::StartupLog),
-            "the log journey lands in the fullscreen viewer"
+            matches!(app.prompt, PromptState::StartupCommandLogs(_)),
+            "the log journey now lands in the picker"
         );
-        assert!(app.startup_log_viewer.is_some());
         assert!(
-            matches!(app.prompt, PromptState::None),
-            "and never in PromptState::StartupCommandLogs, which nothing in \
-             production constructs"
+            app.startup_log_viewer.is_none()
+                && matches!(app.fullscreen_overlay, FullscreenOverlay::None),
+            "and the fullscreen viewer is not opened behind it"
         );
+
+        app.promote_startup_command_log_to_fullscreen();
+        assert!(matches!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::StartupLog
+        ));
+        let viewer = app.startup_log_viewer.as_ref().expect("promoted viewer");
+        assert_eq!(viewer.display_name, "run.log");
+        assert_eq!(viewer.content, "line one\nline two\n");
     }
 
     /// Reproduction: a click column maps to a CHARACTER index, ignoring
@@ -22705,6 +22873,66 @@ cyan = "#00ffff"
             App::overlay_row_at_sized(list, 4, 8, 2, list.x + 1, list.y + 2),
             Some(5)
         );
+    }
+
+    /// The whole journey, end to end, driven the way a user drives it: open the
+    /// logs, see the newest run rendered, CLICK the older row (at coordinates
+    /// taken from the rect the renderer published, never from string offsets),
+    /// watch the preview swap, then promote to fullscreen.
+    #[test]
+    fn the_startup_log_journey_renders_and_takes_a_click_on_an_older_run() {
+        let mut app = test_app(default_bindings());
+        let (older, newer) = seed_two_startup_runs(&app);
+
+        app.open_startup_command_logs().expect("open logs");
+        drain_until(&mut app, |app| {
+            matches!(app.prompt, PromptState::StartupCommandLogs(_))
+        });
+        render_once(&mut app);
+
+        // What the user actually sees on open: both runs listed, newest first,
+        // with the newest run's output in the preview pane.
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered.contains(&newer) && rendered.contains(&older),
+            "both runs must be listed: {rendered}"
+        );
+        assert!(
+            rendered.contains("new log"),
+            "the newest run's output must already be showing: {rendered}"
+        );
+
+        let OverlayMouseLayout::StartupCommandLogs { list, .. } = app.overlay_layout.active else {
+            panic!("expected the startup-log picker layout");
+        };
+        // Each run occupies two rows (name + timestamp), so the second run's
+        // first row is two below the first's.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: list.x + 1,
+            row: list.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            startup_logs_prompt(&app).selected,
+            1,
+            "the click must select the older run"
+        );
+        drain_until(&mut app, |app| {
+            startup_logs_prompt(app).content == "old log"
+        });
+
+        render_once(&mut app);
+        let rendered = rendered_text(&mut app);
+        assert!(
+            rendered.contains("old log"),
+            "the preview must swap to the clicked run: {rendered}"
+        );
+
+        tap(&mut app, KeyCode::Enter);
+        let viewer = app.startup_log_viewer.as_ref().expect("promoted viewer");
+        assert_eq!(viewer.display_name, older);
+        assert_eq!(viewer.content, "old log");
     }
 
     /// The resource monitor's row cursor must answer to the movement BINDINGS,

@@ -2384,24 +2384,97 @@ impl App {
         Ok(())
     }
 
+    /// Move the picker's selection onto `selected` and load that run's output.
+    ///
+    /// The selection moves NOW and the body follows: the read is a worker hop
+    /// (see [`App::spawn_startup_command_log_content_load`]), so walking the
+    /// list never blocks the UI thread on a log that could be megabytes of
+    /// captured `npm install` output on a cold or networked filesystem.
+    ///
+    /// Re-selecting the row that is already selected is a no-op, so a click on
+    /// the current row, or a filter keystroke whose first match does not move,
+    /// does not re-read the file.
     pub(crate) fn select_startup_command_log(&mut self, selected: usize) {
-        let Some((path, count)) = (match &self.prompt {
-            PromptState::StartupCommandLogs(prompt) => prompt
-                .entries
-                .get(selected)
-                .map(|entry| (entry.path.clone(), prompt.entries.len())),
+        let Some((path, display_name, count, already_selected)) = (match &self.prompt {
+            PromptState::StartupCommandLogs(prompt) => prompt.entries.get(selected).map(|entry| {
+                (
+                    entry.path.clone(),
+                    entry.display_name.clone(),
+                    prompt.entries.len(),
+                    prompt.selected == selected,
+                )
+            }),
             _ => None,
         }) else {
             return;
         };
-        let content = crate::startup::read_log(&path)
-            .unwrap_or_else(|err| format!("Could not read {}: {err:#}", path.display()));
+        if already_selected {
+            return;
+        }
         if let PromptState::StartupCommandLogs(prompt) = &mut self.prompt {
             prompt.selected = selected.min(count.saturating_sub(1));
-            prompt.content = content;
+            prompt.content = format!("Reading {display_name}...");
             prompt.scroll_offset = 0;
         }
         self.startup_log_selection = None;
+        self.spawn_startup_command_log_content_load(path, display_name);
+    }
+
+    /// Apply a run body that finished reading off-thread.
+    ///
+    /// Dropped unless `path` is still the selected run: a fast walk down the
+    /// list has several reads in flight at once and they can land out of order,
+    /// so the selected path is the correlation handle.
+    pub(crate) fn apply_startup_command_log_content(
+        &mut self,
+        path: &Path,
+        result: Result<String, String>,
+    ) {
+        let PromptState::StartupCommandLogs(prompt) = &mut self.prompt else {
+            return;
+        };
+        if prompt
+            .entries
+            .get(prompt.selected)
+            .map(|e| e.path.as_path())
+            != Some(path)
+        {
+            return;
+        }
+        prompt.content = match result {
+            Ok(content) => content,
+            Err(err) => format!("Could not read {}: {err}", path.display()),
+        };
+        prompt.scroll_offset = 0;
+    }
+
+    /// Promote the picker's selected run to the fullscreen viewer.
+    ///
+    /// No I/O: the body the picker is already showing is the body the viewer
+    /// gets, so this is instant and cannot disagree with what was on screen.
+    pub(crate) fn promote_startup_command_log_to_fullscreen(&mut self) {
+        let PromptState::StartupCommandLogs(prompt) = &self.prompt else {
+            return;
+        };
+        let Some(entry) = prompt.entries.get(prompt.selected) else {
+            self.set_error("No startup command log is selected.");
+            return;
+        };
+        let viewer = StartupLogViewer {
+            scope_label: prompt.scope_label.clone(),
+            path: Some(entry.path.clone()),
+            display_name: entry.display_name.clone(),
+            content: prompt.content.clone(),
+            scroll_offset: 0,
+            search: TextInput::new(),
+            searching: false,
+        };
+        self.prompt = PromptState::None;
+        self.input_target = InputTarget::None;
+        self.startup_log_selection = None;
+        self.terminal_selection = None;
+        self.fullscreen_overlay = FullscreenOverlay::StartupLog;
+        self.startup_log_viewer = Some(viewer);
     }
 
     pub(crate) fn startup_command_log_filtered_indices(
@@ -2507,10 +2580,20 @@ impl App {
         let op = dux_core::engine::status_op(format!(
             "Opening startup command logs for {scope_label}..."
         ))
-        .on_success(move |_: &crate::startup::StartupCommandLatestLog| {
-            dux_core::engine::Final::info(format!(
-                "Opened startup command logs for {success_label}."
-            ))
+        // Three outcomes, not two: a scope that has simply never run its
+        // startup command is a success with nothing to show, and it must say so
+        // rather than resolve as "Opened ..." over a surface that never opened.
+        .on_success(move |listing: &crate::startup::StartupCommandLogListing| {
+            if listing.entries.is_empty() {
+                dux_core::engine::Final::info(format!(
+                    "No startup command logs recorded for {success_label} yet."
+                ))
+            } else {
+                dux_core::engine::Final::info(format!(
+                    "Opened {} startup command log run(s) for {success_label}.",
+                    listing.entries.len()
+                ))
+            }
         })
         .on_failure(move |err: &String| {
             dux_core::engine::Final::error(format!(
@@ -2519,18 +2602,49 @@ impl App {
         });
         let pending = op.pending_status();
         std::thread::spawn(move || {
-            let result = crate::startup::latest_log_for_scope(&paths, scope)
+            let result = crate::startup::load_logs_for_scope(&paths, scope)
                 .map_err(|err| format!("{err:#}"));
             let resolved = op.resolve(&result);
             let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
-            // Only the success path has domain work (opening the overlay); the
-            // failure status is fully carried by the StatusOpCompleted above.
-            if let Ok(log) = result {
-                let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
-                    scope_label,
-                    result: Ok(log),
-                });
+            // Domain work exists only when there is something to open. The
+            // failure AND the nothing-recorded outcomes are fully carried by
+            // the StatusOpCompleted above.
+            match result {
+                Ok(listing) if !listing.entries.is_empty() => {
+                    let _ = tx.send(WorkerEvent::StartupCommandLogsLoaded {
+                        scope_label,
+                        result: Ok(listing),
+                    });
+                }
+                _ => {}
             }
+        });
+        self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
+    }
+
+    /// Read one already-listed run off-thread, for the picker's preview.
+    ///
+    /// The final is [`Final::clear`]: the output appearing in the pane IS the
+    /// confirmation, and a success line per arrow-key press would be noise on a
+    /// status surface that is most-recent-wins. A failure still speaks up.
+    fn spawn_startup_command_log_content_load(&mut self, path: PathBuf, display_name: String) {
+        let tx = self.engine.worker_tx.clone();
+        let failure_name = display_name.clone();
+        let op =
+            dux_core::engine::status_op(format!("Reading startup command log {display_name}..."))
+                .on_success(|_: &String| dux_core::engine::Final::clear())
+                .on_failure(move |err: &String| {
+                    dux_core::engine::Final::error(format!(
+                        "Could not read startup command log {failure_name}: {err}"
+                    ))
+                });
+        let pending = op.pending_status();
+        let read_path = path.clone();
+        std::thread::spawn(move || {
+            let result = crate::startup::read_log(&read_path).map_err(|err| format!("{err:#}"));
+            let resolved = op.resolve(&result);
+            let _ = tx.send(WorkerEvent::StatusOpCompleted { resolved });
+            let _ = tx.send(WorkerEvent::StartupCommandLogContentLoaded { path, result });
         });
         self.apply_reaction(dux_core::engine::EventReaction::Status(pending));
     }

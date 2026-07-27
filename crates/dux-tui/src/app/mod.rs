@@ -1317,24 +1317,29 @@ pub(crate) enum PromptState {
         input: TextInput,
         focus: ConfigureFieldFocus,
     },
-    #[allow(dead_code)]
-    /// The windowed startup-log browser.
+    /// The windowed startup-log browser, and where the "read startup command
+    /// logs" journey lands.
     ///
-    /// **Nothing outside `#[cfg(test)]` constructs this today.** The
-    /// "read startup command logs" journey resolves
-    /// `EventReaction::StartupLogArrived`, which opens the FULLSCREEN viewer
-    /// (`FullscreenOverlay::StartupLog` + [`App::startup_log_viewer`])
-    /// instead, so this modal is unreachable from the UI. It still renders and
-    /// still handles keys, and the modal registry still covers it, but do not
-    /// read a green suite here as evidence that a user can open it. Pinned by
-    /// `input::tests::the_startup_log_journey_opens_the_fullscreen_viewer_not_the_modal`.
+    /// `EventReaction::StartupLogsArrived` opens it on the NEWEST run with that
+    /// run's output already loaded, so "see the last log" needs no interaction;
+    /// the rows beside it are how an older run is chosen. The FULLSCREEN viewer
+    /// (`FullscreenOverlay::StartupLog` + [`App::startup_log_viewer`]) is still
+    /// there and is now this modal's PROMOTION, reached with the confirm key.
+    /// A scope with no runs at all opens nothing and reports through the keyed
+    /// status API instead.
     ///
-    /// Consequence worth knowing before "fixing" it: it has four interactive
-    /// regions (the filter, the Runs list, the Output body, the Close button)
-    /// and no focus concept, so its Close button is unreachable by keyboard.
-    /// That is a real gap in a surface no user can reach; whether to wire a
-    /// focus model or delete the variant is an owner's decision, not a
-    /// tidy-up.
+    /// This variant was unreachable outside `#[cfg(test)]` until that change,
+    /// which is how two bugs survived in it: the OS-open actions resolved their
+    /// path from the fullscreen viewer rather than from this picker's own
+    /// selection, and the click mapping assumed one screen row per run when
+    /// each run draws two. Both are fixed and pinned.
+    ///
+    /// Still open, and worth knowing before extending it: it has four
+    /// interactive regions (the filter, the Runs list, the Output body, the
+    /// Close button) and no focus concept, so its Close button is unreachable
+    /// by keyboard. Every other way out works (the close-overlay key, a click
+    /// on the button, a click outside), so this is a gap rather than a trap,
+    /// but a focus model is the honest fix.
     StartupCommandLogs(StartupCommandLogPrompt),
     /// The project chooser: lists every project (agent-less included) so a
     /// project-scoped action can target one when the flat agent list has no

@@ -18,7 +18,7 @@ use crate::logger;
 use crate::model::{
     AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
 };
-use crate::startup::StartupCommandLatestLog;
+use crate::startup::StartupCommandLogListing;
 use crate::statusline::{StatusScope, StatusTone};
 use crate::storage::StoredPr;
 use crate::worker::{
@@ -271,10 +271,19 @@ pub enum EventReaction {
     // -- Project persistence (App applies view follow-up; Engine performed mutations). --
     ProjectPersistenceOutcome(Box<ProjectPersistenceOutcome>),
 
-    // -- Startup command / log viewer (App formats key + opens overlay). --
-    StartupLogArrived {
+    // -- Startup command / log picker (App opens the overlay). --
+    /// A scope's runs are loaded; open the picker on the newest one. Only
+    /// emitted when the listing is NON-empty: an empty scope is reported by the
+    /// load's keyed status and opens nothing.
+    StartupLogsArrived {
         scope_label: String,
-        log: StartupCommandLatestLog,
+        listing: StartupCommandLogListing,
+    },
+    /// A run the picker moved onto finished reading. The App applies it only if
+    /// `path` is still the selected run.
+    StartupLogContentArrived {
+        path: std::path::PathBuf,
+        result: Result<String, String>,
     },
 
     // -- Agent-creation dispatch (E4c). --
@@ -2475,11 +2484,17 @@ impl Engine {
                 scope_label,
                 result,
             } => match result {
-                Ok(log) => EventReaction::StartupLogArrived { scope_label, log },
+                Ok(listing) => EventReaction::StartupLogsArrived {
+                    scope_label,
+                    listing,
+                },
                 Err(err) => EventReaction::Status(StatusUpdate::error(format!(
                     "Could not read startup command logs for {scope_label}: {err}"
                 ))),
             },
+            WorkerEvent::StartupCommandLogContentLoaded { path, result } => {
+                EventReaction::StartupLogContentArrived { path, result }
+            }
             WorkerEvent::ServerFlipPreflightReady { result, warning } => {
                 // No engine domain state to mutate — the listeners and the flip
                 // are TUI concerns. Hand them straight to the App.
@@ -2825,7 +2840,8 @@ mod tests {
             EventReaction::ApplyReloadedConfig(_) => "ApplyReloadedConfig",
             EventReaction::OpenConfigReloadFailedModal(_) => "OpenConfigReloadFailedModal",
             EventReaction::ProjectPersistenceOutcome(_) => "ProjectPersistenceOutcome",
-            EventReaction::StartupLogArrived { .. } => "StartupLogArrived",
+            EventReaction::StartupLogsArrived { .. } => "StartupLogsArrived",
+            EventReaction::StartupLogContentArrived { .. } => "StartupLogContentArrived",
             EventReaction::FinishDeleteSessionView(_) => "FinishDeleteSessionView",
             EventReaction::DoDeleteSessionView(_) => "DoDeleteSessionView",
             EventReaction::BeginDeleteSessionView(_) => "BeginDeleteSessionView",

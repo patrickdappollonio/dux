@@ -710,23 +710,35 @@ impl App {
                 self.apply_project_persistence_outcome(*boxed);
             }
 
-            EventReaction::StartupLogArrived { scope_label, log } => {
+            EventReaction::StartupLogsArrived {
+                scope_label,
+                listing,
+            } => {
+                // The picker, not the viewer: the newest run is preselected and
+                // its output is already loaded, so "see the last log" is
+                // satisfied on open and "choose an older" is one keypress away.
+                // The fullscreen viewer is still there, promoted from here.
                 self.input_target = InputTarget::None;
                 self.terminal_selection = None;
-                self.prompt = PromptState::None;
-                self.fullscreen_overlay = FullscreenOverlay::StartupLog;
-                self.startup_log_viewer = Some(StartupLogViewer {
+                self.startup_log_selection = None;
+                self.fullscreen_overlay = FullscreenOverlay::None;
+                self.startup_log_viewer = None;
+                self.prompt = PromptState::StartupCommandLogs(StartupCommandLogPrompt {
                     scope_label,
-                    path: log.path,
-                    display_name: log.display_name,
-                    content: log.content,
-                    scroll_offset: 0,
-                    search: TextInput::new(),
+                    entries: listing.entries,
+                    selected: 0,
+                    filter: TextInput::new(),
                     searching: false,
+                    content: listing.content,
+                    scroll_offset: 0,
                 });
-                // Domain only: the overlay is now up. The "Opened startup command
-                // logs…" confirmation (resolving the busy) rides the StatusOp's
-                // separate StatusOpCompleted event.
+                // Domain only: the overlay is now up. The "Opened N startup
+                // command log run(s)…" confirmation (resolving the busy) rides
+                // the StatusOp's separate StatusOpCompleted event.
+            }
+
+            EventReaction::StartupLogContentArrived { path, result } => {
+                self.apply_startup_command_log_content(&path, result);
             }
 
             EventReaction::FinishDeleteSessionView(view) => {

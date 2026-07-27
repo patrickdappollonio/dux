@@ -504,9 +504,20 @@ pub enum WorkerEvent {
         /// `None` for callers that don't drive a handler-resolved status (web).
         status_op_id: Option<String>,
     },
+    /// A scope's startup-command runs finished listing off-thread. Carries the
+    /// whole listing (newest first) plus the newest run's contents, because the
+    /// picker shows both.
     StartupCommandLogsLoaded {
         scope_label: String,
-        result: Result<crate::startup::StartupCommandLatestLog, String>,
+        result: Result<crate::startup::StartupCommandLogListing, String>,
+    },
+    /// One already-listed run finished reading off-thread, because the user
+    /// moved the picker's selection onto it. `path` is the correlation handle:
+    /// a reply for a run that is no longer selected is dropped, so a fast walk
+    /// down the list cannot land a stale body under a newer selection.
+    StartupCommandLogContentLoaded {
+        path: std::path::PathBuf,
+        result: Result<String, String>,
     },
     /// The in-process web-server flip pre-flight finished on a worker thread.
     /// LOCAL MODE resolution (loopback:port + optional Tailscale:port) plus the
